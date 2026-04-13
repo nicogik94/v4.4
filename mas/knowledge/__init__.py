@@ -13,7 +13,10 @@ from .registry import (
 )
 from .retrieval import (
     PhaseKnowledgeRetrievalView,
+    RetrievalPhaseImpactSummary,
     ProjectKnowledgeRetrievalSummary,
+    build_phase_retrieval_impact,
+    build_prompt_facing_retrieval_impact,
     build_project_retrieval_summary,
     evaluate_phase_retrieval,
     get_retrieval_policy,
@@ -23,7 +26,10 @@ from .sync import sync_multiple_sources, sync_offline_source
 __all__ = [
     "DEFAULT_FRESHNESS_POLICY",
     "PhaseKnowledgeRetrievalView",
+    "RetrievalPhaseImpactSummary",
     "ProjectKnowledgeRetrievalSummary",
+    "build_phase_retrieval_impact",
+    "build_prompt_facing_retrieval_impact",
     "ProjectedKnowledgeItem",
     "build_knowledge_health",
     "build_project_retrieval_summary",

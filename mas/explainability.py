@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from config import FRAMEWORKS_BY_PHASE, GATE_CONFIGS
 from decision_objects import ensure_decision_objects
 from knowledge.freshness import build_knowledge_health
+from knowledge.retrieval import RetrievalPhaseImpactSummary, build_phase_retrieval_impact
 from state import ProjectState
 from tools.scoring import check_gate
 
@@ -21,6 +22,7 @@ TRACE_PHASE_SEQUENCE = (
     "classify", "hypotheses", "gauntlet", "audit",
     "strategy", "sqi", "monitor", "report",
 )
+PROMPT_FACING_KNOWLEDGE_PHASES = ("audit", "strategy")
 
 PHASE_PURPOSES = {
     "classify": "Frame the decision domain, operating context, and problem structure.",
@@ -123,6 +125,17 @@ class LogicSeparationSummary(BaseModel):
     knowledge_inputs: list[str] = Field(default_factory=list)
 
 
+class KnowledgeUsageSummary(BaseModel):
+    item_id: str = ""
+    source_id: str = ""
+    source_name: str = ""
+    title: str = ""
+    observed_at: str = ""
+    trust_tier: str = ""
+    sensitivity: str = ""
+    fact_keys: list[str] = Field(default_factory=list)
+
+
 class PhaseTraceSummary(BaseModel):
     phase: str
     purpose: str = ""
@@ -133,6 +146,8 @@ class PhaseTraceSummary(BaseModel):
     confidence: Optional[float] = None
     gate_result: GateTraceSummary = Field(default_factory=GateTraceSummary)
     next_step: str = ""
+    retrieval_impact: Optional[RetrievalPhaseImpactSummary] = None
+    knowledge_usage: list[KnowledgeUsageSummary] = Field(default_factory=list)
     logic_separation: LogicSeparationSummary = Field(default_factory=LogicSeparationSummary)
     uncertainty: UncertaintySummary = Field(default_factory=UncertaintySummary)
 
@@ -207,6 +222,8 @@ def build_phase_trace(state: ProjectState, phase: str) -> PhaseTraceSummary:
         confidence=confidence,
         gate_result=gate_trace,
         next_step=_next_step(state, phase, status),
+        retrieval_impact=_phase_retrieval_impact(state, phase),
+        knowledge_usage=_phase_knowledge_usage(state, phase),
         logic_separation=_logic_for_phase(state, phase, gate_trace),
         uncertainty=_phase_uncertainty(state, phase),
     )
@@ -331,6 +348,8 @@ def _next_step(state: ProjectState, phase: str, status: str) -> str:
 
 def _logic_for_phase(state: ProjectState, phase: str, gate: GateTraceSummary) -> LogicSeparationSummary:
     knowledge = build_knowledge_health(state)
+    retrieval_impact = _phase_retrieval_impact(state, phase)
+    knowledge_usage = _phase_knowledge_usage(state, phase)
     policy_events = _phase_policy_events(state, phase)
     deterministic_logic = [
         f"Gate check ({'configured' if gate.configured else 'not configured'}): passed={gate.passed}",
@@ -368,7 +387,27 @@ def _logic_for_phase(state: ProjectState, phase: str, gate: GateTraceSummary) ->
     )
 
     knowledge_inputs = []
-    if knowledge.get("item_count", 0):
+    if phase in PROMPT_FACING_KNOWLEDGE_PHASES and knowledge_usage:
+        knowledge_inputs.append(
+            f"{phase.title()} prompt used retrieval-approved knowledge item(s): "
+            + "; ".join(
+                f"{item.title or item.item_id} ({item.source_name or item.source_id})"
+                for item in knowledge_usage[:4]
+            )
+        )
+        if retrieval_impact and retrieval_impact.blocked_reason_summary:
+            knowledge_inputs.append(
+                f"{phase.title()} blocked reasons: " + "; ".join(retrieval_impact.blocked_reason_summary[:3])
+            )
+    elif phase in PROMPT_FACING_KNOWLEDGE_PHASES and knowledge.get("item_count", 0):
+        knowledge_inputs.append(
+            f"Knowledge layer has {knowledge.get('item_count', 0)} item(s), status={knowledge.get('status', 'unknown')}; {phase} prompt used no retrieval-approved knowledge items."
+        )
+        if retrieval_impact and retrieval_impact.blocked_reason_summary:
+            knowledge_inputs.append(
+                f"{phase.title()} blocked reasons: " + "; ".join(retrieval_impact.blocked_reason_summary[:3])
+            )
+    elif knowledge.get("item_count", 0):
         knowledge_inputs.append(
             f"Knowledge layer has {knowledge.get('item_count', 0)} item(s), status={knowledge.get('status', 'unknown')}; not yet used in prompt-facing reasoning."
         )
@@ -638,7 +677,20 @@ def _project_logic(state: ProjectState, traces: list[PhaseTraceSummary]) -> Logi
     runtime = _runtime_summary(state)
     knowledge = []
     knowledge_health = build_knowledge_health(state)
-    if knowledge_health.get("source_count", 0):
+    prompt_usage_notes = []
+    for phase in PROMPT_FACING_KNOWLEDGE_PHASES:
+        phase_usage = _phase_knowledge_usage(state, phase)
+        if phase_usage:
+            prompt_usage_notes.append(
+                f"{phase.title()} used retrieval-approved knowledge item(s): "
+                + "; ".join(
+                    f"{item.title or item.item_id} ({item.source_name or item.source_id})"
+                    for item in phase_usage[:4]
+                )
+            )
+    if prompt_usage_notes:
+        knowledge.extend(prompt_usage_notes[:6])
+    elif knowledge_health.get("source_count", 0):
         knowledge.append(
             f"Knowledge layer status={knowledge_health.get('status', 'unknown')} with {knowledge_health.get('item_count', 0)} item(s); not yet used in prompt-facing reasoning."
         )
@@ -661,7 +713,7 @@ def _policy_highlights(state: ProjectState) -> list[str]:
         highlights.append(f"Approvals granted: {len(state.approvals_granted)}")
     for event in reversed(state.policy_audit_log or []):
         event_type = str(event.get("event_type") or "")
-        if event_type in {"policy_gate_blocked", "approval_granted", "connector_import", "knowledge_sync", "knowledge_sync_batch", "knowledge_source_upserted"}:
+        if event_type in {"policy_gate_blocked", "approval_granted", "connector_import", "knowledge_sync", "knowledge_sync_batch", "knowledge_source_upserted", "knowledge_retrieval_used"}:
             details = event.get("details", {}) or {}
             highlights.append(f"{event_type}: {_clip(str(details), 160)}")
         if len(highlights) >= 8:
@@ -698,11 +750,59 @@ def _phase_policy_events(state: ProjectState, phase: str) -> list[str]:
 
 def _overview(state: ProjectState, traces: list[PhaseTraceSummary]) -> str:
     completed = sum(1 for trace in traces if trace.status == "completed")
+    usage_notes = []
+    for phase in PROMPT_FACING_KNOWLEDGE_PHASES:
+        phase_usage = _phase_knowledge_usage(state, phase)
+        if phase_usage:
+            usage_notes.append(f"{phase} used {len(phase_usage)} retrieval-approved knowledge item(s)")
+    retrieval_note = ""
+    if usage_notes:
+        retrieval_note = " " + "; ".join(note.capitalize() for note in usage_notes) + "."
     return (
         f"{completed}/{len(traces)} phases have completed. "
         f"Current phase is {state.current_phase}. "
         f"Trace summaries separate deterministic checks from model judgment and policy events."
+        f"{retrieval_note}"
     )
+
+
+def _phase_knowledge_usage(state: ProjectState, phase: str) -> list[KnowledgeUsageSummary]:
+    normalized_phase = (phase or "").strip().lower()
+    if normalized_phase not in PROMPT_FACING_KNOWLEDGE_PHASES:
+        return []
+
+    for event in reversed(state.policy_audit_log or []):
+        if str(event.get("event_type") or "") != "knowledge_retrieval_used":
+            continue
+        details = event.get("details", {}) or {}
+        if str(details.get("phase") or event.get("phase") or "").strip().lower() != normalized_phase:
+            continue
+        items = details.get("used_items", []) or []
+        usage: list[KnowledgeUsageSummary] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            usage.append(
+                KnowledgeUsageSummary(
+                    item_id=str(item.get("item_id") or ""),
+                    source_id=str(item.get("source_id") or ""),
+                    source_name=str(item.get("source_name") or ""),
+                    title=str(item.get("title") or ""),
+                    observed_at=str(item.get("observed_at") or ""),
+                    trust_tier=str(item.get("trust_tier") or ""),
+                    sensitivity=str(item.get("sensitivity") or ""),
+                    fact_keys=[str(value) for value in (item.get("fact_keys") or []) if str(value).strip()],
+                )
+            )
+        return usage
+    return []
+
+
+def _phase_retrieval_impact(state: ProjectState, phase: str) -> Optional[RetrievalPhaseImpactSummary]:
+    normalized_phase = (phase or "").strip().lower()
+    if normalized_phase not in PROMPT_FACING_KNOWLEDGE_PHASES:
+        return None
+    return build_phase_retrieval_impact(state, normalized_phase)
 
 
 def _normalized_status(status: object) -> str:

@@ -1145,6 +1145,7 @@ function renderWorkspace(pid, fullState, workspace) {
   const hypotheses = workspace.hypothesis_table || [];
   const reentries = workspace.reentry_history || [];
   const scores = workspace.score_summary || {};
+  const retrievalVisibility = workspace.retrieval_visibility || [];
     const importPendingNotice = workspace.imported_evidence_pending_analysis
       ? `<div class="workspace-alert" style="margin-bottom:12px;">${escapeHtml(workspace.imported_evidence_pending_message || 'New imported evidence is available. Rerun analysis to incorporate it.')}</div>`
       : '';
@@ -1156,6 +1157,17 @@ function renderWorkspace(pid, fullState, workspace) {
         <div class="meta"><strong>Knowledge:</strong> ${escapeHtml(knowledge.status || 'unconfigured')} means the freshness of synced external knowledge, independent of object sync.</div>
       </div>
     `;
+  const retrievalVisibilityHtml = retrievalVisibility.length
+    ? retrievalVisibility.map(item => `
+        <div class="workspace-row">
+          <strong>${escapeHtml(item.phase || 'phase')}</strong>
+          <div class="meta">used ${item.retrieval_used ? 'yes' : 'no'} · eligible ${fmtInt(item.eligible_count || 0)} · blocked ${fmtInt(item.blocked_count || 0)} · used items ${fmtInt(item.used_item_count || 0)}</div>
+          <div class="meta">${escapeHtml(item.overview || 'No retrieval summary available.')}</div>
+          ${item.used_items && item.used_items.length ? `<div class="meta"><strong>Used:</strong> ${(item.used_items || []).map(used => `${escapeHtml(used.title || used.item_id || 'knowledge item')} (${escapeHtml(used.source_name || used.source_id || 'source')})`).join(' · ')}</div>` : ''}
+          ${item.blocked_reason_summary && item.blocked_reason_summary.length ? `<div class="meta"><strong>Blocked reasons:</strong> ${(item.blocked_reason_summary || []).map(reason => escapeHtml(reason)).join(' · ')}</div>` : ''}
+        </div>
+      `).join('')
+    : `<div class="workspace-empty">No retrieval visibility is available yet.</div>`;
 
   const blockersHtml = blockingReasons.length
     ? `<div class="workspace-list">${blockingReasons.map(reason => `<div class="workspace-alert">${escapeHtml(reason)}</div>`).join('')}</div>`
@@ -1221,6 +1233,11 @@ function renderWorkspace(pid, fullState, workspace) {
             </div>
             ${importPendingNotice}
             ${statusAxesNotice}
+            <div class="workspace-row" style="margin-bottom:12px;">
+              <strong>Retrieval visibility</strong>
+              <div class="meta">Audit and strategy retrieval counts are backend-derived from current eligibility plus recorded usage.</div>
+              <div class="workspace-list" style="margin-top:8px;">${retrievalVisibilityHtml}</div>
+            </div>
             <div class="workspace-kpis">
               <div class="workspace-kpi"><div class="label">Current phase</div><div class="value">${escapeHtml(workspace.current_phase || '—')}</div></div>
               <div class="workspace-kpi"><div class="label">Active risks</div><div class="value">${fmtInt(workspace.active_risk_count)}</div></div>
@@ -1338,6 +1355,9 @@ function renderTrace(pid, explain, workspace = {}) {
           <div class="meta"><strong>Confidence:</strong> ${trace.confidence != null ? fmt(trace.confidence, 2) : '—'}</div>
           <div class="meta"><strong>Gate:</strong> ${trace.gate_result ? `${trace.gate_result.passed ? 'pass' : 'blocked'}${(trace.gate_result.blocking || []).length ? ` · ${(trace.gate_result.blocking || []).join('; ')}` : ''}` : 'No gate data'}</div>
           ${trace.gate_result && trace.gate_result.note ? `<div class="meta"><strong>Gate note:</strong> ${escapeHtml(trace.gate_result.note)}</div>` : ''}
+          ${trace.retrieval_impact ? `<div class="meta"><strong>Retrieval:</strong> ${trace.retrieval_impact.retrieval_used ? 'used' : 'not used'} · eligible ${fmtInt(trace.retrieval_impact.eligible_count || 0)} · blocked ${fmtInt(trace.retrieval_impact.blocked_count || 0)} · used items ${fmtInt(trace.retrieval_impact.used_item_count || 0)}</div>` : ''}
+          ${trace.retrieval_impact && trace.retrieval_impact.blocked_reason_summary && trace.retrieval_impact.blocked_reason_summary.length ? `<div class="meta"><strong>Blocked reasons:</strong> ${(trace.retrieval_impact.blocked_reason_summary || []).map(reason => escapeHtml(reason)).join(' · ')}</div>` : ''}
+          ${trace.knowledge_usage && trace.knowledge_usage.length ? `<div class="meta"><strong>Knowledge used:</strong> ${(trace.knowledge_usage || []).map(item => `${escapeHtml(item.title || item.item_id || 'knowledge item')} (${escapeHtml(item.source_name || item.source_id || 'source')})`).join(' · ')}</div>` : ''}
           <div class="meta"><strong>Next step:</strong> ${escapeHtml(trace.next_step || '—')}</div>
           ${trace.uncertainty && ((trace.uncertainty.open_questions || []).length || (trace.uncertainty.missing_evidence || []).length || (trace.uncertainty.would_change_conclusion || []).length || (trace.uncertainty.monitor_next || []).length) ? `
             <div class="meta"><strong>Uncertainty:</strong> ${(trace.uncertainty.open_questions || []).slice(0, 2).map(item => escapeHtml(item)).join(' · ') || '—'}</div>

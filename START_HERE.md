@@ -112,9 +112,11 @@ If you need to understand how the current result was reached, use **Trace**.
 
 Imported CSV evidence/signals appear in **Workspace** immediately, but they do **not** automatically rewrite prior analysis. If Workspace shows a notice that imported evidence is pending analysis, rerun the relevant analysis/report path before treating recommendations as updated.
 
-Knowledge sources and synced knowledge items also appear as a separate **knowledge freshness** signal in Workspace and Queue. In v4.4 tranche 3A, that layer is operational only: it tells you whether current-awareness inputs are configured, current, stale, expired, or sync-failed. It does **not** automatically rerun phases and it does **not** feed prompts yet.
+Knowledge sources and synced knowledge items also appear as a separate **knowledge freshness** signal in Workspace and Queue. That layer tells you whether current-awareness inputs are configured, current, stale, expired, or sync-failed. It does **not** automatically rerun phases. Prompt-facing use is still tightly bounded: only the **audit** and **strategy** phases may consume approved structured retrieval projections.
 
-Controlled retrieval visibility is now available through the knowledge API routes. Eligibility is backend-computed, phase-specific, and whitelist-based, but it still does **not** auto-rerun phases or expose raw prompt dumps.
+Controlled retrieval visibility is now available through the knowledge API routes. Eligibility is backend-computed, phase-specific, and whitelist-based. In the current bounded slice, only the **audit** and **strategy** phases may consume approved structured projections, and Trace will show which approved knowledge items were used. This still does **not** auto-rerun phases or expose raw prompt dumps.
+
+Workspace and Trace also show simple retrieval visibility for audit/strategy: whether retrieval was used, current eligible vs blocked counts, and the top blocked reasons. Those are operator visibility signals, not proof that retrieval changed the result in a measurable way.
 
 Three status axes stay separate on purpose:
 

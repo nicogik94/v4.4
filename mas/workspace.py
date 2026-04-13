@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from decision_objects import compute_source_state_hash, ensure_decision_objects
 from knowledge.freshness import build_knowledge_health
+from knowledge.retrieval import RetrievalPhaseImpactSummary, build_prompt_facing_retrieval_impact
 from state import ApprovalRecord, DecisionObjectStatus, Evidence, ProjectState, Risk
 
 
@@ -73,6 +74,7 @@ class WorkspaceSummary(BaseModel):
     imported_evidence_pending_analysis: bool = False
     imported_evidence_pending_phase: str = ""
     imported_evidence_pending_message: str = ""
+    retrieval_visibility: list[RetrievalPhaseImpactSummary] = Field(default_factory=list)
     active_risk_count: int = 0
     last_reentry_at: Optional[str] = None
     score_summary: ScoreSummary = Field(default_factory=ScoreSummary)
@@ -137,6 +139,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
     has_stale_downstream = any(status == "stale" for status in phase_statuses.values()) or health_status == "stale"
     import_pending, import_pending_phase, import_pending_message = _import_pending_analysis(state)
     knowledge_health = KnowledgeHealthSummary(**build_knowledge_health(state))
+    retrieval_visibility = build_prompt_facing_retrieval_impact(state)
     project_status = _project_status(state, blocking_reasons, requires_approval, has_stale_downstream)
     active_risks = sorted(
         [risk for risk in decision_objects.risks if risk.status == "active"],
@@ -179,6 +182,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         imported_evidence_pending_analysis=import_pending,
         imported_evidence_pending_phase=import_pending_phase,
         imported_evidence_pending_message=import_pending_message,
+        retrieval_visibility=retrieval_visibility,
         active_risk_count=len(active_risks),
         last_reentry_at=_last_reentry_at(state),
         score_summary=ScoreSummary(

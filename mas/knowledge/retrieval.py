@@ -6,6 +6,7 @@ orchestration semantics and does not expose raw prompt dumps.
 """
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ PHASE_SEQUENCE = (
     "monitor",
     "report",
 )
+PROMPT_FACING_RETRIEVAL_PHASES = ("audit", "strategy")
 
 TRUST_TIER_RANK = {
     "untrusted": 0,
@@ -133,6 +135,28 @@ class PhaseKnowledgeRetrievalView(BaseModel):
     policy: PhaseRetrievalPolicy
     eligible_items: list[RetrievalEligibleItem] = Field(default_factory=list)
     blocked_items: list[RetrievalBlockedItem] = Field(default_factory=list)
+    overview: str = ""
+
+
+class RetrievalUsedItemSummary(BaseModel):
+    item_id: str = ""
+    source_id: str = ""
+    source_name: str = ""
+    title: str = ""
+    observed_at: str = ""
+    trust_tier: str = ""
+    sensitivity: str = ""
+    fact_keys: list[str] = Field(default_factory=list)
+
+
+class RetrievalPhaseImpactSummary(BaseModel):
+    phase: str
+    retrieval_used: bool = False
+    eligible_count: int = 0
+    blocked_count: int = 0
+    used_item_count: int = 0
+    used_items: list[RetrievalUsedItemSummary] = Field(default_factory=list)
+    blocked_reason_summary: list[str] = Field(default_factory=list)
     overview: str = ""
 
 
@@ -305,6 +329,45 @@ def evaluate_phase_retrieval(
     )
 
 
+def build_phase_retrieval_impact(
+    state: ProjectState,
+    phase: str,
+    *,
+    now: datetime | None = None,
+) -> RetrievalPhaseImpactSummary:
+    normalized_phase = (phase or "").strip().lower()
+    view = evaluate_phase_retrieval(state, normalized_phase, now=now)
+    used_items = _used_items_for_phase(state, normalized_phase)
+    blocked_summary = _blocked_reason_summary(view.blocked_items)
+    overview = (
+        f"{normalized_phase.title()} retrieval {'used' if used_items else 'not used'}; "
+        f"eligible now={len(view.eligible_items)}, blocked now={len(view.blocked_items)}."
+    )
+    if blocked_summary:
+        overview += f" Top blocked reasons: {'; '.join(blocked_summary[:3])}."
+    return RetrievalPhaseImpactSummary(
+        phase=normalized_phase,
+        retrieval_used=bool(used_items),
+        eligible_count=len(view.eligible_items),
+        blocked_count=len(view.blocked_items),
+        used_item_count=len(used_items),
+        used_items=used_items,
+        blocked_reason_summary=blocked_summary,
+        overview=overview,
+    )
+
+
+def build_prompt_facing_retrieval_impact(
+    state: ProjectState,
+    *,
+    now: datetime | None = None,
+) -> list[RetrievalPhaseImpactSummary]:
+    return [
+        build_phase_retrieval_impact(state, phase, now=now)
+        for phase in PROMPT_FACING_RETRIEVAL_PHASES
+    ]
+
+
 def _blocked_reasons(
     state: ProjectState,
     item,
@@ -347,3 +410,52 @@ def _trust_rank(value: str) -> int:
 
 def _status_value(value) -> str:
     return value.value if hasattr(value, "value") else str(value)
+
+
+def _used_items_for_phase(state: ProjectState, phase: str) -> list[RetrievalUsedItemSummary]:
+    normalized_phase = (phase or "").strip().lower()
+    for event in reversed(state.policy_audit_log or []):
+        if str(event.get("event_type") or "") != "knowledge_retrieval_used":
+            continue
+        details = event.get("details", {}) or {}
+        if str(details.get("phase") or event.get("phase") or "").strip().lower() != normalized_phase:
+            continue
+        items = details.get("used_items", []) or []
+        used: list[RetrievalUsedItemSummary] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            used.append(
+                RetrievalUsedItemSummary(
+                    item_id=str(item.get("item_id") or ""),
+                    source_id=str(item.get("source_id") or ""),
+                    source_name=str(item.get("source_name") or ""),
+                    title=str(item.get("title") or ""),
+                    observed_at=str(item.get("observed_at") or ""),
+                    trust_tier=str(item.get("trust_tier") or ""),
+                    sensitivity=str(item.get("sensitivity") or ""),
+                    fact_keys=[str(value) for value in (item.get("fact_keys") or []) if str(value).strip()],
+                )
+            )
+        return used
+    return []
+
+
+def _blocked_reason_summary(blocked_items: list[RetrievalBlockedItem]) -> list[str]:
+    counter: Counter[str] = Counter()
+    for item in blocked_items:
+        for reason in item.blocked_reasons or []:
+            counter[_humanize_blocked_reason(reason)] += 1
+    ranked = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    return [f"{reason} x{count}" for reason, count in ranked[:5]]
+
+
+def _humanize_blocked_reason(reason: str) -> str:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return "unknown"
+    if text.startswith("freshness_"):
+        return "freshness " + text.replace("freshness_", "", 1)
+    if text.startswith("source_status_"):
+        return "source status " + text.replace("source_status_", "", 1)
+    return text.replace("_", " ")
