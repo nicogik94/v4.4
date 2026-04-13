@@ -198,6 +198,26 @@ footer { text-align: center; color: var(--mute); font-size: 11px; padding-top: 3
 .workspace-table tr:last-child td { border-bottom: none; }
 .workspace-alert { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #FFFBEB; color: #92400E; font-size: 12px; line-height: 1.6; }
 .workspace-empty { color: var(--mute); font-size: 12px; line-height: 1.6; }
+.hero-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 16px; }
+.hero-card { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 18px; }
+.hero-card.accent { background: linear-gradient(180deg, #FFF7ED 0%, #FFFFFF 100%); border-color: #FED7AA; }
+.hero-card .eyebrow { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--mute); margin-bottom: 8px; }
+.hero-card .headline { font-size: 20px; font-weight: 750; line-height: 1.25; color: var(--ink); letter-spacing: -0.3px; }
+.hero-card .copy { margin-top: 10px; font-size: 13px; color: var(--ink-2); line-height: 1.65; }
+.hero-card .mini { margin-top: 12px; font-size: 12px; color: var(--mute); line-height: 1.6; }
+.overview-stack { display: flex; flex-direction: column; gap: 16px; }
+.overview-section { border: 1px solid var(--line); border-radius: 12px; background: var(--card); overflow: hidden; }
+.overview-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line-2); background: #FCFCFD; }
+.overview-section-head h4 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--ink-2); }
+.overview-callout { border: 1px dashed #CBD5E1; border-radius: 10px; background: #F8FAFC; padding: 14px 16px; font-size: 13px; color: var(--ink-2); line-height: 1.7; }
+.overview-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.overview-list-compact { display: flex; flex-direction: column; gap: 10px; }
+.overview-list-compact li { list-style: none; border: 1px solid var(--line-2); border-radius: 8px; padding: 12px; background: #FCFCFD; }
+.overview-subtle { color: var(--mute); font-size: 12px; line-height: 1.6; }
+.details-toggle { border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.details-toggle summary { cursor: pointer; list-style: none; padding: 14px 18px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--ink-2); }
+.details-toggle summary::-webkit-details-marker { display: none; }
+.details-toggle .meta { font-size: 12px; color: var(--ink-3); line-height: 1.6; }
 .hidden { display: none !important; }
 </style>
 </head>
@@ -223,16 +243,16 @@ footer { text-align: center; color: var(--mute); font-size: 11px; padding-top: 3
 
   <div class="help-panel" id="help-panel">
     <button class="dismiss" id="dismiss-help">dismiss</button>
-    <h3>How to use this</h3>
-    <p>The Decision Engine helps you think through hard decisions carefully. Here's the workflow:</p>
+    <h3>Start here</h3>
+    <p>v4 is a decision tool. Start with the brief, then use <strong>Overview</strong> to see the recommendation, why it matters, and what to do next.</p>
     <ol>
       <li><strong>Create a project</strong> using the form below. Describe the decision in the brief.</li>
       <li><strong>Classify the risk</strong> at create time. Default is "minimal risk". Change it if the decision is about employment, credit, insurance, or other Annex III categories.</li>
+      <li><strong>Add sources if useful</strong> after the project is created. Documents add context; CSV/XLSX can also be imported as structured data.</li>
       <li><strong>Run the project</strong> by clicking the row in the project list, then clicking "Run".</li>
-      <li><strong>Watch it work</strong> in the phase strip. It walks through 8 phases over a few minutes.</li>
-      <li><strong>Read the report</strong> when it finishes. Review every report before delivering it to a client.</li>
+      <li><strong>Read the result in Overview first</strong>, then open Workspace, Decision trace, or Control log only if you need more detail.</li>
     </ol>
-    <p style="margin-top: 12px;"><strong>If anything looks wrong, fire the kill switch.</strong> It stops the project immediately and persists the halt.</p>
+    <p style="margin-top: 12px;"><strong>If anything looks wrong, open Control log or fire the kill switch.</strong> Uploads stay additive until you rerun; nothing updates itself automatically.</p>
   </div>
 
   <div class="card">
@@ -255,6 +275,10 @@ footer { text-align: center; color: var(--mute); font-size: 11px; padding-top: 3
           <label>Supporting data</label>
           <textarea id="np-data" placeholder="Paste additional data, metrics, assumptions, links, or notes. You can update this later in the Dossier tab."></textarea>
           <span class="hint">Optional. Use this for strategy notes, KPIs, research snippets, or structured context that should travel with the project.</span>
+        </div>
+        <div class="form-row">
+          <label>Files and tables</label>
+          <div class="hint">Create the project first, then upload PDFs, DOCX, TXT, MD, CSV, or XLSX files from the new Overview or Dossier upload panel.</div>
         </div>
         <div class="form-row required">
           <label>Risk classification (EU AI Act)</label>
@@ -304,11 +328,12 @@ footer { text-align: center; color: var(--mute); font-size: 11px; padding-top: 3
     <div class="phase-strip" id="dr-phases"></div>
     <div class="budget-grid" id="dr-budget"></div>
     <div class="sub-tabs">
-      <button class="sub-tab active" data-subtab="workspace">Workspace</button>
-      <button class="sub-tab" data-subtab="trace">Trace</button>
+      <button class="sub-tab active" data-subtab="overview">Overview</button>
+      <button class="sub-tab" data-subtab="workspace">Workspace</button>
+      <button class="sub-tab" data-subtab="trace">Decision trace</button>
       <button class="sub-tab" data-subtab="dossier">Dossier</button>
       <button class="sub-tab" data-subtab="report">Report</button>
-      <button class="sub-tab" data-subtab="audit">Audit log</button>
+      <button class="sub-tab" data-subtab="audit">Control log</button>
       <button class="sub-tab" data-subtab="state">Raw state</button>
     </div>
     <div class="sub-tab-content" id="dr-content">Select a project to see details.</div>
@@ -371,7 +396,7 @@ footer { text-align: center; color: var(--mute); font-size: 11px; padding-top: 3
 </div>
 
 <script>
-const state = { activeTab: 'console', selectedProjectId: null, selectedSubtab: 'workspace', projectsCache: [], refreshTimer: null };
+const state = { activeTab: 'console', selectedProjectId: null, selectedSubtab: 'overview', projectsCache: [], refreshTimer: null };
 const $ = (id) => document.getElementById(id);
 const apiUrl = () => $('api-url').value.replace(/\/$/, '');
 const PHASES = ['classify', 'hypotheses', 'gauntlet', 'audit', 'strategy', 'sqi', 'monitor', 'report'];
@@ -402,12 +427,31 @@ async function apiPost(path, body) {
   }
   return r.json();
 }
+async function apiFormPost(path, formData) {
+  const r = await fetch(apiUrl() + path, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`${path} → ${r.status}: ${text}`);
+  }
+  return r.json();
+}
 async function apiPatch(path, body) {
   const r = await fetch(apiUrl() + path, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`${path} → ${r.status}: ${text}`);
+  }
+  return r.json();
+}
+async function apiDelete(path) {
+  const r = await fetch(apiUrl() + path, { method: 'DELETE' });
   if (!r.ok) {
     const text = await r.text();
     throw new Error(`${path} → ${r.status}: ${text}`);
@@ -583,12 +627,13 @@ $('dr-download-pdf').addEventListener('click', () => {
 
 async function loadDrillin(pid) {
   try {
-    const [fullState, budget, audit, workspace, explain] = await Promise.all([
+    const [fullState, budget, audit, workspace, explain, overview] = await Promise.all([
       apiGet(`/projects/${pid}/state`),
       apiGet(`/projects/${pid}/budget`),
       apiGet(`/projects/${pid}/policy-audit`),
       apiGet(`/projects/${pid}/workspace`),
       apiGet(`/projects/${pid}/explain`),
+      apiGet(`/projects/${pid}/overview`),
     ]);
 
     $('dr-name').innerHTML = escapeHtml(fullState.project_name || 'Untitled')
@@ -605,8 +650,9 @@ async function loadDrillin(pid) {
     renderPhases(fullState.phase_status || {});
     renderBudget(budget);
 
-      if (state.selectedSubtab === 'workspace') renderWorkspace(pid, fullState, workspace);
-      else if (state.selectedSubtab === 'trace') renderTrace(pid, explain, workspace);
+    if (state.selectedSubtab === 'overview') renderOverview(pid, fullState, overview);
+    else if (state.selectedSubtab === 'workspace') renderWorkspace(pid, fullState, workspace);
+    else if (state.selectedSubtab === 'trace') renderTrace(pid, explain, workspace);
     else if (state.selectedSubtab === 'dossier') renderDossier(pid, fullState);
     else if (state.selectedSubtab === 'report') renderReport(pid, fullState);
     else if (state.selectedSubtab === 'audit') renderAudit(audit.audit_log || []);
@@ -974,6 +1020,296 @@ function attachDossierHandlers(pid) {
   wireRemoveButtons();
 }
 
+function uploadPanelHtml(prefix) {
+  return `
+    <div class="workspace-row" style="margin-top:12px;">
+      <strong>Add sources</strong>
+      <div class="meta">Use documents for context and CSV/XLSX for data. Uploads appear in Sources right away, but they only affect downstream analysis after you rerun the workflow.</div>
+      <div class="dossier-grid" style="padding:12px 0 0;">
+        <div class="form-row dossier-span-full"><label>File</label><input type="file" id="${prefix}-upload-file" accept=".pdf,.docx,.txt,.md,.csv,.xlsx"></div>
+        <div class="form-row"><label>Source role</label>
+          <select id="${prefix}-upload-role">
+            <option value="context">Document context</option>
+            <option value="data">Structured data</option>
+          </select>
+        </div>
+        <div class="form-row"><label>How should v4 use it?</label>
+          <select id="${prefix}-upload-mode">
+            <option value="knowledge">Add it as a source only</option>
+            <option value="structured_import">Advanced: structured CSV/XLSX import</option>
+          </select>
+        </div>
+        <div class="form-row"><label>Sheet (XLSX optional)</label><input type="text" id="${prefix}-upload-sheet" placeholder="First visible sheet by default"></div>
+        <div class="form-row dossier-span-full">
+          <div class="overview-callout">
+            <strong>What happens next:</strong> documents become searchable context, while CSV/XLSX can optionally become structured evidence or signals. Nothing reruns automatically.
+          </div>
+        </div>
+        <div class="form-row dossier-span-full">
+          <details class="details-toggle">
+            <summary>Advanced: structured CSV/XLSX mapping</summary>
+            <div style="padding:0 16px 16px;">
+              <div class="meta" style="margin-bottom:10px;">Only use this when you want CSV/XLSX rows mapped directly into evidence or signals. The normal path is to upload the file as a source first.</div>
+              <label style="display:block; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--ink-3); margin-bottom:6px;">Mapping JSON (optional)</label>
+              <textarea class="compact-textarea" id="${prefix}-upload-mapping" placeholder='[{"column":"title","target_type":"evidence","target_field":"title"}]'></textarea>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="form-actions" style="padding:12px 0 0;">
+        <button class="btn secondary small" type="button" id="${prefix}-upload-btn">Add source</button>
+      </div>
+      <div class="meta" id="${prefix}-upload-status">No source uploaded from this panel yet.</div>
+    </div>
+  `;
+}
+
+function renderFileLibrary(files) {
+  if (!files || !files.length) {
+    return `<div class="workspace-empty">No sources yet. Add a document for context or a CSV/XLSX file for data.</div>`;
+  }
+  return `<div class="workspace-list">${files.map(file => `
+    <div class="workspace-row">
+      <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start;">
+        <div>
+          <strong>${escapeHtml(file.filename || 'upload')}</strong>
+          <div class="meta">${escapeHtml(file.role || 'context')} · ${escapeHtml(file.parser_kind || 'file')} · ${escapeHtml(file.parse_status || 'pending')} · uploaded ${fmtDate(file.uploaded_at)}</div>
+          <div class="meta">Available as ${fmtInt(file.knowledge_item_count || 0)} knowledge item(s) · ${fmtInt(file.evidence_count || 0)} evidence · ${fmtInt(file.signal_count || 0)} signals</div>
+        </div>
+        <button class="btn secondary small delete-file-btn" data-file-id="${escapeHtml(file.file_id)}">Delete</button>
+      </div>
+    </div>
+  `).join('')}</div>`;
+}
+
+function wireUploadPanel(pid, prefix) {
+  const button = $(`${prefix}-upload-btn`);
+  if (!button) return;
+  button.onclick = async () => {
+    const fileInput = $(`${prefix}-upload-file`);
+    const status = $(`${prefix}-upload-status`);
+    const uploadFile = fileInput?.files?.[0];
+    if (!uploadFile) {
+      alert('Choose a file first.');
+      return;
+    }
+    const formData = new FormData();
+    formData.append('file', uploadFile);
+    formData.append('actor', 'operator-console');
+    formData.append('role', $(`${prefix}-upload-role`)?.value || 'context');
+    formData.append('import_mode', $(`${prefix}-upload-mode`)?.value || 'knowledge');
+    formData.append('sheet_name', $(`${prefix}-upload-sheet`)?.value || '');
+    formData.append('mapping_json', $(`${prefix}-upload-mapping`)?.value || '');
+    button.disabled = true;
+    if (status) status.textContent = `Uploading ${uploadFile.name}…`;
+    try {
+      const response = await apiFormPost(`/projects/${pid}/files`, formData);
+      if (status) status.textContent = `${response.manifest.filename} uploaded. ${response.parse_summary.knowledge_item_count || 0} knowledge item(s) created.`;
+      await loadProjects();
+      await loadDrillin(pid);
+    } catch (e) {
+      if (status) status.textContent = `Upload failed: ${e.message}`;
+      alert('Upload failed: ' + e.message);
+    } finally {
+      button.disabled = false;
+      if (fileInput) fileInput.value = '';
+    }
+  };
+}
+
+function wireFileDeleteButtons(pid) {
+  document.querySelectorAll('.delete-file-btn').forEach(btn => {
+    btn.onclick = async () => {
+      const fileId = btn.dataset.fileId;
+      if (!fileId) return;
+      if (!confirm('Delete this uploaded file and its derived additive artifacts? This does not rerun the workflow automatically.')) return;
+      try {
+        await apiDelete(`/projects/${pid}/files/${fileId}`);
+        await loadProjects();
+        await loadDrillin(pid);
+      } catch (e) {
+        alert('Delete failed: ' + e.message);
+      }
+    };
+  });
+}
+
+function renderOverview(pid, fullState, overview) {
+  const container = $('dr-content');
+  container.classList.remove('code');
+  const workspace = overview.workspace || {};
+  const justificationBlocks = overview.why_it_recommends_this || [];
+  const strategyCards = overview.strategy_cards || [];
+  const hypotheses = overview.hypotheses || [];
+  const metrics = overview.key_metrics || [];
+  const files = overview.files || [];
+  const retrievalVisibility = workspace.retrieval_visibility || [];
+  const topReason = justificationBlocks[0]?.summary || overview.decision_summary || 'No recommendation rationale is available yet.';
+  const topWatch = (overview.open_questions || [])[0]
+    || (workspace.blocking_reasons || [])[0]
+    || (workspace.active_risk_count ? `${workspace.active_risk_count} active risk(s) need attention.` : '')
+    || 'No major open question is highlighted yet.';
+  const qualityMetric = metrics.find(item => /confidence|certainty/i.test(String(item.label || '')))
+    || metrics.find(item => /SQI|Deterministic score|Brier/i.test(String(item.label || '')));
+  const qualityLabel = qualityMetric ? (String(qualityMetric.label || '').match(/confidence|certainty/i) ? 'Confidence signal' : 'Decision quality signal') : 'Current state';
+  const qualityValue = qualityMetric?.value || String(overview.project_status || 'safe_to_proceed').replace(/_/g, ' ');
+  const qualityDetail = qualityMetric?.detail || 'This reflects the current workflow state, not an automatic rerun.';
+  const hasDecision = Boolean((overview.current_recommendation || '').trim() && overview.current_recommendation !== 'No recommendation generated yet.');
+  const controlOpen = Boolean(
+    workspace.imported_evidence_pending_analysis
+    || (workspace.blocking_reasons || []).length
+    || workspace.requires_approval
+    || workspace.has_stale_downstream
+    || workspace.decision_object_health?.status === 'rebuild_failed'
+  );
+  const sourcesOpen = Boolean(files.length || workspace.imported_evidence_pending_analysis);
+
+  container.innerHTML = `
+    <div class="hero-grid">
+      <div class="hero-card accent" style="grid-column: span 2;">
+        <div class="eyebrow">Decision overview</div>
+        <div class="headline">${escapeHtml(hasDecision ? overview.current_recommendation : 'Decision still being prepared')}</div>
+        <div class="copy">${escapeHtml(hasDecision ? (overview.decision_summary || 'Open the sections below for the recommendation, justification, and next steps.') : 'Start with the brief, then add supporting documents or data if useful. When you run the workflow, v4 will return a recommendation, the reasons behind it, and the next operator action.')}</div>
+        <div class="mini">${statusChip(overview.project_status || 'safe_to_proceed')} ${workspace.imported_evidence_pending_analysis ? `&nbsp;&nbsp;${escapeHtml(workspace.imported_evidence_pending_message || 'New uploaded evidence needs a rerun before it affects downstream outputs.')}` : ''}</div>
+      </div>
+      <div class="hero-card">
+        <div class="eyebrow">${escapeHtml(qualityLabel)}</div>
+        <div class="headline">${escapeHtml(qualityValue || '—')}</div>
+        <div class="copy">${escapeHtml(qualityDetail)}</div>
+      </div>
+    </div>
+
+    <div class="hero-grid">
+      <div class="hero-card">
+        <div class="eyebrow">Why this</div>
+        <div class="headline">${escapeHtml(justificationBlocks[0]?.title || 'Current rationale')}</div>
+        <div class="copy">${escapeHtml(topReason)}</div>
+      </div>
+      <div class="hero-card">
+        <div class="eyebrow">What to watch</div>
+        <div class="headline">${escapeHtml((overview.open_questions || []).length ? `${Math.min((overview.open_questions || []).length, 9)} open question(s)` : 'Top watch item')}</div>
+        <div class="copy">${escapeHtml(topWatch)}</div>
+      </div>
+      <div class="hero-card">
+        <div class="eyebrow">Next step</div>
+        <div class="headline">${escapeHtml(overview.next_operator_action || 'Continue when ready')}</div>
+        <div class="copy">Uploads stay additive until you choose to rerun. Use Workspace for operational state and Decision trace for deeper reasoning detail.</div>
+      </div>
+    </div>
+
+    ${!hasDecision ? `
+      <div class="overview-callout" style="margin-bottom:16px;">
+        <strong>New here?</strong> Start with a short project brief. Add <strong>document context</strong> if you want background material, or upload <strong>structured data</strong> if you have CSV/XLSX tables. Then run the workflow. The first useful result will be a recommendation, the reasons behind it, and the next action to take.
+      </div>
+    ` : ''}
+
+    <div class="overview-stack">
+      <div class="overview-section">
+        <div class="overview-section-head"><h4>Decision plan</h4><div class="meta">${fmtInt(strategyCards.length)} action(s)</div></div>
+        <div class="workspace-panel-body">
+          ${strategyCards.length ? `<div class="workspace-list">${strategyCards.map(item => `
+            <div class="workspace-row">
+              <strong>${escapeHtml(item.action || 'Action')}</strong>
+              <div class="meta">${escapeHtml(item.priority || 'priority')} · expected impact ${escapeHtml(item.expected_impact || '—')} · risk if ignored ${escapeHtml(item.risk_if_ignored || '—')}</div>
+              <div class="meta">${escapeHtml(item.justification || item.evidence_chain || 'No justification recorded.')}</div>
+            </div>
+          `).join('')}</div>` : `<div class="workspace-empty">No strategy actions are available yet. Run the workflow to generate a recommended plan.</div>`}
+        </div>
+      </div>
+
+      <div class="overview-split">
+        <div class="overview-section">
+          <div class="overview-section-head"><h4>Hypotheses</h4><div class="meta">${fmtInt(hypotheses.length)} item(s)</div></div>
+          <div class="workspace-panel-body">
+            ${hypotheses.length ? `
+              <table class="workspace-table">
+                <thead><tr><th>ID</th><th>Hypothesis</th><th>Status</th><th>P</th></tr></thead>
+                <tbody>${hypotheses.map(item => `
+                  <tr>
+                    <td><strong>${escapeHtml(item.hypothesis_id || '—')}</strong></td>
+                    <td>${escapeHtml(item.text || '—')}<div class="meta">${escapeHtml(item.justification || '')}</div></td>
+                    <td>${escapeHtml(item.status || 'OPEN')}</td>
+                    <td>${item.probability != null ? fmt(item.probability, 2) : '—'}</td>
+                  </tr>
+                `).join('')}</tbody>
+              </table>
+            ` : `<div class="workspace-empty">No hypotheses are available yet.</div>`}
+          </div>
+        </div>
+
+        <div class="overview-section">
+          <div class="overview-section-head"><h4>Key signals</h4><div class="meta">${fmtInt(metrics.length)} metric(s)</div></div>
+          <div class="workspace-panel-body">
+            ${metrics.length ? `<div class="workspace-kpis">${metrics.map(item => `
+              <div class="workspace-kpi">
+                <div class="label">${escapeHtml(item.label || 'metric')}</div>
+                <div class="value">${escapeHtml(item.value || '—')}</div>
+                <div class="meta">${escapeHtml(item.detail || '')}</div>
+              </div>
+            `).join('')}</div>` : `<div class="workspace-empty">No key metrics are available yet.</div>`}
+          </div>
+        </div>
+      </div>
+
+      <div class="overview-section">
+        <div class="overview-section-head"><h4>Sources</h4><div class="meta">${escapeHtml(workspace.knowledge_health?.status || 'unconfigured')}</div></div>
+        <div class="workspace-panel-body">
+          <div class="workspace-row">
+            <strong>Source summary</strong>
+            <div class="meta">${escapeHtml(overview.sources_and_files_message || 'No source summary available yet.')}</div>
+          </div>
+          <div class="workspace-row" style="margin-top:12px;">
+            <strong>Source library</strong>
+            <div class="meta">Documents add context. CSV/XLSX can stay as sources or be imported as structured evidence. Uploads are additive and never rerun the workflow automatically.</div>
+            <div style="margin-top:10px;">${renderFileLibrary(files)}</div>
+          </div>
+          <div style="margin-top:12px;">${uploadPanelHtml('overview')}</div>
+          <details class="details-toggle" ${sourcesOpen ? 'open' : ''} style="margin-top:12px;">
+            <summary>External context used</summary>
+            <div style="padding:0 16px 16px;">
+              <div class="meta" style="margin-bottom:10px;">This shows current eligibility and recorded usage for prompt-facing external context. It does not claim historical causality by itself.</div>
+              ${(retrievalVisibility || []).length ? `<div class="workspace-list">${retrievalVisibility.map(item => `
+                <div class="workspace-row">
+                  <strong>${escapeHtml(item.phase || 'phase')}</strong>
+                  <div class="meta">${item.retrieval_used ? 'used' : 'not used'} · eligible ${fmtInt(item.eligible_count || 0)} · blocked ${fmtInt(item.blocked_count || 0)}</div>
+                  <div class="meta">${escapeHtml(item.overview || 'No retrieval summary available.')}</div>
+                </div>
+              `).join('')}</div>` : `<div class="workspace-empty">No prompt-facing external context has been recorded yet.</div>`}
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <details class="details-toggle" ${controlOpen ? 'open' : ''}>
+        <summary>Control and system detail</summary>
+        <div style="padding:0 16px 16px;">
+          <div class="workspace-row">
+            <strong>Project status</strong>
+            <div class="meta">${escapeHtml(overview.project_status || 'safe_to_proceed')}</div>
+          </div>
+          <div class="workspace-row">
+            <strong>Decision object health</strong>
+            <div class="meta">${escapeHtml(workspace.decision_object_health?.status || '—')}</div>
+          </div>
+          <div class="workspace-row">
+            <strong>Knowledge health</strong>
+            <div class="meta">${escapeHtml(workspace.knowledge_health?.message || 'No knowledge status available.')}</div>
+          </div>
+          <div class="workspace-row">
+            <strong>Status axes</strong>
+            <div class="meta"><strong>Objects:</strong> derived decision objects synchronized with stored state.</div>
+            <div class="meta"><strong>Imported evidence pending analysis:</strong> uploads or imports exist, but a successful rerun has not yet incorporated them into downstream analysis.</div>
+            <div class="meta"><strong>Knowledge freshness:</strong> external knowledge is current, stale, expired, or failed independently of object sync.</div>
+          </div>
+        </div>
+      </details>
+    </div>
+  `;
+
+  wireUploadPanel(pid, 'overview');
+  wireFileDeleteButtons(pid);
+}
+
 function renderDossier(pid, fullState) {
   const container = $('dr-content');
   const classify = fullState.classify || {};
@@ -996,6 +1332,8 @@ function renderDossier(pid, fullState) {
         <div class="form-row dossier-span-full"><label>Observations (JSON object)</label><textarea class="compact-textarea" id="dossier-observations">${escapeHtml(jsonText(fullState.observations, {}))}</textarea></div>
         <div class="form-row dossier-span-full"><label>Timer logs (JSON array)</label><textarea class="compact-textarea" id="dossier-timer-logs">${escapeHtml(jsonText(fullState.timer_logs, []))}</textarea></div>
       </div>
+      <div class="dossier-note">Add sources here when you need more context or data. Uploads are additive and safe; they do not auto-rerun the workflow.</div>
+      <div style="padding:0 22px 12px;">${uploadPanelHtml('dossier')}</div>
       <div class="dossier-note">Editing the brief or data marks classify and every downstream phase stale. Updating observations or timer logs marks monitor and report stale.</div>
       <div class="form-actions"><button class="btn" id="save-input-btn">Save input</button></div>
       ${rawJsonDetails('Input', { project_name: fullState.project_name, brief: fullState.brief, data: fullState.data, observations: fullState.observations, timer_logs: fullState.timer_logs })}
@@ -1130,6 +1468,7 @@ function renderDossier(pid, fullState) {
   `;
 
   attachDossierHandlers(pid);
+  wireUploadPanel(pid, 'dossier');
 }
 
 function renderWorkspace(pid, fullState, workspace) {

@@ -24,6 +24,7 @@ from config import (
 from extensions.runtime import GatewayRequest, RoutingContext
 from runtime.cache import InMemorySemanticCache, NoOpSemanticCache
 from runtime.provider_gateway import DefaultProviderGateway, select_model_config
+from scenarios.engine import run_shadow_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +314,9 @@ def route_model(phase: str, complexity: str = "default",
 
 async def call_llm(
     phase: str, system: str, prompt: str,
-    config_override: Optional[ModelConfig] = None
+    config_override: Optional[ModelConfig] = None,
+    *,
+    project_id: str = "",
 ) -> LLMResponse:
     """
     Call an LLM with retry, fallback chain, and circuit breaker.
@@ -324,16 +327,22 @@ async def call_llm(
     the orchestrator the hooks it needs without requiring the multi-provider
     gateway to be deployed yet.
     """
+    routing_context = RoutingContext(phase=phase)
+    selected_config, selection = select_model_config(
+        phase,
+        config_override=config_override,
+        routing_context=routing_context,
+    )
     gateway_request = GatewayRequest(
         phase=phase,
         system_prompt=system,
         user_prompt=prompt,
-        routing_context=RoutingContext(phase=phase),
+        routing_context=routing_context,
         allow_cache=RUNTIME_LAYER.cache_enabled,
     )
     gateway = _get_provider_gateway()
     resp = await gateway.call(gateway_request, config_override=config_override)
-    return LLMResponse(
+    result = LLMResponse(
         text=resp.text,
         ok=not bool(resp.error),
         error=resp.error,
@@ -347,6 +356,21 @@ async def call_llm(
         latency_ms=resp.latency_ms,
         cost_usd=resp.cost_usd,
     )
+    try:
+        run_shadow_evaluation(
+            phase=phase,
+            project_id=project_id,
+            baseline_selected_provider=selection.provider,
+            baseline_selected_model=selected_config.model,
+            actual_provider_used=result.provider_used,
+            actual_model_used=result.model_used,
+            response_ok=result.ok,
+            latency_ms=result.latency_ms,
+            cost_usd=result.cost_usd,
+        )
+    except Exception as exc:
+        logger.warning("scenario shadow hook skipped for %s: %s", phase, exc)
+    return result
 
 
 def parse_json(text):

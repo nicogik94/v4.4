@@ -528,7 +528,7 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
     system = build_system_prompt(phase, json_mode=is_json, calibration_hint=calibration_hint)
 
     # Call LLM
-    response: LLMResponse = await call_llm(phase, system, prompt)
+    response: LLMResponse = await call_llm(phase, system, prompt, project_id=state.project_id)
 
     # v4.3: record budget consumption regardless of success
     try:
@@ -565,7 +565,8 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 prompt + "\n\nCRITICAL: Return ONLY valid JSON. "
                          "Do NOT wrap it in markdown fences. Do NOT add any "
                          "text before or after. "
-                         + _phase_json_retry_instruction(phase)
+                         + _phase_json_retry_instruction(phase),
+                project_id=state.project_id,
             )
             try:
                 rt_tokens = getattr(retry_response, "total_tokens", 0) or 0

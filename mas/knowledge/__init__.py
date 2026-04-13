@@ -1,6 +1,14 @@
 """Knowledge-layer foundation for tranche 3A."""
 
 from .freshness import build_knowledge_health, refresh_knowledge_items
+from .files import (
+    delete_project_uploads,
+    delete_uploaded_file,
+    describe_uploaded_file,
+    get_uploaded_file_manifest,
+    ingest_uploaded_file,
+    list_uploaded_files,
+)
 from .projection import ProjectedKnowledgeItem, project_knowledge_item
 from .registry import (
     DEFAULT_FRESHNESS_POLICY,
@@ -33,13 +41,19 @@ __all__ = [
     "ProjectedKnowledgeItem",
     "build_knowledge_health",
     "build_project_retrieval_summary",
+    "delete_project_uploads",
+    "delete_uploaded_file",
+    "describe_uploaded_file",
     "ensure_knowledge_layer",
     "evaluate_phase_retrieval",
     "get_freshness_policy",
+    "get_uploaded_file_manifest",
     "get_retrieval_policy",
     "get_source_entry",
+    "ingest_uploaded_file",
     "list_jobs",
     "list_sources",
+    "list_uploaded_files",
     "project_knowledge_item",
     "refresh_knowledge_items",
     "sync_multiple_sources",

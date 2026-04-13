@@ -6,13 +6,14 @@ v4.1: state persisted via store.py (PostgreSQL JSONB) — falls back to in-memor
 if DATABASE_URL is unset. Langfuse tracing wired via observability.py.
 """
 import asyncio
+import json
 import uuid
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ValidationError
@@ -27,18 +28,32 @@ from explainability import (
     build_project_trace,
 )
 from knowledge import (
+    delete_project_uploads,
     PhaseKnowledgeRetrievalView,
     ProjectKnowledgeRetrievalSummary,
     build_project_retrieval_summary,
+    describe_uploaded_file,
+    delete_uploaded_file,
     ensure_knowledge_layer,
     evaluate_phase_retrieval,
+    get_uploaded_file_manifest,
+    ingest_uploaded_file,
+    list_uploaded_files,
     list_jobs as list_knowledge_jobs,
     list_sources as list_knowledge_sources,
     sync_multiple_sources,
     sync_offline_source,
     upsert_source_entry,
 )
+from knowledge.file_parsers import UploadParseError
 from knowledge.freshness import build_knowledge_health
+from overview import OperatorOverviewSummary, build_operator_overview
+from scenarios import (
+    ProjectScenarioShadowView,
+    ScenarioPhaseShadowView,
+    build_phase_shadow_view,
+    build_project_shadow_view,
+)
 from state import (
     ProjectState, PhaseStatus,
     ClassifyOutput, Hypothesis, GauntletOutput,
@@ -308,6 +323,36 @@ async def get_workspace(project_id: str):
     return build_workspace_summary(state, workflow_running=project_id in running)
 
 
+@app.get("/projects/{project_id}/overview", response_model=OperatorOverviewSummary)
+async def get_overview(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return build_operator_overview(state)
+
+
+@app.get("/projects/{project_id}/files")
+async def get_uploaded_files(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return {
+        "project_id": project_id,
+        "files": [manifest.model_dump(mode="json") for manifest in list_uploaded_files(state)],
+    }
+
+
+@app.get("/projects/{project_id}/files/{file_id}")
+async def get_uploaded_file(project_id: str, file_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    try:
+        return describe_uploaded_file(state, file_id)
+    except KeyError:
+        raise HTTPException(404, "Uploaded file not found") from None
+
+
 @app.get("/projects/{project_id}/trace", response_model=ProjectTrace)
 async def get_project_trace(project_id: str):
     state = await store.load(project_id)
@@ -333,6 +378,22 @@ async def get_explainability(project_id: str):
     if not state:
         raise HTTPException(404, "Project not found")
     return build_explainability_report(state)
+
+
+@app.get("/projects/{project_id}/scenarios/shadow", response_model=ProjectScenarioShadowView)
+async def get_project_scenario_shadow(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return build_project_shadow_view(project_id)
+
+
+@app.get("/projects/{project_id}/scenarios/shadow/{phase}", response_model=ScenarioPhaseShadowView)
+async def get_project_scenario_shadow_phase(project_id: str, phase: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return build_phase_shadow_view(project_id, phase)
 
 
 @app.get("/projects/{project_id}/knowledge")
@@ -508,6 +569,84 @@ async def sync_project_knowledge_source(project_id: str, source_id: str, req: Kn
         "job": job.model_dump(mode="json"),
         "summary": build_knowledge_health(state),
     }
+
+
+@app.post("/projects/{project_id}/files")
+async def upload_project_file(
+    project_id: str,
+    file: UploadFile = File(...),
+    actor: str = Form("operator"),
+    role: str = Form("context"),
+    import_mode: str = Form("knowledge"),
+    sheet_name: str = Form(""),
+    mapping_json: str = Form(""),
+):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    _ensure_project_not_running(project_id)
+
+    normalized_import_mode = (import_mode or "knowledge").strip().lower()
+    if normalized_import_mode not in {"knowledge", "structured_import"}:
+        raise HTTPException(400, "import_mode must be knowledge or structured_import")
+
+    mapping = _parse_upload_mapping_json(mapping_json)
+    try:
+        content = await file.read()
+        result = ingest_uploaded_file(
+            state,
+            filename=file.filename or "upload.bin",
+            media_type=file.content_type or "",
+            content=content,
+            actor=actor,
+            role=role,
+            import_mode=normalized_import_mode,
+            sheet_name=sheet_name,
+            mapping=mapping,
+        )
+    except UploadParseError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    _log_uploaded_file_event(
+        state,
+        result=result,
+        actor=actor,
+        import_mode=normalized_import_mode,
+    )
+    await store.save(state)
+    return {
+        "status": "uploaded",
+        "project_id": project_id,
+        "manifest": result.manifest.model_dump(mode="json"),
+        "parse_summary": result.manifest.parse_summary.model_dump(mode="json"),
+        "source": result.source.model_dump(mode="json"),
+        "knowledge_summary": result.knowledge_summary,
+        "structured_import_summary": result.import_summary,
+    }
+
+
+@app.delete("/projects/{project_id}/files/{file_id}")
+async def delete_project_file(project_id: str, file_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    _ensure_project_not_running(project_id)
+    manifest = get_uploaded_file_manifest(state, file_id)
+    if manifest is None:
+        raise HTTPException(404, "Uploaded file not found")
+    result = delete_uploaded_file(state, file_id)
+    _log_knowledge_event(
+        state,
+        "uploaded_file_deleted",
+        {
+            "file_id": file_id,
+            "filename": manifest.filename,
+            "source_id": manifest.source_id,
+            "deleted_by": "operator",
+        },
+    )
+    await store.save(state)
+    return result
 
 
 @app.post("/projects/{project_id}/run")
@@ -738,6 +877,8 @@ async def list_projects():
 @app.delete("/projects/{project_id}")
 async def delete_project(project_id: str):
     ok = await store.delete(project_id)
+    if ok:
+        delete_project_uploads(project_id)
     return {"deleted": ok}
 
 
@@ -1302,6 +1443,44 @@ def _log_connector_import(state: ProjectState, req: CSVImportRequest, result) ->
         "analysis_pending": bool(pending_phase),
         "analysis_pending_phase": pending_phase,
     })
+
+
+def _parse_upload_mapping_json(mapping_json: str) -> list[CSVColumnMappingSpec]:
+    raw = (mapping_json or "").strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, f"mapping_json is invalid JSON: {exc.msg}") from exc
+    if not isinstance(payload, list):
+        raise HTTPException(400, "mapping_json must be a JSON array")
+    try:
+        return [CSVColumnMappingSpec(**item) for item in payload]
+    except (TypeError, ValidationError, ValueError) as exc:
+        raise HTTPException(400, f"mapping_json is invalid: {exc}") from exc
+
+
+def _log_uploaded_file_event(state: ProjectState, *, result, actor: str, import_mode: str) -> None:
+    pending_phase = _analysis_pending_phase_for_import(state)
+    _log_knowledge_event(
+        state,
+        "uploaded_file_ingested",
+        {
+            "file_id": result.manifest.file_id,
+            "source_id": result.manifest.source_id,
+            "filename": result.manifest.filename,
+            "uploaded_by": actor,
+            "role": result.manifest.role.value if hasattr(result.manifest.role, "value") else str(result.manifest.role),
+            "parser_kind": result.manifest.parser_kind,
+            "import_mode": import_mode,
+            "knowledge_item_count": result.manifest.parse_summary.knowledge_item_count,
+            "evidence_count": result.manifest.parse_summary.evidence_count,
+            "signal_count": result.manifest.parse_summary.signal_count,
+            "analysis_pending": bool(pending_phase),
+            "analysis_pending_phase": pending_phase,
+        },
+    )
 
 
 def _log_knowledge_event(state: ProjectState, event_type: str, details: dict[str, Any]) -> None:

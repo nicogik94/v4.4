@@ -51,6 +51,17 @@ class KnowledgeSyncJobStatus(str, Enum):
     FAILED = "failed"
 
 
+class FileParseStatus(str, Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class FileRole(str, Enum):
+    CONTEXT = "context"
+    DATA = "data"
+
+
 class ApprovalStatus(str, Enum):
     PENDING = "pending"
     GRANTED = "granted"
@@ -260,12 +271,43 @@ class KnowledgeSyncState(BaseModel):
     jobs: list[KnowledgeSyncJob] = Field(default_factory=list)
 
 
+class FileParseSummary(BaseModel):
+    parser_kind: str = ""
+    status: FileParseStatus = FileParseStatus.PENDING
+    error: str = ""
+    page_count: int = 0
+    row_count: int = 0
+    sheet_count: int = 0
+    sheet_name: str = ""
+    chunk_count: int = 0
+    knowledge_item_count: int = 0
+    evidence_count: int = 0
+    signal_count: int = 0
+
+
+class UploadedFileManifest(BaseModel):
+    file_id: str = ""
+    source_id: str = ""
+    filename: str = ""
+    media_type: str = ""
+    size_bytes: int = 0
+    checksum_sha256: str = ""
+    uploaded_at: str = ""
+    uploaded_by: str = ""
+    parser_kind: str = ""
+    storage_ref: str = ""
+    role: FileRole = FileRole.CONTEXT
+    import_mode: str = "knowledge"
+    parse_summary: FileParseSummary = Field(default_factory=FileParseSummary)
+
+
 class KnowledgeLayerState(BaseModel):
     schema_version: str = "0.1"
     sources: list[SourceRegistryEntry] = Field(default_factory=list)
     items: list[KnowledgeItem] = Field(default_factory=list)
     freshness_policies: list[FreshnessPolicy] = Field(default_factory=list)
     sync_state: KnowledgeSyncState = Field(default_factory=KnowledgeSyncState)
+    uploaded_files: list[UploadedFileManifest] = Field(default_factory=list)
 
 
 # ═══ Phase 0: Classify ═══

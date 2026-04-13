@@ -41,8 +41,8 @@ TRUST_TIER_RANK = {
 }
 
 DEFAULT_ALLOWED_SENSITIVITIES = ["public", "internal"]
-DEFAULT_ALLOWED_SOURCE_KINDS = ["offline_fixture"]
-DEFAULT_ALLOWED_CONNECTORS = ["offline_fixture"]
+DEFAULT_ALLOWED_SOURCE_KINDS = ["offline_fixture", "uploaded_file"]
+DEFAULT_ALLOWED_CONNECTORS = ["offline_fixture", "pdf", "docx", "txt", "md", "csv", "xlsx"]
 DEFAULT_ALLOWED_TEXT_FIELDS = ["title", "summary"]
 DEFAULT_ALLOWED_STRUCTURED_KEYS = [
     "region",
@@ -384,7 +384,7 @@ def _blocked_reasons(
         reasons.append("source_kind_disallowed")
     if source.connector_type not in policy.allowed_connector_types:
         reasons.append("connector_type_disallowed")
-    if source.access_mode != "manual":
+    if source.access_mode not in {"manual", "manual_upload"}:
         reasons.append("access_mode_disallowed")
     if source_status != "current":
         reasons.append(f"source_status_{source_status}")

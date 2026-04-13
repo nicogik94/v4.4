@@ -31,6 +31,33 @@ class RuntimeLayerConfig:
     phase_model_overrides: dict[str, str] = field(default_factory=dict)
     complexity_model_overrides: dict[str, str] = field(default_factory=dict)
 
+
+@dataclass
+class ScenarioShadowConfig:
+    enabled: bool = True
+    sqlite_path: str = ""
+    max_scenarios: int = 4
+    monte_carlo_samples: int = 48
+    hard_sample_cap: int = 64
+    ensemble_min_probability: float = 0.2
+    hitl_min_top_probability: float = 0.55
+    hitl_min_margin: float = 0.05
+    hitl_min_reliability: float = 0.6
+
+
+@dataclass
+class UploadLayerConfig:
+    storage_dir: str = ""
+    max_file_bytes: int = 5_000_000
+    max_document_chars: int = 12_000
+    max_document_chunks: int = 10
+    document_chunk_chars: int = 1_400
+    max_table_rows: int = 200
+    max_table_chunk_rows: int = 25
+    max_table_chunks: int = 8
+    max_cell_chars: int = 180
+    max_row_summary_chars: int = 360
+
 # Cost-optimized model routing per phase
 # Classify = cheap/fast, Strategy = expensive/deep, Report = mid-tier
 MODEL_ROUTING: dict[str, ModelConfig] = {
@@ -235,6 +262,37 @@ RUNTIME_LAYER = RuntimeLayerConfig(
     cache_ttl_seconds=int(os.getenv("SEMANTIC_CACHE_TTL_SECONDS", "300")),
     phase_model_overrides=_env_json_map("PHASE_MODEL_OVERRIDES"),
     complexity_model_overrides=_env_json_map("COMPLEXITY_MODEL_OVERRIDES"),
+)
+
+SCENARIO_SHADOW = ScenarioShadowConfig(
+    enabled=_env_flag("SCENARIO_SHADOW_ENABLED", default=True),
+    sqlite_path=os.getenv(
+        "SCENARIO_SHADOW_SQLITE_PATH",
+        os.path.join(os.path.dirname(__file__), "scenario_shadow.sqlite3"),
+    ),
+    max_scenarios=max(1, int(os.getenv("SCENARIO_SHADOW_MAX_SCENARIOS", "4"))),
+    monte_carlo_samples=max(1, int(os.getenv("SCENARIO_SHADOW_MONTE_CARLO_SAMPLES", "48"))),
+    hard_sample_cap=max(1, int(os.getenv("SCENARIO_SHADOW_HARD_SAMPLE_CAP", "64"))),
+    ensemble_min_probability=float(os.getenv("SCENARIO_SHADOW_ENSEMBLE_MIN_PROBABILITY", "0.2")),
+    hitl_min_top_probability=float(os.getenv("SCENARIO_SHADOW_HITL_MIN_TOP_PROBABILITY", "0.55")),
+    hitl_min_margin=float(os.getenv("SCENARIO_SHADOW_HITL_MIN_MARGIN", "0.05")),
+    hitl_min_reliability=float(os.getenv("SCENARIO_SHADOW_HITL_MIN_RELIABILITY", "0.6")),
+)
+
+UPLOAD_LAYER = UploadLayerConfig(
+    storage_dir=os.getenv(
+        "UPLOAD_STORAGE_DIR",
+        os.path.join(os.path.dirname(__file__), "upload_store"),
+    ),
+    max_file_bytes=max(1, int(os.getenv("UPLOAD_MAX_FILE_BYTES", "5000000"))),
+    max_document_chars=max(500, int(os.getenv("UPLOAD_MAX_DOCUMENT_CHARS", "12000"))),
+    max_document_chunks=max(1, int(os.getenv("UPLOAD_MAX_DOCUMENT_CHUNKS", "10"))),
+    document_chunk_chars=max(250, int(os.getenv("UPLOAD_DOCUMENT_CHUNK_CHARS", "1400"))),
+    max_table_rows=max(1, int(os.getenv("UPLOAD_MAX_TABLE_ROWS", "200"))),
+    max_table_chunk_rows=max(1, int(os.getenv("UPLOAD_MAX_TABLE_CHUNK_ROWS", "25"))),
+    max_table_chunks=max(1, int(os.getenv("UPLOAD_MAX_TABLE_CHUNKS", "8"))),
+    max_cell_chars=max(20, int(os.getenv("UPLOAD_MAX_CELL_CHARS", "180"))),
+    max_row_summary_chars=max(60, int(os.getenv("UPLOAD_MAX_ROW_SUMMARY_CHARS", "360"))),
 )
 
 MAX_RETRIES = 3

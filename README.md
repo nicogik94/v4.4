@@ -18,6 +18,8 @@ For tranche-1 baseline review and acceptance, start with:
 - [`docs/v4.4-TRANCHE-1-QA-CHECKLIST.md`](docs/v4.4-TRANCHE-1-QA-CHECKLIST.md)
 - [`docs/v4.4-TRANCHE-2-PLAN.md`](docs/v4.4-TRANCHE-2-PLAN.md)
 - [`docs/v4.4-TRANCHE-2-CSV-RUNTIME.md`](docs/v4.4-TRANCHE-2-CSV-RUNTIME.md)
+- [`docs/v4.4-SCENARIO-SHADOW.md`](docs/v4.4-SCENARIO-SHADOW.md)
+- [`docs/v4.4-FILE-UPLOADS-OVERVIEW.md`](docs/v4.4-FILE-UPLOADS-OVERVIEW.md)
 
 ---
 

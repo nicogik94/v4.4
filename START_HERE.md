@@ -101,22 +101,32 @@ When `report` turns green, click the **Report** sub-tab in the drill-in panel. T
 
 ### Dossier vs Workspace
 
-The drill-in now has two distinct surfaces:
+The drill-in now has four distinct surfaces:
 
+- **Overview** — the summary-first read surface. Start here. It is designed to answer, in order: the current recommendation, why the system reached it, what to do next, what sources are in play, and only then the control/system detail.
 - **Dossier** — the edit surface. Use it to update the brief, supporting data, and structured phase outputs.
 - **Workspace** — the operational command center. Use it to understand what is blocked, stale, review-required, or complete, and to inspect risks, evidence, approvals, and re-entry history.
-- **Trace** — the explainability surface. Use it to inspect per-phase purpose, inputs, frameworks, gate results, uncertainty, and strategy evidence chains without exposing raw chain-of-thought.
+- **Decision trace** — the explainability surface. Use it to inspect per-phase purpose, inputs, frameworks, gate results, uncertainty, and strategy evidence chains without exposing raw chain-of-thought.
 
 If you need to change project content, use **Dossier**. If you need to understand project state, use **Workspace**.
-If you need to understand how the current result was reached, use **Trace**.
+If you need to understand how the current result was reached, use **Decision trace**.
+If you need the fastest high-level read, start in **Overview**.
+
+You can now upload `PDF`, `DOCX`, `TXT`, `MD`, `CSV`, and `XLSX` files from **Overview** or the **Dossier** input section. Uploads are additive:
+
+- documents become bounded knowledge/context items
+- tables become bounded table knowledge items by default
+- `CSV` and `XLSX` can optionally use structured evidence/signal import
+
+Uploads do **not** auto-rerun the workflow. They update files, knowledge visibility, and import status immediately, but a manual rerun is still required before new uploaded information affects downstream analysis or recommendations.
 
 Imported CSV evidence/signals appear in **Workspace** immediately, but they do **not** automatically rewrite prior analysis. If Workspace shows a notice that imported evidence is pending analysis, rerun the relevant analysis/report path before treating recommendations as updated.
 
 Knowledge sources and synced knowledge items also appear as a separate **knowledge freshness** signal in Workspace and Queue. That layer tells you whether current-awareness inputs are configured, current, stale, expired, or sync-failed. It does **not** automatically rerun phases. Prompt-facing use is still tightly bounded: only the **audit** and **strategy** phases may consume approved structured retrieval projections.
 
-Controlled retrieval visibility is now available through the knowledge API routes. Eligibility is backend-computed, phase-specific, and whitelist-based. In the current bounded slice, only the **audit** and **strategy** phases may consume approved structured projections, and Trace will show which approved knowledge items were used. This still does **not** auto-rerun phases or expose raw prompt dumps.
+Controlled retrieval visibility is now available through the knowledge API routes. Eligibility is backend-computed, phase-specific, and whitelist-based. In the current bounded slice, only the **audit** and **strategy** phases may consume approved structured projections, and **Decision trace** will show which approved knowledge items were used. This still does **not** auto-rerun phases or expose raw prompt dumps.
 
-Workspace and Trace also show simple retrieval visibility for audit/strategy: whether retrieval was used, current eligible vs blocked counts, and the top blocked reasons. Those are operator visibility signals, not proof that retrieval changed the result in a measurable way.
+Workspace and **Decision trace** also show simple retrieval visibility for audit/strategy: whether retrieval was used, current eligible vs blocked counts, and the top blocked reasons. Those are operator visibility signals, not proof that retrieval changed the result in a measurable way.
 
 Three status axes stay separate on purpose:
 
@@ -142,9 +152,9 @@ If anything looks wrong — output suspicious, costs climbing, taking too long, 
 
 The halt is immediate, persisted to the database, and survives orchestrator restarts. The engine cannot bypass it.
 
-### The audit log
+### The Control log
 
-The **Audit log** sub-tab shows every policy event for the project: classification changes, kill switch triggers, budget breaches, sanitization findings, approval grants. If anyone asks "what happened on this project and when," this is the source of truth.
+The **Control log** sub-tab shows every policy event for the project: classification changes, kill switch triggers, budget breaches, sanitization findings, approval grants. If anyone asks "what happened on this project and when," this is the source of truth.
 
 ### Sanitization warnings
 
