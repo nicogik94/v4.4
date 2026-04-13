@@ -273,3 +273,4 @@ Every gate is a hard stop. Re-entry triggers (R1–R8) route the state back to a
 ## License
 
 Proprietary. © 2026 Nicolás Grinberg. All rights reserved.
+"# v4.4" 
