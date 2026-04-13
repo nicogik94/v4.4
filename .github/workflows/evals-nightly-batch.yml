@@ -1,0 +1,62 @@
+name: evals-nightly-batch
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC daily (00:00 CDMX)
+  workflow_dispatch:
+
+jobs:
+  nightly-batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install
+        working-directory: mas
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run batch evals
+        working-directory: mas
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m evals.run_evals_batch --report evals/out/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-batch-report
+          path: mas/evals/out/
+
+      - name: Open issue on regression
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = 'Nightly batch eval suite failed to meet pass threshold.';
+            try {
+              const summary = JSON.parse(fs.readFileSync('mas/evals/out/summary_batch.json', 'utf8'));
+              body = `**Nightly batch eval regression**\n\n` +
+                     `- Passed: ${summary.passed}/${summary.total} (${(summary.pass_rate*100).toFixed(1)}%)\n` +
+                     `- Threshold: ${(summary.threshold*100).toFixed(0)}%\n` +
+                     `- Batch ID: ${summary.batch_id || 'n/a'}\n\n` +
+                     `Failing cases:\n` +
+                     summary.cases.filter(c => !c.passed).map(c =>
+                       `- **${c.case_id}** (judge=${c.judge_overall}, fw=${c.frameworks_covered.toFixed(2)})`
+                     ).join('\n');
+            } catch (e) {}
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly eval regression — ${new Date().toISOString().slice(0,10)}`,
+              body,
+              labels: ['eval-regression', 'nightly']
+            });

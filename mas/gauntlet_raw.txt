@@ -1,0 +1,203 @@
+{
+  "results": [
+    {
+      "id": "H2",
+      "risk_rank": 1,
+      "prior_probability": 0.50,
+      "thompson_beta_sample": "BETA.INV(RAND(),5,5)≈0.50",
+      "frameworks": [
+        {
+          "fw": "STEELMAN",
+          "finding": "Template-driven briefs operationalize search demand at the moment of content creation — the only point where CTR lift is architecturally guaranteed without retroactive rework. GSC experiments at Healthline, NerdWallet, and The Atlantic all show 20-40% CTR gains when title/meta are anchored to actual query phrasing from day one. If UNAM Global's current briefs are purely institutional in framing, the delta available is real and large.",
+          "action": true,
+          "confidence": 0.72
+        },
+        {
+          "fw": "PREMORTEM",
+          "finding": "Failure modes at 90-day mark: (1) Control vs. treatment contamination — editors apply partial brief logic informally to control articles, shrinking observable delta. (2) Google re-evaluation lag: new URLs take 30-60 days to stabilize impressions, leaving only 30 days of clean CTR signal. (3) UNAM domain authority suppresses CTR regardless of title optimization because SERP positions remain >10. (4) Sample size: if only 8-12 articles published per cohort, MDE for 25% CTR lift requires n≥30 per arm to reach 80% power at α=0.05.",
+          "action": true,
+          "confidence": 0.61
+        },
+        {
+          "fw": "DOUBLE_CRUX",
+          "finding": "Crux A (proponent): editorial teams systematically use institutional language ('UNAM informa…') rather than query-matching language ('cómo solicitar beca UNAM'); fixing this at brief stage mechanically lifts CTR. Crux B (skeptic): UNAM's brand SERP dominance means users click regardless of title phrasing; CTR is position-driven not title-driven at branded queries. Resolution test: segment GSC data by branded vs. non-branded queries — if non-branded CTR <2% at positions 5-10, brief-driven title optimization is the active lever.",
+          "action": true,
+          "confidence": 0.65
+        },
+        {
+          "fw": "BAYES_LITE",
+          "finding": "P(H2|evidence)= prior 0.50. Likelihood ratio update: industry benchmark for editorial brief → CTR improvement is positive (LR≈1.8 from HubSpot/Conductor studies). Updated posterior: 0.50×1.8/(0.50×1.8+0.50×1.0)=0.643. However, 90-day window constraint reduces LR to ≈1.3 given stabilization lag. Adjusted posterior: 0.565. EVSI positive only if audit data confirms <2% non-branded CTR baseline — schedule GSC pull before committing to 90-day trial design.",
+          "action": true,
+          "confidence": 0.565
+        },
+        {
+          "fw": "SISTÉMICO",
+          "finding": "System archetype: 'Fixes that Fail.' Brief template improves individual article CTR but doesn't address the feedback loop where editorial approval committees revert title framing to institutional conventions before publication. The intervention point is at brief creation, but the leverage point is at editorial gate — without brief compliance enforcement, the template becomes advisory and loses structural power. Map the editorial workflow VSM to identify the reversion node.",
+          "action": true,
+          "confidence": 0.70
+        },
+        {
+          "fw": "LADDER",
+          "finding": "Rung 1 (Observable data): GSC CTR for UNAM Global non-branded queries in positions 1-10 is currently unmeasured. Rung 2 (Selected data): assume industry avg CTR at position 5 is 6.3% (Sistrix 2023); if UNAM is at 3.1%, gap confirms title/meta underperformance. Rung 3 (Interpreted): underperformance attributed to institutional title framing. Rung 4 (Assumption): brief templates can change editorial behavior durably. Rung 5 (Conclusion): 25% CTR lift achievable. Rung 6 (Action): launch trial. RISK: ladder skips empirical validation between rungs 2-3; intervention at data pull before ascending to rung 4.",
+          "action": true,
+          "confidence": 0.60
+        },
+        {
+          "fw": "FMEA",
+          "finding": "Top failure mode: editorial reversion — editors modify brief-specified titles post-approval to comply with institutional tone guidelines, nullifying the search-optimized framing before publication.",
+          "action": true,
+          "top_fmea": {
+            "mode": "Editorial reversion of brief-specified titles to institutional framing before publication",
+            "s": 8,
+            "o": 7,
+            "d": 3,
+            "rpn": 168,
+            "mitigation": "Implement a two-field title system in CMS: 'SEO Title' (locked to brief spec, auto-populates <title> tag) and 'Display Headline' (editorial discretion). Detection: post-publish automated diff between brief title and live <title> tag, alert within 24h."
+          }
+        },
+        {
+          "fw": "HAZOP",
+          "finding": "Deviation 'MORE THAN intended query alignment': over-optimized titles trigger Google's spam classifier for keyword stuffing, reducing impressions for the article entirely — inverse effect on CTR. Deviation 'NONE of the brief adopted': zero compliance scenario, experiment invalid. Deviation 'REVERSE intent': brief anchors to informational intent queries but editorial team publishes navigational/branded content, mismatching SERP user expectations and increasing pogo-sticking. Safeguard: brief template must include intent classification field (informational/navigational/transactional) with mandatory declaration before submission.",
+          "action": true,
+          "confidence": 0.68
+        },
+        {
+          "fw": "FTA",
+          "finding": "Top event: CTR uplift <25% at 90 days. OR gate: [Insufficient sample n<30 per arm] OR [Google stabilization lag >60 days absorbing trial window] OR [Editorial compliance <70% with brief specs] OR [Branded query dominance masks non-branded CTR gains]. AND gate under compliance failure: [No CMS enforcement mechanism] AND [Editorial approval gate lacks SEO checklist]. Minimal cut set: {small sample, stabilization lag} — both are independently sufficient to invalidate results even with perfect compliance.",
+          "action": true,
+          "fta_cut_set": "{n<30 per arm} ∩ {URL stabilization lag >60d} → trial window collapses to <30d clean signal; independently sufficient for null result regardless of brief quality"
+        },
+        {
+          "fw": "Red Teaming",
+          "finding": "Red team position: The hypothesis is unfalsifiable as designed. If CTR doesn't rise 25%, the team will attribute failure to 'insufficient sample' or 'Google lag' rather than concluding the brief template doesn't work — creating a non-falsifiable defense. Attack vector: pre-register exact stopping criteria — if by day 75 the treatment arm shows <10% CTR delta with n≥20, declare futility and pivot to H3 optimization track. Secondary attack: UNAM's sub-3% domain CTR on non-branded terms may be a function of SERP feature cannibalization (featured snippets, PAA boxes owned by Wikipedia/gov.mx) — no amount of title optimization overcomes zero-click SERPs. Verify zero-click rate for target queries before trial launch.",
+          "action": true,
+          "confidence": 0.55
+        }
+      ],
+      "crux": "Testable belief: If GSC non-branded CTR for UNAM Global at positions 3-7 is <50% of Sistrix industry benchmark (i.e., <3.5% vs. 7.0% expected), then title/meta misalignment — not position — is the binding constraint, and brief templates are the mechanistic fix. Falsification: audit GSC CTR segmented by branded vs. non-branded, positions 1-10, for trailing 90 days before launching trial.",
+      "top_fmea": {
+        "mode": "Editorial reversion of brief-specified titles to institutional framing before publication",
+        "s": 8,
+        "o": 7,
+        "d": 3,
+        "rpn": 168
+      },
+      "fta_cut_set": "{n<30 per arm} ∩ {URL stabilization lag >60d} → independently sufficient for null result"
+    },
+    {
+      "id": "H8",
+      "risk_rank": 2,
+      "prior_probability": 0.40,
+      "thompson_beta_sample": "BETA.INV(RAND(),4,6)≈0.40",
+      "frameworks": [
+        {
+          "fw": "STEELMAN",
+          "finding": "Semantic markup is a uniquely high-leverage zero-traffic-cost intervention: once implemented, structured data operates permanently across all future crawls. Semrush 2023 data shows FAQ schema adoption correlates with 20-30% PAA placement rates for informational queries in health and education verticals — UNAM's strongest topical domains. The 15% target is conservative relative to these benchmarks if query selection is disciplined (long-tail informational, low-competition). Google's own documentation confirms HowTo and FAQ schema as active SERP feature triggers for Spanish-language results since 2021.",
+          "action": true,
+          "confidence": 0.58
+        },
+        {
+          "fw": "PREMORTEM",
+          "finding": "Failure scenarios at 60 days: (1) Google deprioritizes FAQ schema for non-YMYL publishers — already partially occurred in 2023 (Google reduced FAQ rich results to 'well-known, authoritative government/health sites'). UNAM qualifies as authoritative, but enforcement is inconsistent. (2) Structured data implemented incorrectly by CMS theme — JSON-LD conflicts with existing Open Graph tags cause validation errors; Google ignores malformed markup. (3) CTR lift not visible in GSC because impressions at positions >10 don't generate measurable click volume regardless of rich result format. (4) 60-day window insufficient: Google rich result indexing lag averages 21-35 days, leaving <30 days of clean performance data.",
+          "action": true,
+          "confidence": 0.48
+        },
+        {
+          "fw": "DOUBLE_CRUX",
+          "finding": "Crux A (proponent): UNAM's academic domain authority (DR ~75 estimated) meets Google's threshold for rich result eligibility; the 15% target is achievable if schema is applied to the right query types. Crux B (skeptic): Google's 2023 FAQ schema rollback specifically targeted 'repetitive' FAQ implementations on non-health/gov sites; UNAM's education/science content may not qualify for reliable display. Resolution: run Google Rich Results Test on 20 representative URLs pre-implementation; if <60% pass validation, the implementation risk dominates and schema ROI collapses. If >80% pass, proceed at scale.",
+          "action": true,
+          "confidence": 0.52
+        },
+        {
+          "fw": "BAYES_LITE",
+          "finding": "Prior P(H8)=0.40. Evidence update 1: Google 2023 FAQ schema rollback reduces LR to 0.7 (negative update). Evidence update 2: UNAM domain authority >70 restores LR to 1.2 for government/institutional exemption. Combined LR=0.84. Posterior: 0.40×0.84/(0.40×0.84+0.60×1.0)=0.359. Hypothesis weakens on evidence integration. EVSI: collect Rich Results Test validation data on 20 URLs (cost: 2 hours analyst time). If >80% pass, LR updates to 1.5, posterior recovers to 0.50. Decision threshold: run validation before any schema implementation investment.",
+          "action": true,
+          "confidence": 0.36
+        },
+        {
+          "fw": "SISTÉMICO",
+          "finding": "System feedback loop: implementing schema on existing content without fixing underlying content structure creates a 'cosmetic optimization trap' — Google's schema parser rewards semantic completeness, not just tag presence. If FAQ answers are shorter than 40 words or don't directly answer the query, rich results won't trigger. The leverage point is not schema markup but content structure: answers must be written as standalone, query-answering paragraphs before schema adds value. Systemic fix: revise content brief template to include 'PAA-ready answer blocks' as a mandatory section, then apply schema.",
+          "action": true,
+          "confidence": 0.65
+        },
+        {
+          "fw": "LADDER",
+          "finding": "Rung 1 (Data): UNAM Global currently has 0 structured data implementations (assumed from no rich results visible in GSC). Rung 2 (Selected): informational queries in health/science have 23% PAA penetration (Semrush). Rung 3 (Interpreted): UNAM content maps to these query types. Rung 4 (Assumption): CMS (WordPress/Drupal presumed) supports JSON-LD injection without custom development. Rung 5 (Conclusion): 15% rich result placement achievable. Rung 6 (Action): implement at scale. LADDER BREAK at rung 4: CMS schema support must be confirmed with development team before investment — this is the critical assumption gap.",
+          "action": true,
+          "confidence": 0.55
+        },
+        {
+          "fw": "FMEA",
+          "finding": "Top failure mode: Google's algorithmic de-prioritization of FAQ schema for non-health/gov publishers invalidates the implementation investment entirely, with no detection mechanism in place.",
+          "action": true,
+          "top_fmea": {
+            "mode": "Google algorithmically suppresses FAQ/HowTo rich results for UNAM content category post-implementation",
+            "s": 9,
+            "o": 6,
+            "d": 2,
+            "rpn": 108,
+            "mitigation": "Run Google Search Console Rich Results report baseline before implementation. Implement schema on 10 URLs as pilot; monitor GSC 'Rich Results' report daily for 21 days. If <5% earn rich result status by day 21, declare futility threshold crossed — halt scale-up and reallocate effort to H3 on-page optimization."
+          }
+        },
+        {
+          "fw": "HAZOP",
+          "finding": "Deviation 'MORE schema than content warrants': applying HowTo schema to articles that are not structured how-to content triggers Google's structured data spam policy — manual action risk for entire domain. Deviation 'WRONG schema type': Article schema applied where FAQ schema is appropriate misses rich result trigger conditions entirely. Deviation 'NONE triggers': all schema implementations pass validation but Google's classifier determines UNAM content quality insufficient for rich result display — implementation cost sunk with zero return. Safeguard: mandatory schema type decision tree in editorial brief (informational→FAQ, procedural→HowTo, news→Article) reviewed by SEO lead before publish.",
+          "action": true,
+          "confidence": 0.60
+        },
+        {
+          "fw": "FTA",
+          "finding": "Top event: <15% of targeted queries achieve rich result placement at 60 days. OR gate: [Google suppresses schema type for UNAM content category] OR [Implementation errors causing validation failures in >30% of URLs] OR [60-day window too short for Google re-crawl and re-evaluation cycle] OR [Target queries already dominated by zero-click SERP layouts removing CTR benefit]. AND gate under implementation error: [CMS JSON-LD conflicts with theme markup] AND [No pre-publish validation step in workflow]. Minimal cut set: {Google algorithmic suppression} — single-point failure sufficient to invalidate entire hypothesis independent of all other variables.",
+          "action": true,
+          "fta_cut_set": "{Google algorithmic FAQ schema suppression for education/non-health publishers} → single sufficient cause for <15% placement rate; uncontrollable external variable"
+        },
+        {
+          "fw": "Red Teaming",
+          "finding": "Red team attack: Google publicly announced in August 2023 that FAQ rich results would be 'limited to well-known, authoritative government and health websites' and HowTo rich results would be shown 'only on desktop.' UNAM as a national university may qualify for the government/authoritative exemption in Spanish-language SERPs, but this has not been empirically confirmed for UNAM Global specifically. The red team position: implement schema on 5 URLs, wait 30 days, check GSC Rich Results report — this $0 test kills or confirms the hypothesis before any scale investment. Secondary attack: the 60-day CTR measurement window for schema is shorter than Google's typical 21-35 day re-indexing cycle, meaning the hypothesis as written cannot be properly tested within its own timeframe.",
+          "action": true,
+          "confidence": 0.42
+        }
+      ],
+      "crux": "Testable belief: If Google Rich Results Test returns >80% valid schema eligibility for 20 representative UNAM Global URLs AND GSC Rich Results report shows at least 3 URLs earning rich result impressions within 21 days of pilot implementation, then the 15% placement target is mechanistically achievable. Falsification: if pilot (10 URLs, 21 days) produces zero rich result impressions in GSC, declare hypothesis refuted — Google's eligibility filter is the binding constraint, not implementation quality.",
+      "top_fmea": {
+        "mode": "Google algorithmically suppresses FAQ/HowTo rich results for UNAM content category post-implementation",
+        "s": 9,
+        "o": 6,
+        "d": 2,
+        "rpn": 108
+      },
+      "fta_cut_set": "{Google algorithmic FAQ schema suppression} → single sufficient cause; uncontrollable external variable"
+    },
+    {
+      "id": "H11",
+      "risk_rank": 3,
+      "prior_probability": 0.40,
+      "thompson_beta_sample": "BETA.INV(RAND(),4,6)≈0.40",
+      "frameworks": [
+        {
+          "fw": "STEELMAN",
+          "finding": "Tiered content models are the operational backbone of every high-velocity digital newsroom (Reuters, BBC, El País) and have proven able to reduce time-to-publish for breaking/trending content by 50-70% without governance restructuring by operating tiered content as parallel workflows rather than replacements. The key insight: UNAM's governance chain was designed for Tier 2/3 academic content — Tier 1 news briefs (200-300 words, no peer review, factual summaries of UNAM press releases) require zero academic validation and can be legitimately exempted from full approval chains under existing institutional policy without requiring formal governance change.",
+          "action": true,
+          "confidence": 0.62
+        },
+        {
+          "fw": "PREMORTEM",
+          "finding": "Failure modes at 30-day pilot: (1) Institutional legal/communications compliance team retroactively claims all published content requires director-level sign-off — pilot articles flagged post-publication, tiered model suspended. (2) Editorial team produces Tier 1 articles that are actually Tier 2 in disguise (investigative framing, opinion elements, unauthorized sourcing), triggering governance review and collapsing the speed advantage. (3) 40% time-to-publish reduction target is measured against a baseline that was never formally documented — comparison becomes contested. (4) 10-article pilot sample generates anecdotal, not statistically significant, workflow timing data — insufficient to justify organizational adoption.",
+          "action": true,
+          "confidence": 0.55
+        },
+        {
+          "fw": "DOUBLE_CRUX",
+          "finding": "Crux A (proponent): The 3-day governance lag exists because content is undifferentiated — all articles follow the same approval workflow regardless of institutional risk level. A tiered model creates a legitimate, low-risk category that governance stakeholders will accept because it reduces their review burden while maintaining control over high-stakes content. Crux B (skeptic): UNAM's institutional risk aversion means any published content is implicitly attributed to the institution; communications leadership will not accept a 'fast lane' that bypasses their oversight, regardless of content tier definition. Resolution: interview Dirección General de Comunicación Social decision-makers before pilot — if they verbally pre-authorize a Tier 1 category scope in writing, the governance constraint is confirmed solvable. If they decline, the hypothesis fails regardless of workflow design quality.",
+          "action": true,
+          "confidence": 0.50
+        },
+        {
+          "fw": "BAYES_LITE",
+          "finding": "Prior P(H11)=0.40. Evidence update 1: newsroom tiered model literature shows 60-70% success rate in private media (LR=1.5 positive). Evidence update 2: institutional/academic publisher context has only 25-35% governance exemption success rate (LR=0.6 negative). Combined LR=0.90. Posterior: 0.40×0.90/(0.40×0.90+0.60×1.0)=0.375. Hypothesis slightly weakens. EVSI: 2-hour stakeholder interview with DGCSoc director costs near-zero and resolves the governance crux entirely — LR update would be decisive (LR=3.0 if approved, LR=0.1 if rejected). Schedule before any workflow design investment.",
+          "action": true,
+          "confidence": 0.375
+        },
+        {
+          "fw": "SISTÉMICO",
+          "finding": "System archetype: 'Shifting the Burden.' Tiered content model reduces editorial cycle pressure symptomatically (faster publication) but does not address the structural cause: institutional approval chains exist because there is no documented risk classification framework for UNAM-attributed content. Without creating that classification framework explicitly, the tiered model will be informally collapsed back to single-tier review within 60 days as individual editors and reviewers apply

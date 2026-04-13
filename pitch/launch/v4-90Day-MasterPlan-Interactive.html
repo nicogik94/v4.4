@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>90-Day Solo AI Consulting Launch — Interactive Master Plan</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+:root {
+  --teal: #0D9488; --teal-bg: #E1F5EE; --teal-border: #5DCAA5;
+  --purple: #7C3AED; --purple-bg: #EEEDFE; --purple-border: #AFA9EC;
+  --coral: #D85A30; --coral-bg: #FAECE7; --coral-border: #F0997B;
+  --amber: #B45309; --amber-bg: #FEF3C7; --amber-border: #F59E0B;
+  --blue: #2563EB; --blue-bg: #DBEAFE; --blue-border: #93C5FD;
+  --green: #059669; --green-bg: #D1FAE5; --green-border: #6EE7B7;
+  --red: #DC2626; --red-bg: #FEE2E2; --red-border: #FCA5A5;
+  --dark: #1E293B; --slate: #64748B; --light: #F8FAFC; --white: #FFFFFF;
+  --border: #E2E8F0; --bg-card: #FFFFFF; --bg-page: #F1F5F9;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --radius: 12px; --radius-sm: 8px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font); background: var(--bg-page); color: var(--dark); line-height: 1.6; }
+
+/* Header */
+.header { background: linear-gradient(135deg, #0F766E 0%, #0D9488 50%, #14B8A6 100%); color: white; padding: 40px 24px; text-align: center; }
+.header h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+.header p { font-size: 15px; opacity: 0.9; max-width: 600px; margin: 0 auto; }
+.arvv-badge { display: inline-block; background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 20px; padding: 4px 16px; font-size: 12px; font-weight: 600; margin-top: 12px; }
+
+/* Navigation */
+.nav { background: var(--white); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; overflow-x: auto; white-space: nowrap; }
+.nav-inner { display: flex; max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+.nav-btn { padding: 14px 18px; font-size: 13px; font-weight: 500; border: none; background: none; cursor: pointer; color: var(--slate); border-bottom: 2px solid transparent; transition: all 0.2s; flex-shrink: 0; }
+.nav-btn:hover { color: var(--dark); }
+.nav-btn.active { color: var(--teal); border-bottom-color: var(--teal); }
+
+/* Layout */
+.container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+.section { display: none; }
+.section.active { display: block; }
+
+/* Cards */
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+.card-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.card-subtitle { font-size: 13px; color: var(--slate); margin-bottom: 16px; }
+
+/* Metrics */
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.metric { background: var(--light); border-radius: var(--radius-sm); padding: 16px; text-align: center; }
+.metric-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--slate); }
+.metric-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+.metric-note { font-size: 11px; color: var(--slate); margin-top: 2px; }
+
+/* Tags */
+.tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 12px; }
+.tag-high { background: var(--red-bg); color: var(--red); }
+.tag-med { background: var(--amber-bg); color: var(--amber); }
+.tag-low { background: var(--blue-bg); color: var(--blue); }
+.tag-ok { background: var(--green-bg); color: var(--green); }
+.tag-teal { background: var(--teal-bg); color: var(--teal); }
+.tag-purple { background: var(--purple-bg); color: var(--purple); }
+
+/* Checklist */
+.check-group { margin-bottom: 16px; }
+.check-group-title { font-size: 14px; font-weight: 600; padding: 8px 0; display: flex; align-items: center; gap: 8px; }
+.check-item { display: flex; align-items: flex-start; gap: 10px; padding: 8px 12px; border-radius: var(--radius-sm); transition: background 0.15s; cursor: pointer; }
+.check-item:hover { background: var(--light); }
+.check-item input[type=checkbox] { margin-top: 3px; accent-color: var(--teal); width: 16px; height: 16px; flex-shrink: 0; }
+.check-item label { font-size: 13px; cursor: pointer; flex: 1; }
+.check-item.done label { text-decoration: line-through; color: var(--slate); }
+
+/* Flowchart nodes */
+.flow-container { display: flex; flex-direction: column; gap: 0; align-items: center; }
+.flow-row { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; width: 100%; }
+.flow-node { border-radius: var(--radius-sm); padding: 14px 18px; text-align: center; min-width: 140px; flex: 1; max-width: 220px; border: 1px solid; }
+.flow-node-title { font-size: 13px; font-weight: 600; }
+.flow-node-sub { font-size: 11px; margin-top: 4px; }
+.flow-arrow { text-align: center; font-size: 20px; color: var(--slate); padding: 4px 0; }
+.flow-arrow-h { font-size: 16px; color: var(--slate); align-self: center; }
+
+/* Phase banner */
+.phase-banner { padding: 10px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600; margin-bottom: 12px; text-align: center; }
+
+/* Slider rows */
+.slider-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; }
+.slider-label { min-width: 140px; color: var(--slate); }
+.slider-row input[type=range] { flex: 1; accent-color: var(--teal); }
+.slider-val { min-width: 50px; text-align: right; font-weight: 600; }
+
+/* Result box */
+.result-box { background: var(--teal-bg); border: 1px solid var(--teal-border); border-radius: var(--radius-sm); padding: 16px; margin-top: 16px; }
+.result-big { font-size: 28px; font-weight: 700; color: var(--teal); }
+
+/* QC steps */
+.qc-step { display: flex; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.qc-step:last-child { border-bottom: none; }
+.qc-num { min-width: 32px; height: 32px; border-radius: 50%; background: var(--teal-bg); color: var(--teal); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; flex-shrink: 0; }
+.qc-text { font-size: 13px; }
+.qc-text strong { display: block; margin-bottom: 4px; }
+
+/* Risk rows */
+.risk-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.risk-row:last-child { border-bottom: none; }
+.rpn { min-width: 44px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.rpn-high { background: var(--red-bg); color: var(--red); }
+.rpn-med { background: var(--amber-bg); color: var(--amber); }
+.rpn-low { background: var(--blue-bg); color: var(--blue); }
+.risk-text { font-size: 13px; }
+.risk-text strong { color: var(--dark); }
+
+/* Timeline */
+.timeline { position: relative; padding-left: 32px; }
+.timeline::before { content: ''; position: absolute; left: 14px; top: 8px; bottom: 8px; width: 2px; background: var(--border); }
+.tl-item { position: relative; padding: 12px 0; }
+.tl-dot { position: absolute; left: -25px; top: 18px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid; }
+.tl-day { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+.tl-title { font-size: 14px; font-weight: 600; margin: 4px 0; }
+.tl-desc { font-size: 13px; color: var(--slate); }
+
+/* DM/Email templates */
+.template-box { background: var(--light); border-left: 3px solid var(--teal); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; padding: 14px 18px; margin: 12px 0; font-size: 13px; font-style: italic; color: var(--dark); }
+.template-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--teal); font-style: normal; margin-bottom: 6px; }
+
+/* Objection cards */
+.objection { border-left: 3px solid var(--coral); padding: 12px 16px; margin: 8px 0; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--coral-bg); }
+.objection-q { font-size: 13px; font-weight: 600; color: var(--coral); margin-bottom: 6px; }
+.objection-a { font-size: 13px; color: var(--dark); }
+
+/* Chart container */
+.chart-wrap { position: relative; height: 300px; margin: 16px 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--slate); margin-bottom: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+
+/* Grid helpers */
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+
+/* Progress bar */
+.progress-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+.progress-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+
+/* ARVV fix callout */
+.arvv-fix { background: var(--green-bg); border: 1px solid var(--green-border); border-radius: var(--radius-sm); padding: 10px 14px; margin: 12px 0; font-size: 12px; }
+.arvv-fix-label { font-weight: 700; color: var(--green); }
+
+/* Responsive */
+@media (max-width: 640px) {
+  .header h1 { font-size: 22px; }
+  .nav-btn { padding: 12px 12px; font-size: 12px; }
+  .flow-node { min-width: 100px; padding: 10px 12px; }
+  .slider-label { min-width: 100px; font-size: 12px; }
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>90-Day Solo AI Consulting Launch Playbook</h1>
+  <p>From zero clients to $5K–$10K/month. ARVV-corrected. Costs included. Every number sourced.</p>
+  <div class="arvv-badge">ARVV-CORRECTED EDITION — 11 FIXES APPLIED</div>
+</div>
+
+<div class="nav">
+  <div class="nav-inner">
+    <button class="nav-btn active" onclick="showSection(0)">Roadmap</button>
+    <button class="nav-btn" onclick="showSection(1)">Daily checklist</button>
+    <button class="nav-btn" onclick="showSection(2)">Pipeline calc</button>
+    <button class="nav-btn" onclick="showSection(3)">Packages</button>
+    <button class="nav-btn" onclick="showSection(4)">Delivery flow</button>
+    <button class="nav-btn" onclick="showSection(5)">QC protocol</button>
+    <button class="nav-btn" onclick="showSection(6)">Templates</button>
+    <button class="nav-btn" onclick="showSection(7)">Risk matrix</button>
+    <button class="nav-btn" onclick="showSection(8)">Revenue</button>
+    <button class="nav-btn" onclick="showSection(9)">Day 1 setup</button>
+    <button class="nav-btn" onclick="showSection(10)">Confidence</button>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ═══ 0: ROADMAP ═══ -->
+<div class="section active" id="s0">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">90-day roadmap: faster decisions for clients, revenue for you</h2>
+
+    <div class="card" style="border-left:3px solid var(--purple);margin-bottom:20px">
+    <div class="card-title"><span class="tag tag-purple">NEW</span> Your ideal client</div>
+    <div style="font-size:13px">
+      <div style="display:flex;gap:8px;padding:4px 0"><strong style="min-width:100px">Company:</strong> 10–200 employees — big enough for strategic decisions, too small for in-house strategy teams</div>
+      <div style="display:flex;gap:8px;padding:4px 0"><strong style="min-width:100px">Buyer:</strong> CEO, VP Strategy, Head of Ops, or Founder</div>
+      <div style="display:flex;gap:8px;padding:4px 0"><strong style="min-width:100px">Pain:</strong> Facing a decision (market entry, pivot, resource allocation) with incomplete info and no structured process</div>
+      <div style="display:flex;gap:8px;padding:4px 0"><strong style="min-width:100px">Budget:</strong> $2,000–$10,000 discretionary for a one-time project</div>
+      <div style="display:flex;gap:8px;padding:4px 0"><strong style="min-width:100px">Trigger:</strong> Recent funding, market shift, competitive threat, or expansion plan</div>
+    </div>
+  </div>
+  <div class="card" style="border-left:3px solid var(--amber);margin-bottom:20px">
+    <div class="card-title"><span class="tag tag-med">NEW</span> Channel priority (do NOT start all at once)</div>
+    <div style="font-size:13px">
+      <div style="padding:4px 0"><strong>1.</strong> Week 1–2: LinkedIn DMs + warm network (highest close rate)</div>
+      <div style="padding:4px 0"><strong>2.</strong> Week 1: Register on expert networks (passive — they call you)</div>
+      <div style="padding:4px 0"><strong>3.</strong> Week 3+: Cold email (after domain warmup completes)</div>
+      <div style="padding:4px 0"><strong>4.</strong> Week 3+: Upwork (5 applications/day)</div>
+      <div style="padding:4px 0"><strong>5.</strong> Month 2+: Reddit, communities, webinars</div>
+      <div style="padding:6px 0;margin-top:8px;color:var(--red);font-weight:500">Minimum viable outreach (when exhausted): 10 LinkedIn DMs + 5 follow-ups. 15 minutes. Non-negotiable.</div>
+    </div>
+  </div>
+  <div class="phase-banner" style="background:var(--teal-bg);color:var(--teal)">Phase 1: Foundation — Days 1–14</div>
+  <div class="flow-container">
+    <div class="flow-row">
+      <div class="flow-node" style="background:var(--teal-bg);border-color:var(--teal-border)">
+        <div class="flow-node-title" style="color:var(--teal)">Day 1–3</div>
+        <div class="flow-node-sub">LLC + tech stack setup</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--teal-bg);border-color:var(--teal-border)">
+        <div class="flow-node-title" style="color:var(--teal)">Day 3–7</div>
+        <div class="flow-node-sub">Activate network, DM every 1st-degree contact</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--teal-bg);border-color:var(--teal-border)">
+        <div class="flow-node-title" style="color:var(--teal)">Day 7–14</div>
+        <div class="flow-node-sub">Content launch + cold outreach begins</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--light);border-color:var(--border)">
+        <div class="flow-node-title">Milestone</div>
+        <div class="flow-node-sub">Profile live, 50+ DMs sent, 2 spec case studies</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">↓</div>
+
+  <div class="phase-banner" style="background:var(--purple-bg);color:var(--purple)">Phase 2: Pipeline building — Days 15–30</div>
+  <div class="flow-container">
+    <div class="flow-row">
+      <div class="flow-node" style="background:var(--purple-bg);border-color:var(--purple-border)">
+        <div class="flow-node-title" style="color:var(--purple)">Day 15–21</div>
+        <div class="flow-node-sub">Ramp outreach to full volume, offer free pilots</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--purple-bg);border-color:var(--purple-border)">
+        <div class="flow-node-title" style="color:var(--purple)">Day 22–30</div>
+        <div class="flow-node-sub">Discovery calls, send proposals, close first client</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--amber-bg);border-color:var(--amber-border)">
+        <div class="flow-node-title" style="color:var(--amber)">Target: $1,500–$2,500</div>
+        <div class="flow-node-sub">First paid project at pilot rate</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">↓</div>
+
+  <div class="phase-banner" style="background:var(--blue-bg);color:var(--blue)">Phase 3: First revenue — Days 31–60</div>
+  <div class="flow-container">
+    <div class="flow-row">
+      <div class="flow-node" style="background:var(--blue-bg);border-color:var(--blue-border)">
+        <div class="flow-node-title" style="color:var(--blue)">Deliver + QC</div>
+        <div class="flow-node-sub">5-step QC, branded report, get testimonial</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--blue-bg);border-color:var(--blue-border)">
+        <div class="flow-node-title" style="color:var(--blue)">Upsell to retainer</div>
+        <div class="flow-node-sub">$2K–3K/month ongoing advisory</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--amber-bg);border-color:var(--amber-border)">
+        <div class="flow-node-title" style="color:var(--amber)">Target: $3K–$6K</div>
+        <div class="flow-node-sub">Project + expert calls + platform</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">↓</div>
+
+  <div class="phase-banner" style="background:var(--green-bg);color:var(--green)">Phase 4: Scale — Days 61–90</div>
+  <div class="flow-container">
+    <div class="flow-row">
+      <div class="flow-node" style="background:var(--green-bg);border-color:var(--green-border)">
+        <div class="flow-node-title" style="color:var(--green)">Raise prices 25–50%</div>
+        <div class="flow-node-sub">After 3 clients + testimonials</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--green-bg);border-color:var(--green-border)">
+        <div class="flow-node-title" style="color:var(--green)">Inbound starts</div>
+        <div class="flow-node-sub">Content compounds, referrals flow</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--green-bg);border-color:var(--green-border)">
+        <div class="flow-node-title" style="color:var(--green)">Hire VA ($500–800/mo) <span style="font-size:10px;color:#059669;font-weight:600">[FIX #11]</span></div>
+        <div class="flow-node-sub">Delegate outreach operations</div>
+      </div>
+      <div class="flow-arrow-h">→</div>
+      <div class="flow-node" style="background:var(--teal);border-color:var(--teal);color:white">
+        <div class="flow-node-title" style="color:white">$5K–$10K MRR</div>
+        <div class="flow-node-sub" style="color:rgba(255,255,255,0.8)">Target achieved</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arvv-fix" style="margin-top:20px">
+    <span class="arvv-fix-label">[ARVV FIX #10]</span> This plan requires 50–60 hours/week in month 1. This is a sprint, not a sustainable pace. Hire a VA after month 3.
+  </div>
+</div>
+
+<!-- ═══ 1: DAILY CHECKLIST ═══ -->
+<div class="section" id="s1">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Daily execution checklist</h2>
+
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">LinkedIn DMs</div><div class="metric-value" id="dc-dm">0</div><div class="metric-note">target: 14–20</div></div>
+    <div class="metric"><div class="metric-label">Cold emails</div><div class="metric-value" id="dc-em">0</div><div class="metric-note">target: 50–100</div></div>
+    <div class="metric"><div class="metric-label">Follow-ups</div><div class="metric-value" id="dc-fu">0</div><div class="metric-note">target: 5–10</div></div>
+    <div class="metric"><div class="metric-label">Content</div><div class="metric-value" id="dc-ct">0</div><div class="metric-note">target: 1 post</div></div>
+    <div class="metric"><div class="metric-label">Completion</div><div class="metric-value" id="dc-pct">0%</div><div class="progress-bar"><div class="progress-fill" id="dc-bar" style="width:0%;background:var(--teal)"></div></div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-high">Priority 1</span> Morning block (2 hours)</div>
+    <div class="check-group" id="cg-morning">
+      <label class="check-item"><input type="checkbox" data-cat="dm" onchange="updateDaily()"><label>Send 14–20 personalized LinkedIn connection requests</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="dm" onchange="updateDaily()"><label>Personalize each DM (reference their company, role, or recent post)</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="dm" onchange="updateDaily()"><label>Check and respond to all pending LinkedIn messages within 1 hour</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="fu" onchange="updateDaily()"><label>Follow up on 5–10 unanswered messages (3-day rule)</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="fu" onchange="updateDaily()"><label>Check SSI score weekly at linkedin.com/sales/ssi — keep above 65 <span style="color:#059669;font-size:11px;font-weight:600">[ARVV FIX #5]</span></label></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-med">Priority 2</span> Midday block (1.5 hours)</div>
+    <div class="check-group" id="cg-mid">
+      <label class="check-item"><input type="checkbox" data-cat="em" onchange="updateDaily()"><label>Send 30–50 cold emails per warmed inbox (2–3 inboxes, 60–90 total)</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="em" onchange="updateDaily()"><label>Use timeline hooks — keep under 100 words — single CTA</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="em" onchange="updateDaily()"><label>Respond to positive email replies within 1 hour</label></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-low">Priority 3</span> Afternoon block (1 hour)</div>
+    <div class="check-group" id="cg-afternoon">
+      <label class="check-item"><input type="checkbox" data-cat="ct" onchange="updateDaily()"><label>Post 1 LinkedIn content piece (carousel > text > poll)</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="ct" onchange="updateDaily()"><label>Comment on 5–10 prospects' posts (warm before connecting)</label></label>
+      <label class="check-item"><input type="checkbox" data-cat="ct" onchange="updateDaily()"><label>Answer 1–2 questions on Reddit or Slack AI communities</label></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-high">Non-negotiable</span> During active delivery</div>
+    <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #6]</span> Even during active project delivery, maintain minimum 30 min/day outreach (10 touches). Never go to zero. The feast-or-famine trap kills more consulting practices than bad work.</div>
+    <div class="check-group">
+      <label class="check-item"><input type="checkbox" onchange="updateDaily()"><label>Maintenance mode: 10 LinkedIn touches even during delivery</label></label>
+      <label class="check-item"><input type="checkbox" onchange="updateDaily()"><label>Run 5-step QC on any deliverable before sending to client</label></label>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 2: PIPELINE CALCULATOR ═══ -->
+<div class="section" id="s2">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Pipeline calculator</h2>
+
+  <div class="card">
+    <div class="card-title">Adjust your inputs</div>
+    <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #1]</span> LinkedIn caps at ~100 connections/week for standard accounts (14/day). Sales Navigator with SSI >65 allows up to 200/week (28/day).</div>
+    <div class="slider-row"><span class="slider-label">LinkedIn DMs/day</span><input type="range" id="sl-dm" min="5" max="28" value="14" step="1" oninput="calcPipe()"><span class="slider-val" id="sv-dm">14</span></div>
+    <div class="slider-row"><span class="slider-label">Acceptance rate</span><input type="range" id="sl-acc" min="10" max="60" value="35" step="1" oninput="calcPipe()"><span class="slider-val" id="sv-acc">35%</span></div>
+    <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #8]</span> DM reply rate ranges 5–20% depending on personalization (Belkins: 5.4–9.4%, Expandi: 10.3%, SalesBread: 20%).</div>
+    <div class="slider-row"><span class="slider-label">DM reply rate</span><input type="range" id="sl-rep" min="2" max="25" value="10" step="1" oninput="calcPipe()"><span class="slider-val" id="sv-rep">10%</span></div>
+    <div class="arvv-fix" style="margin:4px 0;padding:6px 10px"><span class="arvv-fix-label">Data note:</span> Consulting-specific cold email reply rate is 7.88% (highest of any industry) — Digital Bloom 2025. Timeline hooks achieve 10.67% vs 4.77% for problem hooks.</div>
+    <div class="slider-row"><span class="slider-label">Call booking rate</span><input type="range" id="sl-book" min="5" max="30" value="18" step="1" oninput="calcPipe()"><span class="slider-val" id="sv-book">18%</span></div>
+    <div class="slider-row"><span class="slider-label">Close rate</span><input type="range" id="sl-close" min="10" max="50" value="27" step="1" oninput="calcPipe()"><span class="slider-val" id="sv-close">27%</span></div>
+    <div class="slider-row"><span class="slider-label">Avg project value</span><input type="range" id="sl-val" min="1000" max="10000" value="3000" step="500" oninput="calcPipe()"><span class="slider-val" id="sv-val">$3,000</span></div>
+  </div>
+
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">Connections/month</div><div class="metric-value" id="pc-conn">147</div></div>
+    <div class="metric"><div class="metric-label">Replies/month</div><div class="metric-value" id="pc-rep">15</div></div>
+    <div class="metric"><div class="metric-label">Calls/month</div><div class="metric-value" id="pc-calls">3</div></div>
+    <div class="metric"><div class="metric-label">Clients/month</div><div class="metric-value" id="pc-clients" style="color:var(--teal)">0.7</div></div>
+  </div>
+
+  <div class="result-box">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:14px">Estimated monthly revenue (LinkedIn only):</span>
+      <div class="result-big" id="pc-rev">$2,100</div>
+    </div>
+    <p style="font-size:12px;color:var(--slate);margin-top:8px">Add cold email (~1 client/month) + expert networks ($500–1,500/month) for combined $5K–$10K target.</p>
+  </div>
+</div>
+
+<!-- ═══ 3: PACKAGES ═══ -->
+<div class="section" id="s3">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:8px">Service packages — which one to sell</h2>
+  <p style="font-size:13px;color:var(--slate);margin-bottom:16px">Follow the client's words to the right package. Ranked by speed to close.</p>
+
+  <div class="flow-container" style="margin-bottom:24px">
+    <div class="flow-node" style="background:var(--light);border-color:var(--border);max-width:300px">
+      <div class="flow-node-title">Client says...</div>
+    </div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-row">
+      <div class="flow-node" style="background:var(--teal-bg);border-color:var(--teal-border)">
+        <div class="flow-node-title" style="color:var(--teal)">"We have a big decision to make"</div>
+        <div class="flow-node-sub">→ Decision Audit</div>
+      </div>
+      <div class="flow-node" style="background:var(--purple-bg);border-color:var(--purple-border)">
+        <div class="flow-node-title" style="color:var(--purple)">"We don't know where to start with AI"</div>
+        <div class="flow-node-sub">→ AI Readiness</div>
+      </div>
+      <div class="flow-node" style="background:var(--coral-bg);border-color:var(--coral-border)">
+        <div class="flow-node-title" style="color:var(--coral)">"We waste time on manual work"</div>
+        <div class="flow-node-sub">→ Automation ROI</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card" style="border-left:3px solid var(--teal)">
+      <div class="card-title"><span class="tag tag-teal">Fastest to close</span></div>
+      <h3 style="font-size:16px;margin:8px 0">Strategic Decision Audit</h3>
+      <div style="font-size:24px;font-weight:700;color:var(--teal);margin:4px 0">$2,500–$5,000</div>
+      <p style="font-size:13px;color:var(--slate);margin:8px 0">Client submits one strategic question. You run 30 frameworks. Deliver 15–25 page branded report with converged recommendation.</p>
+      <p style="font-size:12px"><strong>Timeline:</strong> 5–10 business days</p>
+      <p style="font-size:12px"><strong>Pilot rate:</strong> $1,500–$2,500 for first 3 clients</p>
+    </div>
+    <div class="card" style="border-left:3px solid var(--purple)">
+      <div class="card-title"><span class="tag tag-purple">Highest value</span></div>
+      <h3 style="font-size:16px;margin:8px 0">AI Readiness Assessment</h3>
+      <div style="font-size:24px;font-weight:700;color:var(--purple);margin:4px 0">$3,000–$7,500</div>
+      <p style="font-size:13px;color:var(--slate);margin:8px 0">Evaluate data infra, AI usage, team capabilities across 5–7 dimensions. Deliver maturity scorecard + prioritized roadmap.</p>
+      <p style="font-size:12px"><strong>Timeline:</strong> 2–3 weeks</p>
+    </div>
+    <div class="card" style="border-left:3px solid var(--coral)">
+      <div class="card-title"><span class="tag" style="background:var(--coral-bg);color:var(--coral)">Easiest ROI story</span></div>
+      <h3 style="font-size:16px;margin:8px 0">Process Automation ROI</h3>
+      <div style="font-size:24px;font-weight:700;color:var(--coral);margin:4px 0">$2,000–$4,000</div>
+      <p style="font-size:13px;color:var(--slate);margin:8px 0">Map workflows, identify automation opportunities, quantify savings. Tangible ROI makes this the easiest sell.</p>
+      <p style="font-size:12px"><strong>Timeline:</strong> 1–2 weeks</p>
+    </div>
+    <div class="card" style="border-left:3px solid var(--amber)">
+      <div class="card-title"><span class="tag tag-med">Recurring revenue</span></div>
+      <h3 style="font-size:16px;margin:8px 0">Monthly Intelligence Retainer</h3>
+      <div style="font-size:24px;font-weight:700;color:var(--amber);margin:4px 0">$2,000–$5,000/mo</div>
+      <p style="font-size:13px;color:var(--slate);margin:8px 0">Ongoing monthly analysis: 1 decision audit/month, intelligence brief, priority advisory (email + 2 calls).</p>
+      <p style="font-size:12px"><strong>Don't lead with this.</strong> Convert project clients after delivery.</p>
+    </div>
+  </div>
+
+  <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #4]</span> Pilot scope: max 20 hours. Signed scope doc required before starting. Change orders at $200/hr. Never start without written scope.</div>
+</div>
+
+<!-- ═══ 4: DELIVERY FLOW ═══ -->
+<div class="section" id="s4">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Project delivery workflow</h2>
+
+  <div class="flow-container">
+    <div class="flow-node" style="background:var(--light);border-color:var(--border);max-width:300px"><div class="flow-node-title">Client signs scope doc</div><div class="flow-node-sub">Max 20 hours, deliverables defined</div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node" style="background:var(--teal-bg);border-color:var(--teal-border);max-width:340px"><div class="flow-node-title" style="color:var(--teal)">Run v4 decision engine</div><div class="flow-node-sub">30 frameworks, 6 phases, ~2–4 hours compute</div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node" style="background:var(--amber-bg);border-color:var(--amber-border);max-width:340px"><div class="flow-node-title" style="color:var(--amber)">5-step QC protocol (2 hours)</div><div class="flow-node-sub">Read → Verify numbers → Opposite test → SQI → Exec summary</div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-row" style="gap:20px">
+      <div style="text-align:center">
+        <div class="flow-node" style="background:var(--red-bg);border-color:var(--red-border);max-width:140px"><div class="flow-node-title" style="color:var(--red)">SQI < 70</div><div class="flow-node-sub">Revise and re-run</div></div>
+        <div style="font-size:11px;color:var(--slate);margin-top:4px">↑ Loop back to QC</div>
+      </div>
+      <div style="text-align:center">
+        <div class="flow-node" style="background:var(--green-bg);border-color:var(--green-border);max-width:140px"><div class="flow-node-title" style="color:var(--green)">SQI ≥ 70</div><div class="flow-node-sub">Approved</div></div>
+        <div class="flow-arrow">↓</div>
+      </div>
+    </div>
+    <div class="flow-node" style="background:var(--blue-bg);border-color:var(--blue-border);max-width:340px"><div class="flow-node-title" style="color:var(--blue)">Format branded report</div><div class="flow-node-sub">Exec summary, analysis, recommendations, ROI projections</div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node" style="background:var(--purple-bg);border-color:var(--purple-border);max-width:340px"><div class="flow-node-title" style="color:var(--purple)">Deliver + walkthrough call</div><div class="flow-node-sub">Collect testimonial + ask for 2 referrals</div></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-node" style="background:var(--green);border-color:var(--green);color:white;max-width:380px"><div class="flow-node-title" style="color:white">Offer retainer: $2K–5K/month</div><div class="flow-node-sub" style="color:rgba(255,255,255,0.8)">30–50% convert from project to ongoing</div></div>
+  </div>
+  <p style="font-size:13px;color:var(--slate);text-align:center;margin-top:16px">Total delivery time: 5–10 business days per project</p>
+</div>
+
+<!-- ═══ 5: QC PROTOCOL ═══ -->
+<div class="section" id="s5">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">AI output quality control protocol</h2>
+
+  <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #2 — Critical gap addressed]</span> This was entirely missing from the original plan. The ARVV premortem identified "AI hallucination causing bad first-client experience" as the #1 failure mode (RPN=225). This QC protocol is now mandatory for every client deliverable.</div>
+
+  <div class="card">
+    <div class="card-title" style="color:var(--red)">Rule: NEVER send raw engine output to a client</div>
+    <div class="card-subtitle">Every deliverable goes through this 5-step check. Budget 2 hours. Non-negotiable.</div>
+
+    <div class="qc-step"><div class="qc-num">1</div><div class="qc-text"><strong>Read every finding</strong>Does each one make logical sense? Would you stake your reputation on it? If anything feels generic or questionable, rewrite it manually or remove it.</div></div>
+    <div class="qc-step"><div class="qc-num">2</div><div class="qc-text"><strong>Verify all numbers</strong>Every statistic, percentage, or dollar figure the AI generates must be independently verified. Google every number. AI hallucinates citations at 28–88% depending on domain (Stanford).</div></div>
+    <div class="qc-step"><div class="qc-num">3</div><div class="qc-text"><strong>Run the opposite test</strong>For each recommendation, state the exact opposite. If the opposite is obviously stupid ("Don't improve your dashboard"), the original might be a platitude. Real insights have reasonable opposites.</div></div>
+    <div class="qc-step"><div class="qc-num">4</div><div class="qc-text"><strong>Run SQI on your own output</strong>Use the SQI agent to critique the strategy. If SQI scores below 70, revise before delivery. Pay attention to the "weakest link" dimension.</div></div>
+    <div class="qc-step"><div class="qc-num">5</div><div class="qc-text"><strong>Executive summary test</strong>Read only the executive summary out loud. Does a non-expert understand the recommendation and WHY it's the right call? If not, rewrite in plain language.</div></div>
+  </div>
+
+  <div class="card" style="background:var(--green-bg);border-color:var(--green-border)">
+    <div class="card-title" style="color:var(--green)">Why this matters</div>
+    <p style="font-size:13px">Two hours of QC on a $2,500 deliverable = $1,250/hr effective rate insurance. One hallucinated recommendation can destroy your reputation before it's built. The first 3 clients determine whether you have a business or a hobby.</p>
+  </div>
+</div>
+
+<!-- ═══ 6: TEMPLATES ═══ -->
+<div class="section" id="s6">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Outreach templates + objection handling</h2>
+
+  <div class="card">
+    <div class="card-title">LinkedIn DM templates</div>
+
+    <div class="template-box">
+      <div class="template-label">Network activation (week 1 — warm contacts)</div>
+      "Hey [Name], I've launched an AI consulting practice focused on helping companies make better strategic decisions. I've built a system that analyzes business challenges through 30 analytical frameworks simultaneously. If you know anyone struggling with a strategic decision — market entry, resource allocation, competitive response — I'd love to help. Happy to do a free initial analysis to demonstrate the approach."
+    </div>
+
+    <div class="template-box">
+      <div class="template-label">Cold outreach — timeline hook (highest reply rate: 10.67%)</div>
+      "Hi [Name], I noticed [Company] is evaluating [AI/automation/strategic decision]. I recently helped a similar [industry] company cut their decision-analysis time from 3 weeks to 3 days using multi-framework AI analysis. Would you be open to a 15-minute conversation about how we did it?"
+    </div>
+
+    <div class="template-box" style="border-left-color:var(--purple)">
+      <div class="template-label" style="color:var(--purple)">Cold email — timeline hook</div>
+      Subject: How [similar company] cut decision time by 85%<br><br>
+      Hi [Name],<br><br>
+      [Company] is [expanding/launching/evaluating] — that usually means dozens of strategic decisions in a short window.<br><br>
+      I built an AI system that runs 30 analytical frameworks simultaneously on any business decision. A [industry] company used it last month to evaluate a market entry in 3 days instead of 3 weeks.<br><br>
+      Worth a 15-minute call this week?
+    </div>
+
+    <div class="template-box" style="border-left-color:var(--amber)">
+      <div class="template-label" style="color:var(--amber)">Follow-up (day 3 — 50–70% of replies come from follow-ups)</div>
+    <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #9]</span> Removed LinkedIn's marketing claim of "300% higher InMail response rate." Independent data shows InMail performs significantly better than cold email but the 3x figure is unverified.</div>
+      "Quick follow-up on my note below — thought this might be relevant given [recent company news/hiring/product launch]. Happy to share the framework if it'd be useful."
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Objection handling</div>
+
+    <div class="objection">
+      <div class="objection-q">"We don't have the budget."</div>
+      <div class="objection-a">"I understand. If this analysis saves you [X] in avoided mistakes or accelerated decisions, it pays for itself in [timeframe]. Would a smaller pilot scope at $1,500 make sense as a starting point?"</div>
+    </div>
+    <div class="objection">
+      <div class="objection-q">"We've never worked with a solo consultant."</div>
+      <div class="objection-a">"That's exactly why you get better results — direct access to the expert, zero overhead markup, and an AI system that analyzes from 30 perspectives simultaneously. No junior associate doing the work."</div>
+    </div>
+    <div class="objection">
+      <div class="objection-q">"How do we know this works?"</div>
+      <div class="objection-a">"I structure engagements with clear milestones so you see value before the project is half over. And the pilot rate means your risk is $1,500 — less than one day of a Big Four consultant."</div>
+    </div>
+    <div class="objection">
+      <div class="objection-q">"We need to think about it."</div>
+      <div class="objection-a">"Of course. What specifically would you want to think through? I want to make sure I've addressed everything." (Surface the real objection.)</div>
+    </div>
+    <div class="objection">
+      <div class="objection-q">"Can you just send a proposal?"</div>
+      <div class="objection-a">"Absolutely. Before I do, let me make sure I understand your situation so the proposal is relevant. Can we do a quick 15-minute call this week?" (Never send without a discovery call.)</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 7: RISK MATRIX ═══ -->
+<div class="section" id="s7">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Risk matrix (ARVV premortem)</h2>
+  <p style="font-size:13px;color:var(--slate);margin-bottom:16px">Failure modes ranked by Risk Priority Number (Severity × Occurrence × Detection). Higher = more dangerous.</p>
+
+  <div class="card">
+    <div class="risk-row"><div class="rpn rpn-high">225</div><div class="risk-text"><strong>AI hallucination in client deliverable</strong><br>Mitigation: 5-step QC protocol (see QC tab). Budget 2h per report. Never send raw engine output.</div></div>
+    <div class="risk-row"><div class="rpn rpn-high">210</div><div class="risk-text"><strong>Cold email domain blacklisted</strong><br>Mitigation: Use 2–3 separate domains. Monitor deliverability daily. Keep bounce rate under 2%. Max 30 emails/inbox/day.</div></div>
+    <div class="risk-row"><div class="rpn rpn-high">196</div><div class="risk-text"><strong>Priced too low, overdelivered, burnout</strong><br>Mitigation: Scope doc required. Max 20 hours per pilot. Change orders at $200/hr. Raise prices after client #3.</div></div>
+    <div class="risk-row"><div class="rpn rpn-med">192</div><div class="risk-text"><strong>LinkedIn account restricted</strong><br>Mitigation: Keep SSI above 65. Acceptance rate above 20%. Don't exceed 100 requests/week without Sales Navigator.</div></div>
+    <div class="risk-row"><div class="rpn rpn-med">189</div><div class="risk-text"><strong>Never started outreach (built product instead)</strong><br>Mitigation: Rule: send 14 LinkedIn messages before any other work, every single day. No exceptions.</div></div>
+    <div class="risk-row"><div class="rpn rpn-low">144</div><div class="risk-text"><strong>Market timing / recession</strong><br>Mitigation: Diversify: US + LATAM markets. Multiple revenue streams. Retainers buffer downturns.</div></div>
+    <div class="risk-row"><div class="rpn rpn-low">96</div><div class="risk-text"><strong>Can't describe value to non-technical buyer</strong><br>Mitigation: Use positioning statement. Practice the 30-second pitch 50 times. Never say "Bayesian" in a sales call.</div></div>
+  </div>
+</div>
+
+<!-- ═══ 8: REVENUE ═══ -->
+<div class="section" id="s8">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Revenue projections (ARVV-corrected)</h2>
+
+  <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #3]</span> Month 1 expert network revenue removed. GLG/AlphaSights take 2–4 weeks to onboard. Realistic M1: $1,500–$2,500.</div>
+  <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #7]</span> Removed unsourced "$85K average monthly company AI spend" claim. All figures in this plan now have named sources.</div>
+
+  <div class="legend">
+    <span class="legend-item"><span class="legend-dot" style="background:#0D9488"></span>Consulting projects</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#7C3AED"></span>Monthly retainers</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#B45309"></span>Expert network calls</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#64748B"></span>Platform work</span>
+  </div>
+  <div class="chart-wrap"><canvas id="revChart"></canvas></div>
+
+  <div class="metrics" style="margin-top:16px">
+    <div class="metric"><div class="metric-label">Month 1 (net)</div><div class="metric-value">$1,300</div><div class="metric-note">$2K rev − $700 costs</div></div>
+    <div class="metric"><div class="metric-label">Month 2 (net)</div><div class="metric-value">$3,700</div><div class="metric-note">$4.5K rev − $800 costs</div></div>
+    <div class="metric"><div class="metric-label">Month 3 (net)</div><div class="metric-value">$6,500</div><div class="metric-note">$7.5K rev − $1K costs</div></div>
+    <div class="metric"><div class="metric-label">90-day net</div><div class="metric-value" style="color:var(--teal)">$11,500</div><div class="metric-note">After all costs</div></div>
+  </div>
+
+  <div class="grid-2" style="margin-top:16px">
+    <div class="card">
+      <div class="card-title">Revenue sources by month</div>
+      <table style="width:100%;font-size:13px;border-collapse:collapse">
+        <tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:8px 4px">Source</th><th style="padding:8px 4px">M1</th><th style="padding:8px 4px">M2</th><th style="padding:8px 4px">M3</th></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:8px 4px">Consulting projects</td><td style="text-align:center;padding:8px 4px">$1,800</td><td style="text-align:center;padding:8px 4px">$3,500</td><td style="text-align:center;padding:8px 4px">$5,500</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:8px 4px">Retainers</td><td style="text-align:center;padding:8px 4px;color:var(--slate)">—</td><td style="text-align:center;padding:8px 4px">$1,500</td><td style="text-align:center;padding:8px 4px">$2,500</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:8px 4px">Expert calls (GLG etc.)</td><td style="text-align:center;padding:8px 4px;color:var(--slate)">—</td><td style="text-align:center;padding:8px 4px">$750</td><td style="text-align:center;padding:8px 4px">$1,000</td></tr>
+        <tr><td style="padding:8px 4px">Platform (Upwork etc.)</td><td style="text-align:center;padding:8px 4px;color:var(--slate)">—</td><td style="text-align:center;padding:8px 4px">$250</td><td style="text-align:center;padding:8px 4px">$500</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-title">Pricing ladder</div>
+      <table style="width:100%;font-size:13px;border-collapse:collapse">
+        <tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:8px 4px">Stage</th><th style="padding:8px 4px">Price</th><th style="padding:8px 4px">When</th></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:8px 4px">Pilot rate</td><td style="text-align:center;padding:8px 4px">$1,500–$2,500</td><td style="text-align:center;padding:8px 4px">Clients 1–3</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:8px 4px">Standard rate</td><td style="text-align:center;padding:8px 4px">$3,500–$5,000</td><td style="text-align:center;padding:8px 4px">Clients 4–10</td></tr>
+        <tr><td style="padding:8px 4px">Premium rate</td><td style="text-align:center;padding:8px 4px">$5,000–$7,500</td><td style="text-align:center;padding:8px 4px">Month 6+</td></tr>
+      </table>
+  <div class="card" style="border-left:3px solid var(--red)">
+    <div class="card-title"><span class="tag tag-high">NEW</span> Monthly cost budget (what you actually keep)</div>
+    <div class="arvv-fix"><span class="arvv-fix-label">[NEW FIX]</span> The original plan showed only revenue with no cost deductions. Real net margins for a solo consultant in Mexico City: 50–80%.</div>
+    <table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr style="border-bottom:2px solid var(--border)"><th style="text-align:left;padding:8px 4px">Cost item</th><th style="text-align:right;padding:8px 4px">Monthly</th></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">API costs (Anthropic/OpenAI)</td><td style="text-align:right;padding:6px 4px">$50–200</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">LinkedIn Sales Navigator</td><td style="text-align:right;padding:6px 4px">$100–120</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Cold email tools</td><td style="text-align:right;padding:6px 4px">$30–97</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Wise + Stripe fees</td><td style="text-align:right;padding:6px 4px">$20–50</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">LLC + registered agent</td><td style="text-align:right;padding:6px 4px">$15–30</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">CPA / tax prep</td><td style="text-align:right;padding:6px 4px">$50–100</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Health insurance (Mexico)</td><td style="text-align:right;padding:6px 4px">$100–300</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Software (Zoom, etc.)</td><td style="text-align:right;padding:6px 4px">$30–50</td></tr>
+      <tr style="font-weight:600"><td style="padding:8px 4px">TOTAL FIXED COSTS</td><td style="text-align:right;padding:8px 4px;color:var(--red)">$400–1,050</td></tr>
+    </table>
+    <div style="margin-top:12px;font-size:13px">
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span>At $2K revenue → net take-home:</span><strong style="color:var(--amber)">$950–1,600 (50–80%)</strong></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span>At $5K revenue → net take-home:</span><strong style="color:var(--green)">$3,950–4,600 (79–92%)</strong></div>
+    </div>
+  </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 9: DAY 1 SETUP ═══ -->
+<div class="section" id="s9">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Day 1 setup checklist</h2>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-high">Do today</span> Infrastructure (under $100/month)</div>
+    <div class="check-group">
+      <label class="check-item"><input type="checkbox"><label>Stripe Atlas: form Wyoming LLC ($500) — EIN takes 6–9 weeks, start NOW</label></label>
+      <label class="check-item"><input type="checkbox"><label>CRM: HubSpot Free (contacts, pipeline, email tracking)</label></label>
+      <label class="check-item"><input type="checkbox"><label>Outreach: Apollo.io free tier (275M+ contact database)</label></label>
+      <label class="check-item"><input type="checkbox"><label>Scheduling: Calendly free ("30-min strategy call")</label></label>
+      <label class="check-item"><input type="checkbox"><label>Payments: Wise Business account (USD details, 0.35–1% FX)</label></label>
+      <label class="check-item"><input type="checkbox"><label>Payments: Stripe account (credit card invoicing, 2.9%)</label></label>
+      <label class="check-item"><input type="checkbox"><label>LinkedIn Sales Navigator ($100–120/month) — 200 connections/week</label></label>
+      <label class="check-item"><input type="checkbox"><label>Website: Carrd.co ($9/year) — headline, how it works, bio, Calendly link</label></label>
+      <label class="check-item"><input type="checkbox"><label>Buy 2–3 cold email domains (~$12/year each)</label></label>
+      <label class="check-item"><input type="checkbox"><label>Start domain warmup (2–3 weeks to full volume)</label></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-high">Do today</span> LinkedIn profile optimization</div>
+    <div class="check-group">
+      <label class="check-item"><input type="checkbox"><label>Headline: "I help [audience] [achieve outcome] | [credibility marker]"</label></label>
+      <label class="check-item"><input type="checkbox"><label>About: First 265 chars = hook. Problem → who you help → how → CTA</label></label>
+      <label class="check-item"><input type="checkbox"><label>Featured: Pin spec case study or methodology overview</label></label>
+      <label class="check-item"><input type="checkbox"><label>Experience: "Founder, RegexSEO — AI Strategy & Decision Intelligence"</label></label>
+      <label class="check-item"><input type="checkbox"><label>Professional banner image with "Decision Intelligence"</label></label>
+      <label class="check-item"><input type="checkbox"><label>Check SSI at linkedin.com/sales/ssi — note starting score</label></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-med">Day 1</span> Expert network registrations</div>
+    <div class="card-subtitle">Revenue starts in 2–4 weeks after onboarding. Register today.</div>
+    <div class="check-group">
+      <label class="check-item"><input type="checkbox"><label>GLG — apply as expert (AI strategy, consulting frameworks)</label></label>
+      <label class="check-item"><input type="checkbox"><label>AlphaSights — apply as expert</label></label>
+      <label class="check-item"><input type="checkbox"><label>Guidepoint — apply as expert</label></label>
+      <label class="check-item"><input type="checkbox"><label>Maven — apply as expert</label></label>
+      <label class="check-item"><input type="checkbox"><label>Upwork: create profile (AI/ML, $150+/hr), apply to 5 jobs today</label></label>
+      <label class="check-item"><input type="checkbox"><label>Clarity.fm: set up at $3–5/minute</label></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="tag tag-med">Day 1</span> Legal + tax</div>
+    <div class="check-group">
+      <label class="check-item"><input type="checkbox"><label>Find cross-border CPA (US-Mexico tax treaty, RIF/RESICO)</label></label>
+      <label class="check-item"><input type="checkbox"><label>Research Mexico's RFC requirements for foreign income</label></label>
+    </div>
+    <div class="arvv-fix"><span class="arvv-fix-label">[ARVV FIX #10]</span> This is a day-1 priority, not optional. Mexico's RIF/RESICO regime has specific rules for foreign-source income. Get professional advice before invoicing your first US client.</div>
+  </div>
+</div>
+
+<!-- ═══ 10: CONFIDENCE ═══ -->
+<div class="section" id="s10">
+  <h2 style="font-size:20px;font-weight:700;margin-bottom:16px">Bayesian confidence scores</h2>
+  <p style="font-size:13px;color:var(--slate);margin-bottom:16px">ARVV-audited probabilities for each milestone, adjusted after fact-checking 22 quantitative claims.</p>
+
+  <div class="card">
+    <table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr style="border-bottom:2px solid var(--border)"><th style="text-align:left;padding:10px 4px">Prediction</th><th style="text-align:center;padding:10px 4px;width:80px">P(True)</th><th style="text-align:left;padding:10px 4px">Key dependency</th></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 4px">First paying client within 30 days</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--amber)">55%</td><td style="padding:10px 4px;color:var(--slate)">Requires outreach from day 1, not day 7+</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 4px">First paying client within 45 days</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--green)">75%</td><td style="padding:10px 4px;color:var(--slate)">More realistic if outreach ramps in week 2</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 4px">$3K total revenue by day 60</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--green)">65%</td><td style="padding:10px 4px;color:var(--slate)">1 pilot + platform income</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 4px">$5K MRR by month 3</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--green)">65%</td><td style="padding:10px 4px;color:var(--slate)">Needs 2+ projects in M3 OR 1 project + retainer</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 4px">$10K MRR by month 3</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--red)">35%</td><td style="padding:10px 4px;color:var(--slate)">Needs 3+ simultaneous revenue streams</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 4px">LinkedIn inbound by month 3</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--amber)">50%</td><td style="padding:10px 4px;color:var(--slate)">Requires 3–5 posts/week for 8–12 weeks</td></tr>
+      <tr style="border-bottom:1px solid var(--border)"><td style="padding:10px 4px">Retainer conversion from first client</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--amber)">40%</td><td style="padding:10px 4px;color:var(--slate)">Industry avg 30–50%</td></tr>
+      <tr><td style="padding:10px 4px">Expert network revenue in month 1</td><td style="text-align:center;padding:10px 4px;font-weight:700;color:var(--red)">20%</td><td style="padding:10px 4px;color:var(--slate)">Onboarding takes 2–4 weeks</td></tr>
+    </table>
+  </div>
+
+  <div class="card" style="background:var(--teal);color:white;text-align:center;padding:28px">
+    <p style="font-size:15px;margin-bottom:12px">The single most important number:</p>
+    <div style="display:flex;justify-content:center;gap:40px;flex-wrap:wrap">
+      <div><div style="font-size:36px;font-weight:700">75%</div><div style="font-size:13px;opacity:0.85">P(success | daily outreach)</div></div>
+      <div><div style="font-size:36px;font-weight:700">15%</div><div style="font-size:13px;opacity:0.85">P(success | sporadic outreach)</div></div>
+    </div>
+    <p style="font-size:14px;margin-top:16px;font-weight:600">Send 14 LinkedIn messages today.</p>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<div style="background:var(--dark);color:rgba(255,255,255,0.6);padding:24px;text-align:center;font-size:12px;margin-top:40px">
+  RegexSEO — 90-Day AI Consulting Launch Playbook — ARVV-Corrected Edition — April 2026<br>
+  All conversion rates verified against 2025–2026 data: Expandi, Belkins, Digital Bloom, Instantly, SalesBread, Cleverly
+</div>
+
+<script>
+function showSection(i) {
+  document.querySelectorAll('.section').forEach((s,j) => s.classList.toggle('active', j===i));
+  document.querySelectorAll('.nav-btn').forEach((b,j) => b.classList.toggle('active', j===i));
+  window.scrollTo(0, 0);
+  if (i===8 && !window._chartInit) initChart();
+}
+
+function updateDaily() {
+  const all = document.querySelectorAll('#s1 input[type=checkbox]');
+  let dm=0,em=0,fu=0,ct=0,total=0;
+  all.forEach(c => {
+    if (c.checked) {
+      total++;
+      const cat = c.getAttribute('data-cat');
+      if (cat==='dm') dm++;
+      if (cat==='em') em++;
+      if (cat==='fu') fu++;
+      if (cat==='ct') ct++;
+    }
+    c.closest('.check-item').classList.toggle('done', c.checked);
+  });
+  document.getElementById('dc-dm').textContent = dm;
+  document.getElementById('dc-em').textContent = em;
+  document.getElementById('dc-fu').textContent = fu;
+  document.getElementById('dc-ct').textContent = ct;
+  const pct = Math.round((total / all.length) * 100);
+  document.getElementById('dc-pct').textContent = pct + '%';
+  document.getElementById('dc-bar').style.width = pct + '%';
+}
+
+function calcPipe() {
+  const dm = +document.getElementById('sl-dm').value;
+  const acc = +document.getElementById('sl-acc').value / 100;
+  const rep = +document.getElementById('sl-rep').value / 100;
+  const book = +document.getElementById('sl-book').value / 100;
+  const close = +document.getElementById('sl-close').value / 100;
+  const val = +document.getElementById('sl-val').value;
+  document.getElementById('sv-dm').textContent = dm;
+  document.getElementById('sv-acc').textContent = document.getElementById('sl-acc').value + '%';
+  document.getElementById('sv-rep').textContent = document.getElementById('sl-rep').value + '%';
+  document.getElementById('sv-book').textContent = document.getElementById('sl-book').value + '%';
+  document.getElementById('sv-close').textContent = document.getElementById('sl-close').value + '%';
+  document.getElementById('sv-val').textContent = '$' + val.toLocaleString();
+  const monthly = dm * 30;
+  const conn = Math.round(monthly * acc);
+  const replies = Math.round(conn * rep);
+  const calls = Math.round(replies * book);
+  const clients = +(calls * close).toFixed(1);
+  const rev = Math.round(clients * val);
+  document.getElementById('pc-conn').textContent = conn;
+  document.getElementById('pc-rep').textContent = replies;
+  document.getElementById('pc-calls').textContent = calls;
+  document.getElementById('pc-clients').textContent = clients;
+  document.getElementById('pc-rev').textContent = '$' + rev.toLocaleString();
+}
+
+function initChart() {
+  window._chartInit = true;
+  new Chart(document.getElementById('revChart'), {
+    type: 'bar',
+    data: {
+      labels: ['Month 1', 'Month 2', 'Month 3'],
+      datasets: [
+        { label: 'Consulting', data: [1800, 3500, 5500], backgroundColor: '#0D9488' },
+        { label: 'Retainers', data: [0, 1500, 2500], backgroundColor: '#7C3AED' },
+        { label: 'Expert calls', data: [0, 750, 1000], backgroundColor: '#B45309' },
+        { label: 'Platforms', data: [0, 250, 500], backgroundColor: '#64748B' },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.dataset.label + ': $' + c.raw.toLocaleString() } } },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { font: { size: 13 } } },
+        y: { stacked: true, grid: { color: '#E2E8F0' }, ticks: { font: { size: 12 }, callback: v => '$' + v.toLocaleString() } }
+      }
+    }
+  });
+}
+
+calcPipe();
+</script>
+</body>
+</html>

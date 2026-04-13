@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: workflow_v4
+      POSTGRES_USER: workflow
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./sql/outcomes.sql:/docker-entrypoint-initdb.d/02-outcomes.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workflow -d workflow_v4"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://workflow:${DB_PASSWORD:-dev_password}@db:5432/workflow_v4
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-anthropic}
+      ROUTING_STRATEGY: ${ROUTING_STRATEGY:-phase}
+      SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-false}
+      SEMANTIC_CACHE_TTL_SECONDS: ${SEMANTIC_CACHE_TTL_SECONDS:-300}
+      PHASE_MODEL_OVERRIDES: ${PHASE_MODEL_OVERRIDES:-}
+      COMPLEXITY_MODEL_OVERRIDES: ${COMPLEXITY_MODEL_OVERRIDES:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pgdata:

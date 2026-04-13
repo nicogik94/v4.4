@@ -1,0 +1,75 @@
+name: evals
+
+on:
+  pull_request:
+    paths:
+      - 'mas/prompts/**'
+      - 'mas/orchestrator.py'
+      - 'mas/llm_client.py'
+      - 'mas/config.py'
+      - 'mas/evals/**'
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: 'Pass rate threshold (0.0-1.0)'
+        required: false
+        default: '0.75'
+
+jobs:
+  run-evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: mas
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Smoke test (mock mode)
+        working-directory: mas
+        run: python -m evals.run_evals --mock
+
+      - name: Run evals (real)
+        working-directory: mas
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python -m evals.run_evals \
+            --report evals/out/ \
+            --threshold ${{ github.event.inputs.threshold || '0.75' }}
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: mas/evals/out/
+
+      - name: Post summary
+        if: always()
+        working-directory: mas
+        run: |
+          if [ -f evals/out/summary.json ]; then
+            echo "## Eval Results" >> $GITHUB_STEP_SUMMARY
+            python -c "
+          import json
+          d = json.load(open('evals/out/summary.json'))
+          print(f\"**{d['passed']}/{d['total']} passed** ({d['pass_rate']:.1%})\")
+          print()
+          print('| Case | Pass | Judge | Domain | FW | Must-mention |')
+          print('|------|------|-------|--------|----|--------------|')
+          for c in d['cases']:
+              icon = '✅' if c['passed'] else '❌'
+              print(f\"| {c['case_id']} | {icon} | {c['judge_overall']} | {c['domain_match']} | {c['frameworks_covered']:.2f} | {c['must_mention_hits']:.2f} |\")
+          " >> $GITHUB_STEP_SUMMARY
+          fi

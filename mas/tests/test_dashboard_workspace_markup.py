@@ -1,0 +1,40 @@
+"""Lightweight dashboard markup regression checks for the workspace UI."""
+import unittest
+from pathlib import Path
+
+
+_HERE = Path(__file__).resolve()
+HTML_PATH = None
+for root in (_HERE.parents[1], _HERE.parents[2]):
+    candidate = root / "dashboards" / "index.html"
+    if candidate.exists():
+        HTML_PATH = candidate
+        break
+if HTML_PATH is None:
+    HTML_PATH = _HERE.parents[1] / "dashboards" / "index.html"
+
+
+class TestDashboardWorkspaceMarkup(unittest.TestCase):
+    def test_workspace_tab_and_queue_api_are_present(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('data-subtab="workspace"', html)
+        self.assertIn('data-subtab="trace"', html)
+        self.assertIn("/projects/queue", html)
+        self.assertIn("/workspace", html)
+        self.assertIn("/explain", html)
+        self.assertIn("renderTrace", html)
+        self.assertIn("Evidence Timeline", html)
+        self.assertIn("Approval Inbox", html)
+        self.assertIn("Decision Object Health", html)
+        self.assertIn("Per-Phase Trace", html)
+        self.assertIn("Strategy Evidence Chains", html)
+        self.assertIn("Gate note:", html)
+        self.assertIn("imported_evidence_pending_analysis", html)
+        self.assertIn("Rerun analysis to incorporate", html)
+        self.assertIn("Status axes", html)
+        self.assertIn("derived decision objects match the current stored state", html)
+        self.assertIn("knowledge:", html)
+        self.assertIn("external knowledge freshness", html)

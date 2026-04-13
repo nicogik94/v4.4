@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Decision Engine ROI Calculator</title>
+<style>
+:root {
+  --ink: #0A1628;
+  --ink-2: #1a2942;
+  --paper: #FAFBFC;
+  --line: #E4E8EF;
+  --accent: #D97706;
+  --accent-2: #F59E0B;
+  --good: #059669;
+  --bad: #DC2626;
+  --mute: #64748B;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 48px 24px 80px; }
+
+header {
+  border-left: 4px solid var(--accent);
+  padding: 4px 0 4px 20px;
+  margin-bottom: 48px;
+}
+header .eyebrow {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  color: var(--mute);
+  font-weight: 600;
+}
+header h1 {
+  font-size: 34px;
+  font-weight: 700;
+  margin-top: 8px;
+  letter-spacing: -0.5px;
+  line-height: 1.15;
+}
+header p {
+  color: var(--mute);
+  margin-top: 14px;
+  max-width: 640px;
+  font-size: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 36px;
+  margin-bottom: 36px;
+}
+@media (max-width: 840px) { .grid { grid-template-columns: 1fr; gap: 24px; } }
+
+.card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 28px 28px 30px;
+}
+.card h2 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--mute);
+  margin-bottom: 22px;
+}
+
+.field { margin-bottom: 22px; }
+.field label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.field label .val {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+.field input[type=range] {
+  width: 100%;
+  -webkit-appearance: none;
+  height: 5px;
+  background: var(--line);
+  border-radius: 3px;
+  outline: none;
+}
+.field input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink);
+  cursor: pointer;
+  border: 3px solid white;
+  box-shadow: 0 0 0 1px var(--line);
+}
+.field input[type=range]::-moz-range-thumb {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--ink);
+  cursor: pointer;
+  border: 3px solid white;
+  box-shadow: 0 0 0 1px var(--line);
+}
+.field .hint {
+  font-size: 12px;
+  color: var(--mute);
+  margin-top: 5px;
+}
+.field.toggle {
+  background: #F1F4F8;
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+.toggle-label {
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+}
+.toggle-label input[type=checkbox] {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.scenario {
+  background: var(--ink);
+  color: white;
+  border-radius: 14px;
+  padding: 28px;
+  position: relative;
+  overflow: hidden;
+}
+.scenario::before {
+  content: '';
+  position: absolute;
+  top: -80px;
+  right: -80px;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, rgba(217, 119, 6, 0.14), transparent 70%);
+  pointer-events: none;
+}
+.scenario h2 {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  font-weight: 700;
+  margin-bottom: 24px;
+}
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+.compare .box {
+  background: var(--ink-2);
+  border-radius: 10px;
+  padding: 18px 16px;
+}
+.compare .box .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 600;
+}
+.compare .box .num {
+  font-size: 28px;
+  font-weight: 700;
+  margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+}
+.compare .box.traditional .num { color: #F87171; }
+.compare .box.engine .num { color: #34D399; }
+.compare .box .sub {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-top: 4px;
+}
+
+.savings {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 20px;
+  margin-top: 4px;
+}
+.savings .row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  font-size: 14px;
+}
+.savings .row + .row { border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.savings .row .k { color: rgba(255, 255, 255, 0.65); }
+.savings .row .v {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.savings .row.hero .k { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: rgba(255,255,255,0.5); }
+.savings .row.hero .v { font-size: 22px; color: var(--accent-2); }
+
+.bar {
+  margin-top: 32px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 28px;
+}
+.bar h2 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--mute);
+  margin-bottom: 18px;
+}
+.bar-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 14px;
+  gap: 14px;
+}
+.bar-row:last-child { margin-bottom: 0; }
+.bar-row .name {
+  width: 140px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.bar-row .track {
+  flex: 1;
+  height: 36px;
+  background: #F1F4F8;
+  border-radius: 8px;
+  position: relative;
+  overflow: hidden;
+}
+.bar-row .fill {
+  height: 100%;
+  border-radius: 8px;
+  transition: width 0.35s ease;
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
+  color: white;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.bar-row.traditional .fill { background: linear-gradient(90deg, #991B1B, #DC2626); }
+.bar-row.engine .fill { background: linear-gradient(90deg, #065F46, #059669); }
+
+.assumptions {
+  margin-top: 24px;
+  font-size: 12px;
+  color: var(--mute);
+  line-height: 1.7;
+  padding: 18px 22px;
+  background: #F1F4F8;
+  border-radius: 10px;
+}
+.assumptions strong { color: var(--ink); }
+.assumptions ul { margin-top: 8px; padding-left: 18px; }
+
+.cta {
+  margin-top: 48px;
+  text-align: center;
+  padding: 40px 24px;
+  border-top: 1px solid var(--line);
+}
+.cta h3 {
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 10px;
+  letter-spacing: -0.3px;
+}
+.cta p {
+  color: var(--mute);
+  max-width: 540px;
+  margin: 0 auto 24px;
+  font-size: 15px;
+}
+.cta a {
+  display: inline-block;
+  background: var(--ink);
+  color: white;
+  padding: 14px 28px;
+  border-radius: 10px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 15px;
+  transition: transform 0.15s;
+}
+.cta a:hover { transform: translateY(-1px); background: var(--accent); }
+.cta .small { font-size: 12px; margin-top: 14px; color: var(--mute); }
+
+footer {
+  text-align: center;
+  font-size: 11px;
+  color: var(--mute);
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Decision Engine · Nicolás Grinberg</div>
+  <h1>How much is your next strategic decision actually costing you?</h1>
+  <p>Traditional consulting prices time. The Decision Engine prices outcomes. Move the sliders to see the difference for a decision like yours.</p>
+</header>
+
+<div class="grid">
+
+  <div class="card">
+    <h2>Your decision</h2>
+
+    <div class="field">
+      <label>Decision value at stake <span class="val" id="v-value">$500K</span></label>
+      <input type="range" id="decision-value" min="50" max="5000" value="500" step="10">
+      <div class="hint">The size of the downside if you get this wrong (revenue, runway, opportunity cost).</div>
+    </div>
+
+    <div class="field">
+      <label>Traditional consulting hours you'd need <span class="val" id="v-hours">120h</span></label>
+      <input type="range" id="hours" min="20" max="400" value="120" step="5">
+      <div class="hint">Typical range for a strategic decision at a boutique firm: 80–200 hours.</div>
+    </div>
+
+    <div class="field">
+      <label>Blended consulting rate <span class="val" id="v-rate">$350/h</span></label>
+      <input type="range" id="rate" min="100" max="800" value="350" step="25">
+      <div class="hint">Independent senior strategist: $200–400. Tier-2 firm: $400–700. MBB: $800+.</div>
+    </div>
+
+    <div class="field">
+      <label>Your current confidence in the decision <span class="val" id="v-conf">55%</span></label>
+      <input type="range" id="confidence" min="20" max="90" value="55" step="5">
+      <div class="hint">Honest guess: how sure are you right now, before any analysis?</div>
+    </div>
+
+    <div class="field toggle">
+      <label class="toggle-label">
+        <input type="checkbox" id="first-time" checked>
+        <span>This is our first engagement together</span>
+      </label>
+      <div class="hint">First-time clients start with a Decision Audit Lite ($1,500) — a deliberate trial, not a discount. Repeat clients move to full engagements.</div>
+    </div>
+  </div>
+
+  <div class="scenario">
+    <h2>Cost comparison</h2>
+    <div class="compare">
+      <div class="box traditional">
+        <div class="label">Traditional</div>
+        <div class="num" id="r-trad">$42,000</div>
+        <div class="sub" id="r-trad-sub">120h × $350</div>
+      </div>
+      <div class="box engine">
+        <div class="label">Decision Engine</div>
+        <div class="num" id="r-engine">$1,500</div>
+        <div class="sub" id="r-engine-sub">Decision Audit Lite</div>
+      </div>
+    </div>
+    <div class="savings">
+      <div class="row">
+        <div class="k">Time to dossier</div>
+        <div class="v"><span id="r-trad-time">3 weeks</span> → <span id="r-engine-time">5 days</span></div>
+      </div>
+      <div class="row">
+        <div class="k">Confidence after analysis</div>
+        <div class="v"><span id="r-conf-after">78%</span></div>
+      </div>
+      <div class="row">
+        <div class="k">Expected value of higher confidence</div>
+        <div class="v" id="r-evhc">$115,000</div>
+      </div>
+      <div class="row hero">
+        <div class="k">Net savings + EV gain</div>
+        <div class="v" id="r-total">$152,000</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="bar">
+  <h2>Where the money goes</h2>
+  <div class="bar-row traditional">
+    <div class="name">Traditional</div>
+    <div class="track"><div class="fill" id="bar-trad" style="width:100%">$42,000</div></div>
+  </div>
+  <div class="bar-row engine">
+    <div class="name">Decision Engine</div>
+    <div class="track"><div class="fill" id="bar-engine" style="width:12%">$5,000</div></div>
+  </div>
+
+  <div class="assumptions">
+    <strong>Assumptions behind the math:</strong>
+    <ul>
+      <li>First-time clients always start with the Decision Audit Lite ($1,500) — a deliberate one-engagement trial that delivers ~80% of the confidence uplift in ~5 days. It is positioned as a wedge, not a discount.</li>
+      <li>Repeat clients move to a Full engagement ($5,000 standard, $7,500 for decisions ≥ $500K value at stake).</li>
+      <li>Confidence uplift: +23 percentage points average for full engagements, ~80% of that for Lite. Numbers based on 14 structured analyses vs. baseline single-framework analyses in our calibration history.</li>
+      <li>Expected Value of Higher Confidence = (confidence uplift × decision value × 0.5). The 0.5 factor is a conservative haircut — the real multiplier depends on the decision's reversibility.</li>
+      <li>Time estimates based on actual engagement logs, not marketing.</li>
+      <li>This is not investment advice. Every decision is unique. The calculator is directional, not contractual.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="cta">
+  <h3>Ready to run one of yours through the engine?</h3>
+  <p>Book a free 30-minute decision intake call. We'll tell you within 20 minutes whether your decision is a good fit — and we won't charge you for a bad fit.</p>
+  <a href="#" id="cta-link" target="_blank" rel="noopener">Book the intake call →</a>
+  <div class="small">Or email <strong>&lt;your email&gt;</strong> with a 2-3 sentence description of the decision.</div>
+</div>
+
+<footer>
+  Nicolás Grinberg · Universal Project Workflow v4.1 · Mexico City
+</footer>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => '$' + Math.round(n).toLocaleString();
+const fmtK = n => n >= 1000 ? '$' + (n/1000).toFixed(n >= 10000 ? 0 : 1) + 'K' : fmt(n);
+
+function calc() {
+  const value = parseInt($('decision-value').value) * 1000;  // $K input
+  const hours = parseInt($('hours').value);
+  const rate = parseInt($('rate').value);
+  const conf = parseInt($('confidence').value);
+  const firstTime = $('first-time').checked;
+
+  $('v-value').textContent = fmtK(value);
+  $('v-hours').textContent = hours + 'h';
+  $('v-rate').textContent = '$' + rate + '/h';
+  $('v-conf').textContent = conf + '%';
+
+  const tradCost = hours * rate;
+  // First-time clients always start with the Lite tier — a deliberate trial, not a discount.
+  // Repeat clients move to a Full engagement priced by decision size.
+  const engineCost = firstTime ? 1500 : (value >= 500000 ? 7500 : 5000);
+  const engineLabel = firstTime
+    ? 'Decision Audit Lite'
+    : (value >= 500000 ? 'Full engagement (large)' : 'Full engagement');
+  const engineHours = firstTime ? Math.max(5, Math.round(hours * 0.20)) : Math.max(8, Math.round(hours * 0.25));
+  const tradWeeks = Math.max(1, Math.round(hours / 40));
+  const engineDays = firstTime ? 5 : Math.max(5, Math.round(engineHours / 4));
+
+  // Confidence uplift: capped at 90%, +23pp baseline, less for already-confident starts.
+  // Lite delivers ~80% of the uplift in 1/4 the time — diminishing returns on the long tail.
+  const baseUplift = 23 - Math.max(0, (conf - 50) * 0.2);
+  const uplift = Math.min(90 - conf, firstTime ? baseUplift * 0.80 : baseUplift);
+  const confAfter = conf + uplift;
+
+  // Expected Value of Higher Confidence (conservative haircut 0.5)
+  const evhc = (uplift / 100) * value * 0.5;
+
+  const netBenefit = (tradCost - engineCost) + evhc;
+
+  $('r-trad').textContent = fmt(tradCost);
+  $('r-trad-sub').textContent = `${hours}h × $${rate}`;
+  $('r-engine').textContent = fmt(engineCost);
+  $('r-engine-sub').textContent = engineLabel;
+  $('r-trad-time').textContent = tradWeeks + (tradWeeks === 1 ? ' week' : ' weeks');
+  $('r-engine-time').textContent = engineDays + ' days';
+  $('r-conf-after').textContent = Math.round(confAfter) + '%';
+  $('r-evhc').textContent = fmt(evhc);
+  $('r-total').textContent = fmt(netBenefit);
+
+  const maxWidth = Math.max(tradCost, engineCost);
+  $('bar-trad').style.width = (tradCost / maxWidth * 100) + '%';
+  $('bar-trad').textContent = fmt(tradCost);
+  $('bar-engine').style.width = Math.max(8, engineCost / maxWidth * 100) + '%';
+  $('bar-engine').textContent = fmt(engineCost);
+}
+
+['decision-value', 'hours', 'rate', 'confidence', 'first-time'].forEach(id => {
+  $(id).addEventListener('input', calc);
+  $(id).addEventListener('change', calc);
+});
+calc();
+</script>
+</body>
+</html>
