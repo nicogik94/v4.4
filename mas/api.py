@@ -27,7 +27,11 @@ from explainability import (
     build_project_trace,
 )
 from knowledge import (
+    PhaseKnowledgeRetrievalView,
+    ProjectKnowledgeRetrievalSummary,
+    build_project_retrieval_summary,
     ensure_knowledge_layer,
+    evaluate_phase_retrieval,
     list_jobs as list_knowledge_jobs,
     list_sources as list_knowledge_sources,
     sync_multiple_sources,
@@ -340,6 +344,7 @@ async def get_knowledge(project_id: str):
     return {
         "project_id": project_id,
         "summary": build_knowledge_health(state),
+        "retrieval_summary": build_project_retrieval_summary(state).model_dump(mode="json"),
         "knowledge_layer": layer.model_dump(mode="json"),
     }
 
@@ -358,6 +363,25 @@ async def get_knowledge_jobs(project_id: str):
     if not state:
         raise HTTPException(404, "Project not found")
     return [job.model_dump(mode="json") for job in list_knowledge_jobs(state)]
+
+
+@app.get("/projects/{project_id}/knowledge/retrieval", response_model=ProjectKnowledgeRetrievalSummary)
+async def get_knowledge_retrieval_summary(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return build_project_retrieval_summary(state)
+
+
+@app.get("/projects/{project_id}/knowledge/retrieval/{phase}", response_model=PhaseKnowledgeRetrievalView)
+async def get_knowledge_retrieval_phase(project_id: str, phase: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    try:
+        return evaluate_phase_retrieval(state, phase)
+    except KeyError:
+        raise HTTPException(404, "Knowledge retrieval phase not found") from None
 
 
 @app.post("/projects/{project_id}/knowledge/sources")

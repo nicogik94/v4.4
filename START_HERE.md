@@ -114,6 +114,8 @@ Imported CSV evidence/signals appear in **Workspace** immediately, but they do *
 
 Knowledge sources and synced knowledge items also appear as a separate **knowledge freshness** signal in Workspace and Queue. In v4.4 tranche 3A, that layer is operational only: it tells you whether current-awareness inputs are configured, current, stale, expired, or sync-failed. It does **not** automatically rerun phases and it does **not** feed prompts yet.
 
+Controlled retrieval visibility is now available through the knowledge API routes. Eligibility is backend-computed, phase-specific, and whitelist-based, but it still does **not** auto-rerun phases or expose raw prompt dumps.
+
 Three status axes stay separate on purpose:
 
 - **Decision object health** means whether the derived `decision_objects` layer is synchronized with the current stored project state.
