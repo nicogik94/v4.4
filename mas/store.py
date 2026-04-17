@@ -56,6 +56,19 @@ async def save(state: ProjectState) -> None:
         return
     payload = state.model_dump(mode="json")
     async with pool.acquire() as conn:
+        # Ensure the FK-parent row in projects exists so that outcomes,
+        # decision_events, approvals, and policy_decisions INSERTs succeed.
+        await conn.execute("""
+            INSERT INTO projects (id, name, brief, data, current_phase, status, created_at, updated_at)
+            VALUES ($1::uuid, $2, $3, $4, $5, 'active', $6::timestamptz, NOW())
+            ON CONFLICT (id) DO UPDATE
+            SET name          = EXCLUDED.name,
+                brief         = EXCLUDED.brief,
+                current_phase = EXCLUDED.current_phase,
+                updated_at    = NOW()
+        """, state.project_id, state.project_name, state.brief,
+             state.data, state.current_phase,
+             state.created_at)
         await conn.execute("""
             INSERT INTO state_snapshots (project_id, state_json, version, updated_at)
             VALUES ($1::uuid, $2::jsonb, 1, NOW())
@@ -110,8 +123,11 @@ async def delete(project_id: str) -> bool:
     if pool is None:
         return True
     async with pool.acquire() as conn:
-        result = await conn.execute(
+        await conn.execute(
             "DELETE FROM state_snapshots WHERE project_id = $1::uuid", project_id
+        )
+        result = await conn.execute(
+            "DELETE FROM projects WHERE id = $1::uuid", project_id
         )
     return "DELETE 1" in result
 
