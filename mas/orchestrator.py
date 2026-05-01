@@ -14,6 +14,10 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from state import ProjectState, PhaseStatus
 from config import PHASE_ORDER, GATE_CONFIGS, FRAMEWORKS_BY_PHASE
 from llm_client import call_llm, parse_json, LLMResponse
+from cdp.citation_format import (
+    EVIDENCE_CITATION_MARKER_FORMAT,
+    EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE,
+)
 from decision_objects import ensure_decision_objects
 from knowledge.retrieval import evaluate_phase_retrieval
 from tools.scoring import (
@@ -170,14 +174,18 @@ def _build_report_evidence_locator_register(state: ProjectState, max_entries: in
     )
     truncated = len(ordered) > max_entries
     for entry in ordered[:max_entries]:
-        locator = entry.get("locator") or "locator unavailable"
+        locator = entry.get("locator") or EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE
         metadata = []
         for key in ("source_ref", "source_id", "title", "external_uri"):
             value = entry.get(key, "")
             if value:
                 metadata.append(f"{key}={value}")
         suffix = f" {' '.join(metadata)}" if metadata else ""
-        lines.append(f"- [Evidence: {entry['evidence_id']} | {locator}]{suffix}")
+        marker = EVIDENCE_CITATION_MARKER_FORMAT.format(
+            evidence_id=entry["evidence_id"],
+            locator=locator,
+        )
+        lines.append(f"- {marker}{suffix}")
     if truncated:
         lines.append(f"Locator register truncated to first {max_entries} entries sorted by evidence_id.")
     return "\n".join(lines)

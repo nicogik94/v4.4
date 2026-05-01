@@ -12,12 +12,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cdp.citation_format import (
+    EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE,
+    EVIDENCE_CITATION_MARKER_REGEX,
+)
 
 CANONICAL_MARKER_PATTERN = r"\[Evidence:\s+[^\s|]+\s+\|\s+[^\]]+\]"
 CANONICAL_MARKER_RE = re.compile(CANONICAL_MARKER_PATTERN)
-MARKER_DETAIL_RE = re.compile(
-    r"\[Evidence:\s+(?P<evidence_id>[^\s|]+)\s+\|\s+(?P<locator>[^\]]+)\]"
-)
+MARKER_DETAIL_RE = re.compile(EVIDENCE_CITATION_MARKER_REGEX)
 EVIDENCE_CANDIDATE_RE = re.compile(r"\[Evidence:[^\]]*\]")
 MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 
@@ -40,7 +42,7 @@ LOAD_BEARING_SECTIONS = {
 SUPPORT_LABELS = ("[Inference]", "[Hypothesis]", "[Unknown]", "citation unavailable")
 GENERIC_EVIDENCE_IDS = {"evidence_id"}
 GENERIC_LOCATORS = {"locator"}
-NON_CONCRETE_LOCATORS = {"", "locator unavailable"}
+NON_CONCRETE_LOCATORS = {"", EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE}
 EMPIRICAL_CUE_RE = re.compile(
     r"(%|\$|\b\d+(?:\.\d+)?\b|\b("
     r"increased|decreased|grew|declined|reduced|improved|worsened|"
@@ -446,7 +448,7 @@ def _is_concrete_locator(locator: str) -> bool:
 
 
 def _is_locator_unavailable(locator: str) -> bool:
-    return _clean(locator).lower() == "locator unavailable"
+    return _clean(locator).lower() == EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE
 
 
 def _missing_inputs(
