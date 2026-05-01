@@ -1,5 +1,6 @@
 """Regression tests for the resumable sequential workflow runner."""
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -15,7 +16,9 @@ if str(ROOT) not in sys.path:
 import api
 from llm_client import LLMResponse
 from orchestrator import (
+    _build_report_evidence_locator_register,
     build_monitor_prompt,
+    build_report_prompt,
     get_first_unfinished_phase,
     is_workflow_complete,
     run_phase_node,
@@ -28,6 +31,8 @@ from state import (
     GauntletOutput,
     GauntletResult,
     Hypothesis,
+    KnowledgeItem,
+    KnowledgeLayerState,
     MonitorCanary,
     MonitorCircuitBreaker,
     MonitorOODASchedule,
@@ -37,6 +42,7 @@ from state import (
     PhaseStatus,
     PreliminaryVerdict,
     Priority,
+    Provenance,
     ProjectState,
     SQIDimension,
     SQIOutput,
@@ -158,7 +164,220 @@ def make_completed_state(project_id: str = "workflow-complete") -> ProjectState:
     return state
 
 
+REPORT_EVIDENCE_MARKER_RE = re.compile(r"\[Evidence: [^\]\n]+ \| [^\]\n]+\]")
+REPORT_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+REPORT_LOAD_BEARING_SECTIONS = {
+    "executive summary",
+    "decision logic",
+    "evidence strength",
+    "final verdicts",
+    "strategy results",
+    "monitoring and kill criteria",
+}
+
+
+def report_load_bearing_marker_counts(report: str) -> dict[str, int]:
+    counts = {section: 0 for section in REPORT_LOAD_BEARING_SECTIONS}
+    current_section = ""
+    for raw_line in (report or "").splitlines():
+        line = raw_line.strip()
+        heading = REPORT_MARKDOWN_HEADING_RE.match(line)
+        if heading:
+            current_section = heading.group(1).strip().lower()
+        if current_section in counts and REPORT_EVIDENCE_MARKER_RE.search(line):
+            counts[current_section] += len(REPORT_EVIDENCE_MARKER_RE.findall(line))
+    return counts
+
+
 class TestWorkflowHelpers(unittest.TestCase):
+
+    def test_report_prompt_includes_parseable_evidence_locator_register(self):
+        state = make_completed_state("report-locator-register")
+        state.knowledge_layer = KnowledgeLayerState(
+            items=[
+                KnowledgeItem(
+                    evidence_id="ev-market-note",
+                    source_id="src-market",
+                    source_ref="fixture://market-note",
+                    locator="upload:file-1:market-note.pdf#chunk=2",
+                    title="Market note",
+                    summary="RAW_EVIDENCE_BODY_SHOULD_NOT_APPEAR",
+                    provenance=Provenance(external_uri="upload:file-1"),
+                )
+            ]
+        )
+
+        prompt = build_report_prompt(state)
+
+        self.assertIn("PROJECT EVIDENCE LOCATORS:", prompt)
+        header = "PHASE 5: Final report. Use Causal Inference[#24], Swiss Cheese[#10], HRO[#29], Red Team[#28], Ablation[#23]."
+        self.assertLess(prompt.index(header), prompt.index("PROJECT EVIDENCE LOCATORS:"))
+        self.assertLess(prompt.index("PROJECT EVIDENCE LOCATORS:"), prompt.index("MANDATORY REPORT CITATION DISCIPLINE:"))
+        self.assertLess(prompt.index("MANDATORY REPORT CITATION DISCIPLINE:"), prompt.index("Include:"))
+        self.assertLess(prompt.index("PROJECT EVIDENCE LOCATORS:"), prompt.index("DOMAIN:"))
+        self.assertIn("[Evidence: ev-market-note | upload:file-1:market-note.pdf#chunk=2]", prompt)
+        self.assertIn("source_ref=fixture://market-note", prompt)
+        self.assertIn("source_id=src-market", prompt)
+        self.assertIn("title=Market note", prompt)
+        self.assertIn("external_uri=upload:file-1", prompt)
+        self.assertNotIn("RAW_EVIDENCE_BODY_SHOULD_NOT_APPEAR", prompt)
+
+    def test_report_prompt_includes_citation_discipline_instructions(self):
+        prompt = build_report_prompt(make_completed_state("report-citation-discipline"))
+
+        self.assertIn("MANDATORY REPORT CITATION DISCIPLINE:", prompt)
+        self.assertIn("Final report project-evidence citations must use concrete markers copied from PROJECT EVIDENCE LOCATORS", prompt)
+        self.assertIn("Use the literal pipe character `|`. Do not escape it as `\\|`.", prompt)
+        self.assertIn("Valid example: [Evidence: ev-market-note | chunk=2]", prompt)
+        self.assertIn("Invalid: [Evidence: ev-market-note \\| chunk=2]", prompt)
+        self.assertIn("Never output placeholder evidence markers.", prompt)
+        self.assertIn("Do not output [Evidence: ...] or angle-bracket templates in the final report.", prompt)
+        for invalid_marker in (
+            "[Evidence: ...]",
+            "[Evidence: <evidence_id> | <locator>]",
+            "[Evidence: evidence_id | locator]",
+            "[Evidence: ev-market-note | ...]",
+            "[Evidence: ... | ...]",
+        ):
+            self.assertIn(f"Invalid: {invalid_marker}", prompt)
+        self.assertIn("Each citation marker must contain exactly one evidence ID and one locator", prompt)
+        self.assertIn("do not put semicolons or multiple Evidence tokens inside one marker", prompt)
+        self.assertIn("Every evidence marker in the final report must copy a real evidence_id and locator from PROJECT EVIDENCE LOCATORS", prompt)
+        self.assertIn("Do not invent evidence IDs, source names, metrics, pages, rows, chunks, customers, or provenance", prompt)
+        self.assertIn("Framework markers such as [#24] are methodology references, not project evidence citations", prompt)
+        self.assertIn("Do not cite the act of recommending; cite the empirical evidence behind the recommendation", prompt)
+        self.assertIn("If no concrete locator is available or no supplied evidence supports the claim", prompt)
+        self.assertIn("[Inference], [Hypothesis], [Unknown], or write citation unavailable", prompt)
+        self.assertNotIn("[Evidence: <evidence_id> | <locator>] is the only canonical project-evidence citation format", prompt)
+        self.assertNotIn("Use only these evidence IDs for [Evidence: <evidence_id> | <locator>] citations.", prompt)
+
+    def test_report_prompt_citation_discipline_names_load_bearing_sections(self):
+        prompt = build_report_prompt(make_completed_state("report-load-bearing-citations"))
+
+        for section in (
+            "EXECUTIVE SUMMARY",
+            "DECISION LOGIC",
+            "EVIDENCE STRENGTH",
+            "FINAL VERDICTS",
+            "STRATEGY RESULTS",
+            "MONITORING AND KILL CRITERIA",
+        ):
+            self.assertIn(section, prompt)
+        self.assertIn("if a section contains an empirical claim supported by supplied project evidence", prompt)
+        self.assertIn("Never fabricate a marker to satisfy the citation rule", prompt)
+
+    def test_report_prompt_includes_internal_evidence_citation_check(self):
+        prompt = build_report_prompt(make_completed_state("report-internal-citation-check"))
+
+        self.assertIn("EVIDENCE CITATION CHECK BEFORE FINAL OUTPUT:", prompt)
+        self.assertIn("Use this checklist internally. Do not render it as a separate buyer-facing report section.", prompt)
+        self.assertIn("Every empirical load-bearing claim either has a concrete evidence marker copied from PROJECT EVIDENCE LOCATORS", prompt)
+        self.assertIn("No framework marker is used as project evidence", prompt)
+        self.assertIn("No evidence ID or locator is invented", prompt)
+
+    def test_report_prompt_uses_missing_locator_fallback(self):
+        state = make_completed_state("report-missing-locator")
+        state.hypotheses[0].evidence_ids = ["ev-no-locator"]
+
+        prompt = build_report_prompt(state)
+
+        self.assertIn("[Evidence: ev-no-locator | locator unavailable]", prompt)
+
+    def test_report_phase_prompt_file_contains_matching_citation_discipline(self):
+        prompt_text = Path("prompts/phases/05-report.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Citation discipline", prompt_text)
+        self.assertIn("Final report project-evidence citations must use concrete markers copied from `PROJECT EVIDENCE LOCATORS`", prompt_text)
+        self.assertIn("Use the literal pipe character `|`. Do not escape it as `\\|`.", prompt_text)
+        self.assertIn("Valid example: [Evidence: ev-market-note | chunk=2]", prompt_text)
+        self.assertIn("Invalid: [Evidence: ev-market-note \\| chunk=2]", prompt_text)
+        self.assertIn("Never output placeholder evidence markers.", prompt_text)
+        self.assertIn("Do not output [Evidence: ...] or angle-bracket templates in the final report.", prompt_text)
+        for invalid_marker in (
+            "[Evidence: ...]",
+            "[Evidence: <evidence_id> | <locator>]",
+            "[Evidence: evidence_id | locator]",
+            "[Evidence: ev-market-note | ...]",
+            "[Evidence: ... | ...]",
+        ):
+            self.assertIn(f"Invalid: {invalid_marker}", prompt_text)
+        self.assertIn("Each citation marker must contain exactly one evidence ID and one locator", prompt_text)
+        self.assertIn("do not put semicolons or multiple Evidence tokens inside one marker", prompt_text)
+        self.assertIn("Every evidence marker in the final report must copy a real evidence_id and locator from `PROJECT EVIDENCE LOCATORS`", prompt_text)
+        self.assertIn("Framework markers such as [#24] are methodology references, not project evidence citations", prompt_text)
+        self.assertIn("Do not cite the act of recommending; cite the empirical evidence behind the recommendation", prompt_text)
+        self.assertIn("EXECUTIVE SUMMARY", prompt_text)
+        self.assertIn("DECISION LOGIC", prompt_text)
+        self.assertIn("EVIDENCE STRENGTH", prompt_text)
+        self.assertIn("FINAL VERDICTS", prompt_text)
+        self.assertIn("STRATEGY RESULTS", prompt_text)
+        self.assertIn("MONITORING AND KILL CRITERIA", prompt_text)
+        self.assertIn("## Evidence citation check before final output", prompt_text)
+        self.assertIn("Use this checklist internally. Do not render it as a separate buyer-facing report section.", prompt_text)
+        self.assertIn("concrete evidence marker copied from `PROJECT EVIDENCE LOCATORS`", prompt_text)
+        self.assertIn("[Inference]", prompt_text)
+        self.assertIn("[Hypothesis]", prompt_text)
+        self.assertIn("[Unknown]", prompt_text)
+        self.assertNotIn("`[Evidence: <evidence_id> | <locator>]` is the only canonical project-evidence citation format", prompt_text)
+        self.assertNotIn("canonical `[Evidence: ...]` marker", prompt_text)
+
+    def test_report_prompt_raw_markdown_parser_detects_load_bearing_markers(self):
+        report = """# EXECUTIVE SUMMARY
+- Market demand increased [Evidence: ev-market | upload:file-market.pdf#page=2].
+
+# DECISION LOGIC
+- Capacity is constrained [Evidence: ev-capacity | upload:file-capacity.xlsx#row=7].
+
+# RED TEAM [#28]
+- This is a methodology section [#28].
+"""
+
+        counts = report_load_bearing_marker_counts(report)
+
+        self.assertEqual(counts["executive summary"], 1)
+        self.assertEqual(counts["decision logic"], 1)
+        self.assertEqual(counts["strategy results"], 0)
+        self.assertNotIn("red team [#28]", counts)
+
+    def test_report_evidence_locator_helper_does_not_mutate_state(self):
+        state = make_completed_state("report-locator-no-mutation")
+        state.knowledge_layer = KnowledgeLayerState(
+            items=[
+                KnowledgeItem(
+                    evidence_id="ev-no-mutation",
+                    source_ref="fixture://no-mutation",
+                    locator="fixture://no-mutation#row=1",
+                    title="No mutation note",
+                )
+            ]
+        )
+        before = state.model_dump(mode="json")
+
+        _build_report_evidence_locator_register(state)
+
+        self.assertEqual(state.model_dump(mode="json"), before)
+
+    def test_report_evidence_locator_helper_excludes_raw_summaries(self):
+        state = make_completed_state("report-locator-no-summary")
+        state.knowledge_layer = KnowledgeLayerState(
+            items=[
+                KnowledgeItem(
+                    evidence_id="ev-no-summary",
+                    locator="fixture://summary#chunk=1",
+                    title="Safe title",
+                    summary="RAW_SUMMARY_SHOULD_NOT_APPEAR",
+                    normalized_summary="RAW_NORMALIZED_SUMMARY_SHOULD_NOT_APPEAR",
+                )
+            ]
+        )
+
+        register = _build_report_evidence_locator_register(state)
+
+        self.assertIn("[Evidence: ev-no-summary | fixture://summary#chunk=1]", register)
+        self.assertIn("title=Safe title", register)
+        self.assertNotIn("RAW_SUMMARY_SHOULD_NOT_APPEAR", register)
+        self.assertNotIn("RAW_NORMALIZED_SUMMARY_SHOULD_NOT_APPEAR", register)
+
     def test_build_monitor_prompt_declares_required_schema(self):
         prompt = build_monitor_prompt(make_completed_state("monitor-prompt"))
         self.assertIn('"ooda_schedule"', prompt)

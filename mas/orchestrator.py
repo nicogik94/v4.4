@@ -33,6 +33,155 @@ CONVERGENCE: BF>10, H_norm<0.15, D_KL<0.01, EVSI/ENBS>0, OBF sequential, Futilit
 
 Be specific, quantitative, actionable."""
 
+REPORT_CITATION_DISCIPLINE = """MANDATORY REPORT CITATION DISCIPLINE:
+- Final report project-evidence citations must use concrete markers copied from PROJECT EVIDENCE LOCATORS.
+- Use the literal pipe character `|`. Do not escape it as `\\|`.
+- Valid example: [Evidence: ev-market-note | chunk=2]
+- Invalid: [Evidence: ev-market-note \\| chunk=2]
+- Never output placeholder evidence markers.
+- Do not output [Evidence: ...] or angle-bracket templates in the final report.
+- Invalid: [Evidence: ...]
+- Invalid: [Evidence: <evidence_id> | <locator>]
+- Invalid: [Evidence: evidence_id | locator]
+- Invalid: [Evidence: ev-market-note | ...]
+- Invalid: [Evidence: ... | ...]
+- Each citation marker must contain exactly one evidence ID and one locator. For multiple evidence items, use separate adjacent markers; do not put semicolons or multiple Evidence tokens inside one marker.
+- Every evidence marker in the final report must copy a real evidence_id and locator from PROJECT EVIDENCE LOCATORS.
+- Do not invent evidence IDs, source names, metrics, pages, rows, chunks, customers, or provenance.
+- Framework markers such as [#24] are methodology references, not project evidence citations.
+- Do not cite the act of recommending; cite the empirical evidence behind the recommendation.
+- Do not cite pure reasoning, causal interpretation, or framework logic as empirical evidence.
+- In load-bearing sections such as EXECUTIVE SUMMARY, DECISION LOGIC, EVIDENCE STRENGTH, FINAL VERDICTS, STRATEGY RESULTS, and MONITORING AND KILL CRITERIA: if a section contains an empirical claim supported by supplied project evidence, include at least one concrete evidence marker copied from PROJECT EVIDENCE LOCATORS in that section.
+- If no concrete locator is available or no supplied evidence supports the claim, label the claim as [Inference], [Hypothesis], [Unknown], or write citation unavailable.
+- Never fabricate a marker to satisfy the citation rule.
+
+EVIDENCE CITATION CHECK BEFORE FINAL OUTPUT:
+Use this checklist internally. Do not render it as a separate buyer-facing report section.
+- Every empirical load-bearing claim either has a concrete evidence marker copied from PROJECT EVIDENCE LOCATORS or is labeled [Inference], [Hypothesis], [Unknown], or citation unavailable.
+- No framework marker is used as project evidence.
+- No evidence ID or locator is invented."""
+
+
+def _clean_report_locator_value(value, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _add_report_locator_entry(
+    entries: dict[str, dict[str, str]],
+    *,
+    evidence_id,
+    locator="",
+    source_ref="",
+    source_id="",
+    title="",
+    external_uri="",
+) -> None:
+    clean_id = _clean_report_locator_value(evidence_id, limit=180)
+    if not clean_id:
+        return
+    incoming = {
+        "evidence_id": clean_id,
+        "locator": _clean_report_locator_value(locator, limit=220),
+        "source_ref": _clean_report_locator_value(source_ref, limit=220),
+        "source_id": _clean_report_locator_value(source_id, limit=160),
+        "title": _clean_report_locator_value(title, limit=120),
+        "external_uri": _clean_report_locator_value(external_uri, limit=220),
+    }
+    existing = entries.setdefault(
+        clean_id,
+        {
+            "evidence_id": clean_id,
+            "locator": "",
+            "source_ref": "",
+            "source_id": "",
+            "title": "",
+            "external_uri": "",
+        },
+    )
+    for key, value in incoming.items():
+        if key == "evidence_id":
+            continue
+        if value and not existing.get(key):
+            existing[key] = value
+
+
+def _build_report_evidence_locator_register(state: ProjectState, max_entries: int = 40) -> str:
+    """Build bounded evidence locator metadata for the report prompt without mutating state."""
+    entries: dict[str, dict[str, str]] = {}
+
+    for item in list(getattr(getattr(state, "knowledge_layer", None), "items", []) or []):
+        provenance = getattr(item, "provenance", None)
+        _add_report_locator_entry(
+            entries,
+            evidence_id=getattr(item, "evidence_id", ""),
+            locator=getattr(item, "locator", ""),
+            source_ref=getattr(item, "source_ref", "") or getattr(provenance, "source_ref", ""),
+            source_id=getattr(item, "source_id", ""),
+            title=getattr(item, "title", ""),
+            external_uri=getattr(provenance, "external_uri", ""),
+        )
+
+    for evidence in list(getattr(state, "imported_evidence", []) or []):
+        provenance = getattr(evidence, "provenance", None)
+        _add_report_locator_entry(
+            entries,
+            evidence_id=getattr(evidence, "evidence_id", ""),
+            source_ref=getattr(provenance, "source_ref", ""),
+            title=getattr(evidence, "title", ""),
+            external_uri=getattr(provenance, "external_uri", ""),
+        )
+
+    decision_objects = getattr(state, "decision_objects", None)
+    for evidence in list(getattr(decision_objects, "evidences", []) or []):
+        provenance = getattr(evidence, "provenance", None)
+        _add_report_locator_entry(
+            entries,
+            evidence_id=getattr(evidence, "evidence_id", ""),
+            source_ref=getattr(provenance, "source_ref", ""),
+            title=getattr(evidence, "title", ""),
+            external_uri=getattr(provenance, "external_uri", ""),
+        )
+
+    for hypothesis in list(getattr(state, "hypotheses", []) or []):
+        for evidence_id in list(getattr(hypothesis, "evidence_ids", []) or []):
+            _add_report_locator_entry(entries, evidence_id=evidence_id)
+
+    lines = [
+        "PROJECT EVIDENCE LOCATORS:",
+        "Use only the concrete evidence IDs and locators listed below for final-report evidence markers.",
+    ]
+    if not entries:
+        lines.append("No project evidence locators supplied. Claims without supplied locators must be labeled [Inference], [Hypothesis], or [Unknown], or citation unavailable.")
+        return "\n".join(lines)
+
+    ordered = sorted(
+        entries.values(),
+        key=lambda entry: (
+            entry.get("evidence_id", ""),
+            entry.get("locator", ""),
+            entry.get("source_ref", ""),
+            entry.get("source_id", ""),
+        ),
+    )
+    truncated = len(ordered) > max_entries
+    for entry in ordered[:max_entries]:
+        locator = entry.get("locator") or "locator unavailable"
+        metadata = []
+        for key in ("source_ref", "source_id", "title", "external_uri"):
+            value = entry.get(key, "")
+            if value:
+                metadata.append(f"{key}={value}")
+        suffix = f" {' '.join(metadata)}" if metadata else ""
+        lines.append(f"- [Evidence: {entry['evidence_id']} | {locator}]{suffix}")
+    if truncated:
+        lines.append(f"Locator register truncated to first {max_entries} entries sorted by evidence_id.")
+    return "\n".join(lines)
+
 
 def build_system_prompt(phase: str, json_mode: bool = True, calibration_hint: str = "") -> str:
     """Build phase-specific system prompt with only relevant frameworks.
@@ -236,9 +385,14 @@ def build_report_prompt(state: ProjectState) -> str:
     ctx_audit = summarize_phase_output("audit", state)
     ctx_strategy = summarize_phase_output("strategy", state)
     ctx_monitor = summarize_phase_output("monitor", state)
+    evidence_locator_register = _build_report_evidence_locator_register(state)
     obs_text = "\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations"
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
     return f"""PHASE 5: Final report. Use Causal Inference[#24], Swiss Cheese[#10], HRO[#29], Red Team[#28], Ablation[#23].
+
+{evidence_locator_register}
+
+{REPORT_CITATION_DISCIPLINE}
 
 Include:
 # EXECUTIVE SUMMARY

@@ -27,6 +27,37 @@ Full state across phases 0–4.
 9. **Causal map.** A simple DAG showing: inputs → hypotheses → strategies → outcomes, with the links that are causal vs merely correlational.
 10. **Confidence and calibration.** What is the team's stated confidence? What was the Brier score on earlier predictions?
 
+## Citation discipline
+
+- Final report project-evidence citations must use concrete markers copied from `PROJECT EVIDENCE LOCATORS`.
+- Use the literal pipe character `|`. Do not escape it as `\|`.
+- Valid example: [Evidence: ev-market-note | chunk=2]
+- Invalid: [Evidence: ev-market-note \| chunk=2]
+- Never output placeholder evidence markers.
+- Do not output [Evidence: ...] or angle-bracket templates in the final report.
+- Invalid: [Evidence: ...]
+- Invalid: [Evidence: <evidence_id> | <locator>]
+- Invalid: [Evidence: evidence_id | locator]
+- Invalid: [Evidence: ev-market-note | ...]
+- Invalid: [Evidence: ... | ...]
+- Each citation marker must contain exactly one evidence ID and one locator. For multiple evidence items, use separate adjacent markers; do not put semicolons or multiple Evidence tokens inside one marker.
+- Every evidence marker in the final report must copy a real evidence_id and locator from `PROJECT EVIDENCE LOCATORS`.
+- Do not invent evidence IDs, source names, metrics, pages, rows, chunks, customers, or provenance.
+- Framework markers such as [#24] are methodology references, not project evidence citations.
+- Do not cite the act of recommending; cite the empirical evidence behind the recommendation.
+- Do not cite pure reasoning, causal interpretation, or framework logic as empirical evidence.
+- In load-bearing sections such as `EXECUTIVE SUMMARY`, `DECISION LOGIC`, `EVIDENCE STRENGTH`, `FINAL VERDICTS`, `STRATEGY RESULTS`, and `MONITORING AND KILL CRITERIA`: if a section contains an empirical claim supported by supplied project evidence, include at least one concrete evidence marker copied from `PROJECT EVIDENCE LOCATORS` in that section.
+- If no concrete locator is available or no supplied evidence supports the claim, label the claim as `[Inference]`, `[Hypothesis]`, `[Unknown]`, or write `citation unavailable`.
+- Never fabricate a marker to satisfy the citation rule.
+
+## Evidence citation check before final output
+
+Use this checklist internally. Do not render it as a separate buyer-facing report section.
+
+- Every empirical load-bearing claim either has a concrete evidence marker copied from `PROJECT EVIDENCE LOCATORS` or is labeled `[Inference]`, `[Hypothesis]`, `[Unknown]`, or `citation unavailable`.
+- No framework marker is used as project evidence.
+- No evidence ID or locator is invented.
+
 ## Meta-learning payload (separate JSON, for the database)
 
 ```json
