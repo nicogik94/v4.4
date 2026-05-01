@@ -1,8 +1,14 @@
-"""Deterministic citation resolvability pass for raw report text.
+"""CDP T1b — Review-only line-level citation resolvability.
 
-This module is intentionally not wired into ProjectState, the workflow graph,
-API, renderer, exporter, database, or persistence. It derives an in-memory
-review-only result from the current ProjectState snapshot.
+Schema: cdp.v0.1.
+
+This module reads ProjectState and never mutates it. It emits an in-memory
+DefensePassResult for deterministic post-pass review only.
+
+It is not wired into the workflow graph, API, renderer, exporter, database,
+persistence, or product surfaces. Full claim defensibility is later work.
+
+The canonical evidence marker format is defined in cdp.citation_format.
 """
 from __future__ import annotations
 
