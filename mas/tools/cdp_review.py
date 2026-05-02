@@ -126,8 +126,6 @@ def build_report_request(project_id: str, system: str, prompt: str) -> GatewayRe
         phase="report",
         system_prompt=system,
         user_prompt=prompt,
-        project_id=project_id,
-        agent_name="report",
         routing_context=RoutingContext(phase="report"),
         allow_cache=False,
     )

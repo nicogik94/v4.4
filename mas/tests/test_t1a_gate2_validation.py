@@ -8,7 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.validate_t1a_gate2 import CANONICAL_MARKER_RE, _malformed_candidates  # noqa: E402
+from cdp.citation_resolvability import CANONICAL_MARKER_RE, _malformed_resolutions  # noqa: E402
+
+
+def _malformed_candidates(text: str) -> list[str]:
+    return [resolution.marker for resolution in _malformed_resolutions(text)]
 
 
 class TestT1aGate2Validation(unittest.TestCase):

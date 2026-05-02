@@ -24,18 +24,18 @@ def make_state(report: str) -> ProjectState:
     state.knowledge_layer = KnowledgeLayerState(
         items=[
             KnowledgeItem(
-                evidence_id="ev-exact",
+                item_id="ev-exact",
                 source_id="src",
                 source_ref="fixture://exact",
                 title="Exact",
-                locator="chunk=1",
+                structured_payload={"locator": "chunk=1"},
             ),
             KnowledgeItem(
-                evidence_id="ev-id-only",
+                item_id="ev-id-only",
                 source_id="src",
                 source_ref="fixture://id-only",
                 title="ID only",
-                locator="locator unavailable",
+                structured_payload={"locator": "locator unavailable"},
             ),
         ]
     )

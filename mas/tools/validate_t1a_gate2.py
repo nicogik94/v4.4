@@ -30,7 +30,6 @@ from state import (  # noqa: E402
     PhaseStatus,
     ProjectState,
     Provenance,
-    SourceClass,
     SourceRegistryEntry,
 )
 from tests.test_decision_objects import make_state  # noqa: E402
@@ -87,7 +86,6 @@ def _manual_source(source_id: str, name: str, **overrides: Any) -> SourceRegistr
         "name": name,
         "source_kind": "offline_fixture",
         "connector_type": "offline_fixture",
-        "source_class": SourceClass.MANUAL_SYNC.value,
         "access_mode": "manual",
         "sensitivity": "internal",
         "freshness_policy_id": "project_evidence",
@@ -106,9 +104,9 @@ def _build_case_a() -> ValidationCase:
     sources = [
         _manual_source("src-audit", "Audit fixture"),
         _manual_source("src-strategy", "Strategy fixture"),
-        _manual_source("src-provenance", "Official note", source_class=SourceClass.OFFICIAL_PRIMARY.value, trust_tier="official"),
+        _manual_source("src-provenance", "Official note", trust_tier="official"),
         _manual_source("src-manual", "Operator evidence", trust_tier="analyst_verified"),
-        _manual_source("src-official", "Official source", source_class=SourceClass.OFFICIAL_PRIMARY.value, trust_tier="official"),
+        _manual_source("src-official", "Official source", trust_tier="official"),
     ]
     for source in sources:
         upsert_source_entry(state, source)

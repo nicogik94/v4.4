@@ -31,19 +31,19 @@ def make_cdp_state() -> ProjectState:
     state.knowledge_layer = KnowledgeLayerState(
         items=[
             KnowledgeItem(
-                evidence_id="ev-exact",
+                item_id="ev-exact",
                 source_id="src-fixture",
                 source_ref="fixture://exact",
                 title="Exact evidence",
-                locator="fixture://exact#chunk=1",
+                structured_payload={"locator": "fixture://exact#chunk=1"},
                 provenance=Provenance(external_uri="fixture://exact"),
             ),
             KnowledgeItem(
-                evidence_id="ev-unavailable",
+                item_id="ev-unavailable",
                 source_id="src-fixture",
                 source_ref="fixture://unavailable",
                 title="Unavailable locator",
-                locator="locator unavailable",
+                structured_payload={"locator": "locator unavailable"},
             ),
         ]
     )

@@ -174,10 +174,11 @@ def build_evidence_locator_registry(state: Any) -> list[EvidenceLocatorEntry]:
 
     for item in list(getattr(getattr(state, "knowledge_layer", None), "items", []) or []):
         provenance = getattr(item, "provenance", None)
+        structured_payload = getattr(item, "structured_payload", {}) or {}
         _add_registry_entry(
             entries,
             evidence_id=getattr(item, "evidence_id", "") or getattr(item, "item_id", ""),
-            locator=getattr(item, "locator", ""),
+            locator=getattr(item, "locator", "") or structured_payload.get("locator", ""),
             source_ref=getattr(item, "source_ref", "") or getattr(provenance, "source_ref", ""),
             source_id=getattr(item, "source_id", ""),
             title=getattr(item, "title", ""),
