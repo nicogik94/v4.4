@@ -213,5 +213,77 @@ class TestCitationResolvability(unittest.TestCase):
         self.assertIn("load_bearing_review", result.claims_requiring_review[-1])
 
 
+class TestKnowledgeItemLocatorDerivation(unittest.TestCase):
+    """Coverage for the locator-derivation pipeline through the CDP resolver."""
+
+    def _state_with_item(self, **item_kwargs) -> ProjectState:
+        state = ProjectState(project_id="cdp-locator", project_name="Locator", brief="Anchor coverage.")
+        state.knowledge_layer = KnowledgeLayerState(items=[KnowledgeItem(**item_kwargs)])
+        return state
+
+    def test_registry_picks_up_chunk_index_locator(self):
+        state = self._state_with_item(item_id="ev-x", structured_payload={"chunk_index": 2})
+
+        registry = {entry.evidence_id: entry for entry in build_evidence_locator_registry(state)}
+
+        self.assertIn("ev-x", registry)
+        self.assertEqual(registry["ev-x"].locators, ["chunk=2"])
+        self.assertTrue(registry["ev-x"].has_concrete_locator)
+
+    def test_registry_picks_up_row_range_locator(self):
+        state = self._state_with_item(
+            item_id="ev-rows",
+            structured_payload={"row_start": 3, "row_end": 9, "sheet_name": "Sales"},
+        )
+
+        registry = {entry.evidence_id: entry for entry in build_evidence_locator_registry(state)}
+
+        self.assertEqual(registry["ev-rows"].locators, ["sheet=Sales;row=3-9"])
+        self.assertTrue(registry["ev-rows"].has_concrete_locator)
+
+    def test_resolver_returns_resolved_exact_when_marker_matches_derived_locator(self):
+        state = self._state_with_item(item_id="ev-x", structured_payload={"chunk_index": 2})
+        state.report = "# EXECUTIVE SUMMARY\n- Claim [Evidence: ev-x | chunk=2]."
+
+        result = build_defense_pass_result(state)
+        statuses = [resolution.status for resolution in result.resolutions]
+
+        self.assertEqual(statuses, ["resolved_exact"])
+        self.assertEqual(result.summary_counts["resolved_exact"], 1)
+        self.assertEqual(result.summary_counts["resolved_id_only"], 0)
+        self.assertEqual(result.summary_counts["unknown_evidence_id"], 0)
+        self.assertEqual(result.summary_counts["locator_mismatch"], 0)
+        self.assertEqual(result.summary_counts["malformed"], 0)
+
+    def test_resolver_returns_resolved_id_only_when_no_anchor_present(self):
+        state = self._state_with_item(item_id="ev-bare", structured_payload={"category": "uploaded_document"})
+        state.report = "# EXECUTIVE SUMMARY\n- Claim [Evidence: ev-bare | locator unavailable]."
+
+        result = build_defense_pass_result(state)
+
+        self.assertEqual([res.status for res in result.resolutions], ["resolved_id_only"])
+        registry = {entry.evidence_id: entry for entry in result.registry_entries}
+        self.assertIn("ev-bare", registry)
+        self.assertEqual(registry["ev-bare"].locators, [])
+        self.assertFalse(registry["ev-bare"].has_concrete_locator)
+
+    def test_registry_picks_up_source_ref_fragment_when_payload_empty(self):
+        state = self._state_with_item(
+            item_id="ev-frag",
+            source_ref="upload:f1:doc.pdf#chunk=4",
+        )
+
+        registry = {entry.evidence_id: entry for entry in build_evidence_locator_registry(state)}
+
+        self.assertEqual(registry["ev-frag"].locators, ["chunk=4"])
+
+    def test_registry_falls_back_to_item_id_when_evidence_id_absent(self):
+        state = self._state_with_item(item_id="ev-id-fallback", structured_payload={"chunk_index": 1})
+
+        registry_ids = {entry.evidence_id for entry in build_evidence_locator_registry(state)}
+
+        self.assertIn("ev-id-fallback", registry_ids)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -17,6 +17,7 @@ from llm_client import call_llm, parse_json, LLMResponse
 from cdp.citation_format import (
     EVIDENCE_CITATION_MARKER_FORMAT,
     EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE,
+    derive_knowledge_item_locator,
 )
 from decision_objects import ensure_decision_objects
 from knowledge.retrieval import evaluate_phase_retrieval
@@ -122,8 +123,8 @@ def _build_report_evidence_locator_register(state: ProjectState, max_entries: in
         provenance = getattr(item, "provenance", None)
         _add_report_locator_entry(
             entries,
-            evidence_id=getattr(item, "evidence_id", ""),
-            locator=getattr(item, "locator", ""),
+            evidence_id=getattr(item, "evidence_id", "") or getattr(item, "item_id", ""),
+            locator=derive_knowledge_item_locator(item),
             source_ref=getattr(item, "source_ref", "") or getattr(provenance, "source_ref", ""),
             source_id=getattr(item, "source_id", ""),
             title=getattr(item, "title", ""),
