@@ -156,6 +156,19 @@ def _build_report_evidence_locator_register(state: ProjectState, max_entries: in
         for evidence_id in list(getattr(hypothesis, "evidence_ids", []) or []):
             _add_report_locator_entry(entries, evidence_id=evidence_id)
 
+    # Filter to entries with a concrete locator. Entries without one (derived
+    # decision_objects.evidences, imported_evidence with no anchor, bare
+    # hypothesis evidence_ids) would otherwise tempt the model into citing
+    # analytical conclusions as `[Evidence: <id> | locator unavailable]` --
+    # the discipline already says such claims must be labeled [Inference],
+    # [Hypothesis], [Unknown], or "citation unavailable" instead.
+    entries = {
+        evidence_id: entry
+        for evidence_id, entry in entries.items()
+        if entry.get("locator")
+        and entry["locator"] != EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE
+    }
+
     lines = [
         "PROJECT EVIDENCE LOCATORS:",
         "Use only the concrete evidence IDs and locators listed below for final-report evidence markers.",
