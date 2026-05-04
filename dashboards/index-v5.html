@@ -17,8 +17,8 @@
   --ink: #0B1426;
   --ink-2: #1E293B;
   --ink-3: #475569;
-  --mute: #64748B;
-  --mute-2: #94A3B8;
+  --mute: #718096;
+  --mute-2: #A0AEC0;
 
   /* lines */
   --line: #E4E8EF;
@@ -26,7 +26,7 @@
   --line-strong: #CBD5E1;
 
   /* semantic */
-  --accent: #2563EB;        /* info/decision */
+  --accent: #3B82F6;        /* info/decision */
   --accent-bg: #EFF4FF;
   --accent-ink: #1E40AF;
   --action: #D97706;        /* run/execute */
@@ -49,11 +49,11 @@
   /* typography */
   --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --fs-xs: 11px;
-  --fs-sm: 12px;
-  --fs-base: 13.5px;
-  --fs-md: 14px;
-  --fs-lg: 16px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
   --fs-xl: 19px;
   --fs-2xl: 24px;
 
@@ -69,16 +69,16 @@
   --sp-12: 48px;
 
   /* radii */
-  --r-sm: 4px;
-  --r-md: 6px;
-  --r-lg: 8px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
   --r-xl: 12px;
   --r-pill: 999px;
 
   /* shadows */
   --shadow-xs: 0 1px 1px rgba(11, 20, 38, 0.03);
-  --shadow-sm: 0 1px 2px rgba(11, 20, 38, 0.05), 0 1px 1px rgba(11, 20, 38, 0.03);
-  --shadow-md: 0 4px 10px rgba(11, 20, 38, 0.06), 0 1px 2px rgba(11, 20, 38, 0.04);
+  --shadow-sm: 0 2px 4px rgba(11, 20, 38, 0.04), 0 1px 2px rgba(11, 20, 38, 0.02);
+  --shadow-md: 0 6px 12px rgba(11, 20, 38, 0.05), 0 2px 4px rgba(11, 20, 38, 0.03);
   --shadow-lg: 0 10px 30px rgba(11, 20, 38, 0.10), 0 2px 6px rgba(11, 20, 38, 0.05);
 
   /* layout */
@@ -3601,12 +3601,12 @@ function classifyOperatorError(error, context = 'generic') {
   const status = parsed.status;
   let title = 'Unexpected server error';
 
-  if (status === 503) title = 'DB not configured';
+  if (status === 503) title = 'Database unavailable';
   else if (context === 'base-project' && status === 404) title = 'Project not found';
   else if (context === 'invalid-selection' && status === 404) title = 'Invalid selection';
-  else if (context === 'selected-project-data' && status === 404) title = 'No data yet';
-  else if (context === 'capability' && (status === 404 || status === 405)) title = 'Backend gap';
-  else if (status === 404) title = 'No data yet';
+  else if (context === 'selected-project-data' && status === 404) title = 'No data available yet';
+  else if (context === 'capability' && (status === 404 || status === 405)) title = 'Unavailable in this build';
+  else if (status === 404) title = 'No data available yet';
   else if (status && status >= 500) title = 'Unexpected server error';
 
   return { status, title, detail: parsed.detail };
@@ -3654,7 +3654,7 @@ const state = {
 };
 
 const TAB_LABELS = {
-  decide: 'Decide',
+  decide: 'Decisions',
   evidence: 'Evidence',
   outcomes: 'Outcomes',
   bayesian: 'Bayesian',
@@ -3800,7 +3800,7 @@ function renderProjects() {
     list.innerHTML = `
       <div style="padding: var(--sp-5); text-align: center; color: var(--mute); font-size: var(--fs-sm);">
         <div style="margin-bottom: 8px; font-size: 24px;">∅</div>
-        No projects yet
+        No projects available
         <div style="margin-top: 4px; font-size: 11px;">Click <strong>+ New</strong> to start</div>
       </div>`;
     return;
@@ -3940,8 +3940,6 @@ async function loadReport(pid) {
   }
 }
 
-}
-
 /* ───────────────────────────────────────────────────────────────────────
    Calibration loader (Tranche 2)
    Lazy — only fetched when the Calibration tab is visited.
@@ -3999,7 +3997,7 @@ function renderMain() {
         <div class="empty-state">
           <div class="empty-icon">◐</div>
           <h2>Select a project to begin</h2>
-          <p>Every project runs through a structured decision workflow. Start from Portfolio signals, then open a project for outcomes, evidence, calibration, and report readiness.</p>
+          <p>Start from Portfolio signals on the left, then open a project to review outcomes, evidence, and report readiness.</p>
           <button class="btn btn-accent btn-lg" id="btn-new-project-big" aria-label="Create a new project">+ Create project</button>
         </div>
       </div>`;
@@ -4245,7 +4243,7 @@ function renderHero(proj, workspace, audit) {
             ${killActive ? '▶ Killed' : '▶ Run'}
           </button>
           <button class="btn btn-danger" id="btn-kill" aria-label="Fire kill switch" ${killActive ? 'disabled' : ''}>
-            ${killActive ? '■ Already killed' : '■ Kill switch'}
+            ${killActive ? '■ Already killed' : '■ Emergency Stop'}
           </button>
         </div>
       </div>
@@ -4396,7 +4394,7 @@ function renderTabs() {
     decide: state.dp.events.length ? String(state.dp.events.length) : '',
     evidence: evCount ? String(evCount) : '',
     outcomes: outcomeN ? String(outcomeN) : '',
-    bayesian: calibration: calibN ? String(calibN) : '',
+    calibration: calibN ? String(calibN) : '',
     report: '',
     audit: state.project?.audit?.audit_log?.length ? String(state.project.audit.audit_log.length) : '',
   };
@@ -4706,51 +4704,11 @@ function renderDiff() {
 }
 
 function renderApprovals() {
-  return `<div class="dp-tl-empty">/projects/{id}/approvals: not available in this build</div>`;
-}
-  return `
-    <div class="dp-table-wrap">
-      <table class="dp-table">
-        <thead><tr>
-          <th>Action</th><th>Decision</th><th>By</th><th>At</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map(r => `
-            <tr>
-              <td>${escapeHtml(r.action || '—')}</td>
-              <td><span class="risk-badge risk-${r.decision === 'granted' ? 'minimal_risk' : (r.decision === 'revoked' ? 'high_risk' : 'limited_risk')}">${escapeHtml(r.decision || '—')}</span></td>
-              <td>${escapeHtml(r.approved_by || '—')}</td>
-              <td class="mono">${escapeHtml(r.decided_at ? new Date(r.decided_at).toLocaleString() : '—')}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return `<div class="dp-tl-empty">Approvals unavailable in this build.</div>`;
 }
 
 function renderPolicyDecisions() {
-  return `<div class="dp-tl-empty">/projects/{id}/policy-decisions: not available in this build</div>`;
-}
-  return `
-    <div class="dp-table-wrap">
-      <table class="dp-table">
-        <thead><tr>
-          <th>Type</th><th>By</th><th>Rationale</th><th>At</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map(r => `
-            <tr>
-              <td>${escapeHtml(r.decision_type || '—')}</td>
-              <td>${escapeHtml(r.decided_by || '—')}</td>
-              <td title="${escapeHtml(r.rationale || '')}">${escapeHtml((r.rationale || '—').slice(0, 40))}${(r.rationale || '').length > 40 ? '…' : ''}</td>
-              <td class="mono">${escapeHtml(r.decided_at ? new Date(r.decided_at).toLocaleString() : '—')}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return `<div class="dp-tl-empty">Policy decisions unavailable in this build.</div>`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -5271,93 +5229,6 @@ function renderEvUploadPanel() {
       <div class="ev-upload-actions">
         <button class="btn btn-accent btn-sm" id="ev-up-submit" type="button">Add source</button>
       </div>
-    </div>
-  `;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
-   Bayesian advisory tab — read-only, advisory-only drill-in
-   Data source: /projects/{id}/bayesian-advisory (fetched by loadProject).
-   This view MUST NOT imply it changes orchestration or runtime behavior.
-   ═══════════════════════════════════════════════════════════════════════ */
-      <div class="view-stub">
-        <div class="stub-tag">Bayesian advisory</div>
-        <h3>Advisory view unavailable</h3>
-        <p>Could not load the advisory posteriors. The endpoint returned no data for this project.</p>
-      </div>
-    `;
-  }
-  if (scenarios.length === 0) {
-    return `
-      ${banner}
-      <div class="view-stub">
-        <div class="stub-tag">Bayesian advisory</div>
-        <h3>No advisory posteriors yet</h3>
-        <p>Advisory posteriors derive from hypothesis priors and linked evidence. Run the workflow through <strong>hypotheses</strong> or later to populate this view.</p>
-      </div>
-    `;
-  }
-
-  // Compact per-hypothesis bar (posterior mean) + uncertainty note.
-  const renderRow = (r) => {
-    const mean = r.posterior_mean != null ? Number(r.posterior_mean) : null;
-    const pct = mean != null ? Math.max(0, Math.min(100, mean * 100)) : 0;
-    const meanTxt = mean != null ? mean.toFixed(2) : '—';
-    const variance = r.posterior_variance != null ? Number(r.posterior_variance).toFixed(3) : '—';
-    const ev = r.evidence_count != null ? Number(r.evidence_count) : 0;
-    const oc = r.outcome_count != null ? Number(r.outcome_count) : 0;
-    const refs = Array.isArray(r.evidence_refs) ? r.evidence_refs : [];
-    const refsShort = refs.slice(0, 4).map(x => escapeHtml(String(x))).join(', ') + (refs.length > 4 ? ` +${refs.length - 4}` : '');
-    const toneCls = mean == null ? '' : (mean >= 0.66 ? 'hi' : (mean <= 0.33 ? 'lo' : 'mid'));
-    return `
-      <div class="bay-row">
-        <div class="bay-row-head">
-          <div class="bay-row-hid mono" title="${escapeHtml(r.hypothesis_id || '')}">${escapeHtml(r.hypothesis_id || '—')}</div>
-          <div class="bay-row-mean mono">μ=${escapeHtml(meanTxt)}</div>
-        </div>
-        ${r.label ? `<div class="bay-row-label">${escapeHtml(r.label)}</div>` : ''}
-        <div class="bay-bar"><div class="bay-bar-fill ${toneCls}" style="width:${pct}%"></div></div>
-        <div class="bay-row-meta">
-          <span>variance: <b class="mono">${escapeHtml(variance)}</b></span>
-          <span class="sep">·</span>
-          <span>evidence: <b class="mono">${escapeHtml(String(ev))}</b></span>
-          <span class="sep">·</span>
-          <span>outcomes: <b class="mono">${escapeHtml(String(oc))}</b></span>
-          ${r.uncertainty_note ? `<span class="sep">·</span><span class="bay-row-note">${escapeHtml(r.uncertainty_note)}</span>` : ''}
-        </div>
-        ${refs.length ? `<div class="bay-row-refs">linked evidence: ${refsShort}</div>` : ''}
-      </div>
-    `;
-  };
-
-  const renderScenario = (sc) => {
-    const rows = Array.isArray(sc.rows) ? sc.rows : [];
-    const agg = sc.aggregate_posterior_mean != null ? Number(sc.aggregate_posterior_mean).toFixed(2) : '—';
-    const linked = Array.isArray(sc.linked_hypothesis_ids) ? sc.linked_hypothesis_ids.length : rows.length;
-    return `
-      <section class="bay-scenario">
-        <header class="bay-scenario-head">
-          <div>
-            <div class="bay-scenario-sub">group</div>
-            <h3>${escapeHtml(sc.scenario_label || 'unlabeled')}</h3>
-          </div>
-          <div class="bay-scenario-stats">
-            <div class="bay-stat"><div class="k">aggregate μ</div><div class="v mono">${escapeHtml(agg)}</div></div>
-            <div class="bay-stat"><div class="k">hypotheses</div><div class="v mono">${escapeHtml(String(linked))}</div></div>
-            <div class="bay-stat"><div class="k">advisory</div><div class="v">read-only</div></div>
-          </div>
-        </header>
-        <div class="bay-scenario-body">
-          ${rows.length ? rows.map(renderRow).join('') : '<div class="bay-empty">No hypothesis rows in this group.</div>'}
-        </div>
-      </section>
-    `;
-  };
-
-  return `
-    ${banner}
-    <div class="bay">
-      ${scenarios.map(renderScenario).join('')}
     </div>
   `;
 }
@@ -6489,38 +6360,6 @@ function renderInspectorAudit() {
                 <div class="ins-right">${escapeHtml(a.decided_at ? new Date(a.decided_at).toLocaleDateString() : '—')}</div>
               </li>`).join('')}
             </ul>`}
-      </div>
-    </div>
-  `;
-}
-
-/* ── Bayesian advisory panel (Evidence + Decide contextual) ─────────── */
-  return `
-    <div class="ins-section">
-      <div class="ins-section-head"><h5>Bayesian advisory</h5><span class="meta">${scenarios.length} scenario${scenarios.length === 1 ? '' : 's'}</span></div>
-      <div class="ins-bayes-advisory">Advisory only — does not control orchestration or gates</div>
-      <div class="ins-section-body dense">
-        ${scenarios.map(sc => {
-          const agg = sc.aggregate_posterior_mean != null ? Number(sc.aggregate_posterior_mean).toFixed(2) : '—';
-          return `
-            <div class="ins-bayes-scenario">
-              <div class="ins-bayes-scenario-head">
-                <h6>${escapeHtml(sc.scenario_label || 'unlabeled')}</h6>
-                <span class="agg">μ=${escapeHtml(agg)}</span>
-              </div>
-              <div class="ins-bayes-rows">
-                ${(sc.rows || []).slice(0, 6).map(r => {
-                  const mean = r.posterior_mean != null ? Number(r.posterior_mean).toFixed(2) : '—';
-                  return `<div class="ins-bayes-row">
-                    <div class="hid" title="${escapeHtml(r.label || r.hypothesis_id || '')}">${escapeHtml(r.hypothesis_id || '—')}</div>
-                    <div class="mean">${escapeHtml(mean)}</div>
-                    <div class="note" title="${escapeHtml(r.uncertainty_note || '')}">${escapeHtml(r.evidence_count != null ? `n=${r.evidence_count}` : '')}</div>
-                  </div>`;
-                }).join('')}
-                ${(sc.rows || []).length > 6 ? `<div class="note" style="text-align: right;">+${sc.rows.length - 6} more…</div>` : ''}
-              </div>
-            </div>`;
-        }).join('')}
       </div>
     </div>
   `;
