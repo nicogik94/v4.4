@@ -3437,40 +3437,130 @@ a:hover { text-decoration: underline; }
    API client — thin wrappers over fetch with consistent error handling
    ═══════════════════════════════════════════════════════════════════════ */
 const $ = (id) => document.getElementById(id);
-const apiUrl = () => $('api-url').value.replace(/\/$/, '');
+
+// --- Runtime Override & Backend Config ---
+// The project default differs from the current local runtime.
+// The current local runtime targets http://localhost:8001 via Docker host port mapping.
+// This is reconciled via the override mechanism (query param > localStorage > default).
+// When loaded from file:// without an override, the connection status will intentionally show "unavailable" (default http://localhost:8000 is not reachable).
+const resolveApiBase = () => {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has('api')) {
+    const apiVal = urlParams.get('api');
+    if (!apiVal) {
+      localStorage.removeItem("v4ApiBase");
+      window.history.replaceState(null, '', window.location.pathname);
+    } else {
+      localStorage.setItem("v4ApiBase", apiVal);
+      return { url: apiVal, source: 'query-param' };
+    }
+  }
+  const lsVal = localStorage.getItem("v4ApiBase");
+  if (lsVal) return { url: lsVal, source: 'localStorage' };
+  
+  const defUrl = (window.location.protocol === 'file:') ? 'http://localhost:8000' : window.location.origin;
+  return { url: defUrl, source: 'default' };
+};
+
+const apiConfig = resolveApiBase();
+const API_BASE = apiConfig.url.replace(/\/$/, '');
+const apiUrl = () => API_BASE;
+
+let currentConnState = 'connecting';
+let healthPassing = false;
+
+function updateConnStatus(stateStr) {
+  currentConnState = stateStr;
+  const stateEl = $('conn-state');
+  const urlEl = $('conn-url');
+  const srcEl = $('conn-source');
+  const resetEl = $('conn-reset');
+  if (stateEl) {
+    let color = 'var(--text)';
+    if (stateStr === 'connected') color = 'var(--good)';
+    if (stateStr === 'unavailable') color = 'var(--bad)';
+    if (stateStr === 'partial') color = 'var(--warn)';
+    stateEl.innerHTML = `<strong style="color: ${color}">${stateStr}</strong>`;
+  }
+  if (urlEl) urlEl.textContent = API_BASE;
+  if (srcEl) srcEl.textContent = `(${apiConfig.source})`;
+  if (resetEl) {
+    resetEl.style.display = apiConfig.source !== 'default' ? 'inline' : 'none';
+    resetEl.onclick = (e) => {
+      e.preventDefault();
+      localStorage.removeItem("v4ApiBase");
+      window.location.href = window.location.pathname;
+    };
+  }
+}
+updateConnStatus('connecting');
+
+async function handleApiError(path, r) {
+  console.error(`Endpoint failed: ${path} → ${r.status}`);
+  if (healthPassing) updateConnStatus('partial');
+  else updateConnStatus('unavailable');
+  throw new Error(`${path} → ${r.status}: ${await r.text().catch(() => '')}`);
+}
+
+async function handleNetworkError(path, e) {
+  console.error(`Endpoint network error: ${path}`, e);
+  if (healthPassing) updateConnStatus('partial');
+  else updateConnStatus('unavailable');
+  throw e;
+}
 
 async function apiGet(path) {
-  const r = await fetch(apiUrl() + path);
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path);
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiPost(path, body) {
-  const r = await fetch(apiUrl() + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiPatch(path, body) {
-  const r = await fetch(apiUrl() + path, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiFormPost(path, formData) {
-  const r = await fetch(apiUrl() + path, { method: 'POST', body: formData });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, { method: 'POST', body: formData });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiDelete(path) {
-  const r = await fetch(apiUrl() + path, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, { method: 'DELETE' });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 
 const UPLOAD_ACCEPT_KNOWLEDGE = [
@@ -3640,17 +3730,29 @@ window.addEventListener('hashchange', onHashChange);
    Health (header pills)
    ═══════════════════════════════════════════════════════════════════════ */
 async function loadHealth() {
+  updateConnStatus('connecting');
   try {
-    const h = await apiGet('/health');
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 5000);
+    const r = await fetch(apiUrl() + '/health', { signal: controller.signal });
+    clearTimeout(id);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const h = await r.json();
+    healthPassing = true;
+    updateConnStatus('connected');
     $('health-pills').innerHTML = [
       `<span class="pill ok"><span class="dot"></span>API ${escapeHtml(h.version || 'ok')}</span>`,
       `<span class="pill ${h.persistence === 'postgres' ? 'ok' : 'warn'}"><span class="dot"></span>${escapeHtml(h.persistence || '—')}</span>`,
       `<span class="pill ${h.tracing === 'langfuse' ? 'ok' : ''}"><span class="dot"></span>tracing: ${escapeHtml(h.tracing || 'off')}</span>`,
     ].join('');
   } catch (e) {
+    console.error(`Health check failed`, e);
+    healthPassing = false;
+    updateConnStatus('unavailable');
     $('health-pills').innerHTML = `<span class="pill err"><span class="dot"></span>API unreachable</span>`;
   }
 }
+setInterval(loadHealth, 30000);
 
 /* ═══════════════════════════════════════════════════════════════════════
    Projects (left rail list)
@@ -3734,21 +3836,14 @@ function renderProjects() {
    Learning Engine summary (sidebar rail)
    ═══════════════════════════════════════════════════════════════════════ */
 async function loadLearningEngine() {
-  // Try /meta-learning/summary first; fall back to priors + deltas
   try {
-    const summary = await apiGet('/meta-learning/summary');
-    state.learningEngine = summary;
-    renderLearningEngine(summary);
-  } catch (e) {
-    try {
-      const [priors, deltas] = await Promise.all([
-        apiGet('/calibration/priors').catch(() => null),
-        apiGet('/calibration/deltas').catch(() => null),
-      ]);
-      renderLearningEngineFallback(priors, deltas);
-    } catch {
-      renderLearningEngineFallback(null, null);
-    }
+    const [priors, deltas] = await Promise.all([
+      apiGet('/calibration/priors').catch(() => null),
+      apiGet('/calibration/deltas').catch(() => null),
+    ]);
+    renderLearningEngineFallback(priors, deltas);
+  } catch {
+    renderLearningEngineFallback(null, null);
   }
 }
 
@@ -3799,7 +3894,7 @@ async function loadProject(pid) {
       auditRes,
       filesRes,
       knowledgeRes,
-      bayesianRes,
+      
       overviewRes,
     ] = await Promise.all([
       apiGet(`/projects/${pid}/state`),
@@ -3808,7 +3903,7 @@ async function loadProject(pid) {
       optionalGet(`/projects/${pid}/policy-audit`),
       optionalGet(`/projects/${pid}/files`),
       optionalGet(`/projects/${pid}/knowledge`),
-      optionalGet(`/projects/${pid}/bayesian-advisory`),
+      
       optionalGet(`/projects/${pid}/overview`),
     ]);
     state.project = {
@@ -3823,8 +3918,8 @@ async function loadProject(pid) {
       filesError: filesRes.error,
       knowledge: knowledgeRes.data,
       knowledgeError: knowledgeRes.error,
-      bayesian: bayesianRes.data,
-      bayesianError: bayesianRes.error,
+      bayesian: null,
+      bayesianError: null,
       overview: overviewRes.data,
       overviewError: overviewRes.error,
       report: null,
@@ -3845,13 +3940,6 @@ async function loadReport(pid) {
   }
 }
 
-async function loadBayesian(pid) {
-  if (!state.project) return;
-  try {
-    state.project.bayesian = await apiGet(`/projects/${pid}/bayesian-advisory`);
-  } catch (e) {
-    state.project.bayesian = null;
-  }
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -3861,17 +3949,11 @@ async function loadBayesian(pid) {
    ─────────────────────────────────────────────────────────────────────── */
 async function loadCalibration(pid) {
   if (!state.project) return;
-  const [projectCalibRes, priorsRes, metaLearningRes, byTemplateRes, frameworkRes] = await Promise.all([
+  const [projectCalibRes, priorsRes, frameworkRes] = await Promise.all([
     apiGet(`/projects/${pid}/calibration`)
       .then(data => ({ data, error: null }))
       .catch(error => ({ data: null, error })),
     apiGet('/calibration/priors')
-      .then(data => ({ data, error: null }))
-      .catch(error => ({ data: null, error })),
-    apiGet('/meta-learning/summary')
-      .then(data => ({ data, error: null }))
-      .catch(error => ({ data: null, error })),
-    apiGet('/calibration/deltas/by-template')
       .then(data => ({ data, error: null }))
       .catch(error => ({ data: null, error })),
     apiGet('/calibration/framework-performance?days=30')
@@ -3883,10 +3965,10 @@ async function loadCalibration(pid) {
     projectCalibError: projectCalibRes.error,
     priors: priorsRes.data,
     priorsError: priorsRes.error,
-    metaLearning: metaLearningRes.data,
-    metaLearningError: metaLearningRes.error,
-    byTemplateDeltas: byTemplateRes.data,
-    byTemplateDeltasError: byTemplateRes.error,
+    metaLearning: null,
+    metaLearningError: null,
+    byTemplateDeltas: null,
+    byTemplateDeltasError: null,
     frameworkPerf: frameworkRes.data,
     frameworkPerfError: frameworkRes.error,
   };
@@ -3894,25 +3976,10 @@ async function loadCalibration(pid) {
 
 async function loadDecisionPlane(pid) {
   try {
-    const [events, approvalsPayload, policyPayload] = await Promise.all([
-      apiGet(`/projects/${pid}/events?limit=500`).catch(() => ({ events: [] })),
-      apiGet(`/projects/${pid}/approvals`).catch(() => ({ approvals: [] })),
-      apiGet(`/projects/${pid}/policy-decisions`).catch(() => ({ policy_decisions: [] })),
-    ]);
-    state.dp.events = Array.isArray(events) ? events : (events?.events || []);
-    state.dp.approvals = Array.isArray(approvalsPayload)
-      ? approvalsPayload
-      : (approvalsPayload?.approvals || []);
-    state.dp.policyDecisions = Array.isArray(policyPayload)
-      ? policyPayload
-      : (policyPayload?.policy_decisions || []);
-
-    // If we have cursors, refresh the diff.
-    if (state.dp.cursorFrom && state.dp.cursorTo) {
-      try {
-        state.dp.diff = await apiGet(`/projects/${pid}/diff?from_event_id=${encodeURIComponent(state.dp.cursorFrom)}&to_event_id=${encodeURIComponent(state.dp.cursorTo)}`);
-      } catch (e) { state.dp.diff = null; }
-    }
+    state.dp.events = [];
+    state.dp.approvals = [];
+    state.dp.policyDecisions = [];
+    state.dp.diff = null;
 
     if (state.activeTab === 'decide' || state.activeTab === 'audit') renderMain();
   } catch (e) {
@@ -4317,7 +4384,7 @@ function renderBudget(b) {
 }
 
 function renderTabs() {
-  const tabs = ['decide', 'evidence', 'outcomes', 'bayesian', 'calibration', 'report', 'audit'];
+  const tabs = ['decide', 'evidence', 'outcomes', 'calibration', 'report', 'audit'];
   const bayesianCount = Array.isArray(state.project?.bayesian?.scenarios) ? state.project.bayesian.scenarios.length : 0;
   const calib = state.project?.calibration?.projectCalib;
   const calibN = (calib && typeof calib.n_resolved === 'number') ? calib.n_resolved : 0;
@@ -4329,8 +4396,7 @@ function renderTabs() {
     decide: state.dp.events.length ? String(state.dp.events.length) : '',
     evidence: evCount ? String(evCount) : '',
     outcomes: outcomeN ? String(outcomeN) : '',
-    bayesian: bayesianCount ? String(bayesianCount) : '',
-    calibration: calibN ? String(calibN) : '',
+    bayesian: calibration: calibN ? String(calibN) : '',
     report: '',
     audit: state.project?.audit?.audit_log?.length ? String(state.project.audit.audit_log.length) : '',
   };
@@ -4486,9 +4552,7 @@ function renderDecide() {
             <span class="meta">${filtered.length} of ${events.length}</span>
           </div>
           <div class="dp-timeline" id="dp-timeline">
-            ${filtered.length === 0
-              ? `<div class="dp-tl-empty">No events yet. Run the project or wait for the first phase to complete.</div>`
-              : filtered.map(renderTimelineRow).join('')}
+            <div class="dp-tl-empty">/projects/{id}/events: not available in this build</div>
           </div>
         </div>
         <div class="dp-panel">
@@ -4497,31 +4561,6 @@ function renderDecide() {
             <span class="meta">${state.dp.selectedEventId ? 'pinned' : 'click a row to inspect'}</span>
           </div>
           ${renderDetailPanel()}
-        </div>
-      </div>
-
-      <div class="dp-diff">
-        <div class="dp-diff-head">
-          <div>
-            <h4 style="font-size: var(--fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--ink-3); margin-bottom: 6px;">State diff</h4>
-            <div style="display: flex; gap: var(--sp-4); flex-wrap: wrap;">
-              <div class="dp-cursor">
-                <span class="cursor-label">From</span>
-                <span class="cursor-value ${state.dp.cursorFrom ? '' : 'empty'}">${state.dp.cursorFrom ? escapeHtml(state.dp.cursorFrom.slice(0, 8)) + '…' : '(not set)'}</span>
-              </div>
-              <div class="dp-cursor">
-                <span class="cursor-label">To</span>
-                <span class="cursor-value ${state.dp.cursorTo ? '' : 'empty'}">${state.dp.cursorTo ? escapeHtml(state.dp.cursorTo.slice(0, 8)) + '…' : '(not set)'}</span>
-              </div>
-            </div>
-          </div>
-          <div style="display: flex; gap: var(--sp-2);">
-            <button class="btn btn-secondary btn-sm" id="dp-diff-clear">Clear</button>
-            <button class="btn btn-accent btn-sm" id="dp-diff-run" ${(!state.dp.cursorFrom || !state.dp.cursorTo) ? 'disabled' : ''}>Compute diff</button>
-          </div>
-        </div>
-        <div class="dp-diff-body" id="dp-diff-body">
-          ${renderDiff()}
         </div>
       </div>
 
@@ -4667,10 +4706,8 @@ function renderDiff() {
 }
 
 function renderApprovals() {
-  const rows = state.dp.approvals;
-  if (rows.length === 0) {
-    return `<div class="dp-tl-empty">No approvals recorded yet.</div>`;
-  }
+  return `<div class="dp-tl-empty">/projects/{id}/approvals: not available in this build</div>`;
+}
   return `
     <div class="dp-table-wrap">
       <table class="dp-table">
@@ -4693,10 +4730,8 @@ function renderApprovals() {
 }
 
 function renderPolicyDecisions() {
-  const rows = state.dp.policyDecisions;
-  if (rows.length === 0) {
-    return `<div class="dp-tl-empty">No policy decisions recorded yet.</div>`;
-  }
+  return `<div class="dp-tl-empty">/projects/{id}/policy-decisions: not available in this build</div>`;
+}
   return `
     <div class="dp-table-wrap">
       <table class="dp-table">
@@ -5245,24 +5280,6 @@ function renderEvUploadPanel() {
    Data source: /projects/{id}/bayesian-advisory (fetched by loadProject).
    This view MUST NOT imply it changes orchestration or runtime behavior.
    ═══════════════════════════════════════════════════════════════════════ */
-function renderBayesianTab() {
-  const bay = state.project?.bayesian;
-  const scenarios = Array.isArray(bay?.scenarios) ? bay.scenarios : [];
-  const note = (bay && typeof bay.note === 'string' && bay.note) ? bay.note : 'Advisory only. Derived from hypothesis priors + recorded evidence. Does not control orchestration, gates, template selection, or phase routing.';
-
-  const banner = `
-    <div class="bay-banner" role="note" aria-label="Bayesian advisory scope notice">
-      <span class="bay-banner-icon" aria-hidden="true">⚠</span>
-      <div>
-        <div class="bay-banner-title">Advisory only — does not affect orchestration, routing, or gate decisions</div>
-        <div class="bay-banner-sub">${escapeHtml(note)}</div>
-      </div>
-    </div>
-  `;
-
-  if (!bay) {
-    return `
-      ${banner}
       <div class="view-stub">
         <div class="stub-tag">Bayesian advisory</div>
         <h3>Advisory view unavailable</h3>
@@ -5737,103 +5754,11 @@ function renderPriorsPanel(priors) {
 }
 
 function renderTemplateBuckets(metaLearning, byTemplateDeltas) {
-  // Per-template calibration is the authoritative view. A cross-template
-  // rollup is intentionally suppressed unless the backend flags it compatible.
-  const buckets = Array.isArray(metaLearning?.buckets) ? metaLearning.buckets : [];
-  const suppressed = metaLearning?.prior_rollup_suppressed !== false; // default true
-  const reason = metaLearning?.prior_rollup_reason || 'Cross-template rollup suppressed — metric semantics are not guaranteed comparable across templates.';
-  const deltaBuckets = byTemplateDeltas?.buckets || null;
-
-  if (!metaLearning && !deltaBuckets) {
-    return `
-      <section class="calib-section">
-        <header class="calib-section-head"><h3>Template-segmented calibration</h3><span class="meta">no data</span></header>
-        <div class="calib-section-body">
-          <p class="calib-empty">Meta-learning summary not available. Calibration is segmented by template (strategic_audit, automation_roi, ai_readiness) once outcomes are recorded.</p>
-        </div>
-      </section>
-    `;
-  }
-
-  const rollupLine = suppressed
-    ? `<div class="calib-rollup suppressed"><strong>Cross-template rollup: suppressed.</strong> ${escapeHtml(reason)}</div>`
-    : (metaLearning?.rollup
-        ? `<div class="calib-rollup"><strong>Cross-template rollup:</strong> n=${fmtInt(metaLearning.rollup.n_outcomes || 0)} · Brier=${Number(metaLearning.rollup.overall_brier || 0).toFixed(3)} · ECE=${Number(metaLearning.rollup.overall_ece || 0).toFixed(3)}</div>`
-        : '');
-
-  const bucketCards = buckets.map(b => {
-    const phases = Array.isArray(b.phases) ? b.phases : [];
-    const n = b.n_outcomes != null ? fmtInt(b.n_outcomes) : '—';
-    const br = b.overall_brier != null ? Number(b.overall_brier).toFixed(3) : '—';
-    const ec = b.overall_ece != null ? Number(b.overall_ece).toFixed(3) : '—';
-    return `
-      <div class="calib-bucket">
-        <div class="calib-bucket-head">
-          <div class="calib-bucket-name">${escapeHtml(b.project_type || '—')}</div>
-          <div class="calib-bucket-stats"><span>n=<b class="mono">${escapeHtml(n)}</b></span><span class="sep">·</span><span>Brier=<b class="mono">${escapeHtml(br)}</b></span><span class="sep">·</span><span>ECE=<b class="mono">${escapeHtml(ec)}</b></span></div>
-        </div>
-        ${phases.length ? `
-          <div class="calib-bucket-table">
-            <table class="calib-table dense">
-              <thead><tr><th>Phase</th><th class="num">n</th><th class="num">Brier</th><th class="num">ECE</th><th class="num">μ pred</th><th class="num">μ real</th></tr></thead>
-              <tbody>
-                ${phases.map(p => `
-                  <tr>
-                    <td>${escapeHtml(p.phase || '—')}</td>
-                    <td class="num mono">${escapeHtml(p.n_outcomes != null ? fmtInt(p.n_outcomes) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.brier != null ? Number(p.brier).toFixed(3) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.ece != null ? Number(p.ece).toFixed(3) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.mean_predicted != null ? Number(p.mean_predicted).toFixed(2) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.mean_realized != null ? Number(p.mean_realized).toFixed(2) : '—')}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        ` : `<div class="calib-bucket-empty">No per-phase rows yet.</div>`}
-      </div>
-    `;
-  }).join('');
-
-  const deltaSection = deltaBuckets
-    ? `
-      <details class="calib-details">
-        <summary>Recent project deltas, per template</summary>
-        ${Object.entries(deltaBuckets).map(([ptype, rows]) => {
-          const rs = Array.isArray(rows) ? rows : [];
-          return `
-            <div class="calib-subbucket">
-              <div class="calib-subbucket-name">${escapeHtml(ptype || '—')} <span class="meta">${rs.length} row${rs.length === 1 ? '' : 's'}</span></div>
-              ${rs.length ? `
-                <table class="calib-table dense">
-                  <thead><tr><th>Project</th><th class="num">n</th><th class="num">Brier</th><th class="num">Δ</th><th>Completed</th></tr></thead>
-                  <tbody>
-                    ${rs.slice(0, 20).map(r => `
-                      <tr>
-                        <td title="${escapeHtml(r.project_id || '')}">${escapeHtml((r.name || r.project_id || '—').slice(0, 40))}</td>
-                        <td class="num mono">${escapeHtml(r.n_resolved != null ? fmtInt(r.n_resolved) : '—')}</td>
-                        <td class="num mono">${escapeHtml(r.mean_brier != null ? Number(r.mean_brier).toFixed(3) : '—')}</td>
-                        <td class="num mono">${escapeHtml(r.calibration_delta != null ? Number(r.calibration_delta).toFixed(2) : '—')}</td>
-                        <td class="mono">${escapeHtml(r.completed_at ? new Date(r.completed_at).toLocaleDateString() : '—')}</td>
-                      </tr>
-                    `).join('')}
-                  </tbody>
-                </table>
-              ` : `<div class="calib-bucket-empty">No deltas for this template.</div>`}
-            </div>
-          `;
-        }).join('')}
-      </details>
-    `
-    : '';
-
   return `
     <section class="calib-section">
-      <header class="calib-section-head"><h3>Template-segmented calibration</h3><span class="meta">${buckets.length} bucket${buckets.length === 1 ? '' : 's'}</span></header>
+      <header class="calib-section-head"><h3>Template-segmented calibration</h3></header>
       <div class="calib-section-body">
-        ${rollupLine}
-        ${buckets.length ? `<div class="calib-buckets">${bucketCards}</div>` : `<p class="calib-empty">No per-template buckets yet. Calibration is segmented by template once outcomes are recorded.</p>`}
-        ${deltaSection}
+        <p class="calib-empty">/meta-learning/summary and /calibration/deltas/by-template: not available in this build</p>
       </div>
     </section>
   `;
@@ -6410,7 +6335,7 @@ function renderInspectorEvidence() {
   const summary = knowledge?.summary || {};
 
   return `
-    ${renderBayesianInspectorSection()}
+    
     <div class="ins-section">
       <div class="ins-section-head"><h5>Uploaded files</h5><span class="meta">${fmtInt(files.length)}</span></div>
       <div class="ins-section-body dense">
@@ -6570,16 +6495,6 @@ function renderInspectorAudit() {
 }
 
 /* ── Bayesian advisory panel (Evidence + Decide contextual) ─────────── */
-function renderBayesianInspectorSection() {
-  const bay = state.project.bayesian;
-  const scenarios = Array.isArray(bay?.scenarios) ? bay.scenarios : [];
-  if (!bay || scenarios.length === 0) {
-    return `
-      <div class="ins-section">
-        <div class="ins-section-head"><h5>Bayesian advisory</h5><span class="meta">advisory only</span></div>
-        <div class="ins-section-body"><div class="ins-empty" style="padding: 0;">No advisory posteriors yet. They derive from hypothesis priors + evidence links; run the project to populate.</div></div>
-      </div>`;
-  }
   return `
     <div class="ins-section">
       <div class="ins-section-head"><h5>Bayesian advisory</h5><span class="meta">${scenarios.length} scenario${scenarios.length === 1 ? '' : 's'}</span></div>
@@ -6906,23 +6821,7 @@ function wireDecisionPlane() {
     });
   });
   // Diff controls
-  $('dp-diff-clear')?.addEventListener('click', () => {
-    state.dp.cursorFrom = null;
-    state.dp.cursorTo = null;
-    state.dp.diff = null;
-    renderMain();
-  });
-  $('dp-diff-run')?.addEventListener('click', async () => {
-    const { cursorFrom, cursorTo } = state.dp;
-    if (!cursorFrom || !cursorTo) return;
-    try {
-      state.dp.diff = await apiGet(`/projects/${state.selectedProjectId}/diff?from_event_id=${encodeURIComponent(cursorFrom)}&to_event_id=${encodeURIComponent(cursorTo)}`);
-      renderMain();
-    } catch (e) {
-      toast('Diff failed: ' + e.message, 'err');
     }
-  });
-}
 
 /* ═══════════════════════════════════════════════════════════════════════
    Run / Kill / Export
