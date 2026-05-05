@@ -217,8 +217,10 @@ class SourceRegistryEntry(BaseModel):
 
 class KnowledgeItem(BaseModel):
     item_id: str = ""
+    evidence_id: str = ""
     source_id: str = ""
     source_ref: str = ""
+    locator: str = ""
     title: str = ""
     summary: str = ""
     structured_payload: dict[str, Any] = Field(default_factory=dict)

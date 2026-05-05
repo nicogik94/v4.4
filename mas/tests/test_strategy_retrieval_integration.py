@@ -2,7 +2,7 @@
 import json
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -60,6 +60,7 @@ def make_strategy_state(project_id: str = "strategy-retrieval"):
 
 
 def sync_strategy_fixture(state):
+    now = datetime.now().replace(microsecond=0)
     sync_offline_source(
         state,
         "src-strategy",
@@ -68,7 +69,7 @@ def sync_strategy_fixture(state):
                 "source_ref": "fixture://strategy/eligible",
                 "title": "Fresh strategy note",
                 "summary": "Recent demand signals favor archive refresh before net-new content.",
-                "observed_at": datetime(2026, 4, 12, 10, 0, 0).isoformat(),
+                "observed_at": (now - timedelta(hours=2)).isoformat(),
                 "structured_payload": {
                     "region": "mx",
                     "score": 0.82,
@@ -77,7 +78,7 @@ def sync_strategy_fixture(state):
             }
         ],
         actor="operator",
-        requested_at=datetime(2026, 4, 12, 12, 0, 0),
+        requested_at=now,
     )
     blocked = state.knowledge_layer.items[0].model_copy(
         update={

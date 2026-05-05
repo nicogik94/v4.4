@@ -82,6 +82,7 @@ import observability
 logger = logging.getLogger("v4-api")
 
 running: set[str] = set()
+auto_refresh_jobs: set[str] = set()
 
 
 @asynccontextmanager
@@ -286,6 +287,22 @@ async def create_project(req: CreateProjectRequest):
             logger.debug(f"policy log skipped at create ({e})")
     ensure_decision_objects(state, trigger="api.create_project")
     await store.save(state)
+    try:
+        import decision_events
+
+        await decision_events.append(
+            state.project_id,
+            "project.created",
+            actor_type="operator",
+            actor_id=req.risk_set_by or "operator",
+            payload={
+                "project_name": state.project_name,
+                "project_type": getattr(req, "project_type", ""),
+                "risk_classification": state.risk_classification,
+            },
+        )
+    except Exception as e:
+        logger.debug(f"decision event append skipped at create ({e})")
     return _to_response(state)
 
 
@@ -917,6 +934,26 @@ async def record_outcome(project_id: str, outcome: OutcomeRecord):
             outcome.predicted_probability, outcome.realized,
             outcome.realized_value, outcome.notes, outcome.recorded_by,
         )
+    try:
+        import decision_events
+
+        await decision_events.append(
+            project_id,
+            "outcome.recorded",
+            actor_type="operator",
+            actor_id=outcome.recorded_by,
+            phase=outcome.phase,
+            payload={
+                "hypothesis_id": outcome.hypothesis_id,
+                "phase": outcome.phase,
+                "predicted_probability": outcome.predicted_probability,
+                "realized": outcome.realized,
+                "realized_value": outcome.realized_value,
+                "notes": outcome.notes,
+            },
+        )
+    except Exception as e:
+        logger.debug(f"decision event append skipped for outcome ({e})")
     return {"status": "recorded", "project_id": project_id, "hypothesis_id": outcome.hypothesis_id}
 
 

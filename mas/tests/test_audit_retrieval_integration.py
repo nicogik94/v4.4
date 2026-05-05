@@ -2,7 +2,7 @@
 import json
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -61,6 +61,7 @@ def make_audit_state(project_id: str = "audit-retrieval"):
 
 
 def sync_audit_fixture(state):
+    now = datetime.now().replace(microsecond=0)
     sync_offline_source(
         state,
         "src-audit",
@@ -69,7 +70,7 @@ def sync_audit_fixture(state):
                 "source_ref": "fixture://audit/eligible",
                 "title": "Fresh audit note",
                 "summary": "Recent operational signal suggests page-speed regressions in archive traffic.",
-                "observed_at": datetime(2026, 4, 12, 10, 0, 0).isoformat(),
+                "observed_at": (now - timedelta(hours=2)).isoformat(),
                 "structured_payload": {
                     "region": "mx",
                     "score": 0.77,
@@ -79,7 +80,7 @@ def sync_audit_fixture(state):
             }
         ],
         actor="operator",
-        requested_at=datetime(2026, 4, 12, 12, 0, 0),
+        requested_at=now,
     )
     blocked = state.knowledge_layer.items[0].model_copy(
         update={

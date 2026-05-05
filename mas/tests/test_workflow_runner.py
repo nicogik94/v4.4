@@ -275,13 +275,15 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("No framework marker is used as project evidence", prompt)
         self.assertIn("No evidence ID or locator is invented", prompt)
 
-    def test_report_prompt_uses_missing_locator_fallback(self):
+    def test_report_prompt_filters_missing_locator_entries(self):
         state = make_completed_state("report-missing-locator")
         state.hypotheses[0].evidence_ids = ["ev-no-locator"]
 
         prompt = build_report_prompt(state)
 
-        self.assertIn("[Evidence: ev-no-locator | locator unavailable]", prompt)
+        self.assertIn("No project evidence locators supplied", prompt)
+        self.assertNotIn("[Evidence: ev-no-locator", prompt)
+        self.assertNotIn("locator unavailable", prompt)
 
     def test_report_phase_prompt_file_contains_matching_citation_discipline(self):
         prompt_text = Path("prompts/phases/05-report.md").read_text(encoding="utf-8")

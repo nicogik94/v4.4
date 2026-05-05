@@ -91,7 +91,7 @@ def evaluate_reentry_triggers(state: ProjectState) -> list[dict]:
         if total > 0:
             if len(rejected) == total:
                 fired.append({**REENTRY_TRIGGERS["R5"], "detail": f"All {total} hypotheses rejected"})
-            elif len(rejected) / total > 0.5:
+            if len(rejected) / total > 0.5:
                 fired.append({**REENTRY_TRIGGERS["R6"], "detail": f"{len(rejected)}/{total} rejected"})
 
     return fired
@@ -233,10 +233,10 @@ def compute_posterior(alpha: float, beta: float, successes: int = 0, failures: i
 
 def compute_bayes_factor(alpha: float, beta: float) -> float:
     """Bayes Factor: strength of evidence for the dominant hypothesis."""
-    p = alpha / (alpha + beta)
-    if p == 0 or p == 1:
+    lower = min(alpha, beta)
+    if lower <= 0:
         return float("inf")
-    return p / (1 - p) if p > 0.5 else (1 - p) / p
+    return max(alpha, beta) / lower
 
 
 def compute_brier_score(predictions: list[Prediction]) -> Optional[float]:
