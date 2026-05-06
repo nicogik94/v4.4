@@ -79,3 +79,41 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("submitClarificationAnswer", html)
         self.assertIn("markClarificationUnavailable", html)
         self.assertIn("Mark unavailable", html)
+
+    def test_v5_export_profile_controls_are_present(self):
+        if not HTML_V5_PATH.exists():
+            self.skipTest("dashboard v5 bundle is not mounted in this execution environment")
+        html = HTML_V5_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("renderExportProfileControl", html)
+        self.assertIn("exportProjectProfile", html)
+        self.assertIn("syncExportProfileFormatOptions", html)
+        self.assertIn("export-profile-select", html)
+        self.assertIn("export-format-select", html)
+        self.assertIn("export-profile-submit", html)
+
+        self.assertIn("Report", html)
+        self.assertIn("Client dossier", html)
+        self.assertIn("Operator dossier", html)
+        self.assertIn("Machine archive", html)
+        self.assertIn("Final report only.", html)
+        self.assertIn("Stakeholder-ready export.", html)
+        self.assertIn("Internal review export with phase summaries.", html)
+        self.assertIn("Internal ZIP archive for backup/debug.", html)
+        self.assertIn("Internal use only.", html)
+        self.assertIn("Contains sanitized project archive files.", html)
+        self.assertIn("Export may be incomplete until the report phase runs.", html)
+
+        self.assertIn("/export?profile=", html)
+        self.assertIn("report", html)
+        self.assertIn("client_dossier", html)
+        self.assertIn("operator_dossier", html)
+        self.assertIn("machine_archive", html)
+        self.assertIn("pdf", html)
+        self.assertIn("docx", html)
+        self.assertIn("zip", html)
+
+        self.assertIn("/export/${fmt}", html)
+        self.assertIn("Download DOCX", html)
+        self.assertIn("Download PDF", html)
+        self.assertIn("downloadExport", html)
