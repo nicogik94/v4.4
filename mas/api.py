@@ -87,6 +87,7 @@ from exporters import (
     build_export_filename,
     export_project_docx_bytes,
     export_project_pdf_bytes,
+    export_project_profile_bytes,
 )
 import store
 import observability
@@ -947,6 +948,26 @@ async def export_project(project_id: str, fmt: str):
         raise HTTPException(400, "fmt must be pdf or docx")
 
     filename = build_export_filename(state, fmt)
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/projects/{project_id}/export")
+async def export_project_profile(project_id: str, profile: str = "report", format: str | None = None):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    if not format:
+        raise HTTPException(400, "format is required")
+
+    try:
+        payload, media_type, filename = export_project_profile_bytes(state, profile, format)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
     return Response(
         content=payload,
         media_type=media_type,
