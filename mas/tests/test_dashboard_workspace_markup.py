@@ -5,13 +5,20 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve()
 HTML_PATH = None
+HTML_V5_PATH = None
 for root in (_HERE.parents[1], _HERE.parents[2]):
     candidate = root / "dashboards" / "index.html"
     if candidate.exists():
         HTML_PATH = candidate
+    v5_candidate = root / "dashboards" / "index-v5.html"
+    if v5_candidate.exists():
+        HTML_V5_PATH = v5_candidate
+    if HTML_PATH is not None and HTML_V5_PATH is not None:
         break
 if HTML_PATH is None:
     HTML_PATH = _HERE.parents[1] / "dashboards" / "index.html"
+if HTML_V5_PATH is None:
+    HTML_V5_PATH = _HERE.parents[1] / "dashboards" / "index-v5.html"
 
 
 class TestDashboardWorkspaceMarkup(unittest.TestCase):
@@ -59,3 +66,16 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("derived decision objects synchronized with stored state", html)
         self.assertIn("knowledge:", html)
         self.assertIn("external knowledge freshness", html)
+
+    def test_v5_clarification_markup_is_present(self):
+        if not HTML_V5_PATH.exists():
+            self.skipTest("dashboard v5 bundle is not mounted in this execution environment")
+        html = HTML_V5_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("/clarifications", html)
+        self.assertIn("Follow-up questions", html)
+        self.assertIn("Missing information", html)
+        self.assertIn("generateClarificationCycle", html)
+        self.assertIn("submitClarificationAnswer", html)
+        self.assertIn("markClarificationUnavailable", html)
+        self.assertIn("Mark unavailable", html)

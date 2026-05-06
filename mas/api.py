@@ -18,6 +18,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ValidationError
 
+from clarifications import (
+    ClarificationAnswer,
+    ClarificationCycle,
+    ClarificationStatus,
+    generate_clarification_cycle,
+    latest_clarification_cycle,
+    mark_clarification_unavailable,
+    open_clarification_questions,
+    record_clarification_answer,
+    same_gap_set,
+    supersede_open_questions,
+)
 from connectors import CONNECTOR_REGISTRY
 from explainability import (
     ExplainabilityReport,
@@ -244,6 +256,12 @@ class ResetBreakersRequest(BaseModel):
     rationale: str = ""
 
 
+class ClarificationAnswerRequest(BaseModel):
+    question_id: str
+    answer_text: str = ""
+    status: str = "answered"
+
+
 EDITABLE_PHASES = {"classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "report"}
 
 
@@ -346,6 +364,57 @@ async def get_overview(project_id: str):
     if not state:
         raise HTTPException(404, "Project not found")
     return build_operator_overview(state)
+
+
+@app.get("/projects/{project_id}/clarifications")
+async def get_clarifications(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return _clarification_response(state)
+
+
+@app.post("/projects/{project_id}/clarifications/cycles")
+async def create_clarification_cycle(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    _ensure_project_not_running(project_id)
+
+    generated = generate_clarification_cycle(state)
+    latest = latest_clarification_cycle(state)
+    if same_gap_set(latest, generated):
+        cycle = latest
+    else:
+        supersede_open_questions(state)
+        state.clarification_cycles.append(generated)
+        cycle = generated
+    await store.save(state)
+    return _clarification_response(state, cycle=cycle)
+
+
+@app.post("/projects/{project_id}/clarifications/answers")
+async def answer_clarification(project_id: str, req: ClarificationAnswerRequest):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    _ensure_project_not_running(project_id)
+
+    status = (req.status or "").strip().lower()
+    try:
+        if status == ClarificationStatus.ANSWERED.value:
+            answer = record_clarification_answer(state, req.question_id, req.answer_text)
+        elif status == ClarificationStatus.UNAVAILABLE.value:
+            answer = mark_clarification_unavailable(state, req.question_id)
+        else:
+            raise HTTPException(400, "status must be answered or unavailable")
+    except KeyError as exc:
+        raise HTTPException(404, "Clarification question not found") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    await store.save(state)
+    return _clarification_response(state, answer=answer)
 
 
 @app.get("/projects/{project_id}/files")
@@ -1568,3 +1637,42 @@ def _to_response(s: ProjectState) -> ProjectResponse:
         brier_score=s.brier_score,
         reentry_count=len(s.reentry_triggers_fired),
     )
+
+
+def _clarification_response(
+    state: ProjectState,
+    *,
+    cycle: ClarificationCycle | None = None,
+    answer: ClarificationAnswer | None = None,
+) -> dict[str, Any]:
+    latest = latest_clarification_cycle(state)
+    all_questions = [
+        question
+        for existing_cycle in state.clarification_cycles
+        for question in existing_cycle.questions
+    ]
+    status_counts = {
+        status.value: sum(
+            1
+            for question in all_questions
+            if (question.status.value if hasattr(question.status, "value") else str(question.status)) == status.value
+        )
+        for status in ClarificationStatus
+    }
+    payload: dict[str, Any] = {
+        "project_id": state.project_id,
+        "cycles": [existing_cycle.model_dump(mode="json") for existing_cycle in state.clarification_cycles],
+        "latest_cycle": latest.model_dump(mode="json") if latest else None,
+        "open_questions": [
+            question.model_dump(mode="json")
+            for question in open_clarification_questions(state)
+        ],
+        "answers": [existing_answer.model_dump(mode="json") for existing_answer in state.clarification_answers],
+        "status_counts": status_counts,
+        "summary": latest.summary if latest else "No clarification cycle generated yet.",
+    }
+    if cycle is not None:
+        payload["cycle"] = cycle.model_dump(mode="json")
+    if answer is not None:
+        payload["answer"] = answer.model_dump(mode="json")
+    return payload

@@ -3894,7 +3894,7 @@ async function loadProject(pid) {
       auditRes,
       filesRes,
       knowledgeRes,
-      
+      clarificationsRes,
       overviewRes,
     ] = await Promise.all([
       apiGet(`/projects/${pid}/state`),
@@ -3903,7 +3903,7 @@ async function loadProject(pid) {
       optionalGet(`/projects/${pid}/policy-audit`),
       optionalGet(`/projects/${pid}/files`),
       optionalGet(`/projects/${pid}/knowledge`),
-      
+      optionalGet(`/projects/${pid}/clarifications`),
       optionalGet(`/projects/${pid}/overview`),
     ]);
     state.project = {
@@ -3918,6 +3918,8 @@ async function loadProject(pid) {
       filesError: filesRes.error,
       knowledge: knowledgeRes.data,
       knowledgeError: knowledgeRes.error,
+      clarifications: clarificationsRes.data,
+      clarificationsError: clarificationsRes.error,
       bayesian: null,
       bayesianError: null,
       overview: overviewRes.data,
@@ -4512,6 +4514,83 @@ function renderSQICard(sqi) {
   `;
 }
 
+function renderClarificationPanel(clarifications) {
+  const pid = state.selectedProjectId || '';
+  const latest = clarifications?.latest_cycle || null;
+  const openQuestions = Array.isArray(clarifications?.open_questions) ? clarifications.open_questions : [];
+  const counts = clarifications?.status_counts || {};
+  const answered = Number(counts.answered || 0);
+  const unavailable = Number(counts.unavailable || 0);
+  const meta = latest
+    ? `${openQuestions.length} open | ${answered} answered | ${unavailable} unavailable`
+    : 'not generated';
+
+  const generateButton = pid
+    ? `<button class="btn btn-secondary" onclick="generateClarificationCycle('${escapeHtml(pid)}')">Generate questions</button>`
+    : '';
+
+  if (!latest) {
+    return `
+      <section class="dp-panel" aria-label="Follow-up questions">
+        <div class="dp-panel-head">
+          <h4>Follow-up questions</h4>
+          <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+        </div>
+        <div class="dp-detail-empty">
+          No deterministic missing-information cycle has been generated for this project.
+          <div style="margin-top: 10px;">${generateButton}</div>
+        </div>
+      </section>
+    `;
+  }
+
+  if (!openQuestions.length) {
+    return `
+      <section class="dp-panel" aria-label="Follow-up questions">
+        <div class="dp-panel-head">
+          <h4>Follow-up questions</h4>
+          <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+        </div>
+        <div class="dp-detail-empty">
+          No deterministic missing-information questions right now.
+          <div style="margin-top: 10px;">${generateButton}</div>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="dp-panel" aria-label="Follow-up questions">
+      <div class="dp-panel-head">
+        <h4>Follow-up questions</h4>
+        <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+      </div>
+      <div style="display: grid; gap: 10px;">
+        ${openQuestions.map(q => {
+          const questionId = String(q.question_id || '');
+          const inputId = `clar-answer-${questionId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+          return `
+            <div class="dp-detail-card">
+              <div class="dp-stats" style="margin-bottom: 8px;">
+                <span>${escapeHtml(q.priority || '')}</span>
+                <span>${escapeHtml(q.affected_phase || '')}</span>
+                <span>${escapeHtml(q.source_gap || '')}</span>
+              </div>
+              <div style="font-weight: 700; color: var(--ink-1); margin-bottom: 6px;">${escapeHtml(q.text || '')}</div>
+              <div class="meta" style="line-height: 1.45; margin-bottom: 8px;">Why it matters: ${escapeHtml(q.why_it_matters || '')}</div>
+              <textarea id="${escapeHtml(inputId)}" rows="3" placeholder="Operator answer" style="width: 100%; resize: vertical; margin-bottom: 8px;"></textarea>
+              <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="btn btn-primary" onclick="submitClarificationAnswer('${escapeHtml(pid)}', '${escapeHtml(questionId)}', '${escapeHtml(inputId)}')">Answer</button>
+                <button class="btn btn-secondary" onclick="markClarificationUnavailable('${escapeHtml(pid)}', '${escapeHtml(questionId)}')">Mark unavailable</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </section>
+  `;
+}
+
 function renderDecide() {
   const events = state.dp.events;
   const filter = state.dp.filter;
@@ -4525,6 +4604,7 @@ function renderDecide() {
   return `
     <div class="dp">
       ${renderSQICard(state.project?.fullState?.sqi)}
+      ${renderClarificationPanel(state.project?.clarifications)}
       <div class="dp-top">
         <div>
           <div class="dp-title">Decision plane</div>
@@ -6661,6 +6741,54 @@ function wireDecisionPlane() {
   });
   // Diff controls
     }
+
+async function generateClarificationCycle(pid) {
+  if (!pid) return;
+  try {
+    await apiPost(`/projects/${pid}/clarifications/cycles`, {});
+    await loadProject(pid);
+    renderMain();
+    toast('Follow-up questions updated.', 'ok');
+  } catch (e) {
+    toast('Follow-up question update failed: ' + e.message, 'err');
+  }
+}
+
+async function submitClarificationAnswer(pid, questionId, inputId) {
+  if (!pid || !questionId) return;
+  const answerText = ($(inputId)?.value || '').trim();
+  if (!answerText) {
+    toast('Answer text is required.', 'err');
+    return;
+  }
+  try {
+    await apiPost(`/projects/${pid}/clarifications/answers`, {
+      question_id: questionId,
+      answer_text: answerText,
+      status: 'answered',
+    });
+    await loadProject(pid);
+    renderMain();
+    toast('Answer saved.', 'ok');
+  } catch (e) {
+    toast('Answer save failed: ' + e.message, 'err');
+  }
+}
+
+async function markClarificationUnavailable(pid, questionId) {
+  if (!pid || !questionId) return;
+  try {
+    await apiPost(`/projects/${pid}/clarifications/answers`, {
+      question_id: questionId,
+      status: 'unavailable',
+    });
+    await loadProject(pid);
+    renderMain();
+    toast('Marked unavailable.', 'ok');
+  } catch (e) {
+    toast('Mark unavailable failed: ' + e.message, 'err');
+  }
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
    Run / Kill / Export
