@@ -56,8 +56,10 @@ REPORT_CITATION_DISCIPLINE = """MANDATORY REPORT CITATION DISCIPLINE:
 - Framework markers such as [#24] are methodology references, not project evidence citations.
 - Do not cite the act of recommending; cite the empirical evidence behind the recommendation.
 - Do not cite pure reasoning, causal interpretation, or framework logic as empirical evidence.
-- In load-bearing sections such as EXECUTIVE SUMMARY, DECISION LOGIC, EVIDENCE STRENGTH, FINAL VERDICTS, STRATEGY RESULTS, and MONITORING AND KILL CRITERIA: if a section contains an empirical claim supported by supplied project evidence, include at least one concrete evidence marker copied from PROJECT EVIDENCE LOCATORS in that section.
+- In load-bearing sections such as Executive Summary, Recommended Path, Why This Is Recommended, Evidence Used, Key Risks, Assumptions and Open Questions, and Monitoring and Kill Criteria: if a section contains an empirical claim supported by supplied project evidence, include at least one concrete evidence marker copied from PROJECT EVIDENCE LOCATORS in that section.
 - If no concrete locator is available or no supplied evidence supports the claim, label the claim as [Inference], [Hypothesis], [Unknown], or write citation unavailable.
+- Evidence markers identify source material; they do not by themselves prove the recommendation or semantic support for a claim.
+- Do not claim that citation or locator resolvability proves semantic support.
 - Never fabricate a marker to satisfy the citation rule.
 
 EVIDENCE CITATION CHECK BEFORE FINAL OUTPUT:
@@ -410,24 +412,78 @@ def build_report_prompt(state: ProjectState) -> str:
     evidence_locator_register = _build_report_evidence_locator_register(state)
     obs_text = "\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations"
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
-    return f"""PHASE 5: Final report. Use Causal Inference[#24], Swiss Cheese[#10], HRO[#29], Red Team[#28], Ablation[#23].
+    return f"""PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers.
 
 {evidence_locator_register}
 
 {REPORT_CITATION_DISCIPLINE}
 
-Include:
-# EXECUTIVE SUMMARY
-# FINAL VERDICTS (table)
-# STRATEGY RESULTS
-# CAUSAL VERIFICATION [#24]
-# DEFENSE AUDIT — Swiss Cheese [#10]
-# HRO DEBRIEF [#29]
-# RED TEAM [#28]
-# ABLATION [#23]
-# AGENT CARDS
-# META-LEARNER INPUT (Brier, calibration)
-# NEXT STEPS
+Report writing rules:
+- Write for a non-technical business audience. Use plain English first and technical language second.
+- Define technical terms immediately if they must appear. Avoid unexplained acronyms in the main body.
+- Prefer short paragraphs. Keep main-body sections concise: 3-6 bullets or one compact table unless more detail is necessary.
+- Use tables for options, evidence, risks, roadmap, next steps, and monitoring.
+- Separate recommendation strength from evidence strength.
+- Clearly label assumptions, inferences, hypotheses, unknowns, and unavailable citations.
+- Evidence markers identify source material; they do not by themselves prove the recommendation.
+- Explain what cited evidence suggests before relying on it.
+- Do not imply cited evidence semantically proves a claim unless the report text explains what the evidence actually suggests.
+- Do not claim that citation or locator resolvability proves semantic support.
+- Preserve canonical evidence markers from PROJECT EVIDENCE LOCATORS. Do not fabricate evidence markers.
+- If evidence is unavailable, use [Inference], [Hypothesis], [Unknown], or citation unavailable.
+- Do not invent owners, dates, metrics, thresholds, budgets, customer facts, evidence, or commitments.
+- When owner, date, metric, threshold, budget, customer fact, or commitment is not present in project state, use exactly: TBD — requires operator confirmation.
+- If ProjectState clarification_cycles or clarification_answers are present in report context, include them only as assumptions, open questions, unavailable context, or operator-provided context.
+- Unanswered clarification questions remain unresolved questions.
+- Clarification answers and questions are not empirical evidence, must not be cited with project evidence markers, and must not be placed in the Evidence Used table as cited facts.
+
+Report structure:
+Use these exact Markdown headings in this exact order:
+# Executive Summary
+# The Decision
+# Recommended Path
+# Why This Is Recommended
+# Options Considered
+# Evidence Used
+# Key Risks
+# Assumptions and Open Questions
+# Roadmap
+# Next Steps
+# Monitoring and Kill Criteria
+# Appendix: Technical Analysis
+
+Executive Summary:
+- Include an "At a glance" block with: Decision, Recommendation, Confidence level, Biggest risk, Next action.
+
+Options Considered:
+- Use a table with: option, upside, downside, best use case, verdict.
+
+Evidence Used:
+- Use a table with: evidence, what it suggests, evidence strength, caveat, citation marker if available.
+- Evidence strength labels must be one of: strong, moderate, weak, unavailable, inference only.
+
+Key Risks:
+- Use a table with: risk, why it matters, early warning signal, mitigation, owner/role if known.
+
+Assumptions and Open Questions:
+- Use a table with: unresolved assumption or question, why it matters, how to resolve it, owner/role if known, status.
+- Status must be one of: assumption, open question, unknown, operator-provided, unavailable.
+
+Roadmap:
+- Include a 7/30/60/90-day roadmap table with: timeframe, objective, actions, owner/role, success signal, risk/stop-change-course threshold.
+- If a timeframe cannot be responsibly specified, state what information is needed to specify it.
+- If owner, metric, success signal, or threshold is unknown, use: TBD — requires operator confirmation.
+
+Next Steps:
+- Include 5-7 concrete next actions in a table with: action, owner/role, deadline or timeframe, dependency, expected output.
+- If the report cannot responsibly identify 5 concrete next actions, include fewer and explain what information is needed to complete the list.
+
+Monitoring and Kill Criteria:
+- Use plain English. Prefer "stop/change-course threshold" over unexplained "kill criterion."
+- Use a table with: signal to watch, good sign, warning sign, stop/change-course threshold, review cadence.
+
+Appendix: Technical Analysis:
+- Move framework-heavy content here: FMEA, HAZOP, SQI, Causal Inference, HRO, Red Team, Ablation, framework references, and technical scoring notes.
 
 {ctx_classify}
 {ctx_hyps}

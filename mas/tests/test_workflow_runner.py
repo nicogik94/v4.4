@@ -168,10 +168,11 @@ REPORT_EVIDENCE_MARKER_RE = re.compile(r"\[Evidence: [^\]\n]+ \| [^\]\n]+\]")
 REPORT_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 REPORT_LOAD_BEARING_SECTIONS = {
     "executive summary",
-    "decision logic",
-    "evidence strength",
-    "final verdicts",
-    "strategy results",
+    "recommended path",
+    "why this is recommended",
+    "evidence used",
+    "key risks",
+    "assumptions and open questions",
     "monitoring and kill criteria",
 }
 
@@ -210,10 +211,10 @@ class TestWorkflowHelpers(unittest.TestCase):
         prompt = build_report_prompt(state)
 
         self.assertIn("PROJECT EVIDENCE LOCATORS:", prompt)
-        header = "PHASE 5: Final report. Use Causal Inference[#24], Swiss Cheese[#10], HRO[#29], Red Team[#28], Ablation[#23]."
+        header = "PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers."
         self.assertLess(prompt.index(header), prompt.index("PROJECT EVIDENCE LOCATORS:"))
         self.assertLess(prompt.index("PROJECT EVIDENCE LOCATORS:"), prompt.index("MANDATORY REPORT CITATION DISCIPLINE:"))
-        self.assertLess(prompt.index("MANDATORY REPORT CITATION DISCIPLINE:"), prompt.index("Include:"))
+        self.assertLess(prompt.index("MANDATORY REPORT CITATION DISCIPLINE:"), prompt.index("Report structure:"))
         self.assertLess(prompt.index("PROJECT EVIDENCE LOCATORS:"), prompt.index("DOMAIN:"))
         self.assertIn("[Evidence: ev-market-note | upload:file-1:market-note.pdf#chunk=2]", prompt)
         self.assertIn("source_ref=fixture://market-note", prompt)
@@ -246,6 +247,8 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("Do not invent evidence IDs, source names, metrics, pages, rows, chunks, customers, or provenance", prompt)
         self.assertIn("Framework markers such as [#24] are methodology references, not project evidence citations", prompt)
         self.assertIn("Do not cite the act of recommending; cite the empirical evidence behind the recommendation", prompt)
+        self.assertIn("Evidence markers identify source material; they do not by themselves prove the recommendation or semantic support for a claim", prompt)
+        self.assertIn("Do not claim that citation or locator resolvability proves semantic support", prompt)
         self.assertIn("If no concrete locator is available or no supplied evidence supports the claim", prompt)
         self.assertIn("[Inference], [Hypothesis], [Unknown], or write citation unavailable", prompt)
         self.assertNotIn("[Evidence: <evidence_id> | <locator>] is the only canonical project-evidence citation format", prompt)
@@ -255,16 +258,87 @@ class TestWorkflowHelpers(unittest.TestCase):
         prompt = build_report_prompt(make_completed_state("report-load-bearing-citations"))
 
         for section in (
-            "EXECUTIVE SUMMARY",
-            "DECISION LOGIC",
-            "EVIDENCE STRENGTH",
-            "FINAL VERDICTS",
-            "STRATEGY RESULTS",
-            "MONITORING AND KILL CRITERIA",
+            "Executive Summary",
+            "Recommended Path",
+            "Why This Is Recommended",
+            "Evidence Used",
+            "Key Risks",
+            "Assumptions and Open Questions",
+            "Monitoring and Kill Criteria",
         ):
             self.assertIn(section, prompt)
         self.assertIn("if a section contains an empirical claim supported by supplied project evidence", prompt)
         self.assertIn("Never fabricate a marker to satisfy the citation rule", prompt)
+
+    def test_report_prompt_uses_client_memo_headings_in_order(self):
+        prompt = build_report_prompt(make_completed_state("report-client-memo-headings"))
+
+        headings = (
+            "# Executive Summary",
+            "# The Decision",
+            "# Recommended Path",
+            "# Why This Is Recommended",
+            "# Options Considered",
+            "# Evidence Used",
+            "# Key Risks",
+            "# Assumptions and Open Questions",
+            "# Roadmap",
+            "# Next Steps",
+            "# Monitoring and Kill Criteria",
+            "# Appendix: Technical Analysis",
+        )
+        positions = [prompt.index(heading) for heading in headings]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_report_prompt_includes_client_artifact_constraints(self):
+        prompt = build_report_prompt(make_completed_state("report-client-artifact-constraints"))
+
+        self.assertIn("At a glance", prompt)
+        for item in ("Decision", "Recommendation", "Confidence level", "Biggest risk", "Next action"):
+            self.assertIn(item, prompt)
+        self.assertIn("Separate recommendation strength from evidence strength", prompt)
+        self.assertIn("Evidence strength labels must be one of: strong, moderate, weak, unavailable, inference only", prompt)
+        self.assertIn("Do not invent owners, dates, metrics, thresholds, budgets, customer facts, evidence, or commitments", prompt)
+        self.assertIn("TBD — requires operator confirmation", prompt)
+        self.assertIn("Use a table with: option, upside, downside, best use case, verdict", prompt)
+        self.assertIn("Use a table with: evidence, what it suggests, evidence strength, caveat, citation marker if available", prompt)
+        self.assertIn("Use a table with: risk, why it matters, early warning signal, mitigation, owner/role if known", prompt)
+        self.assertIn("Use a table with: unresolved assumption or question, why it matters, how to resolve it, owner/role if known, status", prompt)
+        self.assertIn("Include a 7/30/60/90-day roadmap table", prompt)
+        self.assertIn("Include 5-7 concrete next actions", prompt)
+        self.assertIn("Prefer \"stop/change-course threshold\" over unexplained \"kill criterion.\"", prompt)
+        self.assertIn("Move framework-heavy content here: FMEA, HAZOP, SQI, Causal Inference, HRO, Red Team, Ablation", prompt)
+        self.assertNotIn("Evidence Gauge", prompt)
+        self.assertNotIn("Defense Index", prompt)
+        self.assertNotIn("claim cards", prompt.lower())
+
+    def test_report_prompt_treats_clarifications_as_context_not_evidence(self):
+        prompt = build_report_prompt(make_completed_state("report-clarification-context"))
+
+        self.assertIn("clarification_cycles", prompt)
+        self.assertIn("clarification_answers", prompt)
+        self.assertIn("include them only as assumptions, open questions, unavailable context, or operator-provided context", prompt)
+        self.assertIn("Unanswered clarification questions remain unresolved questions", prompt)
+        self.assertIn("Clarification answers and questions are not empirical evidence", prompt)
+        self.assertIn("must not be cited with project evidence markers", prompt)
+        self.assertIn("must not be placed in the Evidence Used table as cited facts", prompt)
+
+    def test_report_prompt_keeps_framework_heavy_material_in_appendix(self):
+        prompt = build_report_prompt(make_completed_state("report-appendix-frameworks"))
+
+        self.assertIn("# Appendix: Technical Analysis", prompt)
+        self.assertIn("Move framework-heavy content here: FMEA, HAZOP, SQI, Causal Inference, HRO, Red Team, Ablation", prompt)
+        for old_heading in (
+            "# FINAL VERDICTS",
+            "# CAUSAL VERIFICATION",
+            "# DEFENSE AUDIT",
+            "# HRO DEBRIEF",
+            "# RED TEAM",
+            "# ABLATION",
+            "# AGENT CARDS",
+            "# META-LEARNER INPUT",
+        ):
+            self.assertNotIn(old_heading, prompt)
 
     def test_report_prompt_includes_internal_evidence_citation_check(self):
         prompt = build_report_prompt(make_completed_state("report-internal-citation-check"))
@@ -327,7 +401,7 @@ class TestWorkflowHelpers(unittest.TestCase):
         report = """# EXECUTIVE SUMMARY
 - Market demand increased [Evidence: ev-market | upload:file-market.pdf#page=2].
 
-# DECISION LOGIC
+# WHY THIS IS RECOMMENDED
 - Capacity is constrained [Evidence: ev-capacity | upload:file-capacity.xlsx#row=7].
 
 # RED TEAM [#28]
@@ -337,8 +411,8 @@ class TestWorkflowHelpers(unittest.TestCase):
         counts = report_load_bearing_marker_counts(report)
 
         self.assertEqual(counts["executive summary"], 1)
-        self.assertEqual(counts["decision logic"], 1)
-        self.assertEqual(counts["strategy results"], 0)
+        self.assertEqual(counts["why this is recommended"], 1)
+        self.assertEqual(counts["recommended path"], 0)
         self.assertNotIn("red team [#28]", counts)
 
     def test_report_evidence_locator_helper_does_not_mutate_state(self):
