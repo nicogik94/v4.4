@@ -521,6 +521,65 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updated.sealed)
         self.assertTrue(updated.seal_date)
 
+    async def test_audit_phase_repairs_truncated_object_when_required_fields_are_complete(self):
+        state = make_completed_state("audit-phase-truncated-repair")
+        state.phase_status["audit"] = PhaseStatus.PENDING
+        state.audit = None
+        state.audit_raw = "previous raw audit"
+        payload = {
+            "data_based": False,
+            "fmea": [
+                {
+                    "component": "Editorial planning",
+                    "failure_mode": "No keyword demand check",
+                    "effect": "Low organic reach",
+                    "s": 8,
+                    "o": 7,
+                    "d": 6,
+                    "rpn": 336,
+                    "action": "Add keyword gate",
+                    "evidence": "Predicted from workflow gap",
+                }
+            ],
+            "hazop": [
+                {
+                    "node": "Topic selection",
+                    "guide_word": "NO",
+                    "deviation": "No search demand validation",
+                    "consequence": "Misaligned articles",
+                    "evidence": "Predicted",
+                }
+            ],
+            "stpa": [
+                {
+                    "control_action": "Approve topic",
+                    "uca_type": "not provided",
+                    "hazard": "Wrong target query",
+                    "constraint": "Require keyword brief",
+                }
+            ],
+            "fta": {"top_event": "Organic reach stays low", "cut_sets": ["No demand gate"], "prevention": "Add gate"},
+            "swiss_cheese": {"layers": ["Brief", "Review"], "holes": ["No SEO check"]},
+            "top_findings": ["Keyword demand is not part of topic approval."],
+            "h_norm_estimate": "0.22",
+            "observation_needs": ["GSC query export"],
+        }
+        truncated = json.dumps(payload)[:-1] + ', "appendix": "output truncates after audit fields'
+        response = make_response(truncated, 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "audit")
+
+        self.assertEqual(updated.phase_status["audit"], PhaseStatus.COMPLETED)
+        self.assertEqual(updated.phase_confidence["audit"], 1.0)
+        self.assertIsNotNone(updated.audit)
+        self.assertIsNone(updated.audit_raw)
+        self.assertEqual(len(updated.audit.fmea), 1)
+        self.assertEqual(updated.audit.fmea[0].component, "Editorial planning")
+        self.assertEqual(updated.audit.top_findings, ["Keyword demand is not part of topic approval."])
+        self.assertEqual(updated.audit.observation_needs, ["GSC query export"])
+
     async def test_malformed_audit_stores_raw_and_fails_phase(self):
         state = make_completed_state("audit-phase-malformed")
         state.phase_status["audit"] = PhaseStatus.PENDING
@@ -537,6 +596,59 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(updated.audit)
         self.assertEqual(updated.audit_raw, response.text)
         self.assertFalse(_phase_has_output(updated, "audit"))
+
+    async def test_strategy_phase_repairs_truncated_object_when_required_fields_are_complete(self):
+        state = make_completed_state("strategy-phase-truncated-repair")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        state.strategy = None
+        state.strategy_raw = "previous raw strategy"
+        payload = {
+            "preliminary_verdicts": [
+                {
+                    "id": "H1",
+                    "verdict": "LIKELY_CONFIRMED",
+                    "evidence": "Initial signal in user research",
+                    "monitoring_plan": "Track weekly retention",
+                }
+            ],
+            "executive_strategy": "Ship the keyword brief gate before the next editorial cycle.",
+            "strategies": [
+                {
+                    "priority": "HIGH",
+                    "action": "Implement keyword demand gate within sprint",
+                    "justification": "Closes editorial planning gap",
+                    "evidence_chain": "Audit FMEA RPN 336",
+                    "expected_impact": "Lift organic reach by 20% within one quarter",
+                    "effort": "2 weeks",
+                    "timeline": "next sprint",
+                    "risk_if_ignored": "Continued underperformance",
+                    "framework_source": "FMEA",
+                }
+            ],
+            "implementation_sequence": "Brief -> review -> publish",
+            "success_metrics": ["Organic sessions"],
+            "monitoring_plan": "Weekly GSC review",
+            "review_date": "2026-06-01",
+            "confidence": "moderate",
+            "reentry_check": "Re-evaluate at 30 days",
+        }
+        truncated = json.dumps(payload)[:-1] + ', "appendix": "output truncates after strategy fields'
+        response = make_response(truncated, 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.COMPLETED)
+        self.assertEqual(updated.phase_confidence["strategy"], 1.0)
+        self.assertIsNotNone(updated.strategy)
+        self.assertIsNone(updated.strategy_raw)
+        self.assertEqual(len(updated.strategy.strategies), 1)
+        self.assertEqual(
+            updated.strategy.executive_strategy,
+            "Ship the keyword brief gate before the next editorial cycle.",
+        )
+        self.assertEqual(updated.strategy.preliminary_verdicts[0].id, "H1")
 
     async def test_malformed_strategy_stores_raw_and_fails_phase(self):
         state = make_completed_state("strategy-phase-malformed")
@@ -568,6 +680,38 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.phase_confidence["monitor"], 1.0)
         self.assertIsNotNone(updated.monitor)
         self.assertEqual(updated.monitor.commitment_score, 81)
+
+    async def test_monitor_phase_repairs_truncated_object_when_required_fields_are_complete(self):
+        state = make_completed_state("monitor-phase-truncated-repair")
+        state.phase_status["monitor"] = PhaseStatus.PENDING
+        state.monitor = None
+        payload = make_monitor_payload()
+        truncated = (
+            json.dumps(
+                {
+                    "ooda_schedule": payload["ooda_schedule"],
+                    "circuit_breakers": payload["circuit_breakers"],
+                    "canaries": payload["canaries"],
+                    "chaos_drills": payload["chaos_drills"],
+                    "hro_principles_active": payload["hro_principles_active"],
+                    "reentry_watch": payload["reentry_watch"],
+                    "commitment_score": payload["commitment_score"],
+                    "commitment_rationale": payload["commitment_rationale"],
+                }
+            )[:-1]
+            + ', "appendix": "output truncates after required monitor fields'
+        )
+        response = make_response(truncated, 14, 7, 0.03)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "monitor")
+
+        self.assertEqual(updated.phase_status["monitor"], PhaseStatus.COMPLETED)
+        self.assertEqual(updated.phase_confidence["monitor"], 1.0)
+        self.assertIsNotNone(updated.monitor)
+        self.assertEqual(updated.monitor.commitment_score, 81)
+        self.assertEqual(len(updated.monitor.canaries), 3)
 
 
 class TestSequentialRunner(unittest.IsolatedAsyncioTestCase):

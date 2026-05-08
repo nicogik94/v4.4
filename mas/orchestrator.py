@@ -5,6 +5,7 @@ Handles phase transitions, convergence gates, re-entry routing, and downstream i
 """
 import json
 import logging
+import re
 from datetime import date, datetime
 from typing import Awaitable, Callable, Literal
 
@@ -620,6 +621,177 @@ def _parsed_json_matches_phase(phase: str, parsed) -> bool:
     return True
 
 
+def _repair_strategy_payload(text: str) -> dict | None:
+    """Recover required strategy fields from a truncated top-level JSON object.
+
+    Strategy responses can exceed the provider token cap after producing the
+    fields needed by the deterministic gate. If the top-level object truncates
+    later, parse_json may otherwise extract the first nested array and lose the
+    completed strategy content. This repair is intentionally narrow: it only
+    returns a payload when the required top-level strategy fields are complete.
+    """
+    repaired = {}
+    for key in ("preliminary_verdicts", "executive_strategy", "strategies"):
+        value = _extract_top_level_json_value(text, key)
+        if value in (None, "", []):
+            return None
+        repaired[key] = value
+    for key in (
+        "implementation_sequence",
+        "success_metrics",
+        "monitoring_plan",
+        "review_date",
+        "confidence",
+        "reentry_check",
+    ):
+        value = _extract_top_level_json_value(text, key)
+        if value is not None:
+            repaired[key] = value
+    return repaired
+
+
+def _repair_audit_payload(text: str) -> dict | None:
+    """Recover required audit fields from a truncated top-level JSON object."""
+    repaired = {}
+    for key in ("fmea", "top_findings"):
+        value = _extract_top_level_json_value(text, key)
+        if value in (None, "", []):
+            return None
+        repaired[key] = value
+    for key in (
+        "data_based",
+        "hazop",
+        "stpa",
+        "fta",
+        "swiss_cheese",
+        "h_norm_estimate",
+        "observation_needs",
+    ):
+        value = _extract_top_level_json_value(text, key)
+        if value is not None:
+            repaired[key] = value
+    return repaired
+
+
+def _repair_monitor_payload(text: str) -> dict | None:
+    """Recover required monitor fields from a truncated top-level JSON object."""
+    repaired = {}
+    for key in ("ooda_schedule", "circuit_breakers", "canaries"):
+        value = _extract_top_level_json_value(text, key)
+        if value in (None, "", []):
+            return None
+        repaired[key] = value
+    for key in (
+        "chaos_drills",
+        "hro_principles_active",
+        "reentry_watch",
+        "commitment_score",
+        "commitment_rationale",
+    ):
+        value = _extract_top_level_json_value(text, key)
+        if value is not None:
+            repaired[key] = value
+    return repaired
+
+
+def _extract_top_level_json_value(text: str, key: str):
+    needle = f'"{key}"'
+    start = 0
+    while True:
+        key_index = text.find(needle, start)
+        if key_index == -1:
+            return None
+        if _json_container_depth_before(text, key_index) == (1, 0):
+            colon = text.find(":", key_index + len(needle))
+            if colon == -1:
+                return None
+            value_start = colon + 1
+            while value_start < len(text) and text[value_start].isspace():
+                value_start += 1
+            span = _json_value_span(text, value_start)
+            if span is None:
+                return None
+            try:
+                return json.loads(text[value_start:span])
+            except (json.JSONDecodeError, ValueError, TypeError):
+                return None
+        start = key_index + len(needle)
+
+
+def _json_container_depth_before(text: str, stop: int) -> tuple[int, int]:
+    object_depth = 0
+    array_depth = 0
+    in_string = False
+    escape = False
+    for ch in text[:stop]:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            object_depth += 1
+        elif ch == "}":
+            object_depth = max(0, object_depth - 1)
+        elif ch == "[":
+            array_depth += 1
+        elif ch == "]":
+            array_depth = max(0, array_depth - 1)
+    return object_depth, array_depth
+
+
+def _json_value_span(text: str, start: int) -> int | None:
+    if start >= len(text):
+        return None
+    first = text[start]
+    if first == '"':
+        escape = False
+        for idx in range(start + 1, len(text)):
+            ch = text[idx]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                return idx + 1
+        return None
+    if first in "{[":
+        close = "}" if first == "{" else "]"
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == first:
+                depth += 1
+            elif ch == close:
+                depth -= 1
+                if depth == 0:
+                    return idx + 1
+        return None
+    match = re.match(r"(true|false|null|-?\d+(?:\.\d+)?)", text[start:])
+    return start + len(match.group(0)) if match else None
+
+
 def _phase_json_retry_instruction(phase: str) -> str:
     """Phase-specific guidance for repairing wrong-but-parseable JSON."""
     if phase == "classify":
@@ -780,6 +952,24 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
     if is_json:
         parsed = parse_json(response.text)
         shape_ok = _parsed_json_matches_phase(phase, parsed)
+        if phase == "audit" and not shape_ok:
+            repaired = _repair_audit_payload(response.text)
+            if repaired is not None:
+                logger.warning("Phase audit: repaired truncated JSON object from completed top-level fields")
+                parsed = repaired
+                shape_ok = True
+        elif phase == "strategy" and not shape_ok:
+            repaired = _repair_strategy_payload(response.text)
+            if repaired is not None:
+                logger.warning("Phase strategy: repaired truncated JSON object from completed top-level fields")
+                parsed = repaired
+                shape_ok = True
+        elif phase == "monitor" and not shape_ok:
+            repaired = _repair_monitor_payload(response.text)
+            if repaired is not None:
+                logger.warning("Phase monitor: repaired truncated JSON object from completed top-level fields")
+                parsed = repaired
+                shape_ok = True
         if parsed is None or not shape_ok:
             if parsed is None:
                 logger.warning(
@@ -810,6 +1000,33 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
             if retry_response.ok:
                 parsed = parse_json(retry_response.text)
                 shape_ok = _parsed_json_matches_phase(phase, parsed)
+                if phase == "audit" and not shape_ok:
+                    repaired = _repair_audit_payload(retry_response.text)
+                    if repaired is not None:
+                        logger.warning(
+                            "Phase audit: repaired truncated retry JSON object "
+                            "from completed top-level fields"
+                        )
+                        parsed = repaired
+                        shape_ok = True
+                elif phase == "strategy" and not shape_ok:
+                    repaired = _repair_strategy_payload(retry_response.text)
+                    if repaired is not None:
+                        logger.warning(
+                            "Phase strategy: repaired truncated retry JSON object "
+                            "from completed top-level fields"
+                        )
+                        parsed = repaired
+                        shape_ok = True
+                elif phase == "monitor" and not shape_ok:
+                    repaired = _repair_monitor_payload(retry_response.text)
+                    if repaired is not None:
+                        logger.warning(
+                            "Phase monitor: repaired truncated retry JSON object "
+                            "from completed top-level fields"
+                        )
+                        parsed = repaired
+                        shape_ok = True
                 if parsed is None:
                     logger.error(
                         f"Phase {phase}: JSON parse failed on retry too. "
