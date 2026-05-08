@@ -17,6 +17,7 @@ import api
 from llm_client import LLMResponse
 from orchestrator import (
     _build_report_evidence_locator_register,
+    _phase_has_output,
     build_monitor_prompt,
     build_report_prompt,
     get_first_unfinished_phase,
@@ -472,6 +473,38 @@ class TestWorkflowHelpers(unittest.TestCase):
         state.phase_status["gauntlet"] = PhaseStatus.FAILED
         self.assertEqual(get_first_unfinished_phase(state), "gauntlet")
 
+    def test_raw_only_audit_does_not_count_as_output(self):
+        state = make_completed_state("raw-only-audit")
+        state.audit = None
+        state.audit_raw = "raw diagnostic audit output"
+
+        self.assertFalse(_phase_has_output(state, "audit"))
+
+    def test_raw_only_strategy_does_not_count_as_output(self):
+        state = make_completed_state("raw-only-strategy")
+        state.strategy = None
+        state.strategy_raw = "raw diagnostic strategy output"
+
+        self.assertFalse(_phase_has_output(state, "strategy"))
+
+    def test_completed_raw_only_audit_is_first_unfinished_phase(self):
+        state = make_completed_state("completed-raw-only-audit")
+        state.audit = None
+        state.audit_raw = "raw diagnostic audit output"
+        state.phase_status["audit"] = PhaseStatus.COMPLETED
+
+        self.assertEqual(get_first_unfinished_phase(state), "audit")
+        self.assertFalse(is_workflow_complete(state))
+
+    def test_completed_raw_only_strategy_is_first_unfinished_phase(self):
+        state = make_completed_state("completed-raw-only-strategy")
+        state.strategy = None
+        state.strategy_raw = "raw diagnostic strategy output"
+        state.phase_status["strategy"] = PhaseStatus.COMPLETED
+
+        self.assertEqual(get_first_unfinished_phase(state), "strategy")
+        self.assertFalse(is_workflow_complete(state))
+
 
 class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
     async def test_hypotheses_success_sets_seal_and_confidence(self):
@@ -487,6 +520,40 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.phase_confidence["hypotheses"], 1.0)
         self.assertTrue(updated.sealed)
         self.assertTrue(updated.seal_date)
+
+    async def test_malformed_audit_stores_raw_and_fails_phase(self):
+        state = make_completed_state("audit-phase-malformed")
+        state.phase_status["audit"] = PhaseStatus.PENDING
+        state.audit = None
+        state.audit_raw = None
+        response = make_response("this is not valid audit JSON", 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "audit")
+
+        self.assertEqual(updated.phase_status["audit"], PhaseStatus.FAILED)
+        self.assertEqual(updated.phase_confidence["audit"], 0.0)
+        self.assertIsNone(updated.audit)
+        self.assertEqual(updated.audit_raw, response.text)
+        self.assertFalse(_phase_has_output(updated, "audit"))
+
+    async def test_malformed_strategy_stores_raw_and_fails_phase(self):
+        state = make_completed_state("strategy-phase-malformed")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        state.strategy = None
+        state.strategy_raw = None
+        response = make_response("this is not valid strategy JSON", 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.FAILED)
+        self.assertEqual(updated.phase_confidence["strategy"], 0.0)
+        self.assertIsNone(updated.strategy)
+        self.assertEqual(updated.strategy_raw, response.text)
+        self.assertFalse(_phase_has_output(updated, "strategy"))
 
     async def test_monitor_success_stores_output_and_confidence(self):
         state = make_completed_state("monitor-phase")
@@ -540,6 +607,26 @@ class TestSequentialRunner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.report, "rerun report")
         self.assertEqual(updated.phase_status["monitor"], PhaseStatus.COMPLETED)
         self.assertGreaterEqual(len(persisted), 4)
+
+    async def test_runner_halts_after_raw_only_audit_failure(self):
+        state = make_completed_state("halt-after-raw-audit")
+        state.phase_status["audit"] = PhaseStatus.PENDING
+        state.audit = None
+        state.audit_raw = None
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        state.strategy = None
+        state.strategy_raw = None
+        response = make_response("this is not valid audit JSON", 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_workflow_sequence(state)
+
+        self.assertEqual(updated.phase_status["audit"], PhaseStatus.FAILED)
+        self.assertEqual(updated.audit_raw, response.text)
+        self.assertIsNone(updated.audit)
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.STALE)
+        self.assertIsNone(updated.strategy)
 
 
 class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):

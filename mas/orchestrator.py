@@ -580,9 +580,9 @@ def _normalized_phase_status(status) -> PhaseStatus:
 
 def _phase_has_output(state: ProjectState, phase: str) -> bool:
     if phase == "audit":
-        return state.audit is not None or bool(state.audit_raw)
+        return state.audit is not None
     if phase == "strategy":
-        return state.strategy is not None or bool(state.strategy_raw)
+        return state.strategy is not None
     if phase == "report":
         return bool(state.report)
     value = getattr(state, phase, None)
@@ -825,11 +825,14 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
         if parsed is not None and _parsed_json_matches_phase(phase, parsed):
             _store_phase_output(state, phase, parsed)
-            structured_field = getattr(state, phase, None)
-            if structured_field is None and phase in ("classify", "hypotheses", "gauntlet", "monitor", "sqi"):
+            if phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "sqi") and not _phase_has_output(state, phase):
+                if phase == "audit":
+                    state.audit_raw = response.text
+                elif phase == "strategy":
+                    state.strategy_raw = response.text
                 logger.error(
                     f"Phase {phase}: parse succeeded but _store_phase_output "
-                    f"did not populate state.{phase}. Marking phase FAILED."
+                    f"did not populate valid structured output. Marking phase FAILED."
                 )
                 state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
@@ -842,14 +845,20 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         else:
             if phase == "audit":
                 state.audit_raw = response.text
-                state.phase_status[phase] = PhaseStatus.COMPLETED
+                state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
-                logger.warning(f"Phase {phase}: stored raw text as fallback")
+                logger.error(
+                    f"Phase {phase}: stored raw diagnostic output after parse/schema "
+                    "failure; raw output is not accepted as structured completion."
+                )
             elif phase == "strategy":
                 state.strategy_raw = response.text
-                state.phase_status[phase] = PhaseStatus.COMPLETED
+                state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
-                logger.warning(f"Phase {phase}: stored raw text as fallback")
+                logger.error(
+                    f"Phase {phase}: stored raw diagnostic output after parse/schema "
+                    "failure; raw output is not accepted as structured completion."
+                )
             else:
                 state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
@@ -969,8 +978,10 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             state.gauntlet = GauntletOutput(**data)
         elif phase == "audit":
             state.audit = AuditOutput(**data)
+            state.audit_raw = None
         elif phase == "strategy":
             state.strategy = StrategyOutput(**data)
+            state.strategy_raw = None
         elif phase == "monitor":
             state.monitor = MonitorOutput(**data)
         elif phase == "sqi":
