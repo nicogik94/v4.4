@@ -33,6 +33,7 @@ from state import (  # noqa: E402
     KnowledgeItem,
     KnowledgeLayerState,
     PhaseStatus,
+    ProjectState,
     UploadedFileManifest,
 )
 from tests.test_decision_objects import make_state  # noqa: E402
@@ -40,7 +41,62 @@ from tests.test_decision_objects import make_state  # noqa: E402
 
 def _docx_text(payload: bytes) -> str:
     document = Document(BytesIO(payload))
-    return "\n".join(paragraph.text for paragraph in document.paragraphs)
+    parts = [paragraph.text for paragraph in document.paragraphs]
+    for table in document.tables:
+        for row in table.rows:
+            parts.extend(cell.text for cell in row.cells)
+    return "\n".join(parts)
+
+
+def _docx_table_count(payload: bytes) -> int:
+    return len(Document(BytesIO(payload)).tables)
+
+
+CLIENT_HEADINGS = [
+    "What decision we reviewed",
+    "Recommended path",
+    "Why this is recommended",
+    "What evidence was used",
+    "What should happen next",
+    "Timeline / 7-30-60-90 roadmap",
+    "Key risks",
+    "What to monitor",
+    "Open assumptions / questions",
+    "Human review note",
+]
+
+
+OPERATOR_HEADINGS = [
+    "Cover / project metadata",
+    "Executive summary",
+    "Current recommendation",
+    "Decision snapshot",
+    "Phase completion status",
+    "Dashboard overview",
+    "Original input",
+    "Classification summary",
+    "Hypotheses table",
+    "Gauntlet / stress-test summary",
+    "Audit findings",
+    "Evidence and source summary",
+    "Strategy plan",
+    "SQI / quality review",
+    "Monitoring plan",
+    "Workspace summary",
+    "Risks and open questions",
+    "Decision trace / explainability",
+    "Clarifications / assumptions",
+    "Report appendix",
+    "Technical appendix",
+]
+
+
+def _assert_in_order(testcase: unittest.TestCase, text: str, headings: list[str]) -> None:
+    position = -1
+    for heading in headings:
+        next_position = text.find(heading)
+        testcase.assertGreater(next_position, position, heading)
+        position = next_position
 
 
 def make_export_state(project_id: str = "export-profile"):
@@ -160,18 +216,40 @@ class TestProfileExporterHelpers(unittest.TestCase):
         self.assertNotIn("Executive Summary", text)
         self.assertNotIn("classify summary", text)
 
+    def test_all_profiles_export_valid_formats(self):
+        state = make_export_state("all-profiles")
+        expected = {
+            ("report", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ("report", "pdf"): "application/pdf",
+            ("client_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ("client_dossier", "pdf"): "application/pdf",
+            ("operator_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ("operator_dossier", "pdf"): "application/pdf",
+            ("machine_archive", "zip"): "application/zip",
+        }
+
+        for (profile, fmt), media_type in expected.items():
+            with self.subTest(profile=profile, format=fmt):
+                payload, actual_media_type, filename = export_project_profile_bytes(state, profile, fmt)
+                self.assertGreater(len(payload), 100)
+                self.assertEqual(actual_media_type, media_type)
+                self.assertIn(f"{profile}-", filename)
+                if fmt == "pdf":
+                    self.assertTrue(payload.startswith(b"%PDF"))
+                if fmt == "zip":
+                    with zipfile.ZipFile(BytesIO(payload)) as archive:
+                        self.assertNotIn("raw_project_state.json", archive.namelist())
+
     def test_client_dossier_includes_expected_sections_and_safe_cdp_wording(self):
         markdown = build_client_dossier_markdown(make_export_state("client-profile"))
 
+        _assert_in_order(self, markdown, CLIENT_HEADINGS)
         for expected in (
-            "Executive Summary",
-            "Roadmap",
-            "Next Steps",
-            "Key Risks",
-            "Assumptions and Open Questions",
-            "Monitoring and Kill Criteria",
-            "Citation locator review summary — confirms marker/locator availability only, not semantic support.",
+            "Run the 30-day pilot before the full program.",
+            "Day 1-30: run the audit.",
+            "Stop if data access is unavailable.",
             "Who owns the pilot?",
+            "This export is intended to support human review and decision-making.",
         ):
             self.assertIn(expected, markdown)
         for forbidden in (
@@ -191,17 +269,15 @@ class TestProfileExporterHelpers(unittest.TestCase):
     def test_operator_dossier_includes_summaries_and_excludes_unsafe_detail(self):
         markdown = build_operator_dossier_markdown(make_export_state("operator-profile"))
 
+        _assert_in_order(self, markdown, OPERATOR_HEADINGS)
         for expected in (
-            "Phase Summaries",
-            "Hypotheses",
-            "Audit Findings and Observation Needs",
-            "Strategy Actions and Success Metrics",
-            "Monitoring Plan and Circuit Breakers",
-            "Clarifications",
-            "Evidence Locator Register",
-            "Decision Trace Summary",
-            "Risk and Policy Summary",
+            "Phase completion status",
+            "Dashboard overview",
+            "Evidence and source summary",
+            "Decision trace / explainability",
+            "Technical appendix",
             "policy_gate_blocked=1",
+            "Market note",
         ):
             self.assertIn(expected, markdown)
         for forbidden in (
@@ -209,9 +285,115 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "raw_provider_payload",
             "raw_prompt",
             "chain_of_thought",
+            "ProjectState",
             r"C:\Users\nicoc",
         ):
             self.assertNotIn(forbidden, markdown)
+
+    def test_sparse_dossiers_include_explicit_empty_states(self):
+        sparse = ProjectState(
+            project_id="sparse-export",
+            project_name="Sparse export",
+            brief="Sparse decision brief",
+        )
+        client_markdown = build_client_dossier_markdown(sparse)
+        operator_markdown = build_operator_dossier_markdown(sparse)
+        combined = client_markdown + "\n\n" + operator_markdown
+
+        _assert_in_order(self, client_markdown, CLIENT_HEADINGS)
+        _assert_in_order(self, operator_markdown, OPERATOR_HEADINGS)
+        for expected in (
+            "No hypotheses have been generated yet.",
+            "No uploaded files were attached.",
+            "No monitoring plan is available yet.",
+            "This section will populate after the strategy phase runs.",
+            "No imported evidence is available yet.",
+            "No decision trace is available yet.",
+            "No clarification answers have been submitted yet.",
+            "No audit findings are available yet.",
+        ):
+            self.assertIn(expected, combined)
+
+    def test_profile_docx_outputs_include_headings_and_tables(self):
+        state = make_export_state("docx-profile")
+
+        client_payload, _, _ = export_project_profile_bytes(state, "client_dossier", "docx")
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_dossier", "docx")
+        client_text = _docx_text(client_payload)
+        operator_text = _docx_text(operator_payload)
+
+        self.assertIn("What decision we reviewed", client_text)
+        self.assertIn("Human review note", client_text)
+        self.assertIn("Cover / project metadata", operator_text)
+        self.assertIn("Technical appendix", operator_text)
+        self.assertGreaterEqual(_docx_table_count(client_payload), 1)
+        self.assertGreaterEqual(_docx_table_count(operator_payload), 1)
+
+    def test_profile_pdfs_build_for_report_and_dossiers(self):
+        state = make_export_state("pdf-profile")
+
+        for profile in ("report", "client_dossier", "operator_dossier"):
+            with self.subTest(profile=profile):
+                payload, media_type, filename = export_project_profile_bytes(state, profile, "pdf")
+                self.assertEqual(media_type, "application/pdf")
+                self.assertIn(f"{profile}-", filename)
+                self.assertTrue(payload.startswith(b"%PDF"))
+
+    def test_report_docx_normalizes_blockquoted_at_a_glance_table(self):
+        state = make_export_state("blockquote-report")
+        state.report = """# Executive Summary
+> **At a Glance**
+>
+> | Field | Detail |
+> |---|---|
+> | Decision | Run Sprint 0 first |
+> | Recommendation | Validate before implementation |
+
+---
+
+# Evidence Used
+| Evidence | What It Suggests |
+|---|---|
+| Supplied context | Structural analysis only |
+
+Stop if >2 critical assumptions remain unknown.
+"""
+
+        payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        text = _docx_text(payload)
+
+        self.assertIn("At a Glance", text)
+        self.assertIn("Decision", text)
+        self.assertIn("Run Sprint 0 first", text)
+        self.assertNotIn("| Field | Detail |", text)
+        self.assertNotIn("|---|---|", text)
+        self.assertNotIn("---", text)
+        self.assertNotIn(">", text)
+        self.assertIn("greater than 2 critical assumptions", text)
+        for line in text.splitlines():
+            self.assertFalse(line.strip().startswith(">"), line)
+
+    def test_report_pdf_builds_with_blockquoted_table_and_wide_table_cards(self):
+        state = make_export_state("wide-table-report")
+        state.report = """# Executive Summary
+> **At a Glance**
+>
+> | Field | Detail |
+> |---|---|
+> | Decision | Run Sprint 0 first |
+> | Recommendation | Validate before implementation |
+
+# Options Considered
+| Option | Upside | Downside | Best Use Case | Verdict |
+|---|---|---|---|---|
+| Sprint 0 | Validates assumptions | Adds discovery time | Evidence-light SEO work | Recommended |
+"""
+
+        payload, media_type, filename = export_project_profile_bytes(state, "report", "pdf")
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn("wide-table-report-report-", filename)
+        self.assertTrue(payload.startswith(b"%PDF"))
 
     def test_machine_archive_contains_expected_sanitized_files(self):
         state = make_export_state("archive-profile")

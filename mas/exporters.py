@@ -17,6 +17,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
+    HRFlowable,
     ListFlowable,
     ListItem,
     Paragraph,
@@ -52,6 +53,13 @@ def export_project_docx_bytes(state: ProjectState) -> bytes:
         elif block["type"] == "bullets":
             for item in block["items"]:
                 document.add_paragraph(item, style="List Bullet")
+        elif block["type"] == "numbered":
+            for item in block["items"]:
+                document.add_paragraph(item, style="List Number")
+        elif block["type"] == "table":
+            _add_docx_table(document, block["rows"])
+        elif block["type"] == "divider":
+            _add_docx_divider(document)
 
     buf = BytesIO()
     document.save(buf)
@@ -123,6 +131,16 @@ def export_project_pdf_bytes(state: ProjectState) -> bytes:
                 for item in block["items"]
             ]
             story.append(ListFlowable(items, bulletType="bullet", leftIndent=12))
+        elif block["type"] == "numbered":
+            items = [
+                ListItem(Paragraph(_as_pdf_text(item), body), leftIndent=10)
+                for item in block["items"]
+            ]
+            story.append(ListFlowable(items, bulletType="1", leftIndent=12))
+        elif block["type"] == "table":
+            story.extend(_pdf_table_flowables(block["rows"], body, doc.width))
+        elif block["type"] == "divider":
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CBD5E1"), spaceBefore=4, spaceAfter=4))
         story.append(Spacer(1, 2))
 
     doc.build(story)
@@ -143,6 +161,58 @@ REPORT_CLARITY_HEADINGS = [
     "Monitoring and Kill Criteria",
     "Appendix: Technical Analysis",
 ]
+
+CLIENT_DOSSIER_HEADINGS = [
+    "What decision we reviewed",
+    "Recommended path",
+    "Why this is recommended",
+    "What evidence was used",
+    "What should happen next",
+    "Timeline / 7-30-60-90 roadmap",
+    "Key risks",
+    "What to monitor",
+    "Open assumptions / questions",
+    "Human review note",
+]
+
+OPERATOR_DOSSIER_HEADINGS = [
+    "Cover / project metadata",
+    "Executive summary",
+    "Current recommendation",
+    "Decision snapshot",
+    "Phase completion status",
+    "Dashboard overview",
+    "Original input",
+    "Classification summary",
+    "Hypotheses table",
+    "Gauntlet / stress-test summary",
+    "Audit findings",
+    "Evidence and source summary",
+    "Strategy plan",
+    "SQI / quality review",
+    "Monitoring plan",
+    "Workspace summary",
+    "Risks and open questions",
+    "Decision trace / explainability",
+    "Clarifications / assumptions",
+    "Report appendix",
+    "Technical appendix",
+]
+
+HUMAN_REVIEW_NOTE = (
+    "This export is intended to support human review and decision-making. "
+    "It should not replace expert judgment where legal, financial, medical, "
+    "safety, or compliance stakes are involved."
+)
+
+EMPTY_HYPOTHESES = "No hypotheses have been generated yet."
+EMPTY_UPLOADED_FILES = "No uploaded files were attached."
+EMPTY_MONITORING = "No monitoring plan is available yet."
+EMPTY_STRATEGY = "This section will populate after the strategy phase runs."
+EMPTY_EVIDENCE = "No imported evidence is available yet."
+EMPTY_TRACE = "No decision trace is available yet."
+EMPTY_CLARIFICATIONS = "No clarification answers have been submitted yet."
+EMPTY_AUDIT = "No audit findings are available yet."
 
 EXPORT_PROFILE_FORMATS = {
     "report": {"pdf", "docx"},
@@ -222,22 +292,84 @@ def build_client_dossier_markdown(state: ProjectState) -> str:
     lines = [
         "# Client Dossier",
         _project_metadata_line(state),
-        "## Source Report",
-        _safe_report_markdown(state),
     ]
-    for heading in REPORT_CLARITY_HEADINGS:
+    open_questions = client_section_from_report_or_fallback(
+        state,
+        sections,
+        ("Assumptions and Open Questions",),
+        _client_open_questions(state),
+    )
+    clarification_questions = _client_open_questions(state)
+    if (
+        clarification_questions
+        and clarification_questions != "No open assumptions or questions are recorded yet."
+        and clarification_questions not in open_questions
+    ):
+        open_questions = "\n\n".join([open_questions, clarification_questions])
+
+    section_bodies = {
+        "What decision we reviewed": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("The Decision",),
+            _client_decision_reviewed(state),
+        ),
+        "Recommended path": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("Recommended Path", "Executive Summary"),
+            _client_recommended_path(state),
+        ),
+        "Why this is recommended": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("Why This Is Recommended",),
+            _client_why_recommended(state),
+        ),
+        "What evidence was used": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("Evidence Used",),
+            _client_evidence_used(state),
+        ),
+        "What should happen next": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("Next Steps",),
+            _client_next_steps(state),
+        ),
+        "Timeline / 7-30-60-90 roadmap": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("Roadmap",),
+            _client_roadmap(state),
+        ),
+        "Key risks": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("Key Risks",),
+            _client_key_risks(state),
+        ),
+        "What to monitor": client_section_from_report_or_fallback(
+            state,
+            sections,
+            ("Monitoring and Kill Criteria",),
+            _client_monitoring(state),
+        ),
+        "Open assumptions / questions": client_section_from_report_or_fallback(
+            state,
+            sections,
+            (),
+            open_questions,
+        ),
+        "Human review note": HUMAN_REVIEW_NOTE,
+    }
+
+    for heading in CLIENT_DOSSIER_HEADINGS:
         lines.extend([
             f"## {heading}",
-            _section_or_fallback(sections, heading),
+            section_bodies.get(heading) or "Not available in current project output.",
         ])
-
-    citation_summary = _citation_locator_summary_markdown(state, include_registry=True)
-    if citation_summary:
-        lines.extend(["## Citation Locator Review Summary", citation_summary])
-
-    clarification_summary = _client_clarifications_markdown(state)
-    if clarification_summary:
-        lines.extend(["## Clarification Open Questions", clarification_summary])
 
     return "\n\n".join(part for part in lines if str(part).strip())
 
@@ -245,42 +377,388 @@ def build_client_dossier_markdown(state: ProjectState) -> str:
 def build_operator_dossier_markdown(state: ProjectState) -> str:
     lines = [
         "# Operator Dossier",
-        _project_metadata_line(state),
-        build_client_dossier_markdown(state),
-        "## Project Overview",
-        _operator_overview_markdown(state),
-        "## Phase Summaries",
-        summarize_phase_outputs(state),
-        "## Hypotheses",
-        summarize_hypotheses(state),
-        "## Gauntlet Risks and Cruxes",
-        _summarize_gauntlet(state),
-        "## Audit Findings and Observation Needs",
-        _summarize_audit(state),
-        "## Strategy Actions and Success Metrics",
-        _summarize_strategy(state),
-        "## Monitoring Plan and Circuit Breakers",
-        summarize_monitoring(state),
-        "## Clarifications",
-        _operator_clarifications_markdown(state),
-        "## Workspace Summary",
-        _workspace_summary_markdown(state),
-        "## Decision Trace Summary",
-        summarize_trace(state),
-        "## Evidence Locator Register",
-        _evidence_locator_register_markdown(state),
-        "## CDP Citation Locator Review Summary",
-        _citation_locator_summary_markdown(state, include_registry=False) or "No citation locator review summary available.",
-        "## Risk and Policy Summary",
+    ]
+    section_bodies = {
+        "Cover / project metadata": operator_project_metadata(state),
+        "Executive summary": operator_executive_summary(state),
+        "Current recommendation": operator_current_recommendation(state),
+        "Decision snapshot": operator_decision_snapshot(state),
+        "Phase completion status": summarize_phase_outputs(state),
+        "Dashboard overview": operator_dashboard_overview(state),
+        "Original input": operator_original_input(state),
+        "Classification summary": operator_classification_summary(state),
+        "Hypotheses table": operator_hypotheses_table(state),
+        "Gauntlet / stress-test summary": operator_gauntlet_summary(state),
+        "Audit findings": operator_audit_summary(state),
+        "Evidence and source summary": operator_evidence_summary(state),
+        "Strategy plan": operator_strategy_summary(state),
+        "SQI / quality review": operator_sqi_summary(state),
+        "Monitoring plan": operator_monitoring_summary(state),
+        "Workspace summary": operator_workspace_summary(state),
+        "Risks and open questions": operator_risks_and_questions(state),
+        "Decision trace / explainability": operator_trace_summary(state),
+        "Clarifications / assumptions": operator_clarifications_summary(state),
+        "Report appendix": operator_report_appendix(state),
+        "Technical appendix": operator_technical_appendix(state),
+    }
+    for heading in OPERATOR_DOSSIER_HEADINGS:
+        lines.extend([
+            f"## {heading}",
+            section_bodies.get(heading) or "No dashboard-facing summary is available yet.",
+        ])
+    return "\n\n".join(part for part in lines if str(part).strip())
+
+
+def client_section_from_report_or_fallback(
+    state: ProjectState,
+    sections: dict[str, str],
+    report_headings: tuple[str, ...],
+    fallback: str,
+) -> str:
+    for heading in report_headings:
+        value = sections.get(_normalize_heading(heading), "").strip()
+        if value:
+            return value
+    return fallback
+
+
+def _client_decision_reviewed(state: ProjectState) -> str:
+    brief = _short_text(state.brief, 700)
+    return brief or "No decision brief is available yet."
+
+
+def _client_recommended_path(state: ProjectState) -> str:
+    if state.strategy and state.strategy.executive_strategy:
+        return _redact_unsafe_string(state.strategy.executive_strategy)
+    return EMPTY_STRATEGY
+
+
+def _client_why_recommended(state: ProjectState) -> str:
+    if state.strategy and state.strategy.strategies:
+        rows = [["Reason", "Expected impact"]]
+        for action in state.strategy.strategies[:5]:
+            rows.append([
+                action.justification or action.action or "Recommended action",
+                action.expected_impact,
+            ])
+        return _markdown_table(rows)
+    if state.audit and state.audit.top_findings:
+        return "\n".join(f"- {item}" for item in state.audit.top_findings[:6])
+    return EMPTY_STRATEGY
+
+
+def _client_evidence_used(state: ProjectState) -> str:
+    rows = [["Source", "What it contributes"]]
+    for evidence in state.imported_evidence or []:
+        rows.append([evidence.title or evidence.evidence_id, evidence.summary or evidence.category])
+    for item in list(getattr(getattr(state, "knowledge_layer", None), "items", []) or [])[:12]:
+        title = getattr(item, "title", "") or getattr(item, "item_id", "")
+        summary = getattr(item, "summary", "") or getattr(item, "source_ref", "")
+        rows.append([title, summary])
+    if len(rows) > 1:
+        citation_summary = _citation_locator_summary_markdown(state, include_registry=True)
+        return "\n\n".join(part for part in [_markdown_table(rows), citation_summary] if part)
+    return EMPTY_EVIDENCE
+
+
+def _client_next_steps(state: ProjectState) -> str:
+    if state.strategy and state.strategy.strategies:
+        return "\n".join(
+            f"- {action.action} ({action.timeline or 'timing TBD'})"
+            for action in state.strategy.strategies[:6]
+            if action.action
+        ) or EMPTY_STRATEGY
+    if state.strategy and state.strategy.implementation_sequence:
+        return _redact_unsafe_string(state.strategy.implementation_sequence)
+    return EMPTY_STRATEGY
+
+
+def _client_roadmap(state: ProjectState) -> str:
+    if state.strategy and state.strategy.strategies:
+        rows = [["Window", "Action"]]
+        for label in ("7 days", "30 days", "60 days", "90 days"):
+            action = next(
+                (
+                    item.action
+                    for item in state.strategy.strategies
+                    if label.split()[0] in (item.timeline or "")
+                ),
+                "",
+            )
+            rows.append([label, action or "To be confirmed by the operator."])
+        return _markdown_table(rows)
+    return EMPTY_STRATEGY
+
+
+def _client_key_risks(state: ProjectState) -> str:
+    if state.audit and (state.audit.top_findings or state.audit.observation_needs):
+        items = list(state.audit.top_findings or []) + list(state.audit.observation_needs or [])
+        return "\n".join(f"- {item}" for item in items[:8])
+    risks = list(getattr(getattr(state, "decision_objects", None), "risks", []) or [])
+    if risks:
+        return "\n".join(f"- {risk.title or risk.summary}" for risk in risks[:8])
+    return EMPTY_AUDIT
+
+
+def _client_monitoring(state: ProjectState) -> str:
+    if state.monitor:
+        return summarize_monitoring(state)
+    if state.strategy and state.strategy.monitoring_plan:
+        return _redact_unsafe_string(state.strategy.monitoring_plan)
+    return EMPTY_MONITORING
+
+
+def _client_open_questions(state: ProjectState) -> str:
+    parts = []
+    clarification_summary = _client_clarifications_markdown(state)
+    if clarification_summary:
+        parts.append(clarification_summary)
+    if state.audit and state.audit.observation_needs:
+        parts.append("\n".join(f"- {item}" for item in state.audit.observation_needs[:8]))
+    return "\n\n".join(parts) if parts else "No open assumptions or questions are recorded yet."
+
+
+def operator_project_metadata(state: ProjectState) -> str:
+    return _markdown_table([
+        ["Field", "Value"],
+        ["Project ID", state.project_id],
+        ["Project name", state.project_name],
+        ["Created", _fmt_datetime(state.created_at)],
+        ["Current phase", state.current_phase],
+        ["Risk classification", state.risk_classification],
+        ["Risk rationale", state.risk_classification_rationale],
+    ])
+
+
+def operator_executive_summary(state: ProjectState) -> str:
+    sections = _extract_report_sections(state.report or "")
+    report_summary = sections.get(_normalize_heading("Executive Summary"), "").strip()
+    if report_summary:
+        return report_summary
+    return _operator_overview_markdown(state)
+
+
+def operator_current_recommendation(state: ProjectState) -> str:
+    if state.strategy and state.strategy.executive_strategy:
+        return _redact_unsafe_string(state.strategy.executive_strategy)
+    sections = _extract_report_sections(state.report or "")
+    report_recommendation = sections.get(_normalize_heading("Recommended Path"), "").strip()
+    return report_recommendation or EMPTY_STRATEGY
+
+
+def operator_decision_snapshot(state: ProjectState) -> str:
+    rows = [
+        ["Field", "Value"],
+        ["Project status", _project_status_value(state)],
+        ["Current phase", state.current_phase],
+        ["Report status", _enum_value(state.phase_status.get("report", ""))],
+        ["Risk classification", state.risk_classification],
+        ["Uploaded files", str(len(_uploaded_file_manifest_payload(state)))],
+        ["Imported evidence", str(len(state.imported_evidence or []))],
+        ["Imported signals", str(len(state.imported_signals or []))],
+        ["Clarification answers", str(len(state.clarification_answers or []))],
+    ]
+    return _markdown_table(rows)
+
+
+def operator_dashboard_overview(state: ProjectState) -> str:
+    return _operator_overview_markdown(state)
+
+
+def operator_original_input(state: ProjectState) -> str:
+    rows = [["Input", "Value"], ["Brief", state.brief or "No brief provided."]]
+    if state.data:
+        rows.append(["Original data/context", _short_text(state.data, 900)])
+    else:
+        rows.append(["Original data/context", "No original data/context was provided."])
+    return _markdown_table(rows)
+
+
+def operator_classification_summary(state: ProjectState) -> str:
+    if not state.classify:
+        return "This section will populate after the classify phase runs."
+    c = state.classify
+    return _markdown_table([
+        ["Field", "Value"],
+        ["Domain", c.domain],
+        ["Justification", c.justification],
+        ["Bayes factor", _fmt_value(c.bf)],
+        ["Reference class", c.reference_class],
+        ["DQ", ", ".join(_fmt_value(value) for value in c.dq)],
+        ["Variety gaps", c.variety_gaps],
+        ["RPD pattern", c.rpd_pattern],
+        ["Sensemaking anchors", c.sensemaking_anchors],
+        ["OODA cadence", c.ooda.freq],
+    ])
+
+
+def operator_hypotheses_table(state: ProjectState) -> str:
+    rows = [["ID", "Hypothesis", "Status", "Confirm", "Reject", "EVOI", "Cluster", "Evidence IDs"]]
+    for hypothesis in state.hypotheses or []:
+        rows.append([
+            hypothesis.id,
+            hypothesis.text,
+            hypothesis.status,
+            hypothesis.confirm,
+            hypothesis.reject,
+            hypothesis.evoi,
+            hypothesis.portfolio_cluster,
+            ", ".join(hypothesis.evidence_ids or []),
+        ])
+    return _markdown_table(rows) if len(rows) > 1 else EMPTY_HYPOTHESES
+
+
+def operator_gauntlet_summary(state: ProjectState) -> str:
+    if not state.gauntlet:
+        return "This section will populate after the gauntlet phase runs."
+    return _summarize_gauntlet(state)
+
+
+def operator_audit_summary(state: ProjectState) -> str:
+    if not state.audit and not state.audit_raw:
+        return EMPTY_AUDIT
+    return _summarize_audit(state)
+
+
+def operator_evidence_summary(state: ProjectState) -> str:
+    parts = []
+    evidence_rows = [["Evidence ID", "Title", "Summary", "Source phase"]]
+    for evidence in state.imported_evidence or []:
+        evidence_rows.append([evidence.evidence_id, evidence.title, evidence.summary, evidence.source_phase])
+    if len(evidence_rows) > 1:
+        parts.append(_markdown_table(evidence_rows))
+    else:
+        parts.append(EMPTY_EVIDENCE)
+
+    uploads = _uploaded_file_manifest_payload(state)
+    if uploads:
+        rows = [["File ID", "Filename", "Type", "Size", "Parse status"]]
+        for upload in uploads:
+            parse_summary = upload.get("parse_summary") or {}
+            rows.append([
+                upload.get("file_id", ""),
+                upload.get("original_filename", ""),
+                upload.get("content_type", ""),
+                upload.get("size_bytes", ""),
+                parse_summary.get("status", ""),
+            ])
+        parts.extend(["### Uploaded files", _markdown_table(rows)])
+    else:
+        parts.extend(["### Uploaded files", EMPTY_UPLOADED_FILES])
+
+    signals = state.imported_signals or []
+    if signals:
+        rows = [["Signal ID", "Name", "Kind", "Cadence"]]
+        for signal in signals[:20]:
+            rows.append([signal.signal_id, signal.name, signal.kind, signal.cadence])
+        parts.extend(["### Imported signals", _markdown_table(rows)])
+    else:
+        parts.extend(["### Imported signals", "No imported signals are available yet."])
+
+    locator_register = _evidence_locator_register_markdown(state)
+    if locator_register and "No evidence locator registry entries" not in locator_register:
+        parts.extend(["### Evidence locator register", locator_register])
+    citation_summary = _citation_locator_summary_markdown(state, include_registry=False)
+    if citation_summary:
+        parts.extend(["### Citation locator review", citation_summary])
+    return "\n\n".join(parts)
+
+
+def operator_strategy_summary(state: ProjectState) -> str:
+    if not state.strategy and not state.strategy_raw:
+        return EMPTY_STRATEGY
+    return _summarize_strategy(state)
+
+
+def operator_sqi_summary(state: ProjectState) -> str:
+    if not state.sqi:
+        return "This section will populate after the SQI phase runs."
+    rows = [["Field", "Value"], ["SQI overall", _fmt_value(state.sqi.sqi_overall)], ["Weakest link", state.sqi.weakest_link]]
+    for dimension in state.sqi.dimensions or []:
+        rows.append([f"Dimension: {dimension.name}", f"{_fmt_value(dimension.score)} ({dimension.grade}) - {dimension.finding}"])
+    if state.sqi.improvement_actions:
+        rows.append(["Improvement actions", "; ".join(state.sqi.improvement_actions)])
+    return _markdown_table(rows)
+
+
+def operator_monitoring_summary(state: ProjectState) -> str:
+    return summarize_monitoring(state) if state.monitor else EMPTY_MONITORING
+
+
+def operator_workspace_summary(state: ProjectState) -> str:
+    return _workspace_summary_markdown(state)
+
+
+def operator_risks_and_questions(state: ProjectState) -> str:
+    parts = []
+    risks = list(getattr(getattr(state, "decision_objects", None), "risks", []) or [])
+    if risks:
+        rows = [["Risk ID", "Title", "Severity", "Status", "Summary"]]
+        for risk in risks[:20]:
+            rows.append([risk.risk_id, risk.title, risk.severity, risk.status, risk.summary])
+        parts.append(_markdown_table(rows))
+    elif state.audit and state.audit.top_findings:
+        parts.append("\n".join(f"- {item}" for item in state.audit.top_findings[:10]))
+    else:
+        parts.append(EMPTY_AUDIT)
+    clarification_summary = _client_clarifications_markdown(state)
+    if clarification_summary:
+        parts.extend(["### Open clarification questions", clarification_summary])
+    return "\n\n".join(parts)
+
+
+def operator_trace_summary(state: ProjectState) -> str:
+    if not any([
+        state.classify,
+        state.hypotheses,
+        state.gauntlet,
+        state.audit,
+        state.strategy,
+        state.sqi,
+        state.monitor,
+        state.report,
+    ]):
+        return EMPTY_TRACE
+    summary = summarize_trace(state)
+    return summary if summary and "unavailable" not in summary.lower() else EMPTY_TRACE
+
+
+def operator_clarifications_summary(state: ProjectState) -> str:
+    summary = _operator_clarifications_markdown(state)
+    if summary == "No clarification questions or answers saved.":
+        return EMPTY_CLARIFICATIONS
+    if not state.clarification_answers:
+        return "\n\n".join([summary, EMPTY_CLARIFICATIONS])
+    return summary
+
+
+def operator_report_appendix(state: ProjectState) -> str:
+    return _safe_report_markdown(state) if state.report else "No report is available yet."
+
+
+def operator_technical_appendix(state: ProjectState) -> str:
+    parts = [
+        "### Risk and policy summary",
         summarize_policy(state),
-        "## Budget Summary",
+        "### Budget summary",
         _budget_summary_markdown(state),
-        "## Approvals Summary",
+        "### Approvals",
         _approvals_summary_markdown(state),
-        "## Calibration and Prediction Summary",
+        "### Calibration and prediction summary",
         _calibration_prediction_summary_markdown(state),
     ]
-    return "\n\n".join(part for part in lines if str(part).strip())
+    return "\n\n".join(parts)
+
+
+def _project_status_value(state: ProjectState) -> str:
+    statuses = {_enum_value(value) for value in (state.phase_status or {}).values()}
+    if "running" in statuses:
+        return "running"
+    if "failed" in statuses:
+        return "failed"
+    if statuses and statuses <= {"completed"}:
+        return "completed"
+    return "in progress"
 
 
 def build_machine_archive_payload(state: ProjectState) -> dict[str, Any]:
@@ -356,9 +834,33 @@ def summarize_phase_outputs(state: ProjectState) -> str:
             _enum_value(status),
             _fmt_value(state.phase_confidence.get(phase)),
             state.phase_run_completed_at.get(phase, ""),
-            state.phase_summaries.get(phase, _short_text(_phase_output_text(state, phase), 240)),
+            state.phase_summaries.get(phase, _phase_output_digest(state, phase)),
         ])
     return _markdown_table(rows)
+
+
+def _phase_output_digest(state: ProjectState, phase: str) -> str:
+    if phase == "classify" and state.classify:
+        return _short_text(f"{state.classify.domain}: {state.classify.justification}", 240)
+    if phase == "hypotheses" and state.hypotheses:
+        return f"{len(state.hypotheses)} hypotheses generated."
+    if phase == "gauntlet" and state.gauntlet:
+        return f"{len(state.gauntlet.results or [])} stress-test result(s); MECE gaps: {_short_text(state.gauntlet.mece_gaps, 120)}"
+    if phase == "audit" and (state.audit or state.audit_raw):
+        if state.audit:
+            return f"{len(state.audit.top_findings or [])} finding(s), {len(state.audit.observation_needs or [])} observation need(s)."
+        return "Audit output is saved; structured summary is unavailable."
+    if phase == "strategy" and (state.strategy or state.strategy_raw):
+        if state.strategy:
+            return _short_text(state.strategy.executive_strategy or f"{len(state.strategy.strategies or [])} strategy action(s).", 240)
+        return "Strategy output is saved; structured summary is unavailable."
+    if phase == "sqi" and state.sqi:
+        return f"SQI overall: {_fmt_value(state.sqi.sqi_overall)}; weakest link: {_short_text(state.sqi.weakest_link, 120)}"
+    if phase == "monitor" and state.monitor:
+        return f"{len(state.monitor.canaries or [])} canary signal(s), {len(state.monitor.circuit_breakers or [])} circuit breaker(s)."
+    if phase == "report" and state.report:
+        return _short_text(state.report, 240)
+    return ""
 
 
 def summarize_hypotheses(state: ProjectState) -> str:
@@ -445,6 +947,8 @@ def _as_pdf_text(text: str) -> str:
 
 
 def _build_dossier_blocks(state: ProjectState) -> list[dict]:
+    return _markdown_to_blocks(build_operator_dossier_markdown(state))
+
     blocks: list[dict] = []
 
     def heading(text: str, level: int = 1):
@@ -1132,8 +1636,13 @@ def _export_markdown_docx_bytes(markdown: str, *, title: str) -> bytes:
         elif block["type"] == "bullets":
             for item in block["items"]:
                 document.add_paragraph(_strip_inline_markdown(item), style="List Bullet")
+        elif block["type"] == "numbered":
+            for item in block["items"]:
+                document.add_paragraph(_strip_inline_markdown(item), style="List Number")
         elif block["type"] == "table":
             _add_docx_table(document, block["rows"])
+        elif block["type"] == "divider":
+            _add_docx_divider(document)
 
     buf = BytesIO()
     document.save(buf)
@@ -1172,8 +1681,18 @@ def _export_markdown_pdf_bytes(markdown: str, *, title: str) -> bytes:
                     leftIndent=12,
                 )
             )
+        elif block["type"] == "numbered":
+            story.append(
+                ListFlowable(
+                    [ListItem(Paragraph(_as_pdf_text(_strip_inline_markdown(item)), body), leftIndent=10) for item in block["items"]],
+                    bulletType="1",
+                    leftIndent=12,
+                )
+            )
         elif block["type"] == "table":
-            story.append(_pdf_table(block["rows"], body, doc.width))
+            story.extend(_pdf_table_flowables(block["rows"], body, doc.width))
+        elif block["type"] == "divider":
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CBD5E1"), spaceBefore=4, spaceAfter=4))
         story.append(Spacer(1, 2))
     doc.build(story)
     return buf.getvalue()
@@ -1184,57 +1703,84 @@ def _markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
     lines = (markdown or "").splitlines()
     idx = 0
     bullets: list[str] = []
+    numbered: list[str] = []
 
-    def flush_bullets():
-        nonlocal bullets
+    def flush_lists():
+        nonlocal bullets, numbered
         if bullets:
             blocks.append({"type": "bullets", "items": bullets})
             bullets = []
+        if numbered:
+            blocks.append({"type": "numbered", "items": numbered})
+            numbered = []
 
     while idx < len(lines):
-        line = lines[idx].strip()
+        line = _normalize_markdown_line(lines[idx]).strip()
         if not line:
-            flush_bullets()
+            flush_lists()
             idx += 1
             continue
         table = _consume_table(lines, idx)
         if table:
-            flush_bullets()
+            flush_lists()
             rows, next_idx = table
             blocks.append({"type": "table", "rows": rows})
             idx = next_idx
             continue
         heading = re.match(r"^(#{1,6})\s+(.+)$", line)
         if heading:
-            flush_bullets()
+            flush_lists()
             blocks.append({"type": "heading", "level": len(heading.group(1)), "text": heading.group(2).strip()})
+        elif _is_markdown_divider(line):
+            flush_lists()
+            blocks.append({"type": "divider"})
         elif re.match(r"^(-|\*)\s+", line):
+            if numbered:
+                flush_lists()
             bullets.append(re.sub(r"^(-|\*)\s+", "", line).strip())
         elif re.match(r"^\d+\.\s+", line):
-            bullets.append(re.sub(r"^\d+\.\s+", "", line).strip())
+            if bullets:
+                flush_lists()
+            numbered.append(re.sub(r"^\d+\.\s+", "", line).strip())
         else:
-            flush_bullets()
+            flush_lists()
             blocks.append({"type": "paragraph", "text": line})
         idx += 1
-    flush_bullets()
+    flush_lists()
     return blocks
 
 
 def _consume_table(lines: list[str], start: int) -> tuple[list[list[str]], int] | None:
     if start + 1 >= len(lines):
         return None
-    first = lines[start].strip()
-    second = lines[start + 1].strip()
+    first = _normalize_markdown_line(lines[start]).strip()
+    second = _normalize_markdown_line(lines[start + 1]).strip()
     if "|" not in first or not _is_markdown_separator_row(second):
         return None
     rows = [_split_table_row(first)]
     idx = start + 2
-    while idx < len(lines) and "|" in lines[idx].strip():
-        rows.append(_split_table_row(lines[idx].strip()))
+    while idx < len(lines):
+        line = _normalize_markdown_line(lines[idx]).strip()
+        if "|" not in line:
+            break
+        rows.append(_split_table_row(line))
         idx += 1
     width = max(len(row) for row in rows)
     rows = [row + [""] * (width - len(row)) for row in rows]
     return rows, idx
+
+
+def _normalize_markdown_line(line: str) -> str:
+    value = str(line or "").strip()
+    if value == ">":
+        return ""
+    if value.startswith(">"):
+        return value[1:].lstrip()
+    return value
+
+
+def _is_markdown_divider(line: str) -> bool:
+    return bool(re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", (line or "").strip()))
 
 
 def _is_markdown_separator_row(line: str) -> bool:
@@ -1255,6 +1801,19 @@ def _add_docx_table(document: Document, rows: list[list[str]]) -> None:
     for row_idx, row in enumerate(rows):
         for col_idx, value in enumerate(row):
             table.cell(row_idx, col_idx).text = _strip_inline_markdown(str(value))
+
+
+def _add_docx_divider(document: Document) -> None:
+    paragraph = document.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(4)
+    paragraph.paragraph_format.space_after = Pt(4)
+
+
+def _pdf_table_flowables(rows: list[list[str]], body_style: ParagraphStyle, available_width: float) -> list[Any]:
+    column_count = max(len(row) for row in rows) if rows else 1
+    if column_count > 4:
+        return _pdf_wide_table_cards(rows, body_style, available_width)
+    return [_pdf_table(rows, body_style, available_width)]
 
 
 def _pdf_table(rows: list[list[str]], body_style: ParagraphStyle, available_width: float) -> Table:
@@ -1282,6 +1841,50 @@ def _pdf_table(rows: list[list[str]], body_style: ParagraphStyle, available_widt
     return table
 
 
+def _pdf_wide_table_cards(rows: list[list[str]], body_style: ParagraphStyle, available_width: float) -> list[Any]:
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    normalized = [row + [""] * (width - len(row)) for row in rows]
+    headers = normalized[0]
+    cards: list[Any] = []
+    label_style = ParagraphStyle(
+        "WideTableCardLabel",
+        parent=body_style,
+        fontName="Helvetica-Bold",
+        fontSize=max(body_style.fontSize - 0.5, 7),
+        leading=body_style.leading,
+    )
+    for row_index, row in enumerate(normalized[1:], start=1):
+        card_rows = []
+        for header, value in zip(headers, row):
+            if not str(header).strip() and not str(value).strip():
+                continue
+            card_rows.append([
+                Paragraph(_as_pdf_text(_strip_inline_markdown(str(header or f"Field {row_index}"))), label_style),
+                Paragraph(_as_pdf_text(_strip_inline_markdown(str(value))), body_style),
+            ])
+        if not card_rows:
+            continue
+        card = Table(card_rows, colWidths=[available_width * 0.28, available_width * 0.72])
+        card.setStyle(
+            TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
+                    ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F8FAFC")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        cards.extend([card, Spacer(1, 5)])
+    return cards
+
+
 def _markdown_table(rows: list[list[Any]]) -> str:
     if not rows:
         return ""
@@ -1305,7 +1908,15 @@ def _strip_inline_markdown(text: str) -> str:
     value = str(text or "")
     value = re.sub(r"`([^`]+)`", r"\1", value)
     value = value.replace("**", "").replace("__", "")
+    value = _spell_visible_comparators(value)
     return value
+
+
+def _spell_visible_comparators(text: str) -> str:
+    value = str(text or "")
+    value = re.sub(r"(?<![-=])\s*>=\s*", " at least ", value)
+    value = re.sub(r"(?<![-])\s*>\s*", " greater than ", value)
+    return re.sub(r"\s{2,}", " ", value).strip()
 
 
 def _sanitize_for_export(value, *, profile: str, mode: str):
