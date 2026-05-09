@@ -199,6 +199,32 @@ class TestStrategyRunPhaseRetrievalIntegration(unittest.IsolatedAsyncioTestCase)
             any(event.get("event_type") == "knowledge_retrieval_used" for event in updated.policy_audit_log)
         )
 
+    async def test_strategy_phase_repairs_truncated_object_when_required_fields_are_complete(self):
+        state = make_strategy_state("strategy-phase-truncated-repair")
+        payload = make_strategy_payload()
+        truncated = (
+            json.dumps(
+                {
+                    "preliminary_verdicts": payload["preliminary_verdicts"],
+                    "executive_strategy": payload["executive_strategy"],
+                    "strategies": payload["strategies"],
+                }
+            )[:-1]
+            + ', "implementation_sequence": "Wave 1 starts, then output truncates'
+        )
+        response = make_llm_response(truncated)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.COMPLETED)
+        self.assertIsNotNone(updated.strategy)
+        self.assertIsNone(updated.strategy_raw)
+        self.assertEqual(updated.strategy.executive_strategy, payload["executive_strategy"])
+        self.assertEqual(len(updated.strategy.preliminary_verdicts), 2)
+        self.assertEqual(len(updated.strategy.strategies), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
