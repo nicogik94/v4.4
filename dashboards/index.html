@@ -103,6 +103,8 @@ td .subtle { color: var(--mute); font-size: 11px; }
 .sub-tab.active { color: var(--ink); border-bottom-color: var(--ink); }
 .sub-tab-content { padding: 22px; min-height: 200px; }
 .sub-tab-content.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; background: #F8FAFC; white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto; }
+.report-actions { max-width: 720px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--line-2); flex-wrap: wrap; }
+.report-actions .meta { color: var(--mute); font-size: 12px; line-height: 1.5; }
 .report-content { max-width: 720px; font-size: 14px; line-height: 1.7; color: var(--ink-2); }
 .report-content h1 { font-size: 22px; margin: 24px 0 14px; color: var(--ink); font-weight: 700; }
 .report-content h2 { font-size: 18px; margin: 22px 0 12px; color: var(--ink); font-weight: 700; }
@@ -654,7 +656,7 @@ async function loadDrillin(pid) {
     else if (state.selectedSubtab === 'workspace') renderWorkspace(pid, fullState, workspace);
     else if (state.selectedSubtab === 'trace') renderTrace(pid, explain, workspace);
     else if (state.selectedSubtab === 'dossier') renderDossier(pid, fullState);
-    else if (state.selectedSubtab === 'report') renderReport(pid, fullState);
+    else if (state.selectedSubtab === 'report') renderReport(pid, fullState, workspace);
     else if (state.selectedSubtab === 'audit') renderAudit(audit.audit_log || []);
     else renderRawState(fullState);
   } catch (e) {
@@ -1782,19 +1784,54 @@ function renderTrace(pid, explain, workspace = {}) {
   `;
 }
 
-function renderReport(pid, fullState) {
+function renderReport(pid, fullState, workspace) {
   const container = $('dr-content');
   container.classList.remove('code');
+  const phaseStatus = fullState.phase_status || {};
+  const reportStatus = phaseStatus.report || 'pending';
+  const isRegenerating = !!(workspace && workspace.workflow_running) || reportStatus === 'running';
+  const actionBlock = `
+    <div class="report-actions">
+      <div>
+        <button class="btn secondary" id="report-regenerate-btn" ${(!pid || isRegenerating) ? 'disabled' : ''}>Regenerate report</button>
+        <div class="meta">Rebuild the final report from the latest saved phase outputs.</div>
+      </div>
+      ${reportStatus === 'running' ? statusChip('running', 'report running') : ''}
+    </div>`;
   if (fullState.report) {
-    container.innerHTML = `<div class="report-content">${markdownToHtml(fullState.report)}</div>`;
+    container.innerHTML = `${actionBlock}<div class="report-content">${markdownToHtml(fullState.report)}</div>`;
   } else {
-    const phaseStatus = fullState.phase_status || {};
-    const reportStatus = phaseStatus.report || 'pending';
     if (reportStatus === 'running') {
-      container.innerHTML = `<div class="empty-state"><div class="icon">⏳</div>Report phase is running. Refresh in a moment.</div>`;
+      container.innerHTML = `${actionBlock}<div class="empty-state"><div class="icon">⏳</div>Report phase is running. Refresh in a moment.</div>`;
     } else {
-      container.innerHTML = `<div class="empty-state"><div class="icon">📋</div>No report yet. The engine produces the report at the end of phase 8. Click "Run" above to start.</div>`;
+      container.innerHTML = `${actionBlock}<div class="empty-state"><div class="icon">📋</div>No report yet. The engine produces the report at the end of phase 8. Click "Run" above to start.</div>`;
     }
+  }
+  const regenerateBtn = $('report-regenerate-btn');
+  if (regenerateBtn) {
+    regenerateBtn.addEventListener('click', () => regenerateReport(pid, fullState));
+  }
+}
+
+async function regenerateReport(pid, fullState) {
+  if (!pid) return;
+  if (fullState && fullState.report && !confirm('This will regenerate and replace the current report from the latest saved analysis. Continue?')) return;
+  const button = $('report-regenerate-btn');
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Regenerating...';
+    }
+    await apiPost(`/projects/${pid}/phase`, { phase: "report" });
+    await loadProjects();
+    await loadDrillin(pid);
+    alert('Report regenerated.');
+  } catch (e) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Regenerate report';
+    }
+    alert('Report regeneration failed: ' + e.message);
   }
 }
 

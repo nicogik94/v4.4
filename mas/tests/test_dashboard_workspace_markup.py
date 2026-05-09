@@ -67,6 +67,23 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("knowledge:", html)
         self.assertIn("external knowledge freshness", html)
 
+    def test_report_regeneration_control_is_present(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("Regenerate report", html)
+        self.assertIn("Rebuild the final report from the latest saved phase outputs.", html)
+        self.assertIn("This will regenerate and replace the current report from the latest saved analysis. Continue?", html)
+        self.assertIn("regenerateReport", html)
+        self.assertIn("/phase", html)
+        self.assertIn("phase", html)
+        self.assertIn("report", html)
+        self.assertIn("renderReport(pid, fullState, workspace)", html)
+        self.assertIn("Save report", html)
+        self.assertIn("Report markdown", html)
+        self.assertIn("/projects/${pid}/export/${fmt}", html)
+
     def test_v5_clarification_markup_is_present(self):
         if not HTML_V5_PATH.exists():
             self.skipTest("dashboard v5 bundle is not mounted in this execution environment")
