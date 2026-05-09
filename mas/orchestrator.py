@@ -404,14 +404,14 @@ PROJECT:
 
 
 def build_report_prompt(state: ProjectState) -> str:
-    ctx_classify = summarize_phase_output("classify", state)
-    ctx_hyps = summarize_phase_output("hypotheses", state)
-    ctx_gauntlet = summarize_phase_output("gauntlet", state)
-    ctx_audit = summarize_phase_output("audit", state)
-    ctx_strategy = summarize_phase_output("strategy", state)
-    ctx_monitor = summarize_phase_output("monitor", state)
+    ctx_classify = _sanitize_report_context(summarize_phase_output("classify", state))
+    ctx_hyps = _sanitize_report_context(summarize_phase_output("hypotheses", state))
+    ctx_gauntlet = _sanitize_report_context(summarize_phase_output("gauntlet", state))
+    ctx_audit = _sanitize_report_context(summarize_phase_output("audit", state))
+    ctx_strategy = _sanitize_report_context(summarize_phase_output("strategy", state))
+    ctx_monitor = _sanitize_report_context(summarize_phase_output("monitor", state))
     evidence_locator_register = _build_report_evidence_locator_register(state)
-    obs_text = "\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations"
+    obs_text = _sanitize_report_context("\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations")
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
     return f"""PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers.
 
@@ -424,6 +424,8 @@ Report writing rules:
 - Define technical terms immediately if they must appear. Avoid unexplained acronyms in the main body.
 - Prefer short paragraphs. Keep main-body sections concise: 3-6 bullets or one compact table unless more detail is necessary.
 - Use tables for options, evidence, risks, roadmap, next steps, and monitoring.
+- Do not use Markdown blockquote markers for report layout. Do not use Markdown horizontal rules.
+- For thresholds, write comparison words such as "more than", "less than", or "at least"; do not use raw comparison symbols.
 - Separate recommendation strength from evidence strength.
 - Clearly label assumptions, inferences, hypotheses, unknowns, and unavailable citations.
 - Evidence markers identify source material; they do not by themselves prove the recommendation.
@@ -433,10 +435,28 @@ Report writing rules:
 - Preserve canonical evidence markers from PROJECT EVIDENCE LOCATORS. Do not fabricate evidence markers.
 - If evidence is unavailable, use [Inference], [Hypothesis], [Unknown], or citation unavailable.
 - Do not invent owners, dates, metrics, thresholds, budgets, customer facts, evidence, or commitments.
-- When owner, date, metric, threshold, budget, customer fact, or commitment is not present in project state, use exactly: TBD — requires operator confirmation.
+- Use role-based owner placeholders instead of repeated owner TBDs: Executive Sponsor, Analytics Owner, Editorial Lead, SEO Lead, Web/CMS Owner. Named owners require operator confirmation.
+- Owner mapping: GA4, GSC, audience, acquisition, and reporting checks -> Analytics Owner; CrUX, Core Web Vitals, crawl, schema, canonicals, CMS capabilities -> Web/CMS Owner; keyword brief, editorial workflow, refresh protocol, commissioning process -> Editorial Lead; keyword research, cannibalization, internal linking, topic clusters -> SEO Lead; approval, escalation, cross-team enforcement, resource tradeoffs -> Executive Sponsor. If an action spans areas, use two roles.
+- Use TBD — requires operator confirmation only where no reasonable role can be inferred, or where date, metric, threshold, budget, customer fact, or commitment is unknown.
 - If ProjectState clarification_cycles or clarification_answers are present in report context, include them only as assumptions, open questions, unavailable context, or operator-provided context.
 - Unanswered clarification questions remain unresolved questions.
 - Clarification answers and questions are not empirical evidence, must not be cited with project evidence markers, and must not be placed in the Evidence Used table as cited facts.
+
+Factual-safety rules:
+- GA4 data thresholds are system-defined; verify whether the relevant audience report is available and sufficiently populated. Do not claim a fixed numeric monthly-active-user threshold.
+- Do not imply GA4 directly exposes a Hispanic demographic dimension unless the supplied project input explicitly says that validated field is available. If audience validation is needed, write: target audience proxy, such as age/gender plus geo/language or first-party audience data, depending on available GA4/GSC fields.
+- Use INP for responsiveness. Do not pair the retired FID metric with INP.
+- Core Web Vitals and page experience align with Google Search ranking systems and should be treated as a diagnostic and UX priority, not a deterministic ranking lever.
+- Prioritize Article and BreadcrumbList structured data. Consider FAQPage only where the page type and Google's current eligibility rules apply.
+- Structured data can make pages eligible for search features; do not promise or guarantee rich results.
+
+Research-depth and claim-labeling rules:
+- This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a completed evidence-backed SEO audit. Sprint 0 evidence collection is required before committing to full implementation.
+- Claims based only on structural pattern matching must be labeled [Inference].
+- Claims requiring GSC, GA4, crawl, CrUX, PageSpeed, keyword, or editorial workflow validation must be labeled [Hypothesis] or [Unknown].
+- Recommendations may be action-oriented, but full implementation should be gated by Sprint 0 validation of core assumptions.
+- Avoid saying an action will improve organic traffic without validation. Prefer "expected to improve," "the hypothesis is," or "Sprint 0 will validate."
+- Include this confidence explanation once: Moderate confidence in the intervention sequence; low-to-moderate confidence in the size of impact until GSC/GA4/crawl data are reviewed; high confidence that Sprint 0 diagnostics are necessary before implementation.
 
 Report structure:
 Use these exact Markdown headings in this exact order:
@@ -454,7 +474,8 @@ Use these exact Markdown headings in this exact order:
 # Appendix: Technical Analysis
 
 Executive Summary:
-- Include an "At a glance" block with: Decision, Recommendation, Confidence level, Biggest risk, Next action.
+- Add ## At a Glance immediately under Executive Summary. At a glance must be a normal two-column Markdown table, not a blockquote. Use header cells Field and Detail, then rows for Decision, Recommendation, Confidence level, Biggest risk, Next action.
+- Immediately after At a Glance, include the hypothesis-driven diagnostic memo caveat from the Research-depth rules.
 
 Options Considered:
 - Use a table with: option, upside, downside, best use case, verdict.
@@ -462,6 +483,9 @@ Options Considered:
 Evidence Used:
 - Use a table with: evidence, what it suggests, evidence strength, caveat, citation marker if available.
 - Evidence strength labels must be one of: strong, moderate, weak, unavailable, inference only.
+- After the evidence table, add ## Evidence Maturity with current evidence level bullets for: analytical model, direct project evidence, Search Console evidence, GA4 evidence, crawl/technical evidence, editorial workflow evidence, keyword research evidence.
+- After Evidence Maturity, add ## Sprint 0 Evidence Pack Required. Include a compact table with: evidence item, why it is needed, decision it validates, owner role, expected output.
+- The Sprint 0 Evidence Pack must cover: GSC 12-month URL/query export; GA4 audience/acquisition check; CrUX or PageSpeed field data; site crawl export from Screaming Frog, Sitebulb, or equivalent; URL inventory with publish/update dates; keyword research sample; editorial workflow/process confirmation; CMS/schema/canonical capability check; peer/competitor topic-gap sample if available.
 
 Key Risks:
 - Use a table with: risk, why it matters, early warning signal, mitigation, owner/role if known.
@@ -495,6 +519,42 @@ Appendix: Technical Analysis:
 MONITORING: {obs_text}
 TIMER: {timer_text}
 PROJECT: {state.brief[:400]}"""
+
+
+def _sanitize_report_context(text: str) -> str:
+    """Keep unsafe upstream wording out of final-report prompt context.
+
+    This does not rewrite phase outputs. It only prevents outdated or
+    over-specific phrasing from being repeated by the report phase.
+    """
+    value = str(text or "")
+    replacements = {
+        "500 MAU threshold": "system-defined GA4 data threshold to verify",
+        "18–34 female Hispanic segment visible in GA4": "target audience proxy availability to verify in GA4/GSC fields",
+        "18-34 female Hispanic segment visible in GA4": "target audience proxy availability to verify in GA4/GSC fields",
+        "18–34 female Hispanic segment": "target audience proxy using available age/gender plus geo/language or first-party audience fields",
+        "18-34 female Hispanic segment": "target audience proxy using available age/gender plus geo/language or first-party audience fields",
+        "GA4 Hispanic segment": "GA4 audience proxy, if available",
+        "Google Signals threshold for Hispanic segment": "system-defined GA4 data threshold for available audience fields",
+        "FID/INP": "INP",
+        "direct ranking signal": "ranking-system-aligned diagnostic signal",
+        "direct ranking lever": "ranking-system-aligned diagnostic and UX priority",
+        "confirmed ranking factors": "page-experience signals aligned with Google Search ranking systems",
+        "Article/BreadcrumbList/FAQPage schema": "Article and BreadcrumbList structured data, with FAQPage only where eligible",
+        "Article, BreadcrumbList, and FAQPage structured data": "Article and BreadcrumbList structured data, with FAQPage only where eligible",
+        "FAQPage for rich-result capture": "FAQPage only where page type and current eligibility rules apply",
+        "Implement FAQPage schema": "Consider FAQPage only where page type and current eligibility rules apply",
+        "guaranteed rich results": "eligibility for search features",
+    }
+    for unsafe, safe in replacements.items():
+        value = value.replace(unsafe, safe)
+    value = re.sub(
+        r"\bCore Web Vitals are a direct ranking signal\b",
+        "Core Web Vitals and page experience align with Google Search ranking systems and should be treated as diagnostic and UX priorities",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return value
 
 
 def _phase_retrieval_context(state: ProjectState, phase: str) -> tuple[str, list[dict]]:

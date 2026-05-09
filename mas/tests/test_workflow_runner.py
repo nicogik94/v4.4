@@ -18,6 +18,7 @@ from llm_client import LLMResponse
 from orchestrator import (
     _build_report_evidence_locator_register,
     _phase_has_output,
+    _sanitize_report_context,
     build_monitor_prompt,
     build_report_prompt,
     get_first_unfinished_phase,
@@ -294,7 +295,11 @@ class TestWorkflowHelpers(unittest.TestCase):
     def test_report_prompt_includes_client_artifact_constraints(self):
         prompt = build_report_prompt(make_completed_state("report-client-artifact-constraints"))
 
+        self.assertIn("## At a Glance", prompt)
         self.assertIn("At a glance", prompt)
+        self.assertIn("two-column Markdown table", prompt)
+        self.assertIn("Field and Detail", prompt)
+        self.assertIn("do not use raw comparison symbols", prompt)
         for item in ("Decision", "Recommendation", "Confidence level", "Biggest risk", "Next action"):
             self.assertIn(item, prompt)
         self.assertIn("Separate recommendation strength from evidence strength", prompt)
@@ -312,6 +317,75 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertNotIn("Evidence Gauge", prompt)
         self.assertNotIn("Defense Index", prompt)
         self.assertNotIn("claim cards", prompt.lower())
+
+    def test_report_prompt_includes_factual_safety_and_research_depth_rules(self):
+        prompt = build_report_prompt(make_completed_state("report-factual-safety"))
+
+        for expected in (
+            "GA4 data thresholds are system-defined",
+            "Use INP for responsiveness",
+            "Core Web Vitals and page experience align with Google Search ranking systems",
+            "Prioritize Article and BreadcrumbList structured data",
+            "Consider FAQPage only where the page type and Google's current eligibility rules apply",
+            "Structured data can make pages eligible for search features",
+            "hypothesis-driven diagnostic memo",
+            "not yet a completed evidence-backed SEO audit",
+            "Evidence Maturity",
+            "Sprint 0 Evidence Pack Required",
+            "Moderate confidence in the intervention sequence",
+            "low-to-moderate confidence in the size of impact",
+            "high confidence that Sprint 0 diagnostics are necessary",
+            "Named owners require operator confirmation",
+        ):
+            self.assertIn(expected, prompt)
+        for expected in (
+            "GSC 12-month URL/query export",
+            "GA4 audience/acquisition check",
+            "CrUX or PageSpeed field data",
+            "site crawl export",
+            "URL inventory with publish/update dates",
+            "keyword research sample",
+            "editorial workflow/process confirmation",
+            "CMS/schema/canonical capability check",
+        ):
+            self.assertIn(expected, prompt)
+        for forbidden in (
+            "500 MAU threshold",
+            "GA4 Hispanic segment",
+            "Google Signals threshold for Hispanic segment",
+            "FID/INP",
+            "direct ranking signal",
+            "FAQPage for rich-result capture",
+            "guaranteed rich results",
+        ):
+            self.assertNotIn(forbidden, prompt)
+
+    def test_report_context_sanitizer_removes_unsafe_exact_phrasing(self):
+        unsafe = (
+            "500 MAU threshold; GA4 Hispanic segment; "
+            "Google Signals threshold for Hispanic segment; FID/INP; "
+            "Core Web Vitals are a direct ranking signal; "
+            "Implement FAQPage schema; FAQPage for rich-result capture; "
+            "18-34 female Hispanic segment visible in GA4; guaranteed rich results"
+        )
+
+        sanitized = _sanitize_report_context(unsafe)
+
+        for forbidden in (
+            "500 MAU threshold",
+            "GA4 Hispanic segment",
+            "Google Signals threshold for Hispanic segment",
+            "FID/INP",
+            "Core Web Vitals are a direct ranking signal",
+            "Implement FAQPage schema",
+            "FAQPage for rich-result capture",
+            "18-34 female Hispanic segment visible in GA4",
+            "guaranteed rich results",
+        ):
+            self.assertNotIn(forbidden, sanitized)
+        self.assertIn("INP", sanitized)
+        self.assertIn("FAQPage only where page type", sanitized)
+        self.assertIn("eligibility", sanitized)
 
     def test_report_prompt_treats_clarifications_as_context_not_evidence(self):
         prompt = build_report_prompt(make_completed_state("report-clarification-context"))
