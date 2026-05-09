@@ -58,6 +58,24 @@ Use this checklist internally. Do not render it as a separate buyer-facing repor
 - No framework marker is used as project evidence.
 - No evidence ID or locator is invented.
 
+## Report quality and factual safety
+
+- Use `## At a Glance` under the Executive Summary. Render it as a normal two-column Markdown table with `Field` and `Detail` headers, not as a blockquote.
+- Do not use Markdown blockquote markers or Markdown horizontal rules for visual layout.
+- For thresholds, write comparison words such as "more than", "less than", or "at least"; do not use raw comparison symbols.
+- State clearly that the report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context, not yet a completed evidence-backed SEO audit.
+- Add `## Evidence Maturity` after Evidence Used and distinguish analytical model strength from direct project evidence, Search Console evidence, GA4 evidence, crawl/technical evidence, editorial workflow evidence, and keyword research evidence.
+- Add `## Sprint 0 Evidence Pack Required` after Evidence Maturity with evidence item, why it is needed, decision it validates, owner role, and expected output.
+- Sprint 0 evidence must cover: GSC 12-month URL/query export; GA4 audience/acquisition check; CrUX or PageSpeed field data; site crawl export; URL inventory with publish/update dates; keyword research sample; editorial workflow/process confirmation; CMS/schema/canonical capability check; peer/competitor topic-gap sample if available.
+- GA4 data thresholds are system-defined. Verify whether the relevant audience report is available and sufficiently populated; do not invent a fixed numeric monthly-active-user threshold.
+- Do not imply GA4 directly exposes a Hispanic demographic dimension unless project input explicitly validates that available field. Use target audience proxy wording, such as age/gender plus geo/language or first-party audience data, depending on available GA4/GSC fields.
+- Use INP for responsiveness. Do not pair the retired FID metric with INP.
+- Core Web Vitals and page experience align with Google Search ranking systems and should be treated as diagnostic and UX priorities, not deterministic ranking levers.
+- Prioritize Article and BreadcrumbList structured data. Consider FAQPage only where the page type and Google's current eligibility rules apply.
+- Structured data can make pages eligible for search features; do not promise or guarantee rich results.
+- Label structural pattern claims as `[Inference]`; label claims requiring GSC, GA4, crawl, CrUX/PageSpeed, keyword, or editorial workflow validation as `[Hypothesis]` or `[Unknown]`.
+- Use role-based owner placeholders: Executive Sponsor, Analytics Owner, Editorial Lead, SEO Lead, and Web/CMS Owner. Named owners require operator confirmation.
+
 ## Meta-learning payload (separate JSON, for the database)
 
 ```json

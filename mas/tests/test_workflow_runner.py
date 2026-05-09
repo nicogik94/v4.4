@@ -469,6 +469,27 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("[Inference]", prompt_text)
         self.assertIn("[Hypothesis]", prompt_text)
         self.assertIn("[Unknown]", prompt_text)
+        self.assertIn("## Report quality and factual safety", prompt_text)
+        self.assertIn("## At a Glance", prompt_text)
+        self.assertIn("Field` and `Detail` headers", prompt_text)
+        self.assertIn("do not use raw comparison symbols", prompt_text)
+        self.assertIn("Evidence Maturity", prompt_text)
+        self.assertIn("Sprint 0 Evidence Pack Required", prompt_text)
+        self.assertIn("GA4 data thresholds are system-defined", prompt_text)
+        self.assertIn("Use INP for responsiveness", prompt_text)
+        self.assertIn("Core Web Vitals and page experience align with Google Search ranking systems", prompt_text)
+        self.assertIn("Consider FAQPage only where the page type and Google's current eligibility rules apply", prompt_text)
+        self.assertIn("Structured data can make pages eligible for search features", prompt_text)
+        for forbidden in (
+            "500 MAU threshold",
+            "GA4 Hispanic segment",
+            "Google Signals threshold for Hispanic segment",
+            "FID/INP",
+            "direct ranking signal",
+            "FAQPage for rich-result capture",
+            "guaranteed rich results",
+        ):
+            self.assertNotIn(forbidden, prompt_text)
         self.assertNotIn("`[Evidence: <evidence_id> | <locator>]` is the only canonical project-evidence citation format", prompt_text)
         self.assertNotIn("canonical `[Evidence: ...]` marker", prompt_text)
 
