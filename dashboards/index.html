@@ -54,6 +54,8 @@ header h1 .version { font-size: 11px; font-weight: 600; color: var(--accent); ba
 .form-row input[type="text"], .form-row textarea, .form-row select { font: inherit; font-size: 13px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--ink); }
 .form-row textarea { min-height: 110px; resize: vertical; font-family: inherit; }
 .form-row .hint { font-size: 11px; color: var(--mute); margin-top: 2px; font-style: italic; }
+.draft-status { display: block; font-size: 11px; color: var(--mute); margin-top: 4px; font-style: italic; }
+.draft-status a { color: var(--ink-2); text-decoration: underline; cursor: pointer; margin-right: 6px; }
 .form-row.required label::after { content: " *"; color: var(--bad); }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 0 22px 20px; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
@@ -403,6 +405,135 @@ const $ = (id) => document.getElementById(id);
 const apiUrl = () => $('api-url').value.replace(/\/$/, '');
 const PHASES = ['classify', 'hypotheses', 'gauntlet', 'audit', 'strategy', 'sqi', 'monitor', 'report'];
 
+// ── Local browser draft persistence ─────────────────────────────────────────
+// Saves long-form operator input (project brief, supporting data, report
+// editor, upload mapping) to localStorage so refreshes, re-renders, backend
+// reloads, or accidental navigation do not wipe unsaved work. Drafts are
+// browser-local: they are not sent to the backend until the operator
+// explicitly submits, and they are not included in any export.
+const DRAFT_NAMESPACE = 'v4.draft';
+const DRAFT_DEBOUNCE_MS = 400;
+const Drafts = (() => {
+  const tracked = new Map();
+  let beforeUnloadAttached = false;
+
+  function readKey(k) {
+    try { return localStorage.getItem(k); } catch { return null; }
+  }
+  function writeKey(k, value) {
+    try {
+      if (value === undefined || value === null || value === '') localStorage.removeItem(k);
+      else localStorage.setItem(k, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function removeKey(k) {
+    try { localStorage.removeItem(k); } catch {}
+  }
+
+  function ensureBeforeUnload() {
+    if (beforeUnloadAttached) return;
+    beforeUnloadAttached = true;
+    window.addEventListener('beforeunload', (e) => {
+      for (const entry of tracked.values()) {
+        const stored = readKey(entry.key);
+        if (stored && stored.trim()) {
+          e.preventDefault();
+          e.returnValue = '';
+          return '';
+        }
+      }
+    });
+  }
+
+  function buildKey(scope, field, projectId) {
+    const parts = (scope === 'project' && projectId)
+      ? [DRAFT_NAMESPACE, 'project', projectId, field]
+      : [DRAFT_NAMESPACE, scope, field];
+    return parts.filter(p => p !== undefined && p !== null && String(p) !== '').join('.');
+  }
+
+  function attach(elementId, draftKey) {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    const indicatorId = `${elementId}-draft-status`;
+    let indicator = document.getElementById(indicatorId);
+    if (!indicator) {
+      indicator = document.createElement('span');
+      indicator.id = indicatorId;
+      indicator.className = 'draft-status';
+      indicator.setAttribute('aria-live', 'polite');
+      el.parentElement?.appendChild(indicator);
+    }
+    const stored = readKey(draftKey);
+    const initial = el.value || '';
+    if (stored && stored !== '') {
+      if (stored === initial) {
+        indicator.textContent = '';
+      } else if (!initial.trim()) {
+        el.value = stored;
+        indicator.textContent = 'Restored local draft.';
+      } else {
+        indicator.innerHTML = 'Local draft differs from saved version. <a href="#" data-action="restore">Restore draft</a><a href="#" data-action="discard">Clear draft</a>';
+      }
+    } else {
+      indicator.textContent = '';
+    }
+
+    indicator.onclick = (event) => {
+      const target = event.target;
+      if (!target || target.tagName !== 'A') return;
+      event.preventDefault();
+      const action = target.dataset.action;
+      if (action === 'restore') {
+        const current = el.value || '';
+        if (current.trim() && !confirm('Replace current value with the local draft?')) return;
+        const value = readKey(draftKey);
+        if (value !== null) el.value = value;
+        indicator.textContent = 'Restored local draft.';
+      } else if (action === 'discard') {
+        removeKey(draftKey);
+        indicator.textContent = 'Local draft cleared.';
+      }
+    };
+
+    if (el.__draftListener) el.removeEventListener('input', el.__draftListener);
+    let timer = null;
+    const onInput = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        const value = el.value || '';
+        if (value === '') {
+          removeKey(draftKey);
+          indicator.textContent = '';
+        } else {
+          const ok = writeKey(draftKey, value);
+          indicator.textContent = ok ? 'Draft saved locally.' : 'Draft too large to save locally.';
+        }
+      }, DRAFT_DEBOUNCE_MS);
+    };
+    el.addEventListener('input', onInput);
+    el.__draftListener = onInput;
+
+    tracked.set(elementId, { elementId, key: draftKey, indicatorId });
+    ensureBeforeUnload();
+  }
+
+  function clearDraft(draftKey) {
+    removeKey(draftKey);
+    for (const entry of tracked.values()) {
+      if (entry.key === draftKey) {
+        const indicator = document.getElementById(entry.indicatorId);
+        if (indicator) indicator.textContent = '';
+      }
+    }
+  }
+
+  return { key: buildKey, attach, clear: clearDraft, save: writeKey, load: readKey };
+})();
+
 function fmt(n, d = 3) { return (n == null || isNaN(n)) ? '—' : Number(n).toFixed(d); }
 function fmtInt(n) { return n == null ? '—' : Number(n).toLocaleString(); }
 function fmtCost(n) { return n == null ? '—' : '$' + Number(n).toFixed(2); }
@@ -503,12 +634,23 @@ $('form-toggle').addEventListener('click', () => {
   $('form-toggle').textContent = hidden ? 'Show' : 'Hide';
 });
 
+const NEW_PROJECT_DRAFT_FIELDS = [
+  { id: 'np-name', field: 'name' },
+  { id: 'np-brief', field: 'brief' },
+  { id: 'np-data', field: 'data' },
+  { id: 'np-rationale', field: 'rationale' },
+];
+NEW_PROJECT_DRAFT_FIELDS.forEach(({ id, field }) => {
+  Drafts.attach(id, Drafts.key('new_project', field));
+});
+
 $('np-clear').addEventListener('click', () => {
   $('np-name').value = '';
   $('np-brief').value = '';
   $('np-data').value = '';
   $('np-risk').value = 'minimal_risk';
   $('np-rationale').value = '';
+  NEW_PROJECT_DRAFT_FIELDS.forEach(({ field }) => Drafts.clear(Drafts.key('new_project', field)));
 });
 
 $('np-create').addEventListener('click', async () => {
@@ -538,6 +680,7 @@ $('np-create').addEventListener('click', async () => {
     $('np-data').value = '';
     $('np-rationale').value = '';
     $('np-risk').value = 'minimal_risk';
+    NEW_PROJECT_DRAFT_FIELDS.forEach(({ field }) => Drafts.clear(Drafts.key('new_project', field)));
     await loadProjects();
     selectProject(proj.project_id);
   } catch (e) {
@@ -845,6 +988,8 @@ async function saveDossierInput(pid) {
     timer_logs: safeParseJson($('dossier-timer-logs').value, 'Timer logs', []),
   };
   await apiPatch(`/projects/${pid}/input`, payload);
+  Drafts.clear(Drafts.key('project', 'dossier_brief', pid));
+  Drafts.clear(Drafts.key('project', 'dossier_data', pid));
   await loadProjects();
   await loadDrillin(pid);
 }
@@ -966,6 +1111,7 @@ async function saveDossierMonitor(pid) {
 
 async function saveDossierReport(pid) {
   await apiPatch(`/projects/${pid}/phase-output/report`, { report: $('report-editor').value });
+  Drafts.clear(Drafts.key('project', 'report_editor', pid));
   await loadProjects();
   await loadDrillin(pid);
 }
@@ -1087,6 +1233,8 @@ function renderFileLibrary(files) {
 function wireUploadPanel(pid, prefix) {
   const button = $(`${prefix}-upload-btn`);
   if (!button) return;
+  const mappingDraftKey = Drafts.key('project', `upload_mapping_${prefix}`, pid);
+  Drafts.attach(`${prefix}-upload-mapping`, mappingDraftKey);
   button.onclick = async () => {
     const fileInput = $(`${prefix}-upload-file`);
     const status = $(`${prefix}-upload-status`);
@@ -1107,6 +1255,7 @@ function wireUploadPanel(pid, prefix) {
     try {
       const response = await apiFormPost(`/projects/${pid}/files`, formData);
       if (status) status.textContent = `${response.manifest.filename} uploaded. ${response.parse_summary.knowledge_item_count || 0} knowledge item(s) created.`;
+      Drafts.clear(mappingDraftKey);
       await loadProjects();
       await loadDrillin(pid);
     } catch (e) {
@@ -1471,6 +1620,9 @@ function renderDossier(pid, fullState) {
 
   attachDossierHandlers(pid);
   wireUploadPanel(pid, 'dossier');
+  Drafts.attach('dossier-brief', Drafts.key('project', 'dossier_brief', pid));
+  Drafts.attach('dossier-data', Drafts.key('project', 'dossier_data', pid));
+  Drafts.attach('report-editor', Drafts.key('project', 'report_editor', pid));
 }
 
 function renderWorkspace(pid, fullState, workspace) {

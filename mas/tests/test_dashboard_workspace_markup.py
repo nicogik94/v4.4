@@ -84,6 +84,54 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("Report markdown", html)
         self.assertIn("/projects/${pid}/export/${fmt}", html)
 
+    def test_local_draft_persistence_is_present(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("Local browser draft persistence", html)
+        self.assertIn("DRAFT_NAMESPACE = 'v4.draft'", html)
+        self.assertIn("const Drafts =", html)
+        self.assertIn("Drafts.attach(", html)
+        self.assertIn("Drafts.clear(", html)
+        self.assertIn("Drafts.key(", html)
+        self.assertIn("localStorage.setItem", html)
+        self.assertIn("localStorage.removeItem", html)
+        self.assertIn("DRAFT_DEBOUNCE_MS = 400", html)
+        self.assertIn("beforeunload", html)
+        self.assertIn("draft-status", html)
+        self.assertIn("Restore draft", html)
+        self.assertIn("Clear draft", html)
+        self.assertIn("Draft saved locally.", html)
+        self.assertIn("Restored local draft.", html)
+        self.assertIn("Draft too large to save locally.", html)
+        self.assertIn("Replace current value with the local draft?", html)
+
+        self.assertIn("NEW_PROJECT_DRAFT_FIELDS", html)
+        self.assertIn("{ id: 'np-name', field: 'name' }", html)
+        self.assertIn("{ id: 'np-brief', field: 'brief' }", html)
+        self.assertIn("{ id: 'np-data', field: 'data' }", html)
+        self.assertIn("{ id: 'np-rationale', field: 'rationale' }", html)
+        self.assertIn("Drafts.attach(id, Drafts.key('new_project', field))", html)
+        self.assertIn("Drafts.key('project', 'dossier_brief', pid)", html)
+        self.assertIn("Drafts.key('project', 'dossier_data', pid)", html)
+        self.assertIn("Drafts.key('project', 'report_editor', pid)", html)
+        self.assertIn("upload_mapping_${prefix}", html)
+
+        self.assertIn(
+            "NEW_PROJECT_DRAFT_FIELDS.forEach(({ field }) => Drafts.clear(Drafts.key('new_project', field)));",
+            html,
+        )
+        self.assertIn(
+            "Drafts.clear(Drafts.key('project', 'dossier_brief', pid));",
+            html,
+        )
+        self.assertIn(
+            "Drafts.clear(Drafts.key('project', 'report_editor', pid));",
+            html,
+        )
+        self.assertIn("Drafts.clear(mappingDraftKey);", html)
+
     def test_v5_clarification_markup_is_present(self):
         if not HTML_V5_PATH.exists():
             self.skipTest("dashboard v5 bundle is not mounted in this execution environment")
