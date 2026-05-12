@@ -24,9 +24,11 @@ from decision_objects import ensure_decision_objects
 from knowledge.retrieval import evaluate_phase_retrieval
 from report_quality import (
     PROVISIONAL_CLARIFICATION_CAVEAT,
+    SPARSE_CONFIDENCE_RULE,
     SPARSE_EVIDENCE_CAVEAT,
     SPARSE_PRECISION_RULE,
     TELEMETRY_PRIVACY_CAVEAT,
+    WAVE2_GRADUATION_MATRIX,
     assess_report_quality_context,
 )
 from tools.scoring import (
@@ -538,7 +540,9 @@ def _report_quality_prompt_block(context) -> str:
         f"- Decision domain: {context.decision_domain}.",
         "- Owner roles to use: " + ", ".join(context.owner_roles) + ".",
         "- Sprint 0 evidence categories: " + ", ".join(context.evidence_categories) + ".",
-        "- Do not introduce SEO/search evidence categories unless the decision domain is seo_content_editorial or the supplied brief explicitly asks for SEO/web analytics evidence.",
+        "- Use only the active domain's owner roles and Sprint 0 evidence categories unless the original operator input explicitly asks for another domain.",
+        "- For generic growth decisions, use growth/revenue/product analytics roles and evidence; do not default to unrelated web-publishing owner roles or evidence categories.",
+        "- For productization/product strategy decisions, use product telemetry, session/rework logs, report validation, user interviews, pilot sessions, export usage/share data, implementation complexity, privacy review, and template schema / field registry validation; do not use web-publishing platform terminology unless the original operator input explicitly asks for it.",
         f"- {SPARSE_PRECISION_RULE}",
         "- Treat clarification answers as operator context only, not empirical evidence.",
         "- Generate or surface 5-8 decision-critical follow-up questions when clarification answers are absent or unresolved.",
@@ -552,6 +556,11 @@ def _report_quality_prompt_block(context) -> str:
         lines.append("- Evidence warning: one or more evidence channels are missing; separate evidence strength from recommendation strength.")
     if context.provisional_report:
         lines.append(f"- {PROVISIONAL_CLARIFICATION_CAVEAT}")
+    if context.sparse_evidence:
+        lines.append(f"- {SPARSE_CONFIDENCE_RULE}")
+    if context.decision_domain == "productization":
+        lines.append("- Include a Wave 2 Graduation Matrix with Proceed, Extend Wave 1, Split the workstream, and Stop or defer rules. Use existing/operator-set thresholds or qualitative threshold placeholders; do not invent new numeric thresholds.")
+        lines.append(WAVE2_GRADUATION_MATRIX)
     return "\n".join(lines)
 
 
@@ -566,8 +575,11 @@ def _report_factual_safety_rules(context) -> str:
             "- Structured data can make pages eligible for search features; do not promise or guarantee rich results.",
         ])
     return "\n".join([
-        "- Do not use search-console, web-analytics, crawl, keyword, CMS, or schema evidence categories unless the supplied brief explicitly involves SEO, content, editorial, CMS, or web analytics work.",
-        "- For productization/product strategy decisions, use product telemetry, pilot-session data, user feedback, export validation, implementation complexity, and privacy/data governance evidence categories.",
+        "- Do not use unrelated web/search/content evidence categories unless the supplied brief explicitly involves that work.",
+        "- If upstream generated phase text uses unrelated web/search/content wording but the original operator input does not, do not repeat it; replace it with the active domain evidence categories.",
+        "- For generic growth decisions, use cohort retention, CAC/LTV, pipeline conversion, win/loss, product usage/activation, churn, expansion/NRR, pricing/packaging, sales velocity, marketing channel efficiency, and customer success evidence.",
+        "- For productization/product strategy decisions, use product telemetry, pilot-session data, user feedback, export validation, implementation complexity, privacy/data governance, and template schema / field registry validation evidence categories.",
+        "- For productization/product strategy decisions, replace unsupported web-publishing platform wording with reusable template schema, field registry, or product instrumentation validation unless the original operator input explicitly involves that work.",
         "- Do not make precise impact, savings, probability, percentage, or budget claims unless concrete project evidence supports them.",
         "- If evidence is sparse, prefer diagnostic recommendations and Sprint 0 evidence collection over confident implementation prescriptions.",
     ])
@@ -576,12 +588,16 @@ def _report_factual_safety_rules(context) -> str:
 def _report_research_depth_rules(context) -> str:
     if context.decision_domain == "seo_content_editorial":
         domain_claims = "Search Console, GA4, crawl, CrUX/PageSpeed, keyword, or editorial workflow validation"
-        confidence = "Moderate confidence in the intervention sequence; low-to-moderate confidence in the size of impact until Search Console, GA4, crawl, and editorial evidence are reviewed; high confidence that Sprint 0 diagnostics are necessary before implementation."
         caveat = "This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a completed evidence-backed SEO audit. Sprint 0 evidence collection is required before committing to full implementation."
     else:
         domain_claims = ", ".join(context.evidence_categories)
-        confidence = "Moderate confidence in the diagnostic sequence; low-to-moderate confidence in the size of impact until direct project evidence is reviewed; high confidence that Sprint 0 evidence collection is necessary before implementation."
         caveat = "This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a measured audit. Sprint 0 evidence collection is required before committing to full implementation."
+    if context.sparse_evidence:
+        confidence = SPARSE_CONFIDENCE_RULE
+    elif context.decision_domain == "seo_content_editorial":
+        confidence = "Moderate confidence in the intervention sequence; low-to-moderate confidence in the size of impact until Search Console, GA4, crawl, and editorial evidence are reviewed; high confidence that Sprint 0 diagnostics are necessary before implementation."
+    else:
+        confidence = "Moderate confidence in the diagnostic sequence; low-to-moderate confidence in the size of impact until direct project evidence is reviewed; high confidence that Sprint 0 evidence collection is necessary before implementation."
     lines = [
         f"- {caveat}",
         "- Claims based only on structural pattern matching must be labeled [Inference].",

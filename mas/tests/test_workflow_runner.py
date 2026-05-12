@@ -26,6 +26,7 @@ from orchestrator import (
     run_phase_node,
     run_workflow_sequence,
 )
+from report_quality import SPARSE_CONFIDENCE_RULE
 from state import (
     AuditOutput,
     ClassifyOutput,
@@ -319,7 +320,10 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertNotIn("claim cards", prompt.lower())
 
     def test_report_prompt_includes_factual_safety_and_research_depth_rules(self):
-        prompt = build_report_prompt(make_completed_state("report-factual-safety"))
+        state = make_completed_state("report-factual-safety")
+        state.project_name = "SEO content growth"
+        state.brief = "Improve website traffic with SEO content, Search Console, GA4, crawl, and CMS review."
+        prompt = build_report_prompt(state)
 
         for expected in (
             "GA4 data thresholds are system-defined",
@@ -332,9 +336,7 @@ class TestWorkflowHelpers(unittest.TestCase):
             "not yet a completed evidence-backed SEO audit",
             "Evidence Maturity",
             "Sprint 0 Evidence Pack Required",
-            "Moderate confidence in the intervention sequence",
-            "low-to-moderate confidence in the size of impact",
-            "high confidence that Sprint 0 diagnostics are necessary",
+            SPARSE_CONFIDENCE_RULE,
             "Named owners require operator confirmation",
         ):
             self.assertIn(expected, prompt)
@@ -410,6 +412,7 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("This is a structured hypothesis map, not a measured audit.", prompt)
         self.assertIn("Provisional report: clarification questions have not been answered.", prompt)
         self.assertIn("BF, DQ, RPN, H_norm, correlation/rho, priors, probabilities, dollars, and percentages", prompt)
+        self.assertIn(SPARSE_CONFIDENCE_RULE, prompt)
 
     def test_productization_report_prompt_uses_product_roles_and_evidence(self):
         state = ProjectState(
@@ -431,16 +434,68 @@ class TestWorkflowHelpers(unittest.TestCase):
             "product telemetry",
             "pilot sessions",
             "report validation batch",
+            "template schema / field registry validation",
+            "Wave 2 Graduation Matrix",
+            "operator-set threshold",
         ):
             self.assertIn(expected, prompt)
         for forbidden in (
             "GSC 12-month URL/query export",
             "GA4 audience/acquisition check",
+            "CMS/schema/canonical capability check",
             "SEO Lead",
             "Editorial Lead",
             "Web/CMS Owner",
         ):
             self.assertNotIn(forbidden, prompt)
+
+    def test_sparse_generic_growth_prompt_uses_growth_evidence_without_web_leakage(self):
+        state = ProjectState(
+            project_id="sparse-growth-prompt",
+            project_name="Growth performance",
+            brief="Improve growth performance across revenue operations, sales, retention, churn, and pipeline.",
+        )
+        state.report = "Generated text mentions Search Console, GA4, crawl, editorial, CMS/schema capability, SEO Lead, and Web/CMS Owner."
+
+        prompt = build_report_prompt(state)
+
+        for expected in (
+            "Decision domain: growth",
+            "Growth Lead",
+            "Revenue Operations Lead",
+            "Product Analytics Lead",
+            "cohort retention",
+            "CAC / LTV",
+            "pipeline conversion",
+            "win/loss analysis",
+            "product usage / activation",
+            "customer success signals",
+        ):
+            self.assertIn(expected, prompt)
+        for forbidden in (
+            "Search Console",
+            "GA4",
+            "crawl/technical evidence",
+            "editorial workflow evidence",
+            "CMS/schema capability",
+            "SEO Lead",
+            "Web/CMS Owner",
+        ):
+            self.assertNotIn(forbidden, prompt)
+
+    def test_sparse_seo_growth_prompt_may_use_web_evidence_when_explicit(self):
+        state = ProjectState(
+            project_id="seo-growth-prompt",
+            project_name="SEO growth",
+            brief="Improve website traffic with SEO content, Search Console, GA4, crawl, and CMS workflow evidence.",
+        )
+
+        prompt = build_report_prompt(state)
+
+        self.assertIn("Decision domain: seo_content_editorial", prompt)
+        self.assertIn("Search Console", prompt)
+        self.assertIn("GA4", prompt)
+        self.assertIn("Web/CMS Owner", prompt)
 
     def test_non_seo_domains_do_not_receive_seo_owner_roles(self):
         cases = [
@@ -547,8 +602,14 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("do not use raw comparison symbols", prompt_text)
         self.assertIn("This is a structured hypothesis map, not a measured audit.", prompt_text)
         self.assertIn("Provisional report: clarification questions have not been answered.", prompt_text)
+        self.assertIn(SPARSE_CONFIDENCE_RULE, prompt_text)
         self.assertIn("domain-specific owner roles", prompt_text)
+        self.assertIn("cohort retention", prompt_text)
+        self.assertIn("CAC/LTV", prompt_text)
         self.assertIn("product telemetry", prompt_text)
+        self.assertIn("template schema / field registry validation", prompt_text)
+        self.assertIn("Wave 2 Graduation Matrix", prompt_text)
+        self.assertIn("do not invent new numeric thresholds", prompt_text)
         self.assertIn("Log event metadata by default.", prompt_text)
         self.assertIn("Evidence Maturity", prompt_text)
         self.assertIn("Sprint 0 Evidence Pack Required", prompt_text)
