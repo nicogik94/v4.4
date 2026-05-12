@@ -241,8 +241,15 @@ PROJECT:
 
 def build_hypotheses_prompt(state: ProjectState) -> str:
     ctx = summarize_phase_output("classify", state)
+    sparse_note = (
+        "\nSPARSE EVIDENCE NOTE: No supporting data has been supplied. "
+        "Generate falsifiable hypotheses grounded in the brief and classify output. "
+        "Label each justification as [Hypothesis] or [Unknown] where evidence is absent. "
+        "Do NOT invent evidence IDs, metric values, or source names. "
+        "Focus on diagnostic paths and explicitly note missing evidence as confirm/reject thresholds."
+    ) if not state.data else ""
     return f"""PHASE 1: Generate 8-12 hypotheses using HDD[#21]+BAYES_LITE[#4]. Check MECE, portfolio ρ, EVOI[#25].
-
+{sparse_note}
 EXAMPLE:
 {{"id":"H1","text":"We believe X. We will know by Y.","justification":"Why this hypothesis matters and what evidence suggests it is plausible.","signal":"measurable","alpha":6,"beta":4,"confirm":"threshold","reject":"threshold","evoi":"high","portfolio_cluster":"speed","status":"OPEN"}}
 
@@ -1247,10 +1254,35 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
                     data = data[0]
             state.classify = ClassifyOutput(**data)
         elif phase == "hypotheses":
-            if isinstance(data, list):
-                state.hypotheses = [Hypothesis(**h) for h in data]
-            elif isinstance(data, dict) and "hypotheses" in data:
-                state.hypotheses = [Hypothesis(**h) for h in data["hypotheses"]]
+            items = data if isinstance(data, list) else data.get("hypotheses", [])
+            # Fields the LLM may emit as null instead of omitting when evidence is
+            # absent (sparse briefs). Coerce null → default rather than failing the
+            # entire list on a single malformed item.
+            _NULL_COERCE = frozenset(
+                ("justification", "signal", "confirm", "reject",
+                 "evoi", "portfolio_cluster", "status")
+            )
+            valid_hyps: list[Hypothesis] = []
+            for idx, h in enumerate(items):
+                if not isinstance(h, dict):
+                    logger.warning(
+                        f"Phase hypotheses: item {idx} is not a dict "
+                        f"(type={type(h).__name__}); skipping."
+                    )
+                    continue
+                sanitized = {
+                    k: ("" if (v is None and k in _NULL_COERCE) else v)
+                    for k, v in h.items()
+                }
+                try:
+                    valid_hyps.append(Hypothesis(**sanitized))
+                except Exception as item_exc:
+                    logger.warning(
+                        f"Phase hypotheses: item {idx} failed validation "
+                        f"({item_exc!r}); skipping. Preview: {repr(h)[:200]}"
+                    )
+            if valid_hyps:
+                state.hypotheses = valid_hyps
         elif phase == "gauntlet":
             state.gauntlet = GauntletOutput(**data)
         elif phase == "audit":

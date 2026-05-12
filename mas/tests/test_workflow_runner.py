@@ -616,6 +616,123 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updated.sealed)
         self.assertTrue(updated.seal_date)
 
+    async def test_hypotheses_null_optional_fields_are_coerced_and_phase_completes(self):
+        """Null values on optional string fields (signal, evoi, etc.) must not fail
+        the entire phase — they should be coerced to empty string defaults."""
+        state = ProjectState(project_id="hypo-null", project_name="Sparse", brief="Improving growth performance")
+        state.intake_sanitization_findings = {}
+        state.classify = make_completed_state("seed").classify
+        payload_with_nulls = [
+            {
+                "id": "H1",
+                "text": "We believe traffic is underperforming.",
+                "justification": "[Hypothesis] Based on brief only.",
+                "signal": None,          # null optional field
+                "alpha": 6,
+                "beta": 4,
+                "confirm": "CTR >= 5%",
+                "reject": "CTR < 2%",
+                "evoi": None,            # null optional field
+                "portfolio_cluster": None,  # null optional field
+                "status": "OPEN",
+            },
+            {
+                "id": "H2",
+                "text": "We believe content gap is a key driver.",
+                "justification": "[Unknown] No data supplied.",
+                "signal": "keyword gap count",
+                "alpha": 5,
+                "beta": 5,
+                "confirm": ">20 gaps identified",
+                "reject": "<5 gaps identified",
+                "evoi": "high",
+                "portfolio_cluster": "distribution",
+                "status": "OPEN",
+            },
+            {
+                "id": "H3",
+                "text": "We believe technical issues reduce crawlability.",
+                "justification": "[Hypothesis] Common pattern for sparse briefs.",
+                "signal": None,
+                "alpha": 4,
+                "beta": 6,
+                "confirm": "crawl errors < 5%",
+                "reject": "crawl errors > 20%",
+                "evoi": "medium",
+                "portfolio_cluster": None,
+                "status": "OPEN",
+            },
+        ]
+        response = make_response(json.dumps(payload_with_nulls), 15, 8, 0.03)
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "hypotheses")
+
+        self.assertEqual(updated.phase_status["hypotheses"], PhaseStatus.COMPLETED)
+        self.assertEqual(len(updated.hypotheses), 3)
+        self.assertEqual(updated.hypotheses[0].signal, "")
+        self.assertEqual(updated.hypotheses[0].evoi, "")
+        self.assertEqual(updated.hypotheses[0].portfolio_cluster, "")
+        self.assertTrue(updated.sealed)
+
+    async def test_hypotheses_partial_schema_failure_recovers_valid_items(self):
+        """If one hypothesis item fails Pydantic validation, the remaining valid
+        items must still be stored and the phase must complete."""
+        state = ProjectState(project_id="hypo-partial", project_name="Partial", brief="Test")
+        state.intake_sanitization_findings = {}
+        state.classify = make_completed_state("seed").classify
+        payload_mixed = [
+            # Valid
+            {"id": "H1", "text": "Hypothesis one", "alpha": 6, "beta": 4,
+             "confirm": ">60%", "reject": "<30%"},
+            # Invalid: missing required "id" field — will be skipped
+            {"text": "Missing id field", "alpha": 5, "beta": 5,
+             "confirm": ">50%", "reject": "<20%"},
+            # Valid
+            {"id": "H3", "text": "Hypothesis three", "alpha": 7, "beta": 3,
+             "confirm": ">70%", "reject": "<40%"},
+            # Valid
+            {"id": "H4", "text": "Hypothesis four", "alpha": 5, "beta": 5,
+             "confirm": ">55%", "reject": "<25%"},
+        ]
+        response = make_response(json.dumps(payload_mixed), 14, 7, 0.02)
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "hypotheses")
+
+        self.assertEqual(updated.phase_status["hypotheses"], PhaseStatus.COMPLETED)
+        self.assertEqual(len(updated.hypotheses), 3)
+        self.assertNotIn("Missing id field", [h.text for h in updated.hypotheses])
+
+    def test_hypotheses_prompt_sparse_brief_includes_evidence_guidance(self):
+        """When state.data is empty the hypotheses prompt must include the sparse
+        evidence note instructing the LLM to label claims as [Hypothesis]/[Unknown]."""
+        from orchestrator import build_hypotheses_prompt
+        state = ProjectState(
+            project_id="sparse-prompt",
+            project_name="Sparse project",
+            brief="Improving growth performance",
+        )
+        state.classify = make_completed_state("seed").classify
+        prompt = build_hypotheses_prompt(state)
+        self.assertIn("SPARSE EVIDENCE NOTE", prompt)
+        self.assertIn("[Hypothesis]", prompt)
+        self.assertIn("[Unknown]", prompt)
+        self.assertIn("Do NOT invent evidence IDs", prompt)
+
+    def test_hypotheses_prompt_data_present_omits_sparse_note(self):
+        """When state.data is non-empty the sparse evidence note must not appear."""
+        from orchestrator import build_hypotheses_prompt
+        state = ProjectState(
+            project_id="rich-prompt",
+            project_name="Rich project",
+            brief="Improving growth performance",
+            data="GA4 sessions: 50000/month, CTR 2.1%, bounce 65%",
+        )
+        state.classify = make_completed_state("seed").classify
+        prompt = build_hypotheses_prompt(state)
+        self.assertNotIn("SPARSE EVIDENCE NOTE", prompt)
+
     async def test_audit_phase_repairs_truncated_object_when_required_fields_are_complete(self):
         state = make_completed_state("audit-phase-truncated-repair")
         state.phase_status["audit"] = PhaseStatus.PENDING
