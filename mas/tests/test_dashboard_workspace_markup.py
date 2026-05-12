@@ -84,6 +84,24 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("Report markdown", html)
         self.assertIn("/projects/${pid}/export/${fmt}", html)
 
+    def test_canonical_clarification_panel_is_present(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("/clarifications", html)
+        self.assertIn("Clarification questions", html)
+        self.assertIn("clarification-panel", html)
+        self.assertIn("renderClarificationPanel", html)
+        self.assertIn("wireClarificationPanel", html)
+        self.assertIn("Generate questions", html)
+        self.assertIn("Save answer", html)
+        self.assertIn("Mark unavailable", html)
+        self.assertIn("/clarifications/cycles", html)
+        self.assertIn("/clarifications/answers", html)
+        self.assertIn("Regenerate report", html)
+        self.assertIn("/projects/${pid}/export/${fmt}", html)
+
     def test_local_draft_persistence_is_present(self):
         if not HTML_PATH.exists():
             self.skipTest("dashboard bundle is not mounted in this execution environment")

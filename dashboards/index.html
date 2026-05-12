@@ -772,13 +772,14 @@ $('dr-download-pdf').addEventListener('click', () => {
 
 async function loadDrillin(pid) {
   try {
-    const [fullState, budget, audit, workspace, explain, overview] = await Promise.all([
+    const [fullState, budget, audit, workspace, explain, overview, clarifications] = await Promise.all([
       apiGet(`/projects/${pid}/state`),
       apiGet(`/projects/${pid}/budget`),
       apiGet(`/projects/${pid}/policy-audit`),
       apiGet(`/projects/${pid}/workspace`),
       apiGet(`/projects/${pid}/explain`),
       apiGet(`/projects/${pid}/overview`),
+      apiGet(`/projects/${pid}/clarifications`),
     ]);
 
     $('dr-name').innerHTML = escapeHtml(fullState.project_name || 'Untitled')
@@ -795,7 +796,7 @@ async function loadDrillin(pid) {
     renderPhases(fullState.phase_status || {});
     renderBudget(budget);
 
-    if (state.selectedSubtab === 'overview') renderOverview(pid, fullState, overview);
+    if (state.selectedSubtab === 'overview') renderOverview(pid, fullState, overview, clarifications);
     else if (state.selectedSubtab === 'workspace') renderWorkspace(pid, fullState, workspace);
     else if (state.selectedSubtab === 'trace') renderTrace(pid, explain, workspace);
     else if (state.selectedSubtab === 'dossier') renderDossier(pid, fullState);
@@ -1230,6 +1231,100 @@ function renderFileLibrary(files) {
   `).join('')}</div>`;
 }
 
+function renderClarificationPanel(clarifications) {
+  const questions = clarifications?.open_questions || [];
+  const answers = clarifications?.answers || [];
+  const summary = clarifications?.summary || 'No clarification cycle generated yet.';
+  const latestQuestions = clarifications?.latest_cycle?.questions || [];
+  const visibleQuestions = questions.length ? questions : latestQuestions.slice(0, 8);
+  return `
+    <div class="overview-section clarification-panel" style="margin-bottom:16px;">
+      <div class="overview-section-head">
+        <h4>Clarification questions</h4>
+        <div class="meta">${fmtInt(questions.length)} open · ${fmtInt(answers.length)} answered/unavailable</div>
+      </div>
+      <div class="workspace-panel-body">
+        <div class="workspace-row">
+          <strong>Decision-critical follow-up questions</strong>
+          <div class="meta">${escapeHtml(summary)}</div>
+          <div class="form-actions" style="padding:12px 0 0; justify-content:flex-start;">
+            <button class="btn secondary small" id="clarification-generate-btn" type="button">Generate questions</button>
+          </div>
+        </div>
+        ${visibleQuestions.length ? `<div class="workspace-list" style="margin-top:12px;">${visibleQuestions.slice(0, 8).map(question => {
+          const status = question.status || 'open';
+          const isOpen = status === 'open';
+          return `<div class="workspace-row clarification-question" data-question-id="${escapeHtml(question.question_id || '')}">
+            <strong>${escapeHtml(question.text || 'Clarification question')}</strong>
+            <div class="meta">${escapeHtml(question.priority || 'medium')} · affects ${escapeHtml(question.affected_phase || 'workflow')} · ${escapeHtml(status)}</div>
+            <div class="meta">${escapeHtml(question.why_it_matters || '')}</div>
+            ${isOpen ? `
+              <div class="dossier-grid" style="padding:12px 0 0;">
+                <div class="form-row dossier-span-full">
+                  <label>Answer</label>
+                  <textarea class="compact-textarea clarification-answer-input" placeholder="Record operator answer before regenerating the report."></textarea>
+                </div>
+              </div>
+              <div class="form-actions" style="padding:8px 0 0; justify-content:flex-start;">
+                <button class="btn small clarification-answer-btn" type="button">Save answer</button>
+                <button class="btn secondary small clarification-unavailable-btn" type="button">Mark unavailable</button>
+              </div>
+            ` : ''}
+          </div>`;
+        }).join('')}</div>` : `<div class="workspace-empty" style="margin-top:12px;">No follow-up questions generated yet.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function wireClarificationPanel(pid) {
+  const generateBtn = $('clarification-generate-btn');
+  if (generateBtn) {
+    generateBtn.onclick = async () => {
+      generateBtn.disabled = true;
+      try {
+        await apiPost(`/projects/${pid}/clarifications/cycles`, {});
+        await loadDrillin(pid);
+      } catch (e) {
+        alert('Clarification generation failed: ' + e.message);
+      } finally {
+        generateBtn.disabled = false;
+      }
+    };
+  }
+  document.querySelectorAll('.clarification-answer-btn').forEach(btn => {
+    btn.onclick = async () => {
+      const row = btn.closest('.clarification-question');
+      const questionId = row?.dataset?.questionId || '';
+      const answerText = row?.querySelector('.clarification-answer-input')?.value?.trim() || '';
+      if (!questionId) return;
+      if (!answerText) {
+        alert('Add an answer or mark the question unavailable.');
+        return;
+      }
+      try {
+        await apiPost(`/projects/${pid}/clarifications/answers`, { question_id: questionId, status: 'answered', answer_text: answerText });
+        await loadDrillin(pid);
+      } catch (e) {
+        alert('Clarification answer failed: ' + e.message);
+      }
+    };
+  });
+  document.querySelectorAll('.clarification-unavailable-btn').forEach(btn => {
+    btn.onclick = async () => {
+      const row = btn.closest('.clarification-question');
+      const questionId = row?.dataset?.questionId || '';
+      if (!questionId) return;
+      try {
+        await apiPost(`/projects/${pid}/clarifications/answers`, { question_id: questionId, status: 'unavailable', answer_text: '' });
+        await loadDrillin(pid);
+      } catch (e) {
+        alert('Clarification unavailable update failed: ' + e.message);
+      }
+    };
+  });
+}
+
 function wireUploadPanel(pid, prefix) {
   const button = $(`${prefix}-upload-btn`);
   if (!button) return;
@@ -1285,7 +1380,7 @@ function wireFileDeleteButtons(pid) {
   });
 }
 
-function renderOverview(pid, fullState, overview) {
+function renderOverview(pid, fullState, overview, clarifications = null) {
   const container = $('dr-content');
   container.classList.remove('code');
   const workspace = overview.workspace || {};
@@ -1353,6 +1448,7 @@ function renderOverview(pid, fullState, overview) {
         <strong>New here?</strong> Start with a short project brief. Add <strong>document context</strong> if you want background material, or upload <strong>structured data</strong> if you have CSV/XLSX tables. Then run the workflow. The first useful result will be a recommendation, the reasons behind it, and the next action to take.
       </div>
     ` : ''}
+    ${renderClarificationPanel(clarifications)}
 
     <div class="overview-stack">
       <div class="overview-section">
@@ -1458,6 +1554,7 @@ function renderOverview(pid, fullState, overview) {
   `;
 
   wireUploadPanel(pid, 'overview');
+  wireClarificationPanel(pid);
   wireFileDeleteButtons(pid);
 }
 
