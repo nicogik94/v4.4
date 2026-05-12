@@ -29,12 +29,15 @@ from reportlab.platypus import (
 
 from report_quality import (
     NO_CONCRETE_LOCATORS_CLIENT_NOTE,
+    SPARSE_CONFIDENCE_RULE,
     TELEMETRY_PRIVACY_CAVEAT,
+    WAVE2_GRADUATION_MATRIX,
     assess_report_quality_context,
     client_simplify_text,
     commitment_score_text,
     monitor_has_signals,
     monitor_success_metric_lines,
+    requires_productization_wave_matrix,
     requires_telemetry_privacy_caveat,
     threshold_consistency_warnings,
 )
@@ -380,15 +383,23 @@ def build_client_dossier_markdown(state: ProjectState) -> str:
     monitor_fallback = _client_monitoring(state)
     if state.monitor and monitor_fallback and monitor_fallback not in section_bodies["What to monitor"]:
         section_bodies["What to monitor"] = "\n\n".join([section_bodies["What to monitor"], monitor_fallback])
+    sprint0_pack = _client_sprint0_pack(quality)
+    if sprint0_pack and sprint0_pack not in section_bodies["What evidence was used"]:
+        section_bodies["What evidence was used"] = "\n\n".join([section_bodies["What evidence was used"], sprint0_pack])
 
     for heading in CLIENT_DOSSIER_HEADINGS:
         body = section_bodies.get(heading) or "Not available in current project output."
         if heading != "Human review note":
-            body = client_simplify_text(body)
+            body = _client_safe_text(body, quality)
         lines.extend([
             f"## {heading}",
             body,
         ])
+        if heading == "Timeline / 7-30-60-90 roadmap" and requires_productization_wave_matrix(state, quality):
+            lines.extend([
+                "## Wave 2 Graduation Matrix",
+                _client_safe_text(WAVE2_GRADUATION_MATRIX.replace("## Wave 2 Graduation Matrix\n\n", ""), quality),
+            ])
 
     return "\n\n".join(part for part in lines if str(part).strip())
 
@@ -427,6 +438,8 @@ def build_operator_dossier_markdown(state: ProjectState) -> str:
             f"## {heading}",
             section_bodies.get(heading) or "No dashboard-facing summary is available yet.",
         ])
+        if heading == "Strategy plan" and requires_productization_wave_matrix(state, quality):
+            lines.append(WAVE2_GRADUATION_MATRIX)
     return "\n\n".join(part for part in lines if str(part).strip())
 
 
@@ -1268,7 +1281,75 @@ def _profile_filename(state: ProjectState, profile: str, fmt: str) -> str:
 
 
 def _safe_report_markdown(state: ProjectState) -> str:
-    return _redact_unsafe_string(state.report or "No report available.")
+    markdown = _redact_unsafe_string(state.report or "No report available.")
+    quality = assess_report_quality_context(state)
+    if quality.sparse_evidence:
+        markdown = _simplify_sparse_report_markdown(markdown, quality)
+    if requires_productization_wave_matrix(state, quality) and "Wave 2 Graduation Matrix" not in markdown:
+        markdown = "\n\n".join([markdown.strip(), WAVE2_GRADUATION_MATRIX])
+    return markdown
+
+
+def _simplify_sparse_report_markdown(markdown: str, quality) -> str:
+    lines: list[str] = []
+    in_technical_appendix = False
+    for raw_line in str(markdown or "").splitlines():
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", raw_line.strip())
+        if heading:
+            in_technical_appendix = _normalize_heading(heading.group(2)) == _normalize_heading("Appendix: Technical Analysis")
+            lines.append(raw_line)
+            continue
+        if in_technical_appendix:
+            lines.append(raw_line)
+        else:
+            lines.append(_client_safe_text(raw_line, quality))
+    value = _collapse_markdown_blank_lines("\n".join(lines))
+    if SPARSE_CONFIDENCE_RULE not in value:
+        value = "\n\n".join([f"**Sparse confidence note:** {SPARSE_CONFIDENCE_RULE}", value])
+    return value
+
+
+def _collapse_markdown_blank_lines(value: str) -> str:
+    lines = [line.rstrip() for line in str(value or "").splitlines()]
+    collapsed: list[str] = []
+    blank = False
+    for line in lines:
+        if not line.strip():
+            if not blank:
+                collapsed.append("")
+            blank = True
+        else:
+            collapsed.append(line)
+            blank = False
+    return "\n".join(collapsed).strip()
+
+
+def _client_safe_text(text: str, quality) -> str:
+    value = client_simplify_text(text, sparse_evidence=quality.sparse_evidence)
+    if quality.decision_domain == "growth":
+        replacements = {
+            "Search Console": "growth analytics",
+            "GA4": "product/revenue analytics",
+            "crawl/technical evidence": "operating evidence",
+            "crawl": "diagnostic review",
+            "editorial evidence": "customer/revenue evidence",
+            "editorial workflow evidence": "customer/revenue workflow evidence",
+            "CMS/schema capability": "operating capability",
+            "SEO Lead": "Growth Lead",
+            "Editorial Lead": "Growth Lead",
+            "Web/CMS Owner": "Product Analytics Lead",
+        }
+        for unsafe, safe in replacements.items():
+            value = re.sub(re.escape(unsafe), safe, value, flags=re.I)
+    if quality.decision_domain == "productization" and not any("CMS" in item for item in quality.evidence_categories):
+        replacements = {
+            "CMS/schema capability": "template schema / field registry validation",
+            "CMS or schema capability": "reusable template schema, field registry, or product instrumentation",
+            "CMS": "template system",
+        }
+        for unsafe, safe in replacements.items():
+            value = re.sub(re.escape(unsafe), safe, value, flags=re.I)
+    return value
 
 
 def _project_metadata_line(state: ProjectState) -> str:

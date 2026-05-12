@@ -329,6 +329,7 @@ class TestProfileExporterHelpers(unittest.TestCase):
         state = make_export_state("client-jargon")
         state.report = """# Executive Summary
 H1 has BF 12, DQ 65, H_norm 0.12, rho 0.45, FMEA RPN 336 [#10], citation unavailable.
+H2 has Jaccard index 0.42, Brier score 0.20, ECE 0.12, probability 70%, and failure probability 0.70.
 
 # The Decision
 Choose whether to productize the dashboard.
@@ -337,7 +338,7 @@ Choose whether to productize the dashboard.
 Run Sprint 0 before productization.
 
 # Evidence Used
-H1 BF 12, DQ 65, H_norm 0.12, rho 0.45, FMEA row citation unavailable. H2 citation unavailable.
+H1 BF 12, DQ 65, H_norm 0.12, rho 0.45, FMEA row citation unavailable. H2 Jaccard index 0.42, Brier score 0.20, ECE 0.12, citation unavailable.
 
 # Key Risks
 RPN 336 and FMEA gaps remain.
@@ -353,7 +354,7 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         client_markdown = build_client_dossier_markdown(state)
         operator_markdown = build_operator_dossier_markdown(state)
 
-        for forbidden in ("RPN", "FMEA", "BF", "DQ", "H_norm", "rho", "[#10]", "[#24]"):
+        for forbidden in ("RPN", "FMEA", "BF", "DQ", "H_norm", "rho", "Jaccard", "Brier score", "ECE", "[#10]", "[#24]"):
             self.assertNotIn(forbidden, client_markdown)
         for expected in (
             "risk priority",
@@ -362,7 +363,10 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
             "evidence quality diagnostic",
             "uncertainty diagnostic",
             "related-hypothesis risk",
-            "hypothesis 1",
+            "user-value hypothesis",
+            "schema overlap score",
+            "forecast accuracy check",
+            "calibration check",
             "No concrete citation locators were available for this project",
         ):
             self.assertIn(expected, client_markdown)
@@ -400,6 +404,26 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         self.assertIn("Commitment score: Not scored — requires operator confirmation.", combined)
         self.assertNotIn("Commitment score: 0", combined)
 
+    def test_numeric_commitment_with_placeholder_rationale_renders_not_scored(self):
+        state = make_export_state("commitment-placeholder")
+        state.monitor.commitment_score = 71
+        state.monitor.commitment_rationale = "TBD / operator confirmation"
+
+        combined = build_client_dossier_markdown(state) + "\n\n" + build_operator_dossier_markdown(state)
+
+        self.assertIn("Commitment score: Not scored — requires operator confirmation.", combined)
+        self.assertNotIn("Commitment score: 71", combined)
+
+    def test_substantive_commitment_rationale_preserves_numeric_score(self):
+        state = make_export_state("commitment-substantive")
+        state.monitor.commitment_score = 61
+        state.monitor.commitment_rationale = "Executive sponsor, owner, budget review, and weekly cadence are confirmed."
+
+        combined = build_client_dossier_markdown(state) + "\n\n" + build_operator_dossier_markdown(state)
+
+        self.assertIn("Commitment score: 61", combined)
+        self.assertIn("Executive sponsor, owner, budget review, and weekly cadence are confirmed.", combined)
+
     def test_threshold_conflicts_warn_and_consistent_thresholds_do_not(self):
         conflict = make_export_state("threshold-conflict")
         conflict.report = (
@@ -431,7 +455,68 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         operator_markdown = build_operator_dossier_markdown(state)
 
         self.assertIn("Exact dollar estimates appear without budget or spend evidence", operator_markdown)
-        self.assertIn("High-confidence language appears while direct evidence is sparse", operator_markdown)
+        self.assertIn("High confidence only that evidence collection is required", operator_markdown)
+
+    def test_sparse_client_dossier_replaces_exact_probabilities_but_keeps_provisional_gates(self):
+        state = ProjectState(
+            project_id="sparse-probabilities",
+            project_name="Sparse probabilities",
+            brief="Improve growth performance across sales, retention, and pipeline.",
+            report="""# Executive Summary
+H1 probability 70% and predicted failure probability 0.70.
+
+# Monitoring and Kill Criteria
+Stop threshold is more than 15% churn.
+The proposed planning gate is more than 20% activation.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        self.assertNotIn("probability 70%", markdown)
+        self.assertNotIn("failure probability 0.70", markdown)
+        self.assertIn("model-generated prior", markdown)
+        self.assertIn("high provisional failure risk", markdown)
+        self.assertIn("operator-confirmed threshold required", markdown)
+        self.assertIn("proposed planning gate is more than 20% activation", markdown)
+
+    def test_growth_client_dossier_avoids_generated_web_language_without_explicit_context(self):
+        state = ProjectState(
+            project_id="growth-client-no-web",
+            project_name="Growth performance",
+            brief="Improve growth performance across revenue operations, retention, and pipeline.",
+            report="""# Executive Summary
+Generated text says Search Console, GA4, crawl, CMS/schema capability, SEO Lead, and Web/CMS Owner.
+
+# Evidence Used
+Generated text says editorial evidence and CMS/schema capability.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        self.assertIn("cohort retention", markdown)
+        for forbidden in ("Search Console", "GA4", "CMS/schema capability", "SEO Lead", "Web/CMS Owner"):
+            self.assertNotIn(forbidden, markdown)
+
+    def test_productization_client_and_operator_include_wave2_matrix_without_cms_leakage(self):
+        state = ProjectState(
+            project_id="productization-wave2",
+            project_name="Productization direction",
+            brief="Choose the v4 productization direction, Wave 2 roadmap, template abstraction, ROI engine, and pilot sessions.",
+            report="# Executive Summary\nProceed with Wave 0 and Wave 1 before Wave 2.",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        for markdown in (client_markdown, operator_markdown):
+            self.assertIn("Wave 2 Graduation Matrix", markdown)
+            self.assertIn("Proceed to Wave 2 if", markdown)
+            self.assertIn("operator-set threshold", markdown)
+            self.assertNotIn("70%", markdown)
+            self.assertNotIn("80%", markdown)
+        self.assertNotIn("CMS/schema capability", client_markdown)
 
     def test_telemetry_privacy_caveat_appears_for_logging_recommendations(self):
         state = make_export_state("telemetry-export")
