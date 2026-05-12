@@ -27,6 +27,17 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from report_quality import (
+    NO_CONCRETE_LOCATORS_CLIENT_NOTE,
+    TELEMETRY_PRIVACY_CAVEAT,
+    assess_report_quality_context,
+    client_simplify_text,
+    commitment_score_text,
+    monitor_has_signals,
+    monitor_success_metric_lines,
+    requires_telemetry_privacy_caveat,
+    threshold_consistency_warnings,
+)
 from state import ProjectState
 
 
@@ -288,11 +299,13 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
 
 
 def build_client_dossier_markdown(state: ProjectState) -> str:
+    quality = assess_report_quality_context(state)
     sections = _extract_report_sections(state.report or "")
     lines = [
         "# Client Dossier",
         _project_metadata_line(state),
     ]
+    lines.extend(_quality_warning_blocks(state, quality, client=True))
     open_questions = client_section_from_report_or_fallback(
         state,
         sections,
@@ -364,20 +377,28 @@ def build_client_dossier_markdown(state: ProjectState) -> str:
         ),
         "Human review note": HUMAN_REVIEW_NOTE,
     }
+    monitor_fallback = _client_monitoring(state)
+    if state.monitor and monitor_fallback and monitor_fallback not in section_bodies["What to monitor"]:
+        section_bodies["What to monitor"] = "\n\n".join([section_bodies["What to monitor"], monitor_fallback])
 
     for heading in CLIENT_DOSSIER_HEADINGS:
+        body = section_bodies.get(heading) or "Not available in current project output."
+        if heading != "Human review note":
+            body = client_simplify_text(body)
         lines.extend([
             f"## {heading}",
-            section_bodies.get(heading) or "Not available in current project output.",
+            body,
         ])
 
     return "\n\n".join(part for part in lines if str(part).strip())
 
 
 def build_operator_dossier_markdown(state: ProjectState) -> str:
+    quality = assess_report_quality_context(state)
     lines = [
         "# Operator Dossier",
     ]
+    lines.extend(_quality_warning_blocks(state, quality, client=False))
     section_bodies = {
         "Cover / project metadata": operator_project_metadata(state),
         "Executive summary": operator_executive_summary(state),
@@ -422,6 +443,49 @@ def client_section_from_report_or_fallback(
     return fallback
 
 
+def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> list[str]:
+    blocks: list[str] = []
+    if quality.sparse_evidence:
+        blocks.extend(["## Evidence maturity warning", quality.sparse_evidence_caveat])
+    elif quality.evidence_warning and not client:
+        blocks.extend(["## Evidence maturity warning", "Some evidence channels are missing: " + "; ".join(quality.sparse_reasons)])
+    if quality.provisional_report:
+        blocks.extend(["## Provisional report warning", quality.provisional_clarification_caveat])
+    if client and not quality.has_concrete_locators:
+        blocks.extend(["## Citation locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
+    if quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state)):
+        blocks.extend(["## Telemetry privacy note", TELEMETRY_PRIVACY_CAVEAT])
+    warnings = threshold_consistency_warnings(state, quality)
+    if client and warnings:
+        blocks.extend(["## Threshold note", "Confirm one decision matrix in Sprint 0 before acting on thresholds."])
+    elif not client:
+        if warnings:
+            blocks.extend(["## Threshold consistency warnings", "\n".join(f"- {warning}" for warning in warnings)])
+    return blocks
+
+
+def _quality_content_text(state: ProjectState) -> str:
+    parts = [
+        state.brief or "",
+        state.data or "",
+        state.report or "",
+    ]
+    if state.strategy:
+        parts.extend([
+            state.strategy.executive_strategy,
+            state.strategy.implementation_sequence,
+            state.strategy.monitoring_plan,
+            state.strategy.confidence,
+            *state.strategy.success_metrics,
+        ])
+        for action in state.strategy.strategies or []:
+            parts.extend([action.action, action.justification, action.expected_impact, action.risk_if_ignored])
+    if state.monitor:
+        parts.append(state.monitor.commitment_rationale)
+        parts.extend(monitor_success_metric_lines(state.monitor, limit=50))
+    return "\n".join(str(part) for part in parts if part)
+
+
 def _client_decision_reviewed(state: ProjectState) -> str:
     brief = _short_text(state.brief, 700)
     return brief or "No decision brief is available yet."
@@ -448,6 +512,7 @@ def _client_why_recommended(state: ProjectState) -> str:
 
 
 def _client_evidence_used(state: ProjectState) -> str:
+    quality = assess_report_quality_context(state)
     rows = [["Source", "What it contributes"]]
     for evidence in state.imported_evidence or []:
         rows.append([evidence.title or evidence.evidence_id, evidence.summary or evidence.category])
@@ -456,8 +521,14 @@ def _client_evidence_used(state: ProjectState) -> str:
         summary = getattr(item, "summary", "") or getattr(item, "source_ref", "")
         rows.append([title, summary])
     if len(rows) > 1:
-        citation_summary = _citation_locator_summary_markdown(state, include_registry=True)
-        return "\n\n".join(part for part in [_markdown_table(rows), citation_summary] if part)
+        citation_summary = (
+            _citation_locator_summary_markdown(state, include_registry=True)
+            if quality.has_concrete_locators
+            else NO_CONCRETE_LOCATORS_CLIENT_NOTE
+        )
+        return "\n\n".join(part for part in [_markdown_table(rows), citation_summary, _client_sprint0_pack(quality)] if part)
+    if quality.sparse_evidence:
+        return "\n\n".join([EMPTY_EVIDENCE, _client_sprint0_pack(quality)])
     return EMPTY_EVIDENCE
 
 
@@ -516,6 +587,15 @@ def _client_open_questions(state: ProjectState) -> str:
     if state.audit and state.audit.observation_needs:
         parts.append("\n".join(f"- {item}" for item in state.audit.observation_needs[:8]))
     return "\n\n".join(parts) if parts else "No open assumptions or questions are recorded yet."
+
+
+def _client_sprint0_pack(quality) -> str:
+    if not (quality.sparse_evidence or quality.evidence_warning):
+        return ""
+    rows = [["Evidence to collect in Sprint 0", "Why it matters"]]
+    for category in quality.evidence_categories[:8]:
+        rows.append([category, "Validates assumptions before implementation."])
+    return "Sprint 0 evidence collection should validate the current recommendation before acting.\n\n" + _markdown_table(rows)
 
 
 def operator_project_metadata(state: ProjectState) -> str:
@@ -883,7 +963,7 @@ def summarize_monitoring(state: ProjectState) -> str:
     if not state.monitor:
         return "No monitor output saved."
     lines = [
-        f"Commitment score: {_fmt_value(state.monitor.commitment_score)}",
+        commitment_score_text(state.monitor.commitment_score, state.monitor.commitment_rationale),
         f"Commitment rationale: {state.monitor.commitment_rationale or 'TBD — requires operator confirmation.'}",
         "### OODA Schedule",
         _markdown_table(
@@ -1087,7 +1167,11 @@ def _build_dossier_blocks(state: ProjectState) -> list[dict]:
                 f"Risk if ignored: {action.risk_if_ignored}",
                 f"Framework source: {action.framework_source}",
             ])
-        bullets([f"Success metric: {metric}" for metric in state.strategy.success_metrics])
+        if state.strategy.success_metrics:
+            bullets([f"Success metric: {metric}" for metric in state.strategy.success_metrics])
+        elif monitor_has_signals(state.monitor):
+            paragraph("Success metrics are captured in the monitoring plan below.")
+            bullets(monitor_success_metric_lines(state.monitor))
         paragraph(f"Implementation sequence: {state.strategy.implementation_sequence}")
         paragraph(f"Monitoring plan: {state.strategy.monitoring_plan}")
         paragraph(f"Review date: {state.strategy.review_date}")
@@ -1118,7 +1202,7 @@ def _build_dossier_blocks(state: ProjectState) -> list[dict]:
         ])
         bullets([f"HRO principle: {item}" for item in state.monitor.hro_principles_active])
         bullets([f"Re-entry watch: {item}" for item in state.monitor.reentry_watch])
-        paragraph(f"Commitment score: {state.monitor.commitment_score}")
+        paragraph(commitment_score_text(state.monitor.commitment_score, state.monitor.commitment_rationale))
         paragraph(f"Commitment rationale: {state.monitor.commitment_rationale}")
     else:
         paragraph("No monitor output saved.")
@@ -1409,6 +1493,11 @@ def _summarize_strategy(state: ProjectState) -> str:
             action.risk_if_ignored,
         ])
     metrics = "\n".join(f"- {metric}" for metric in state.strategy.success_metrics or [])
+    if not metrics and monitor_has_signals(state.monitor):
+        monitor_lines = "\n".join(f"- {line}" for line in monitor_success_metric_lines(state.monitor))
+        metrics = "Success metrics are captured in the monitoring plan below."
+        if monitor_lines:
+            metrics = f"{metrics}\n{monitor_lines}"
     return "\n\n".join([
         state.strategy.executive_strategy or "No executive strategy saved.",
         _markdown_table(rows),

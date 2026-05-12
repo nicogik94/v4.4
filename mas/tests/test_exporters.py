@@ -30,10 +30,18 @@ from exporters import (  # noqa: E402
     sanitize_for_export,
 )
 from state import (  # noqa: E402
+    AuditOutput,
+    FMEAItem,
     KnowledgeItem,
     KnowledgeLayerState,
+    MonitorCanary,
+    MonitorCircuitBreaker,
+    MonitorOODASchedule,
+    MonitorOutput,
+    MonitorScheduleItem,
     PhaseStatus,
     ProjectState,
+    StrategyOutput,
     UploadedFileManifest,
 )
 from tests.test_decision_objects import make_state  # noqa: E402
@@ -313,6 +321,132 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "No audit findings are available yet.",
         ):
             self.assertIn(expected, combined)
+        self.assertIn("This is a structured hypothesis map, not a measured audit.", combined)
+        self.assertIn("Provisional report: clarification questions have not been answered.", combined)
+        self.assertIn("Sprint 0 evidence collection should validate", client_markdown)
+
+    def test_client_dossier_simplifies_internal_jargon_but_operator_keeps_detail(self):
+        state = make_export_state("client-jargon")
+        state.report = """# Executive Summary
+H1 has BF 12, DQ 65, H_norm 0.12, rho 0.45, FMEA RPN 336 [#10], citation unavailable.
+
+# The Decision
+Choose whether to productize the dashboard.
+
+# Recommended Path
+Run Sprint 0 before productization.
+
+# Evidence Used
+H1 BF 12, DQ 65, H_norm 0.12, rho 0.45, FMEA row citation unavailable. H2 citation unavailable.
+
+# Key Risks
+RPN 336 and FMEA gaps remain.
+
+# Appendix: Technical Analysis
+FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
+"""
+        state.audit = AuditOutput(
+            fmea=[FMEAItem(component="dashboard", failure_mode="unclear owner", rpn=336, action="assign owner")],
+            top_findings=["FMEA RPN 336 needs review"],
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        for forbidden in ("RPN", "FMEA", "BF", "DQ", "H_norm", "rho", "[#10]", "[#24]"):
+            self.assertNotIn(forbidden, client_markdown)
+        for expected in (
+            "risk priority",
+            "structured risk review",
+            "internal confidence diagnostic",
+            "evidence quality diagnostic",
+            "uncertainty diagnostic",
+            "related-hypothesis risk",
+            "hypothesis 1",
+            "No concrete citation locators were available for this project",
+        ):
+            self.assertIn(expected, client_markdown)
+        self.assertIn("FMEA", operator_markdown)
+        self.assertIn("RPN", operator_markdown)
+
+    def test_monitor_signals_fill_success_metrics_when_strategy_metrics_empty(self):
+        state = make_export_state("monitor-success")
+        state.strategy.success_metrics = []
+        state.monitor = MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                daily=[MonitorScheduleItem(metric="Pilot activation", owner="Product Owner", source="product telemetry")]
+            ),
+            canaries=[MonitorCanary(signal="Regeneration failure rate", direction="down", window="7d", meaning="workflow quality")],
+            circuit_breakers=[MonitorCircuitBreaker(strategy_ref="S1", trip="failure rate more than 15%", reset="two stable weeks")],
+            commitment_score=70,
+            commitment_rationale="Owner and cadence confirmed.",
+        )
+
+        operator_markdown = build_operator_dossier_markdown(state)
+        client_markdown = build_client_dossier_markdown(state)
+
+        self.assertIn("Success metrics are captured in the monitoring plan below.", operator_markdown)
+        self.assertIn("Regeneration failure rate", operator_markdown)
+        self.assertIn("Pilot activation", client_markdown)
+        self.assertNotIn("No success metrics saved.", operator_markdown)
+
+    def test_unavailable_commitment_score_renders_not_scored(self):
+        state = make_export_state("commitment-unscored")
+        state.monitor.commitment_score = 0
+        state.monitor.commitment_rationale = ""
+
+        combined = build_client_dossier_markdown(state) + "\n\n" + build_operator_dossier_markdown(state)
+
+        self.assertIn("Commitment score: Not scored — requires operator confirmation.", combined)
+        self.assertNotIn("Commitment score: 0", combined)
+
+    def test_threshold_conflicts_warn_and_consistent_thresholds_do_not(self):
+        conflict = make_export_state("threshold-conflict")
+        conflict.report = (
+            "# Executive Summary\n"
+            "Use rho target 0.45 for portfolio risk.\n"
+            "# Monitoring and Kill Criteria\n"
+            "Canary success more than 5/20 in one table and more than 15% elsewhere. rho less than 0.50.\n"
+        )
+        consistent = make_export_state("threshold-consistent")
+        consistent.report = (
+            "# Executive Summary\n"
+            "Use rho target 0.45 for portfolio risk.\n"
+            "# Monitoring and Kill Criteria\n"
+            "Canary success more than 5/20 in each table. rho target 0.45.\n"
+        )
+
+        self.assertIn("Threshold consistency warning", build_operator_dossier_markdown(conflict))
+        self.assertIn("Confirm one decision matrix in Sprint 0", build_client_dossier_markdown(conflict))
+        self.assertNotIn("Threshold consistency warning", build_operator_dossier_markdown(consistent))
+
+    def test_exact_dollar_estimate_without_budget_evidence_is_caveated(self):
+        state = ProjectState(
+            project_id="dollar-without-budget",
+            project_name="Dollar without budget",
+            brief="Decide productization direction for a product pilot.",
+            report="# Executive Summary\nExpected value is $125,000 with high confidence.",
+        )
+
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Exact dollar estimates appear without budget or spend evidence", operator_markdown)
+        self.assertIn("High-confidence language appears while direct evidence is sparse", operator_markdown)
+
+    def test_telemetry_privacy_caveat_appears_for_logging_recommendations(self):
+        state = make_export_state("telemetry-export")
+        state.report = "# Executive Summary\nRecommend dashboard telemetry, product analytics, session replay, and regeneration-event logging."
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        for markdown in (client_markdown, operator_markdown):
+            self.assertIn("Log event metadata by default.", markdown)
+            self.assertIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", markdown)
+        self.assertNotIn("raw_provider_payload", client_markdown)
+        self.assertNotIn("raw_prompt", client_markdown)
+        self.assertNotIn("sk-test-secret", client_markdown)
+        self.assertIn("This export is intended to support human review and decision-making.", client_markdown)
 
     def test_profile_docx_outputs_include_headings_and_tables(self):
         state = make_export_state("docx-profile")
