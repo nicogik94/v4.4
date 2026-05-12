@@ -985,6 +985,113 @@ class TestSequentialRunner(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(updated.strategy)
 
 
+    async def test_classify_gate_quality_shortfall_does_not_block_workflow(self):
+        """classify gate BF/DQ threshold failures are quality warnings, not
+        structural errors.  The sequential runner must force-proceed so that
+        sparse/low-evidence projects are not permanently blocked at classify."""
+        state = ProjectState(
+            project_id="sparse-classify",
+            project_name="Sparse",
+            brief="Improving growth performance",
+        )
+        state.intake_sanitization_findings = {}
+        executed: list[str] = []
+
+        async def fake_run_phase_node(snapshot: ProjectState, phase: str) -> ProjectState:
+            executed.append(phase)
+            snapshot.current_phase = phase
+            snapshot.phase_status[phase] = PhaseStatus.COMPLETED
+            snapshot.phase_confidence[phase] = 1.0
+            if phase == "classify":
+                snapshot.classify = make_completed_state("seed").classify
+            elif phase == "hypotheses":
+                snapshot.hypotheses = [Hypothesis(**h) for h in make_hypotheses_payload()]
+                snapshot.sealed = True
+            elif phase == "gauntlet":
+                from state import GauntletOutput, GauntletResult
+                snapshot.gauntlet = GauntletOutput(results=[
+                    GauntletResult(id="H1", risk_rank=1,
+                                   frameworks=[{"fw": "STEELMAN", "finding": "x", "action": True}] * 10,
+                                   crux="crux")
+                ])
+            return snapshot
+
+        def fake_gate(s, p):
+            if p == "classify":
+                # BF and DQ below threshold — quality shortfall, not structural
+                return {
+                    "passed": False,
+                    "blocking": ["BF=5.0, need >10", "DQ=29%, need >=60%"],
+                    "confidence": 1.0,
+                }
+            return {"passed": True, "blocking": [], "confidence": 1.0}
+
+        with patch("orchestrator.run_phase_node", new=AsyncMock(side_effect=fake_run_phase_node)):
+            with patch("orchestrator.check_gate", side_effect=fake_gate):
+                updated = await run_workflow_sequence(state)
+
+        # classify must remain COMPLETED (not FAILED) despite quality gate shortfall
+        self.assertEqual(updated.phase_status.get("classify"), PhaseStatus.COMPLETED)
+        # workflow must have continued past classify
+        self.assertIn("hypotheses", executed)
+
+    async def test_classify_gate_missing_output_halts_workflow(self):
+        """classify gate structural failure (no output) must still halt the workflow."""
+        state = ProjectState(
+            project_id="classify-no-output",
+            project_name="Sparse",
+            brief="Brief",
+        )
+        state.intake_sanitization_findings = {}
+        executed: list[str] = []
+
+        async def fake_run_phase_node(snapshot: ProjectState, phase: str) -> ProjectState:
+            executed.append(phase)
+            snapshot.current_phase = phase
+            # classify completes but produces no output (state.classify remains None)
+            snapshot.phase_status[phase] = PhaseStatus.COMPLETED
+            snapshot.phase_confidence[phase] = 1.0
+            return snapshot
+
+        def fake_gate(s, p):
+            if p == "classify":
+                return {
+                    "passed": False,
+                    "blocking": [f"{p} has no output yet"],
+                    "confidence": 0.0,
+                }
+            return {"passed": True, "blocking": [], "confidence": 1.0}
+
+        with patch("orchestrator.run_phase_node", new=AsyncMock(side_effect=fake_run_phase_node)):
+            with patch("orchestrator.check_gate", side_effect=fake_gate):
+                updated = await run_workflow_sequence(state)
+
+        self.assertEqual(updated.phase_status.get("classify"), PhaseStatus.FAILED)
+        # workflow must not have continued past classify
+        self.assertNotIn("hypotheses", executed)
+
+    async def test_classify_null_bf_and_dq_fields_are_coerced(self):
+        """_store_phase_output must not raise when the LLM returns null for bf or dq."""
+        from orchestrator import _store_phase_output
+        state = ProjectState(project_id="null-classify", project_name="N", brief="B")
+        data = {
+            "domain": "Complex",
+            "justification": "Sparse brief.",
+            "bf": None,    # LLM emitted null
+            "variety_env": "Unknown",
+            "variety_sys": "Unknown",
+            "variety_gaps": "1. No data",
+            "variety_decision": "Amplify",
+            "ooda": {"observe": "metrics", "orient": "gaps", "decide": "act",
+                     "act": "iterate", "freq": "weekly"},
+            "rpd_pattern": "",
+            "dq": None,    # LLM emitted null
+        }
+        _store_phase_output(state, "classify", data)
+        self.assertIsNotNone(state.classify)
+        self.assertEqual(state.classify.bf, 0.0)
+        self.assertEqual(state.classify.dq, [0.0, 0.0, 0.0, 0.0])
+
 class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         api.running.clear()

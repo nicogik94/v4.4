@@ -1228,14 +1228,34 @@ async def run_workflow_sequence(
             gate = check_gate(state, phase)
             state.phase_confidence[phase] = gate["confidence"]
             if not gate["passed"]:
-                logger.error(
-                    f"Gate blocked workflow after {phase}: blocking={gate['blocking']} "
+                # Distinguish structural failures (missing output / required fields)
+                # from quality-threshold shortfalls (BF, DQ, hypothesis count).
+                # Structural failures abort the workflow; quality shortfalls are
+                # recorded as warnings and the runner force-proceeds — matching the
+                # LangGraph behaviour where gate failure triggers retry→force_proceed
+                # rather than a permanent FAILED status.  Sparse/low-evidence
+                # projects legitimately score below BF and DQ thresholds; blocking
+                # them permanently prevents any useful downstream output.
+                structural = [
+                    r for r in gate["blocking"]
+                    if r.startswith("Missing required")
+                    or r.endswith("has no output yet")
+                    or r.endswith("output is empty")
+                ]
+                if structural:
+                    logger.error(
+                        f"Gate structurally blocked workflow after {phase}: "
+                        f"blocking={structural} confidence={gate['confidence']}"
+                    )
+                    state.phase_status[phase] = PhaseStatus.FAILED
+                    if persist_state:
+                        await persist_state(state)
+                    return state
+                logger.warning(
+                    f"Gate quality-threshold shortfall after {phase} "
+                    f"(force-proceeding): blocking={gate['blocking']} "
                     f"confidence={gate['confidence']}"
                 )
-                state.phase_status[phase] = PhaseStatus.FAILED
-                if persist_state:
-                    await persist_state(state)
-                return state
 
     return state
 
@@ -1252,6 +1272,13 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             if isinstance(data, list):
                 if len(data) == 1 and isinstance(data[0], dict):
                     data = data[0]
+            # Coerce explicit null on numeric/list fields to defaults so sparse
+            # LLM output (e.g. "bf": null, "dq": null) doesn't fail Pydantic.
+            if isinstance(data, dict):
+                if data.get("bf") is None:
+                    data = {**data, "bf": 0.0}
+                if data.get("dq") is None:
+                    data = {**data, "dq": [0.0, 0.0, 0.0, 0.0]}
             state.classify = ClassifyOutput(**data)
         elif phase == "hypotheses":
             items = data if isinstance(data, list) else data.get("hypotheses", [])
