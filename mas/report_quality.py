@@ -35,6 +35,12 @@ SPARSE_PRECISION_RULE = (
     "planning gates, or placeholders unless backed by concrete project evidence."
 )
 
+SPARSE_CONFIDENCE_RULE = (
+    "High confidence only that evidence collection is required; low confidence "
+    "in specific root causes, impact size, or feature priority until Sprint 0 "
+    "evidence is collected."
+)
+
 THRESHOLD_WARNING = (
     "Threshold consistency warning: multiple thresholds appear to govern the "
     "same decision. Confirm one decision matrix before acting."
@@ -44,6 +50,35 @@ NO_CONCRETE_LOCATORS_CLIENT_NOTE = (
     "No concrete citation locators were available for this project; evidence "
     "should be validated in Sprint 0."
 )
+
+WAVE2_GRADUATION_MATRIX = """## Wave 2 Graduation Matrix
+
+Proceed to Wave 2 if:
+- feature exclusion list remains intact
+- telemetry is live and reliable
+- clarification workflow reaches the agreed quality/adoption threshold
+- template field completion clears the operator-set threshold
+- ROI engine canary passes
+- support/confusion signals stay below the operator-set threshold
+- no major compliance/privacy issue appears
+
+Extend Wave 1 if:
+- metrics are directionally positive but underpowered
+- sample size is insufficient
+- schema overlap is ambiguous
+- user feedback is mixed but fixable
+
+Split the workstream if:
+- schema overlap is too low
+- ROI template does not generalize
+- clarification workflow and template abstraction do not share enough reusable scaffolding
+
+Stop or defer Wave 2 if:
+- telemetry is unavailable
+- canary fails
+- users do not adopt clarification workflow
+- support/confusion signals exceed the operator-set threshold
+- scope boundary violations recur"""
 
 OWNER_ROLE_MAPS: dict[str, list[str]] = {
     "productization": [
@@ -117,6 +152,20 @@ EVIDENCE_CATEGORY_MAPS: dict[str, list[str]] = {
         "competitor/product gap scan",
         "implementation complexity estimate",
         "privacy/data governance review",
+        "template schema / field registry validation",
+    ],
+    "growth": [
+        "cohort retention",
+        "CAC / LTV",
+        "pipeline conversion",
+        "win/loss analysis",
+        "product usage / activation",
+        "churn interviews",
+        "expansion / NRR",
+        "pricing and packaging evidence",
+        "sales velocity",
+        "marketing channel efficiency",
+        "customer success signals",
     ],
     "seo_content_editorial": [
         "Search Console",
@@ -148,28 +197,34 @@ TELEMETRY_PATTERN = re.compile(
 
 SEO_PATTERN = re.compile(
     r"\b(seo|search console|gsc|ga4|google analytics|editorial|content|cms|"
-    r"schema|crawl|crawler|keyword|article workflow|web analytics|organic "
+    r"schema|crawl|crawler|keyword|article workflow|website traffic|web analytics|organic "
     r"traffic|core web vitals|crux|pagespeed|canonical|serp)\b",
     re.I,
 )
 
-DOMAIN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "ai_readiness",
-        re.compile(r"\b(ai readiness|ai program|model governance|llm|machine learning|ml readiness|data readiness)\b", re.I),
-    ),
-    (
-        "automation_roi",
-        re.compile(r"\b(automation roi|automation|rpa|workflow automation|process workflow|manual process|process owner)\b", re.I),
-    ),
-    (
-        "growth",
-        re.compile(r"\b(growth|revenue|sales|pipeline|customer success|conversion|retention|churn|acquisition)\b", re.I),
-    ),
-    (
-        "productization",
-        re.compile(r"\b(productization|product strategy|product telemetry|pilot users?|dashboard|exports?|dossier|regeneration|feature|ux research)\b", re.I),
-    ),
+PRODUCTIZATION_PATTERN = re.compile(
+    r"\b(productization|product strategy|product telemetry|pilot users?|dashboard|exports?|"
+    r"dossier|regeneration|feature roadmap|feature prioritization|productization direction|"
+    r"ux research|template abstraction|roi engine)\b",
+    re.I,
+)
+AI_READINESS_PATTERN = re.compile(
+    r"\b(ai readiness|ai program|model governance|llm|machine learning|ml readiness|data readiness)\b",
+    re.I,
+)
+AUTOMATION_ROI_PATTERN = re.compile(
+    r"\b(automation roi|automation|rpa|workflow automation|process workflow|manual process|process owner)\b",
+    re.I,
+)
+GROWTH_PATTERN = re.compile(
+    r"\b(growth|revenue|sales|pipeline|customer success|conversion|retention|churn|acquisition|cac|ltv|nrr|win/loss)\b",
+    re.I,
+)
+
+WAVE2_PATTERN = re.compile(
+    r"\b(wave 2|wave two|wave 1|wave one|feature roadmap|feature prioritization|"
+    r"productization direction|template abstraction|roi engine|graduation gate)\b",
+    re.I,
 )
 
 UNKNOWN_EVIDENCE_PATTERN = re.compile(
@@ -179,7 +234,9 @@ UNKNOWN_EVIDENCE_PATTERN = re.compile(
 )
 
 PLACEHOLDER_RATIONALE_PATTERN = re.compile(
-    r"^\s*(|tbd|tbd\s*[—-]\s*requires operator confirmation|requires operator confirmation|unconfirmed|none|n/a)\s*$",
+    r"^\s*(|tbd|tbd\s*(?:[—/\-]\s*)?(?:requires\s*)?operator confirmation|"
+    r"requires operator confirmation|operator confirmation required|requires confirmation|"
+    r"unconfirmed|unavailable|placeholder|none|n/a)\s*$",
     re.I,
 )
 
@@ -204,6 +261,7 @@ class ReportQualityContext:
 
 def assess_report_quality_context(state: Any) -> ReportQualityContext:
     text = _combined_state_text(state)
+    domain_text = _domain_source_text(state)
     uploaded_count = len(_uploaded_files(state))
     imported_evidence_count = len(getattr(state, "imported_evidence", []) or [])
     imported_signal_count = len(getattr(state, "imported_signals", []) or [])
@@ -237,9 +295,9 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
     )
     sparse_evidence = absent_count >= 4 or explicit_sparse
     evidence_warning = bool(sparse_reasons) and not sparse_evidence
-    domain = infer_decision_domain(text)
+    domain = infer_decision_domain(domain_text)
     roles = OWNER_ROLE_MAPS.get(domain, OWNER_ROLE_MAPS["general_business"])
-    evidence_categories = evidence_categories_for_domain(domain)
+    evidence_categories = evidence_categories_for_domain(domain, domain_text)
 
     return ReportQualityContext(
         sparse_evidence=sparse_evidence,
@@ -257,18 +315,34 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
 
 
 def infer_decision_domain(text: str) -> str:
-    if SEO_PATTERN.search(text or ""):
+    source = text or ""
+    if PRODUCTIZATION_PATTERN.search(source):
+        return "productization"
+    if AI_READINESS_PATTERN.search(source):
+        return "ai_readiness"
+    if AUTOMATION_ROI_PATTERN.search(source):
+        return "automation_roi"
+    if SEO_PATTERN.search(source):
         return "seo_content_editorial"
-    for domain, pattern in DOMAIN_PATTERNS:
-        if pattern.search(text or ""):
-            return domain
+    if GROWTH_PATTERN.search(source):
+        return "growth"
     return "general_business"
 
 
-def evidence_categories_for_domain(domain: str) -> list[str]:
+def evidence_categories_for_domain(domain: str, source_text: str = "") -> list[str]:
     if domain in EVIDENCE_CATEGORY_MAPS:
-        return EVIDENCE_CATEGORY_MAPS[domain]
+        categories = list(EVIDENCE_CATEGORY_MAPS[domain])
+        if domain == "productization" and SEO_PATTERN.search(source_text or ""):
+            categories.append("explicit CMS/content publishing capability, if relevant")
+        return categories
     return EVIDENCE_CATEGORY_MAPS["general_business"]
+
+
+def requires_productization_wave_matrix(state: Any, context: ReportQualityContext | None = None) -> bool:
+    context = context or assess_report_quality_context(state)
+    if context.decision_domain == "productization":
+        return True
+    return bool(WAVE2_PATTERN.search(_domain_source_text(state)))
 
 
 def has_concrete_evidence_locators(state: Any) -> bool:
@@ -297,17 +371,26 @@ def requires_telemetry_privacy_caveat(text: str) -> bool:
     return bool(TELEMETRY_PATTERN.search(text or ""))
 
 
-def client_simplify_text(text: str) -> str:
+def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
     """Translate technical report wording for client-facing dossier sections."""
     value = str(text or "")
     citation_repeated = len(re.findall(r"citation unavailable", value, flags=re.I)) > 1
-    value = re.sub(r"\bRPN\b", "risk priority", value)
-    value = re.sub(r"\bFMEA\b", "structured risk review", value)
-    value = re.sub(r"\bBayes factor\b|\bBF\b", "internal confidence diagnostic", value, flags=re.I)
-    value = re.sub(r"\bDQ\b", "evidence quality diagnostic", value)
-    value = re.sub(r"\bH_norm\b", "uncertainty diagnostic", value, flags=re.I)
-    value = re.sub(r"\b(?:rho|correlation coefficient)\b|ρ", "related-hypothesis risk", value, flags=re.I)
-    value = re.sub(r"\bH(\d+)\b", r"hypothesis \1", value)
+    replacements = [
+        (r"\b(?:FMEA-derived labels?|FMEA)\b", "structured risk review"),
+        (r"\b(?:RPN|risk priority numbers?)\s*[=:]?\s*\d*(?:\.\d+)?\b", "structured risk priority"),
+        (r"\b(?:Bayes factor|BF)\s*[=:]?\s*\d*(?:\.\d+)?\b", "internal confidence diagnostic"),
+        (r"\bDQ\s*[=:]?\s*\d*(?:\.\d+)?\b", "evidence quality diagnostic"),
+        (r"\bH_norm\s*[=:]?\s*\d*(?:\.\d+)?\b", "uncertainty diagnostic"),
+        (r"\b(?:portfolio correlation|correlation coefficient|rho)\s*[=:]?\s*[01]?(?:\.\d+)?\b|ρ\s*[=:]?\s*[01]?(?:\.\d+)?", "related-hypothesis risk"),
+        (r"\bJaccard(?: index)?\s*[=:]?\s*[01]?(?:\.\d+)?\b", "schema overlap score"),
+        (r"\bBrier score\s*[=:]?\s*[01]?(?:\.\d+)?\b", "forecast accuracy check"),
+        (r"\bECE\s*[=:]?\s*[01]?(?:\.\d+)?\b", "calibration check"),
+    ]
+    for pattern, replacement in replacements:
+        value = re.sub(pattern, replacement, value, flags=re.I)
+    value = _replace_hypothesis_ids(value)
+    if sparse_evidence:
+        value = _simplify_sparse_precision(value)
     value = re.sub(r"\[#\d+\]", "", value)
     if citation_repeated:
         value = re.sub(r"\s*\(?citation unavailable\)?\.?", "", value, flags=re.I)
@@ -320,7 +403,7 @@ def commitment_score_text(score: Any, rationale: str = "") -> str:
         numeric = float(score)
     except (TypeError, ValueError):
         return "Commitment score: Not scored — requires operator confirmation."
-    if numeric == 0 and PLACEHOLDER_RATIONALE_PATTERN.match(rationale or ""):
+    if PLACEHOLDER_RATIONALE_PATTERN.match(rationale or ""):
         return "Commitment score: Not scored — requires operator confirmation."
     if numeric < 50:
         return (
@@ -382,16 +465,12 @@ def threshold_consistency_warnings(state: Any, context: ReportQualityContext | N
     if _has_conflicting_rho_thresholds(text) or _has_conflicting_canary_thresholds(text):
         warnings.append(THRESHOLD_WARNING)
     if _has_high_confidence_language(text) and context.sparse_evidence:
-        warnings.append("High-confidence language appears while direct evidence is sparse; label confidence as provisional.")
+        warnings.append(SPARSE_CONFIDENCE_RULE)
     if _has_exact_dollar_estimate(text) and not context.has_budget_or_spend_evidence:
         warnings.append("Exact dollar estimates appear without budget or spend evidence; treat them as placeholders until Sprint 0 validates cost data.")
     monitor = getattr(state, "monitor", None)
     if monitor and PLACEHOLDER_RATIONALE_PATTERN.match(getattr(monitor, "commitment_rationale", "") or ""):
-        try:
-            if float(getattr(monitor, "commitment_score", 0) or 0) == 0:
-                warnings.append("Commitment score is unconfirmed; operator confirmation is required before treating it as a score.")
-        except (TypeError, ValueError):
-            warnings.append("Commitment score is unconfirmed; operator confirmation is required before treating it as a score.")
+        warnings.append("Commitment score is unconfirmed; operator confirmation is required before treating it as a score.")
     return _unique(warnings)
 
 
@@ -432,6 +511,26 @@ def _uploaded_files(state: Any) -> list[Any]:
     return list(getattr(layer, "uploaded_files", []) or [])
 
 
+def _domain_source_text(state: Any) -> str:
+    """Operator-supplied or explicit classification text only.
+
+    Generated reports, model phase outputs, and model-created evidence lists are
+    intentionally excluded so stale SEO/CMS wording cannot reclassify a generic
+    growth or product decision.
+    """
+    parts = [
+        getattr(state, "project_name", ""),
+        getattr(state, "brief", ""),
+        getattr(state, "data", ""),
+        getattr(state, "risk_classification", ""),
+        getattr(state, "risk_classification_rationale", ""),
+    ]
+    classify = getattr(state, "classify", None)
+    if classify:
+        parts.extend([getattr(classify, "domain", ""), getattr(classify, "reference_class", "")])
+    return "\n".join(str(part) for part in parts if part is not None)
+
+
 def _combined_state_text(state: Any) -> str:
     parts = [
         getattr(state, "brief", ""),
@@ -470,6 +569,77 @@ def _combined_state_text(state: Any) -> str:
     for item in list(getattr(layer, "items", []) or []):
         parts.extend([getattr(item, "title", ""), getattr(item, "summary", ""), getattr(item, "source_ref", "")])
     return "\n".join(str(part) for part in parts if part is not None)
+
+
+def _replace_hypothesis_ids(value: str) -> str:
+    labels = {
+        "1": "user-value hypothesis",
+        "2": "architecture hypothesis",
+        "3": "scope-risk hypothesis",
+    }
+
+    def repl(match: re.Match[str]) -> str:
+        number = match.group(1)
+        return labels.get(number, f"hypothesis {number}")
+
+    return re.sub(r"\bH(\d+)\b", repl, value)
+
+
+def _simplify_sparse_precision(value: str) -> str:
+    lines: list[str] = []
+    for line in str(value or "").splitlines():
+        if _is_provisional_planning_gate(line) and not re.search(
+            r"\b(probability|prior|likelihood|chance|failure probability|BF|DQ|RPN|FMEA|Jaccard|Brier|ECE|rho|portfolio correlation)\b|ρ",
+            line,
+            re.I,
+        ):
+            lines.append(line)
+            continue
+        simplified = line
+        if re.search(r"\b(canary|threshold|stop|trip|warning sign|good sign|kill criteria|monitoring)\b", simplified, re.I):
+            simplified = re.sub(r"\b\d+(?:\.\d+)?\s*%", "operator-confirmed threshold required", simplified)
+            simplified = re.sub(r"\b\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\b", "operator-confirmed count threshold required", simplified)
+        simplified = re.sub(
+            r"\b(?:failure probability|predicted failure probability)\s*(?:of|=|:)?\s*(?:0\.\d+|\d{1,3}\s*%)",
+            "high provisional failure risk",
+            simplified,
+            flags=re.I,
+        )
+        simplified = re.sub(
+            r"\b(?:probability|prior|likelihood|chance)\s*(?:of|=|:)?\s*\d{1,3}\s*%",
+            "model-generated prior",
+            simplified,
+            flags=re.I,
+        )
+        simplified = re.sub(
+            r"\b\d{1,3}\s*%\s*(?:probability|prior|likelihood|chance)\b",
+            "model-generated prior",
+            simplified,
+            flags=re.I,
+        )
+        simplified = re.sub(
+            r"\b(expected|projected|predicted)\s+\d{1,3}\s*%\s+(impact|lift|reduction|increase|improvement|conversion|roi)\b",
+            r"provisional planning estimate for \2",
+            simplified,
+            flags=re.I,
+        )
+        simplified = re.sub(
+            r"\$\s*\d[\d,]*(?:\.\d+)?",
+            "provisional planning estimate",
+            simplified,
+        )
+        simplified = re.sub(
+            r"\b\d+(?:\.\d+)?\s*(?:person-hours?|hours?)\b",
+            "provisional effort estimate",
+            simplified,
+            flags=re.I,
+        )
+        lines.append(simplified)
+    return "\n".join(lines)
+
+
+def _is_provisional_planning_gate(line: str) -> bool:
+    return bool(re.search(r"\b(proposed|provisional)\b.*\b(planning gate|gate|threshold)\b", line or "", re.I))
 
 
 def _structured_locator(item: Any) -> str:
