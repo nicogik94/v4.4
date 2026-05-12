@@ -22,6 +22,13 @@ from cdp.citation_format import (
 )
 from decision_objects import ensure_decision_objects
 from knowledge.retrieval import evaluate_phase_retrieval
+from report_quality import (
+    PROVISIONAL_CLARIFICATION_CAVEAT,
+    SPARSE_EVIDENCE_CAVEAT,
+    SPARSE_PRECISION_RULE,
+    TELEMETRY_PRIVACY_CAVEAT,
+    assess_report_quality_context,
+)
 from tools.scoring import (
     check_gate, evaluate_reentry_triggers, invalidate_downstream,
     compute_det_scores, compute_brier_score, summarize_phase_output
@@ -418,6 +425,12 @@ def build_report_prompt(state: ProjectState) -> str:
     ctx_strategy = _sanitize_report_context(summarize_phase_output("strategy", state))
     ctx_monitor = _sanitize_report_context(summarize_phase_output("monitor", state))
     evidence_locator_register = _build_report_evidence_locator_register(state)
+    quality_context = assess_report_quality_context(state)
+    report_quality_rules = _report_quality_prompt_block(quality_context)
+    factual_safety_rules = _report_factual_safety_rules(quality_context)
+    research_depth_rules = _report_research_depth_rules(quality_context)
+    evidence_maturity_rule = _report_evidence_maturity_rule(quality_context)
+    sprint0_rule = _report_sprint0_rule(quality_context)
     obs_text = _sanitize_report_context("\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations")
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
     return f"""PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers.
@@ -442,28 +455,20 @@ Report writing rules:
 - Preserve canonical evidence markers from PROJECT EVIDENCE LOCATORS. Do not fabricate evidence markers.
 - If evidence is unavailable, use [Inference], [Hypothesis], [Unknown], or citation unavailable.
 - Do not invent owners, dates, metrics, thresholds, budgets, customer facts, evidence, or commitments.
-- Use role-based owner placeholders instead of repeated owner TBDs: Executive Sponsor, Analytics Owner, Editorial Lead, SEO Lead, Web/CMS Owner. Named owners require operator confirmation.
-- Owner mapping: GA4, GSC, audience, acquisition, and reporting checks -> Analytics Owner; CrUX, Core Web Vitals, crawl, schema, canonicals, CMS capabilities -> Web/CMS Owner; keyword brief, editorial workflow, refresh protocol, commissioning process -> Editorial Lead; keyword research, cannibalization, internal linking, topic clusters -> SEO Lead; approval, escalation, cross-team enforcement, resource tradeoffs -> Executive Sponsor. If an action spans areas, use two roles.
+- Use role-based owner placeholders from REPORT QUALITY CONTEXT instead of repeated owner TBDs. Named owners require operator confirmation.
 - Use TBD — requires operator confirmation only where no reasonable role can be inferred, or where date, metric, threshold, budget, customer fact, or commitment is unknown.
 - If ProjectState clarification_cycles or clarification_answers are present in report context, include them only as assumptions, open questions, unavailable context, or operator-provided context.
 - Unanswered clarification questions remain unresolved questions.
 - Clarification answers and questions are not empirical evidence, must not be cited with project evidence markers, and must not be placed in the Evidence Used table as cited facts.
 
+REPORT QUALITY CONTEXT:
+{report_quality_rules}
+
 Factual-safety rules:
-- GA4 data thresholds are system-defined; verify whether the relevant audience report is available and sufficiently populated. Do not claim a fixed numeric monthly-active-user threshold.
-- Do not imply GA4 directly exposes a Hispanic demographic dimension unless the supplied project input explicitly says that validated field is available. If audience validation is needed, write: target audience proxy, such as age/gender plus geo/language or first-party audience data, depending on available GA4/GSC fields.
-- Use INP for responsiveness. Do not pair the retired FID metric with INP.
-- Core Web Vitals and page experience align with Google Search ranking systems and should be treated as a diagnostic and UX priority, not a deterministic ranking lever.
-- Prioritize Article and BreadcrumbList structured data. Consider FAQPage only where the page type and Google's current eligibility rules apply.
-- Structured data can make pages eligible for search features; do not promise or guarantee rich results.
+{factual_safety_rules}
 
 Research-depth and claim-labeling rules:
-- This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a completed evidence-backed SEO audit. Sprint 0 evidence collection is required before committing to full implementation.
-- Claims based only on structural pattern matching must be labeled [Inference].
-- Claims requiring GSC, GA4, crawl, CrUX, PageSpeed, keyword, or editorial workflow validation must be labeled [Hypothesis] or [Unknown].
-- Recommendations may be action-oriented, but full implementation should be gated by Sprint 0 validation of core assumptions.
-- Avoid saying an action will improve organic traffic without validation. Prefer "expected to improve," "the hypothesis is," or "Sprint 0 will validate."
-- Include this confidence explanation once: Moderate confidence in the intervention sequence; low-to-moderate confidence in the size of impact until GSC/GA4/crawl data are reviewed; high confidence that Sprint 0 diagnostics are necessary before implementation.
+{research_depth_rules}
 
 Report structure:
 Use these exact Markdown headings in this exact order:
@@ -490,9 +495,9 @@ Options Considered:
 Evidence Used:
 - Use a table with: evidence, what it suggests, evidence strength, caveat, citation marker if available.
 - Evidence strength labels must be one of: strong, moderate, weak, unavailable, inference only.
-- After the evidence table, add ## Evidence Maturity with current evidence level bullets for: analytical model, direct project evidence, Search Console evidence, GA4 evidence, crawl/technical evidence, editorial workflow evidence, keyword research evidence.
+- After the evidence table, add ## Evidence Maturity. {evidence_maturity_rule}
 - After Evidence Maturity, add ## Sprint 0 Evidence Pack Required. Include a compact table with: evidence item, why it is needed, decision it validates, owner role, expected output.
-- The Sprint 0 Evidence Pack must cover: GSC 12-month URL/query export; GA4 audience/acquisition check; CrUX or PageSpeed field data; site crawl export from Screaming Frog, Sitebulb, or equivalent; URL inventory with publish/update dates; keyword research sample; editorial workflow/process confirmation; CMS/schema/canonical capability check; peer/competitor topic-gap sample if available.
+- {sprint0_rule}
 
 Key Risks:
 - Use a table with: risk, why it matters, early warning signal, mitigation, owner/role if known.
@@ -526,6 +531,81 @@ Appendix: Technical Analysis:
 MONITORING: {obs_text}
 TIMER: {timer_text}
 PROJECT: {state.brief[:400]}"""
+
+
+def _report_quality_prompt_block(context) -> str:
+    lines = [
+        f"- Decision domain: {context.decision_domain}.",
+        "- Owner roles to use: " + ", ".join(context.owner_roles) + ".",
+        "- Sprint 0 evidence categories: " + ", ".join(context.evidence_categories) + ".",
+        "- Do not introduce SEO/search evidence categories unless the decision domain is seo_content_editorial or the supplied brief explicitly asks for SEO/web analytics evidence.",
+        f"- {SPARSE_PRECISION_RULE}",
+        "- Treat clarification answers as operator context only, not empirical evidence.",
+        "- Generate or surface 5-8 decision-critical follow-up questions when clarification answers are absent or unresolved.",
+        f"- If recommending logs, event tracking, session replay, transcripts, recordings, dashboard telemetry, product analytics, usage instrumentation, regeneration-event logging, or rework flags: {TELEMETRY_PRIVACY_CAVEAT}",
+    ]
+    if context.sparse_evidence:
+        lines.append(f"- {SPARSE_EVIDENCE_CAVEAT}")
+        if context.sparse_reasons:
+            lines.append("- Sparse evidence reasons: " + "; ".join(context.sparse_reasons))
+    elif context.evidence_warning:
+        lines.append("- Evidence warning: one or more evidence channels are missing; separate evidence strength from recommendation strength.")
+    if context.provisional_report:
+        lines.append(f"- {PROVISIONAL_CLARIFICATION_CAVEAT}")
+    return "\n".join(lines)
+
+
+def _report_factual_safety_rules(context) -> str:
+    if context.decision_domain == "seo_content_editorial":
+        return "\n".join([
+            "- Search Console and GA4 data thresholds are system-defined; verify whether the relevant reports are available and sufficiently populated. Do not claim a fixed numeric monthly-active-user threshold.",
+            "- Do not imply GA4 directly exposes a Hispanic demographic dimension unless the supplied project input explicitly says that validated field is available. If audience validation is needed, write: target audience proxy, such as age/gender plus geo/language or first-party audience data, depending on available GA4/GSC fields.",
+            "- Use INP for responsiveness. Do not pair the retired FID metric with INP.",
+            "- Core Web Vitals and page experience align with Google Search ranking systems and should be treated as a diagnostic and UX priority, not a deterministic ranking lever.",
+            "- Prioritize Article and BreadcrumbList structured data. Consider FAQPage only where the page type and Google's current eligibility rules apply.",
+            "- Structured data can make pages eligible for search features; do not promise or guarantee rich results.",
+        ])
+    return "\n".join([
+        "- Do not use search-console, web-analytics, crawl, keyword, CMS, or schema evidence categories unless the supplied brief explicitly involves SEO, content, editorial, CMS, or web analytics work.",
+        "- For productization/product strategy decisions, use product telemetry, pilot-session data, user feedback, export validation, implementation complexity, and privacy/data governance evidence categories.",
+        "- Do not make precise impact, savings, probability, percentage, or budget claims unless concrete project evidence supports them.",
+        "- If evidence is sparse, prefer diagnostic recommendations and Sprint 0 evidence collection over confident implementation prescriptions.",
+    ])
+
+
+def _report_research_depth_rules(context) -> str:
+    if context.decision_domain == "seo_content_editorial":
+        domain_claims = "Search Console, GA4, crawl, CrUX/PageSpeed, keyword, or editorial workflow validation"
+        confidence = "Moderate confidence in the intervention sequence; low-to-moderate confidence in the size of impact until Search Console, GA4, crawl, and editorial evidence are reviewed; high confidence that Sprint 0 diagnostics are necessary before implementation."
+        caveat = "This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a completed evidence-backed SEO audit. Sprint 0 evidence collection is required before committing to full implementation."
+    else:
+        domain_claims = ", ".join(context.evidence_categories)
+        confidence = "Moderate confidence in the diagnostic sequence; low-to-moderate confidence in the size of impact until direct project evidence is reviewed; high confidence that Sprint 0 evidence collection is necessary before implementation."
+        caveat = "This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a measured audit. Sprint 0 evidence collection is required before committing to full implementation."
+    lines = [
+        f"- {caveat}",
+        "- Claims based only on structural pattern matching must be labeled [Inference].",
+        f"- Claims requiring {domain_claims} must be labeled [Hypothesis] or [Unknown] until validated.",
+        "- Recommendations may be action-oriented, but full implementation should be gated by Sprint 0 validation of core assumptions.",
+        "- Avoid saying an action will produce a measured impact without validation. Prefer \"expected to improve,\" \"the hypothesis is,\" or \"Sprint 0 will validate.\"",
+        f"- Include this confidence explanation once: {confidence}",
+    ]
+    if context.sparse_evidence:
+        lines.append(f"- {SPARSE_EVIDENCE_CAVEAT}")
+    if context.provisional_report:
+        lines.append(f"- {PROVISIONAL_CLARIFICATION_CAVEAT}")
+    return "\n".join(lines)
+
+
+def _report_evidence_maturity_rule(context) -> str:
+    categories = ["analytical model", "direct project evidence", *context.evidence_categories]
+    return "Use current evidence level bullets for: " + ", ".join(categories) + "."
+
+
+def _report_sprint0_rule(context) -> str:
+    if context.decision_domain == "seo_content_editorial":
+        return "The Sprint 0 Evidence Pack must cover: GSC 12-month URL/query export; GA4 audience/acquisition check; CrUX or PageSpeed field data; site crawl export from Screaming Frog, Sitebulb, or equivalent; URL inventory with publish/update dates; keyword research sample; editorial workflow/process confirmation; CMS/schema/canonical capability check; peer/competitor topic-gap sample if available."
+    return "The Sprint 0 Evidence Pack must cover: " + "; ".join(context.evidence_categories) + "."
 
 
 def _sanitize_report_context(text: str) -> str:

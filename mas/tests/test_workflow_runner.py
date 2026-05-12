@@ -398,6 +398,78 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("must not be cited with project evidence markers", prompt)
         self.assertIn("must not be placed in the Evidence Used table as cited facts", prompt)
 
+    def test_sparse_no_clarification_report_prompt_includes_caveats(self):
+        state = ProjectState(
+            project_id="sparse-report-prompt",
+            project_name="Sparse report prompt",
+            brief="Decide productization direction for v4 dashboard exports.",
+        )
+
+        prompt = build_report_prompt(state)
+
+        self.assertIn("This is a structured hypothesis map, not a measured audit.", prompt)
+        self.assertIn("Provisional report: clarification questions have not been answered.", prompt)
+        self.assertIn("BF, DQ, RPN, H_norm, correlation/rho, priors, probabilities, dollars, and percentages", prompt)
+
+    def test_productization_report_prompt_uses_product_roles_and_evidence(self):
+        state = ProjectState(
+            project_id="productization-prompt",
+            project_name="Productization prompt",
+            brief=(
+                "Decide the v4 productization direction for dashboard exports, "
+                "regeneration workflow, pilot users, product telemetry, and validation batch."
+            ),
+        )
+
+        prompt = build_report_prompt(state)
+
+        for expected in (
+            "Decision domain: productization",
+            "Product Owner",
+            "Engineering Lead",
+            "Privacy or Data Governance Reviewer",
+            "product telemetry",
+            "pilot sessions",
+            "report validation batch",
+        ):
+            self.assertIn(expected, prompt)
+        for forbidden in (
+            "GSC 12-month URL/query export",
+            "GA4 audience/acquisition check",
+            "SEO Lead",
+            "Editorial Lead",
+            "Web/CMS Owner",
+        ):
+            self.assertNotIn(forbidden, prompt)
+
+    def test_non_seo_domains_do_not_receive_seo_owner_roles(self):
+        cases = [
+            ("growth", "Improve growth performance across revenue operations, sales, customer success, retention, and pipeline.", "Growth Lead"),
+            ("ai_readiness", "Assess AI readiness, data readiness, model governance, security, legal compliance, and training.", "AI Program Lead"),
+            ("automation_roi", "Evaluate automation ROI for a manual process workflow with operations, finance, and change training.", "IT/Automation Lead"),
+        ]
+
+        for project_id, brief, expected_role in cases:
+            with self.subTest(project_id=project_id):
+                prompt = build_report_prompt(ProjectState(project_id=project_id, project_name=project_id, brief=brief))
+
+                self.assertIn(expected_role, prompt)
+                self.assertNotIn("SEO Lead", prompt)
+                self.assertNotIn("Editorial Lead", prompt)
+                self.assertNotIn("Web/CMS Owner", prompt)
+
+    def test_report_prompt_includes_telemetry_privacy_rule(self):
+        state = ProjectState(
+            project_id="telemetry-privacy-prompt",
+            project_name="Telemetry privacy",
+            brief="Recommend dashboard telemetry, regeneration-event logging, session replay, and product analytics for the product pilot.",
+        )
+
+        prompt = build_report_prompt(state)
+
+        self.assertIn("Log event metadata by default.", prompt)
+        self.assertIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", prompt)
+
     def test_report_prompt_keeps_framework_heavy_material_in_appendix(self):
         prompt = build_report_prompt(make_completed_state("report-appendix-frameworks"))
 
@@ -473,6 +545,11 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("## At a Glance", prompt_text)
         self.assertIn("Field` and `Detail` headers", prompt_text)
         self.assertIn("do not use raw comparison symbols", prompt_text)
+        self.assertIn("This is a structured hypothesis map, not a measured audit.", prompt_text)
+        self.assertIn("Provisional report: clarification questions have not been answered.", prompt_text)
+        self.assertIn("domain-specific owner roles", prompt_text)
+        self.assertIn("product telemetry", prompt_text)
+        self.assertIn("Log event metadata by default.", prompt_text)
         self.assertIn("Evidence Maturity", prompt_text)
         self.assertIn("Sprint 0 Evidence Pack Required", prompt_text)
         self.assertIn("GA4 data thresholds are system-defined", prompt_text)

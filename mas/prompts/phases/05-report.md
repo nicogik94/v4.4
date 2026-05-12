@@ -63,10 +63,17 @@ Use this checklist internally. Do not render it as a separate buyer-facing repor
 - Use `## At a Glance` under the Executive Summary. Render it as a normal two-column Markdown table with `Field` and `Detail` headers, not as a blockquote.
 - Do not use Markdown blockquote markers or Markdown horizontal rules for visual layout.
 - For thresholds, write comparison words such as "more than", "less than", or "at least"; do not use raw comparison symbols.
-- State clearly that the report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context, not yet a completed evidence-backed SEO audit.
-- Add `## Evidence Maturity` after Evidence Used and distinguish analytical model strength from direct project evidence, Search Console evidence, GA4 evidence, crawl/technical evidence, editorial workflow evidence, and keyword research evidence.
+- If Sparse Evidence Mode is active, include this caveat near the top: "This is a structured hypothesis map, not a measured audit. Direct evidence is limited or absent. Treat probabilities, scores, thresholds, and risk rankings as provisional priors until Sprint 0 validates them."
+- If no clarification answers exist while evidence is sparse, include this caveat near the top: "Provisional report: clarification questions have not been answered. Recommendations should be reviewed after the operator answers the decision-critical follow-up questions."
+- When evidence is sparse, BF, DQ, RPN, H_norm, correlation/rho, priors, probabilities, dollars, and percentages must be labeled as priors, planning gates, or placeholders unless backed by concrete project evidence.
+- Use domain-specific owner roles. Productization/product strategy roles include Executive Sponsor, Product Owner, Engineering Lead, UX Research Lead, Data/Analytics Owner, Pilot User Recruiter, Operator / QA Reviewer, and Privacy or Data Governance Reviewer. Growth, AI readiness, automation ROI, SEO/content/editorial, and general business decisions must use their matching role maps instead of defaulting to SEO/content/CMS roles.
+- Use SEO/content/editorial evidence categories only when the brief actually involves SEO, editorial, content, CMS, web analytics, GA4, Search Console, schema, crawl, keywords, article workflow, or related terms.
+- For productization/product strategy decisions, use product telemetry, session/rework logs, report validation batch, user interviews, pilot sessions, export usage/share data, competitor/product gap scan, implementation complexity estimate, and privacy/data governance review.
+- If recommending logs, event tracking, dashboard telemetry, product analytics, session replay, recordings, transcripts, user behavior instrumentation, regeneration-event logging, or rework flags, include: "Log event metadata by default. Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text unless the operator explicitly marks a session for qualitative review."
+- State clearly that the report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context, not yet a completed measured audit.
+- Add `## Evidence Maturity` after Evidence Used and distinguish analytical model strength from direct project evidence and the domain-specific evidence categories supplied by the runtime prompt.
 - Add `## Sprint 0 Evidence Pack Required` after Evidence Maturity with evidence item, why it is needed, decision it validates, owner role, and expected output.
-- Sprint 0 evidence must cover: GSC 12-month URL/query export; GA4 audience/acquisition check; CrUX or PageSpeed field data; site crawl export; URL inventory with publish/update dates; keyword research sample; editorial workflow/process confirmation; CMS/schema/canonical capability check; peer/competitor topic-gap sample if available.
+- Sprint 0 evidence must cover the domain-specific evidence categories supplied by the runtime prompt. For SEO/content/editorial decisions this can include GSC 12-month URL/query export, GA4 audience/acquisition check, CrUX or PageSpeed field data, site crawl export, URL inventory with publish/update dates, keyword research sample, editorial workflow/process confirmation, CMS/schema/canonical capability check, and peer/competitor topic-gap sample if available.
 - GA4 data thresholds are system-defined. Verify whether the relevant audience report is available and sufficiently populated; do not invent a fixed numeric monthly-active-user threshold.
 - Do not imply GA4 directly exposes a Hispanic demographic dimension unless project input explicitly validates that available field. Use target audience proxy wording, such as age/gender plus geo/language or first-party audience data, depending on available GA4/GSC fields.
 - Use INP for responsiveness. Do not pair the retired FID metric with INP.
@@ -74,7 +81,7 @@ Use this checklist internally. Do not render it as a separate buyer-facing repor
 - Prioritize Article and BreadcrumbList structured data. Consider FAQPage only where the page type and Google's current eligibility rules apply.
 - Structured data can make pages eligible for search features; do not promise or guarantee rich results.
 - Label structural pattern claims as `[Inference]`; label claims requiring GSC, GA4, crawl, CrUX/PageSpeed, keyword, or editorial workflow validation as `[Hypothesis]` or `[Unknown]`.
-- Use role-based owner placeholders: Executive Sponsor, Analytics Owner, Editorial Lead, SEO Lead, and Web/CMS Owner. Named owners require operator confirmation.
+- Use role-based owner placeholders from the active runtime domain guidance. Named owners require operator confirmation.
 
 ## Meta-learning payload (separate JSON, for the database)
 
