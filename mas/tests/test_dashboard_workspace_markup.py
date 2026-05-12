@@ -84,6 +84,38 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("Report markdown", html)
         self.assertIn("/projects/${pid}/export/${fmt}", html)
 
+    def test_canonical_export_profile_controls_are_present(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("renderExportProfileControl", html)
+        self.assertIn("exportProjectProfile", html)
+        self.assertIn("syncExportProfileFormatOptions", html)
+        self.assertIn("export-profile-select", html)
+        self.assertIn("export-format-select", html)
+        self.assertIn("export-profile-submit", html)
+        self.assertIn("Profile export", html)
+        self.assertIn("report: {", html)
+        self.assertIn("client_dossier", html)
+        self.assertIn("operator_dossier", html)
+        self.assertIn("machine_archive", html)
+        self.assertIn("Report", html)
+        self.assertIn("Client dossier", html)
+        self.assertIn("Operator dossier", html)
+        self.assertIn("Machine archive", html)
+        self.assertIn("pdf", html)
+        self.assertIn("docx", html)
+        self.assertIn("zip", html)
+        self.assertIn("/export?profile=", html)
+        self.assertIn("/export/", html)
+        self.assertIn("/projects/${pid}/export/${fmt}", html)
+        self.assertIn("downloadExport", html)
+        self.assertIn("Regenerate report", html)
+        self.assertIn("clarification-panel", html)
+        self.assertIn("DRAFT_NAMESPACE = 'v4.draft'", html)
+        self.assertIn("Drafts.attach(", html)
+
     def test_canonical_clarification_panel_is_present(self):
         if not HTML_PATH.exists():
             self.skipTest("dashboard bundle is not mounted in this execution environment")

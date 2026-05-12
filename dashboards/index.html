@@ -107,6 +107,15 @@ td .subtle { color: var(--mute); font-size: 11px; }
 .sub-tab-content.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; background: #F8FAFC; white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto; }
 .report-actions { max-width: 720px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--line-2); flex-wrap: wrap; }
 .report-actions .meta { color: var(--mute); font-size: 12px; line-height: 1.5; }
+.report-export-actions { min-width: 280px; flex: 1; max-width: 380px; }
+.export-profile-control { display: flex; flex-direction: column; gap: 8px; }
+.export-profile-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 8px; }
+.export-profile-field { display: flex; flex-direction: column; gap: 4px; }
+.export-profile-field label { font-size: 10px; font-weight: 700; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.5px; }
+.export-profile-field select { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--ink); padding: 7px 8px; font: inherit; font-size: 12px; }
+.export-profile-help, .export-profile-note { font-size: 11px; color: var(--mute); line-height: 1.4; }
+.export-profile-warning { display: none; border: 1px solid rgba(217, 119, 6, 0.35); background: var(--accent-bg); border-radius: 6px; color: var(--ink-2); font-size: 11px; line-height: 1.4; padding: 7px 8px; }
+.export-profile-warning.visible { display: block; }
 .report-content { max-width: 720px; font-size: 14px; line-height: 1.7; color: var(--ink-2); }
 .report-content h1 { font-size: 22px; margin: 24px 0 14px; color: var(--ink); font-weight: 700; }
 .report-content h2 { font-size: 18px; margin: 22px 0 12px; color: var(--ink); font-weight: 700; }
@@ -404,6 +413,29 @@ const state = { activeTab: 'console', selectedProjectId: null, selectedSubtab: '
 const $ = (id) => document.getElementById(id);
 const apiUrl = () => $('api-url').value.replace(/\/$/, '');
 const PHASES = ['classify', 'hypotheses', 'gauntlet', 'audit', 'strategy', 'sqi', 'monitor', 'report'];
+const EXPORT_PROFILES = {
+  report: {
+    label: 'Report',
+    formats: ['pdf', 'docx'],
+    help: 'Final report only.',
+  },
+  client_dossier: {
+    label: 'Client dossier',
+    formats: ['pdf', 'docx'],
+    help: 'Stakeholder-ready export.',
+  },
+  operator_dossier: {
+    label: 'Operator dossier',
+    formats: ['pdf', 'docx'],
+    help: 'Internal review export with phase summaries.',
+  },
+  machine_archive: {
+    label: 'Machine archive',
+    formats: ['zip'],
+    help: 'Internal ZIP archive for backup/debug.',
+  },
+};
+const EXPORT_FORMAT_LABELS = { pdf: 'PDF', docx: 'DOCX', zip: 'ZIP' };
 
 // ── Local browser draft persistence ─────────────────────────────────────────
 // Saves long-form operator input (project brief, supporting data, report
@@ -595,6 +627,54 @@ async function apiDelete(path) {
 function downloadExport(pid, fmt) {
   const link = document.createElement('a');
   link.href = `${apiUrl()}/projects/${pid}/export/${fmt}`;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function syncExportProfileFormatOptions() {
+  const profileSelect = $('export-profile-select');
+  const formatSelect = $('export-format-select');
+  if (!profileSelect || !formatSelect) return;
+
+  const profile = profileSelect.value || 'report';
+  const config = EXPORT_PROFILES[profile];
+  if (!config) {
+    alert('Invalid export profile.');
+    return;
+  }
+
+  const previousFormat = formatSelect.value;
+  formatSelect.innerHTML = config.formats.map(fmt => (
+    `<option value="${escapeHtml(fmt)}">${escapeHtml(EXPORT_FORMAT_LABELS[fmt] || fmt.toUpperCase())}</option>`
+  )).join('');
+  formatSelect.value = config.formats.includes(previousFormat) ? previousFormat : config.formats[0];
+
+  const help = $('export-profile-help');
+  if (help) help.textContent = config.help;
+  const warning = $('export-profile-warning');
+  if (warning) warning.classList.toggle('visible', profile === 'machine_archive');
+}
+
+function exportProjectProfile(pid, profile, format) {
+  if (!pid) {
+    alert('Select a project before exporting.');
+    return;
+  }
+  const config = EXPORT_PROFILES[profile];
+  if (!config) {
+    alert('Invalid export profile.');
+    return;
+  }
+  if (!format || !config.formats.includes(format)) {
+    alert('Invalid export format for this profile.');
+    return;
+  }
+
+  const link = document.createElement('a');
+  link.href = `${apiUrl()}/projects/${encodeURIComponent(pid)}/export?profile=${encodeURIComponent(profile)}&format=${encodeURIComponent(format)}`;
   link.target = '_blank';
   link.rel = 'noopener';
   document.body.appendChild(link);
@@ -2033,17 +2113,50 @@ function renderTrace(pid, explain, workspace = {}) {
   `;
 }
 
+function renderExportProfileControl(reportExists) {
+  const profileOptions = Object.entries(EXPORT_PROFILES).map(([value, config]) => (
+    `<option value="${escapeHtml(value)}">${escapeHtml(config.label)}</option>`
+  )).join('');
+  const initialFormats = EXPORT_PROFILES.report.formats.map(fmt => (
+    `<option value="${escapeHtml(fmt)}">${escapeHtml(EXPORT_FORMAT_LABELS[fmt] || fmt.toUpperCase())}</option>`
+  )).join('');
+
+  return `
+    <div class="export-profile-control" data-export-profile-control>
+      <div class="export-profile-row">
+        <div class="export-profile-field">
+          <label for="export-profile-select">Profile</label>
+          <select id="export-profile-select">${profileOptions}</select>
+        </div>
+        <div class="export-profile-field">
+          <label for="export-format-select">Format</label>
+          <select id="export-format-select">${initialFormats}</select>
+        </div>
+      </div>
+      <div class="export-profile-help" id="export-profile-help">${escapeHtml(EXPORT_PROFILES.report.help)}</div>
+      <div class="export-profile-warning" id="export-profile-warning">Internal use only. Contains sanitized project archive files.</div>
+      ${reportExists ? '' : `<div class="export-profile-note">Export may be incomplete until the report phase runs.</div>`}
+      <button class="btn secondary" id="export-profile-submit" type="button">Export selected profile</button>
+    </div>
+  `;
+}
+
 function renderReport(pid, fullState, workspace) {
   const container = $('dr-content');
   container.classList.remove('code');
   const phaseStatus = fullState.phase_status || {};
   const reportStatus = phaseStatus.report || 'pending';
+  const reportExists = !!fullState.report;
   const isRegenerating = !!(workspace && workspace.workflow_running) || reportStatus === 'running';
   const actionBlock = `
     <div class="report-actions">
       <div>
         <button class="btn secondary" id="report-regenerate-btn" ${(!pid || isRegenerating) ? 'disabled' : ''}>Regenerate report</button>
         <div class="meta">Rebuild the final report from the latest saved phase outputs.</div>
+      </div>
+      <div class="report-export-actions">
+        <div class="meta"><strong>Profile export</strong></div>
+        ${renderExportProfileControl(reportExists)}
       </div>
       ${reportStatus === 'running' ? statusChip('running', 'report running') : ''}
     </div>`;
@@ -2059,6 +2172,21 @@ function renderReport(pid, fullState, workspace) {
   const regenerateBtn = $('report-regenerate-btn');
   if (regenerateBtn) {
     regenerateBtn.addEventListener('click', () => regenerateReport(pid, fullState));
+  }
+  const profileSelect = $('export-profile-select');
+  if (profileSelect) {
+    syncExportProfileFormatOptions();
+    profileSelect.addEventListener('change', syncExportProfileFormatOptions);
+  }
+  const profileSubmit = $('export-profile-submit');
+  if (profileSubmit) {
+    profileSubmit.addEventListener('click', () => {
+      exportProjectProfile(
+        pid,
+        $('export-profile-select')?.value || 'report',
+        $('export-format-select')?.value || 'pdf',
+      );
+    });
   }
 }
 
