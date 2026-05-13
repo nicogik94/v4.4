@@ -1,10 +1,12 @@
 """Tests for profile-based project exports."""
 import json
+import os
 import sys
 import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from docx import Document
@@ -25,6 +27,7 @@ from clarifications import (  # noqa: E402
 )
 from exporters import (  # noqa: E402
     build_client_dossier_markdown,
+    build_export_manifest,
     build_machine_archive_payload,
     build_operator_dossier_markdown,
     export_project_profile_bytes,
@@ -229,6 +232,58 @@ Technical notes stay here.
     ]
     state.data = r"Local notes at C:\Users\nicoc\private\data.csv with api_key=sk-test-secret"
     return state
+
+
+class TestCodeVersionFreshness(unittest.TestCase):
+    def test_current_code_version_uses_safe_env_var_first(self):
+        env = {
+            "V4_CODE_VERSION": "abc123",
+            "GIT_COMMIT": "",
+            "COMMIT_SHA": "",
+            "SOURCE_VERSION": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with patch("report_freshness.subprocess.run") as run_mock:
+                self.assertEqual(report_freshness.current_code_version(), "abc123")
+
+        run_mock.assert_not_called()
+
+    def test_current_code_version_ignores_unsafe_env_and_uses_git_root(self):
+        repo_root = ROOT.parent
+        env = {
+            "V4_CODE_VERSION": r"abc123 C:\Users\example\secret.txt",
+            "GIT_COMMIT": "",
+            "COMMIT_SHA": "",
+            "SOURCE_VERSION": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with patch("report_freshness._detect_repo_root", return_value=repo_root):
+                with patch(
+                    "report_freshness.subprocess.run",
+                    return_value=SimpleNamespace(stdout="git789\n"),
+                ) as run_mock:
+                    self.assertEqual(report_freshness.current_code_version(), "git789")
+
+        self.assertEqual(run_mock.call_args.kwargs["cwd"], str(repo_root))
+
+    def test_current_code_version_returns_unknown_only_when_env_and_git_fail(self):
+        env = {name: "" for name in report_freshness.CODE_VERSION_ENV_VARS}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("report_freshness._detect_repo_root", return_value=ROOT.parent):
+                with patch("report_freshness.subprocess.run", side_effect=FileNotFoundError):
+                    self.assertEqual(report_freshness.current_code_version(), report_freshness.UNKNOWN_CODE_VERSION)
+
+    def test_export_manifest_uses_code_version_helper_for_manifest_and_freshness(self):
+        state = make_export_state("manifest-version")
+        _attach_report_generation_metadata(state, code_version="same999")
+
+        with patch("report_freshness.current_code_version", return_value="same999"):
+            manifest = build_export_manifest(state, "machine_archive", "zip")
+
+        self.assertEqual(manifest["code_version"], "same999")
+        self.assertEqual(manifest["report_freshness"]["current_code_version"], "same999")
+        self.assertEqual(manifest["report_freshness"]["generated_code_version"], "same999")
+        self.assertEqual(manifest["report_freshness"]["status"], "fresh")
 
 
 class TestProfileExporterHelpers(unittest.TestCase):
