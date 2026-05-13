@@ -22,6 +22,7 @@ from cdp.citation_format import (
 )
 from decision_objects import ensure_decision_objects
 from knowledge.retrieval import evaluate_phase_retrieval
+import report_freshness
 from report_quality import (
     PROVISIONAL_CLARIFICATION_CAVEAT,
     SPARSE_CONFIDENCE_RULE,
@@ -1248,6 +1249,11 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 )
     else:
         state.report = response.text
+        log_policy_event(
+            state,
+            "report_generated",
+            report_freshness.build_report_generation_metadata(state.report),
+        )
         state.phase_status[phase] = PhaseStatus.COMPLETED
         state.phase_confidence[phase] = 1.0
 

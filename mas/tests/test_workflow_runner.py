@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import api
+import report_freshness
 from llm_client import LLMResponse
 from orchestrator import (
     _build_report_evidence_locator_register,
@@ -1030,6 +1031,56 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.phase_confidence["monitor"], 1.0)
         self.assertIsNotNone(updated.monitor)
         self.assertEqual(updated.monitor.commitment_score, 81)
+
+    async def test_report_success_records_generation_metadata(self):
+        state = make_completed_state("report-generation-metadata")
+        state.phase_status["report"] = PhaseStatus.PENDING
+        state.report = None
+        response = make_response("new report body", 14, 7, 0.03)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                with patch("report_freshness.current_code_version", return_value="meta123"):
+                    updated = await run_phase_node(state, "report")
+
+        events = [
+            event for event in updated.policy_audit_log
+            if event.get("event_type") == "report_generated"
+        ]
+        self.assertTrue(events)
+        details = events[-1]["details"]
+        self.assertEqual(updated.report, "new report body")
+        self.assertEqual(details["phase"], "report")
+        self.assertEqual(details["code_version"], "meta123")
+        self.assertEqual(details["report_sha256"], report_freshness.report_sha256("new report body"))
+        self.assertEqual(details["report_length"], len("new report body"))
+        self.assertTrue(details["generated_at"])
+
+    async def test_report_regeneration_records_updated_generation_metadata(self):
+        state = make_completed_state("report-regeneration-metadata")
+        responses = [
+            make_response("first regenerated report", 14, 7, 0.03),
+            make_response("second regenerated report", 14, 7, 0.03),
+        ]
+
+        with patch("orchestrator.call_llm", new=AsyncMock(side_effect=responses)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                with patch("report_freshness.current_code_version", side_effect=["old111", "new222"]):
+                    updated = await run_phase_node(state, "report")
+                    updated = await run_phase_node(updated, "report")
+
+        events = [
+            event for event in updated.policy_audit_log
+            if event.get("event_type") == "report_generated"
+        ]
+        self.assertGreaterEqual(len(events), 2)
+        first = events[-2]["details"]
+        second = events[-1]["details"]
+        self.assertEqual(updated.report, "second regenerated report")
+        self.assertEqual(first["code_version"], "old111")
+        self.assertEqual(second["code_version"], "new222")
+        self.assertEqual(second["report_sha256"], report_freshness.report_sha256("second regenerated report"))
+        self.assertNotEqual(first["report_sha256"], second["report_sha256"])
 
     async def test_monitor_phase_repairs_truncated_object_when_required_fields_are_complete(self):
         state = make_completed_state("monitor-phase-truncated-repair")

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import zipfile
 from io import BytesIO
 from datetime import datetime, timezone
@@ -41,6 +40,7 @@ from report_quality import (
     requires_telemetry_privacy_caveat,
     threshold_consistency_warnings,
 )
+import report_freshness
 from state import ProjectState
 
 
@@ -289,25 +289,37 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
         archive_payload = build_machine_archive_payload(state)
         return _zip_archive_bytes(archive_payload), PROFILE_MEDIA_TYPES[fmt], filename
 
+    current_version = report_freshness.current_code_version()
     if profile_name == "report":
-        markdown = _safe_report_markdown(state)
+        markdown = _prepend_report_freshness_warning(
+            _safe_report_markdown(state),
+            state,
+            current_code_version=current_version,
+        )
     elif profile_name == "client_dossier":
-        markdown = build_client_dossier_markdown(state)
+        markdown = build_client_dossier_markdown(state, current_code_version=current_version)
     else:
-        markdown = build_operator_dossier_markdown(state)
+        markdown = build_operator_dossier_markdown(state, current_code_version=current_version)
 
     if fmt == "docx":
         return _export_markdown_docx_bytes(markdown, title=filename), PROFILE_MEDIA_TYPES[fmt], filename
     return _export_markdown_pdf_bytes(markdown, title=filename), PROFILE_MEDIA_TYPES[fmt], filename
 
 
-def build_client_dossier_markdown(state: ProjectState) -> str:
+def build_client_dossier_markdown(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+) -> str:
     quality = assess_report_quality_context(state)
     sections = _extract_report_sections(state.report or "")
     lines = [
         "# Client Dossier",
         _project_metadata_line(state),
     ]
+    warning = _report_freshness_warning(state, current_code_version=current_code_version)
+    if warning:
+        lines.append(warning)
     lines.extend(_quality_warning_blocks(state, quality, client=True))
     open_questions = client_section_from_report_or_fallback(
         state,
@@ -404,11 +416,20 @@ def build_client_dossier_markdown(state: ProjectState) -> str:
     return "\n\n".join(part for part in lines if str(part).strip())
 
 
-def build_operator_dossier_markdown(state: ProjectState) -> str:
+def build_operator_dossier_markdown(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+    include_freshness: bool = True,
+) -> str:
     quality = assess_report_quality_context(state)
     lines = [
         "# Operator Dossier",
     ]
+    if include_freshness:
+        warning = _operator_report_freshness_warning(state, current_code_version=current_code_version)
+        if warning:
+            lines.append(warning)
     lines.extend(_quality_warning_blocks(state, quality, client=False))
     section_bodies = {
         "Cover / project metadata": operator_project_metadata(state),
@@ -894,6 +915,7 @@ def build_export_manifest(
     *,
     included_files: list[str] | None = None,
 ) -> dict[str, Any]:
+    current_version = report_freshness.current_code_version()
     return sanitize_for_export(
         {
             "export_schema_version": "1.0",
@@ -902,7 +924,11 @@ def build_export_manifest(
             "export_profile": profile,
             "export_format": format,
             "generated_at": _utc_now(),
-            "code_version": _code_version(),
+            "code_version": current_version,
+            "report_freshness": report_freshness.report_freshness_manifest(
+                state,
+                current_version=current_version,
+            ),
             "redaction_policy": "Recursive sensitive-key, unsafe-path, prompt/debug, provider-payload, and chain-of-thought redaction.",
             "included_files": included_files or [],
         },
@@ -1040,7 +1066,7 @@ def _as_pdf_text(text: str) -> str:
 
 
 def _build_dossier_blocks(state: ProjectState) -> list[dict]:
-    return _markdown_to_blocks(build_operator_dossier_markdown(state))
+    return _markdown_to_blocks(build_operator_dossier_markdown(state, include_freshness=False))
 
     blocks: list[dict] = []
 
@@ -1288,6 +1314,55 @@ def _safe_report_markdown(state: ProjectState) -> str:
     if requires_productization_wave_matrix(state, quality) and "Wave 2 Graduation Matrix" not in markdown:
         markdown = "\n\n".join([markdown.strip(), WAVE2_GRADUATION_MATRIX])
     return markdown
+
+
+def _prepend_report_freshness_warning(
+    markdown: str,
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+) -> str:
+    warning = _report_freshness_warning(state, current_code_version=current_code_version)
+    if not warning:
+        return markdown
+    return "\n\n".join([warning, markdown])
+
+
+def _report_freshness_warning(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+) -> str:
+    freshness = report_freshness.assess_report_freshness(
+        state,
+        current_version=current_code_version,
+    )
+    return freshness.warning
+
+
+def _operator_report_freshness_warning(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+) -> str:
+    freshness = report_freshness.assess_report_freshness(
+        state,
+        current_version=current_code_version,
+    )
+    if not freshness.warning:
+        return ""
+    metadata_rows = [
+        ["Field", "Value"],
+        ["Freshness status", freshness.status],
+        ["Generated code version", freshness.generated_code_version or "unavailable"],
+        ["Current code version", freshness.current_code_version or "unavailable"],
+        ["Generated at", freshness.generated_at or "unavailable"],
+        ["Matching report hash", str(bool(freshness.matching_report_hash))],
+    ]
+    return "\n\n".join([
+        freshness.warning,
+        "Freshness metadata:\n\n" + _markdown_table(metadata_rows),
+    ])
 
 
 def _simplify_sparse_report_markdown(markdown: str, quality) -> str:
@@ -2187,14 +2262,4 @@ def _utc_now() -> str:
 
 
 def _code_version() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        return result.stdout.strip()
-    except Exception:
-        return "unknown"
+    return report_freshness.current_code_version()
