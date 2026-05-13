@@ -26,6 +26,7 @@ from clarifications import (  # noqa: E402
     ClarificationStatus,
 )
 from exporters import (  # noqa: E402
+    _safe_report_markdown,
     build_client_dossier_markdown,
     build_export_manifest,
     build_machine_archive_payload,
@@ -469,8 +470,8 @@ class TestProfileExporterHelpers(unittest.TestCase):
     def test_client_dossier_simplifies_internal_jargon_but_operator_keeps_detail(self):
         state = make_export_state("client-jargon")
         state.report = """# Executive Summary
-H1 has BF 12, DQ 65, H_norm 0.12, rho 0.45, FMEA RPN 336 [#10], citation unavailable.
-H2 has Jaccard index 0.42, Brier score 0.20, ECE 0.12, probability 70%, and failure probability 0.70.
+H1 has BF 12, DQ 65, H_norm 0.12, rho 0.45, correlation=0.44, FMEA RPN 336 [#10], citation unavailable.
+H2 has Jaccard index 0.42, Brier score 0.20, ECE 0.12, probability 70%, scenario_probability: 0.91, structural probability=0.73, and failure probability 0.70.
 
 # The Decision
 Choose whether to productize the dashboard.
@@ -479,7 +480,7 @@ Choose whether to productize the dashboard.
 Run Sprint 0 before productization.
 
 # Evidence Used
-H1 BF 12, DQ 65, H_norm 0.12, rho 0.45, FMEA row citation unavailable. H2 Jaccard index 0.42, Brier score 0.20, ECE 0.12, citation unavailable.
+H1 BF 12, DQ 65, H_norm 0.12, rho 0.45, correlation=0.44, FMEA row citation unavailable. H2 Jaccard index 0.42, Brier score 0.20, ECE 0.12, scenario_probability: 0.91, citation unavailable.
 
 # Key Risks
 RPN 336 and FMEA gaps remain.
@@ -495,7 +496,23 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         client_markdown = build_client_dossier_markdown(state)
         operator_markdown = build_operator_dossier_markdown(state)
 
-        for forbidden in ("RPN", "FMEA", "BF", "DQ", "H_norm", "rho", "Jaccard", "Brier score", "ECE", "[#10]", "[#24]"):
+        for forbidden in (
+            "RPN",
+            "FMEA",
+            "BF",
+            "DQ",
+            "H_norm",
+            "rho",
+            "correlation=0.44",
+            "Jaccard",
+            "Brier score",
+            "ECE",
+            "probability 70%",
+            "scenario_probability: 0.91",
+            "structural probability=0.73",
+            "[#10]",
+            "[#24]",
+        ):
             self.assertNotIn(forbidden, client_markdown)
         for expected in (
             "risk priority",
@@ -513,6 +530,8 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
             self.assertIn(expected, client_markdown)
         self.assertIn("FMEA", operator_markdown)
         self.assertIn("RPN", operator_markdown)
+        self.assertIn("BF 12", operator_markdown)
+        self.assertIn("DQ 65", operator_markdown)
 
     def test_monitor_signals_fill_success_metrics_when_strategy_metrics_empty(self):
         state = make_export_state("monitor-success")
@@ -596,7 +615,8 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         operator_markdown = build_operator_dossier_markdown(state)
 
         self.assertIn("Exact dollar estimates appear without budget or spend evidence", operator_markdown)
-        self.assertIn("High confidence only that evidence collection is required", operator_markdown)
+        self.assertIn("Moderate confidence in the need for Sprint 0 evidence collection", operator_markdown)
+        self.assertNotIn("High confidence only that evidence collection is required", operator_markdown)
 
     def test_sparse_client_dossier_replaces_exact_probabilities_but_keeps_provisional_gates(self):
         state = ProjectState(
@@ -604,7 +624,7 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
             project_name="Sparse probabilities",
             brief="Improve growth performance across sales, retention, and pipeline.",
             report="""# Executive Summary
-H1 probability 70% and predicted failure probability 0.70.
+H1 probability 70%, scenario_probability: 0.91, structural probability=0.73, and predicted failure probability 0.70.
 
 # Monitoring and Kill Criteria
 Stop threshold is more than 15% churn.
@@ -615,11 +635,59 @@ The proposed planning gate is more than 20% activation.
         markdown = build_client_dossier_markdown(state)
 
         self.assertNotIn("probability 70%", markdown)
+        self.assertNotIn("scenario_probability: 0.91", markdown)
+        self.assertNotIn("structural probability=0.73", markdown)
         self.assertNotIn("failure probability 0.70", markdown)
         self.assertIn("model-generated prior", markdown)
         self.assertIn("high provisional failure risk", markdown)
         self.assertIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
+
+    def test_sparse_report_preserves_exact_values_in_technical_appendix(self):
+        state = ProjectState(
+            project_id="sparse-technical-appendix",
+            project_name="Sparse technical appendix",
+            brief="Decide productization direction for a product pilot.",
+            report="""# Executive Summary
+BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
+
+# Appendix: Technical Analysis
+BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
+""",
+        )
+
+        markdown = _safe_report_markdown(state)
+        main, appendix = markdown.split("# Appendix: Technical Analysis", 1)
+
+        for exact in ("BF=42", "DQ=70", "RPN=336", "correlation=0.44", "probability 70%"):
+            self.assertNotIn(exact, main)
+            self.assertIn(exact, appendix)
+
+    def test_client_dossier_omits_empty_citation_marker_column_without_locators(self):
+        state = ProjectState(
+            project_id="empty-citation-column",
+            project_name="Empty citation column",
+            brief="Decide productization direction for a product pilot.",
+            report="""# Executive Summary
+Run Sprint 0 first.
+
+# Evidence Used
+| Evidence | What it suggests | Citation Marker |
+|---|---|---|
+| Supplied context | Placeholder only | citation unavailable |
+| Open questions | Needs Sprint 0 | - |
+""",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("No concrete citation locators were available for this project", client_markdown)
+        self.assertIn("| Evidence | What it suggests |", client_markdown)
+        self.assertNotIn("Citation Marker", client_markdown)
+        self.assertNotIn("citation unavailable", client_markdown)
+        self.assertIn("Citation Marker", operator_markdown)
+        self.assertIn("citation unavailable", operator_markdown)
 
     def test_growth_client_dossier_avoids_generated_web_language_without_explicit_context(self):
         state = ProjectState(

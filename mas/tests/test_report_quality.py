@@ -66,19 +66,36 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertNotIn("CMS/schema capability", quality.evidence_categories)
 
     def test_sparse_confidence_rule_is_available(self):
-        self.assertIn("High confidence only that evidence collection is required", SPARSE_CONFIDENCE_RULE)
-        self.assertIn("low confidence in specific root causes", SPARSE_CONFIDENCE_RULE)
+        self.assertIn("Moderate confidence in the need for Sprint 0 evidence collection", SPARSE_CONFIDENCE_RULE)
+        self.assertIn("low confidence in any specific root cause", SPARSE_CONFIDENCE_RULE)
+        self.assertNotIn("High confidence only that evidence collection is required", SPARSE_CONFIDENCE_RULE)
 
     def test_client_simplification_covers_residual_jargon(self):
         text = (
             "H1 probability 70%; H2 failure probability 0.70; H3 has Jaccard index 0.42, "
-            "Brier score 0.20, ECE 0.12, FMEA RPN 336, rho 0.45, BF=42, DQ=70. "
+            "Brier score 0.20, ECE 0.12, FMEA RPN 336, rho 0.45, correlation=0.44, "
+            "BF=42, DQ=70, scenario_probability: 0.91, structural probability=0.73. "
             "The proposed planning gate is more than 15% activation."
         )
 
         simplified = client_simplify_text(text, sparse_evidence=True)
 
-        for forbidden in ("H1", "H2", "H3", "Jaccard", "Brier score", "ECE", "FMEA", "RPN", "rho", "BF=42", "DQ=70"):
+        for forbidden in (
+            "H1",
+            "H2",
+            "H3",
+            "Jaccard",
+            "Brier score",
+            "ECE",
+            "FMEA",
+            "RPN",
+            "rho",
+            "correlation=0.44",
+            "BF=42",
+            "DQ=70",
+            "scenario_probability: 0.91",
+            "structural probability=0.73",
+        ):
             self.assertNotIn(forbidden, simplified)
         for expected in (
             "user-value hypothesis",
@@ -94,6 +111,28 @@ class TestReportQualityHelpers(unittest.TestCase):
             "proposed planning gate is more than 15% activation",
         ):
             self.assertIn(expected, simplified)
+
+    def test_client_simplification_fixes_missing_space_artifacts(self):
+        text = (
+            "BF values changed; BF progress stalled; DQ baseline absent. "
+            "internal confidence diagnosticinternal confidence diagnostic stalled. "
+            "evidence quality diagnosticevidence quality diagnosticbaseline."
+        )
+
+        simplified = client_simplify_text(text, sparse_evidence=True)
+
+        for forbidden in (
+            "diagnosticvalues",
+            "diagnosticprogress",
+            "diagnosticstalled",
+            "diagnosticbaseline",
+            "diagnosticinternal",
+        ):
+            self.assertNotIn(forbidden, simplified)
+        self.assertIn("internal confidence diagnostic values", simplified)
+        self.assertIn("internal confidence diagnostic progress", simplified)
+        self.assertIn("internal confidence diagnostic stalled", simplified)
+        self.assertIn("evidence quality diagnostic baseline", simplified)
 
 
 if __name__ == "__main__":

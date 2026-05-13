@@ -403,6 +403,8 @@ def build_client_dossier_markdown(
         body = section_bodies.get(heading) or "Not available in current project output."
         if heading != "Human review note":
             body = _client_safe_text(body, quality)
+            if not quality.has_concrete_locators:
+                body = _remove_empty_client_citation_marker_columns(body)
         lines.extend([
             f"## {heading}",
             body,
@@ -1371,7 +1373,7 @@ def _simplify_sparse_report_markdown(markdown: str, quality) -> str:
     for raw_line in str(markdown or "").splitlines():
         heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", raw_line.strip())
         if heading:
-            in_technical_appendix = _normalize_heading(heading.group(2)) == _normalize_heading("Appendix: Technical Analysis")
+            in_technical_appendix = _is_technical_appendix_heading(heading.group(2))
             lines.append(raw_line)
             continue
         if in_technical_appendix:
@@ -1425,6 +1427,128 @@ def _client_safe_text(text: str, quality) -> str:
         for unsafe, safe in replacements.items():
             value = re.sub(re.escape(unsafe), safe, value, flags=re.I)
     return value
+
+
+def _remove_empty_client_citation_marker_columns(markdown: str) -> str:
+    source = str(markdown or "")
+    lines = source.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].lstrip().startswith("|"):
+            block: list[str] = []
+            while index < len(lines) and lines[index].lstrip().startswith("|"):
+                block.append(lines[index])
+                index += 1
+            output.extend(_clean_client_citation_table_block(block))
+            continue
+        output.append(lines[index])
+        index += 1
+    return "\n".join(output)
+
+
+def _clean_client_citation_table_block(block: list[str]) -> list[str]:
+    if len(block) < 2:
+        return block
+    rows = [_split_markdown_table_row(line) for line in block]
+    if not rows or not rows[0] or not _is_client_markdown_separator_cells(rows[1]):
+        return block
+    width = len(rows[0])
+    candidate_indexes = [
+        index
+        for index, header in enumerate(rows[0])
+        if _is_client_citation_column_header(header)
+    ]
+    if not candidate_indexes:
+        return block
+    removable = {
+        index
+        for index in candidate_indexes
+        if all(
+            _is_empty_client_citation_cell((row + [""] * width)[index])
+            for row in rows[2:]
+        )
+    }
+    if not removable:
+        return block
+
+    cleaned: list[str] = []
+    for row_index, row in enumerate(rows):
+        padded = (row + [""] * width)[:width]
+        kept = [cell for index, cell in enumerate(padded) if index not in removable]
+        if not kept:
+            continue
+        if row_index == 1:
+            kept = ["---"] * len(kept)
+        if row_index > 1 and not any(cell.strip() for cell in kept):
+            continue
+        cleaned.append(_format_markdown_table_row(kept))
+    return cleaned
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    text = line.strip()
+    if not text.startswith("|"):
+        return []
+    if text.endswith("|"):
+        text = text[1:-1]
+    else:
+        text = text[1:]
+    return [cell.strip() for cell in text.split("|")]
+
+
+def _format_markdown_table_row(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _is_client_markdown_separator_cells(cells: list[str]) -> bool:
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells
+    )
+
+
+def _is_client_citation_column_header(value: str) -> bool:
+    normalized = _normalize_heading(value)
+    return normalized in {
+        "citation",
+        "citation marker",
+        "citation markers",
+        "citation locator",
+        "citation locators",
+        "locator",
+        "locators",
+    } or ("citation" in normalized and ("marker" in normalized or "locator" in normalized))
+
+
+def _is_empty_client_citation_cell(value: str) -> bool:
+    text = re.sub(r"<br\s*/?>", " ", str(value or ""), flags=re.I).strip()
+    text = text.strip("`*_ ")
+    if not text:
+        return True
+    normalized = _normalize_heading(text)
+    return normalized in {
+        "n a",
+        "na",
+        "none",
+        "unknown",
+        "unavailable",
+        "not available",
+        "citation unavailable",
+        "no concrete locator registered",
+        "no concrete citation locator registered",
+        "no concrete citation locators available",
+        "no locator",
+        "no locators",
+    } or bool(re.fullmatch(r"[-]+", text))
+
+
+def _is_technical_appendix_heading(value: str) -> bool:
+    normalized = _normalize_heading(value)
+    return normalized in {
+        "appendix technical analysis",
+        "technical appendix",
+        "appendix technical",
+    } or ("technical" in normalized and "appendix" in normalized)
 
 
 def _project_metadata_line(state: ProjectState) -> str:

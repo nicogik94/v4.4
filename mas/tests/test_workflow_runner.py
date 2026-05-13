@@ -1161,6 +1161,7 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.report, "new report body")
         self.assertEqual(details["phase"], "report")
         self.assertEqual(details["code_version"], "meta123")
+        self.assertNotEqual(details["code_version"], report_freshness.UNKNOWN_CODE_VERSION)
         self.assertEqual(details["report_sha256"], report_freshness.report_sha256("new report body"))
         self.assertEqual(details["report_length"], len("new report body"))
         self.assertTrue(details["generated_at"])

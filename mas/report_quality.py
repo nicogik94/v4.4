@@ -36,9 +36,9 @@ SPARSE_PRECISION_RULE = (
 )
 
 SPARSE_CONFIDENCE_RULE = (
-    "High confidence only that evidence collection is required; low confidence "
-    "in specific root causes, impact size, or feature priority until Sprint 0 "
-    "evidence is collected."
+    "Moderate confidence in the need for Sprint 0 evidence collection; low "
+    "confidence in any specific root cause, impact size, or intervention until "
+    "Sprint 0 data is collected."
 )
 
 THRESHOLD_WARNING = (
@@ -377,14 +377,19 @@ def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
     citation_repeated = len(re.findall(r"citation unavailable", value, flags=re.I)) > 1
     replacements = [
         (r"\b(?:FMEA-derived labels?|FMEA)\b", "structured risk review"),
-        (r"\b(?:RPN|risk priority numbers?)\s*[=:]?\s*\d*(?:\.\d+)?\b", "structured risk priority"),
-        (r"\b(?:Bayes factor|BF)\s*[=:]?\s*\d*(?:\.\d+)?\b", "internal confidence diagnostic"),
-        (r"\bDQ\s*[=:]?\s*\d*(?:\.\d+)?\b", "evidence quality diagnostic"),
-        (r"\bH_norm\s*[=:]?\s*\d*(?:\.\d+)?\b", "uncertainty diagnostic"),
-        (r"\b(?:portfolio correlation|correlation coefficient|rho)\s*[=:]?\s*[01]?(?:\.\d+)?\b|ρ\s*[=:]?\s*[01]?(?:\.\d+)?", "related-hypothesis risk"),
-        (r"\bJaccard(?: index)?\s*[=:]?\s*[01]?(?:\.\d+)?\b", "schema overlap score"),
-        (r"\bBrier score\s*[=:]?\s*[01]?(?:\.\d+)?\b", "forecast accuracy check"),
-        (r"\bECE\s*[=:]?\s*[01]?(?:\.\d+)?\b", "calibration check"),
+        (r"\b(?:RPN|risk priority numbers?)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "structured risk priority"),
+        (r"\b(?:Bayes factor|BF)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "internal confidence diagnostic"),
+        (r"\bDQ(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "evidence quality diagnostic"),
+        (r"\bH_norm(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "uncertainty diagnostic"),
+        (
+            r"\b(?:portfolio correlation|correlation coefficient|rho)(?:\s*[=:]\s*[01]?(?:\.\d+)?|\s+[01]?(?:\.\d+)?)?\b"
+            r"|\bcorrelation\s*(?:[=:]\s*)?[01](?:\.\d+)?\b"
+            r"|ρ\s*[=:]?\s*[01]?(?:\.\d+)?",
+            "related-hypothesis risk",
+        ),
+        (r"\bJaccard(?: index)?(?:\s*[=:]\s*[01]?(?:\.\d+)?|\s+[01]?(?:\.\d+)?)?\b", "schema overlap score"),
+        (r"\bBrier score(?:\s*[=:]\s*[01]?(?:\.\d+)?|\s+[01]?(?:\.\d+)?)?\b", "forecast accuracy check"),
+        (r"\bECE(?:\s*[=:]\s*[01]?(?:\.\d+)?|\s+[01]?(?:\.\d+)?)?\b", "calibration check"),
     ]
     for pattern, replacement in replacements:
         value = re.sub(pattern, replacement, value, flags=re.I)
@@ -395,6 +400,7 @@ def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
     if citation_repeated:
         value = re.sub(r"\s*\(?citation unavailable\)?\.?", "", value, flags=re.I)
         value = f"{NO_CONCRETE_LOCATORS_CLIENT_NOTE}\n\n{value.strip()}"
+    value = _cleanup_client_replacement_artifacts(value)
     return _collapse_blank_lines(value)
 
 
@@ -589,7 +595,7 @@ def _simplify_sparse_precision(value: str) -> str:
     lines: list[str] = []
     for line in str(value or "").splitlines():
         if _is_provisional_planning_gate(line) and not re.search(
-            r"\b(probability|prior|likelihood|chance|failure probability|BF|DQ|RPN|FMEA|Jaccard|Brier|ECE|rho|portfolio correlation)\b|ρ",
+            r"\b(probability|scenario[_ -]?probability|structural probability|prior|likelihood|chance|failure probability|BF|DQ|RPN|FMEA|Jaccard|Brier|ECE|rho|correlation|portfolio correlation)\b|ρ",
             line,
             re.I,
         ):
@@ -612,7 +618,19 @@ def _simplify_sparse_precision(value: str) -> str:
             flags=re.I,
         )
         simplified = re.sub(
-            r"\b\d{1,3}\s*%\s*(?:probability|prior|likelihood|chance)\b",
+            r"\b(?:scenario[_ -]?probability|structural probability|probability|prior|likelihood|chance)\s*(?:of|=|:)?\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\b",
+            "model-generated prior",
+            simplified,
+            flags=re.I,
+        )
+        simplified = re.sub(
+            r"\b\d{1,3}\s*%\s*(?:scenario[_ -]?probability|structural probability|probability|prior|likelihood|chance)\b",
+            "model-generated prior",
+            simplified,
+            flags=re.I,
+        )
+        simplified = re.sub(
+            r"\b(?:0(?:\.\d+)?|1(?:\.0+)?)\s*(?:scenario[_ -]?probability|structural probability|probability|prior|likelihood|chance)\b",
             "model-generated prior",
             simplified,
             flags=re.I,
@@ -640,6 +658,30 @@ def _simplify_sparse_precision(value: str) -> str:
 
 def _is_provisional_planning_gate(line: str) -> bool:
     return bool(re.search(r"\b(proposed|provisional)\b.*\b(planning gate|gate|threshold)\b", line or "", re.I))
+
+
+def _cleanup_client_replacement_artifacts(value: str) -> str:
+    phrases = [
+        "internal confidence diagnostic",
+        "evidence quality diagnostic",
+        "uncertainty diagnostic",
+        "structured risk review",
+        "structured risk priority",
+        "related-hypothesis risk",
+        "schema overlap score",
+        "forecast accuracy check",
+        "calibration check",
+        "model-generated prior",
+        "high provisional failure risk",
+    ]
+    for phrase in phrases:
+        escaped = re.escape(phrase)
+        value = re.sub(rf"({escaped})(?=[A-Za-z0-9])", r"\1 ", value, flags=re.I)
+        value = re.sub(rf"(?:{escaped}\s*){{2,}}", f"{phrase} ", value, flags=re.I)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    value = re.sub(r"\s+([,.;:])", r"\1", value)
+    value = re.sub(r"([,.;:])(?=\S)", r"\1 ", value)
+    return value
 
 
 def _structured_locator(item: Any) -> str:
