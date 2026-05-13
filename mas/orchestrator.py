@@ -1095,8 +1095,48 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
     system = build_system_prompt(phase, json_mode=is_json, calibration_hint=calibration_hint)
 
+    async def _pre_attempt_governance(_config):
+        attempt_decision = policy_gate(state, phase, reversibility)
+        if attempt_decision.allowed:
+            return None
+        return {
+            "reason": attempt_decision.reason,
+            "category": attempt_decision.breach_category or "policy",
+        }
+
+    def _log_llm_route(response: LLMResponse) -> None:
+        log_policy_event(state, "llm_route", {
+            "phase": phase,
+            "task_profile": getattr(response, "task_profile", ""),
+            "selected_provider": getattr(response, "selected_provider", ""),
+            "selected_model": getattr(response, "selected_model", ""),
+            "selection_reason": getattr(response, "selection_reason", ""),
+            "final_provider": getattr(response, "provider_used", ""),
+            "final_model": getattr(response, "model_used", ""),
+            "attempt_count": getattr(response, "attempt_count", 0) or 0,
+            "fallback_used": bool(getattr(response, "fallback_used", False)),
+            "fallback_reason": getattr(response, "fallback_reason", ""),
+            "failed_provider": getattr(response, "failed_provider", ""),
+            "failed_model": getattr(response, "failed_model", ""),
+            "failed_error_type": getattr(response, "failed_error_type", ""),
+            "fallback_provider": getattr(response, "fallback_provider", ""),
+            "fallback_model": getattr(response, "fallback_model", ""),
+            "error_type": getattr(response, "error_type", ""),
+            "input_tokens": getattr(response, "input_tokens", 0) or 0,
+            "output_tokens": getattr(response, "output_tokens", 0) or 0,
+            "cache_hit": bool(getattr(response, "cache_hit", False)),
+            "latency_ms": getattr(response, "latency_ms", 0) or 0,
+        })
+
     # Call LLM
-    response: LLMResponse = await call_llm(phase, system, prompt, project_id=state.project_id)
+    response: LLMResponse = await call_llm(
+        phase,
+        system,
+        prompt,
+        project_id=state.project_id,
+        before_attempt=_pre_attempt_governance,
+    )
+    _log_llm_route(response)
 
     # v4.3: record budget consumption regardless of success
     try:
@@ -1153,7 +1193,9 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                          "text before or after. "
                          + _phase_json_retry_instruction(phase),
                 project_id=state.project_id,
+                before_attempt=_pre_attempt_governance,
             )
+            _log_llm_route(retry_response)
             try:
                 rt_tokens = getattr(retry_response, "total_tokens", 0) or 0
                 rt_cost = getattr(retry_response, "cost_usd", 0.0) or 0.0

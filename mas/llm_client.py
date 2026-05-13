@@ -9,7 +9,7 @@ import re
 import time
 import logging
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import anthropic
 import openai
@@ -23,7 +23,13 @@ from config import (
 )
 from extensions.runtime import GatewayRequest, RoutingContext
 from runtime.cache import InMemorySemanticCache, NoOpSemanticCache
-from runtime.provider_gateway import DefaultProviderGateway, select_model_config
+from runtime.provider_gateway import (
+    DefaultProviderGateway,
+    TRANSPORT_MALFORMED_RESPONSE,
+    normalize_exception_category,
+    normalize_error_type,
+    select_model_config,
+)
 from scenarios.engine import run_shadow_evaluation
 
 logger = logging.getLogger(__name__)
@@ -32,25 +38,27 @@ logger = logging.getLogger(__name__)
 class CircuitBreaker:
     """Stops hammering a provider after repeated failures."""
     def __init__(self, threshold: int = CIRCUIT_BREAKER_THRESHOLD,
-                 cooldown: float = CIRCUIT_BREAKER_COOLDOWN):
+                 cooldown: float = CIRCUIT_BREAKER_COOLDOWN,
+                 clock=None):
         self.threshold = threshold
         self.cooldown = cooldown
         self.failures: dict[str, list[float]] = {}
+        self._clock = clock or time.time
 
-    def record_failure(self, provider: str):
-        now = time.time()
-        self.failures.setdefault(provider, [])
-        self.failures[provider].append(now)
+    def record_failure(self, key: str):
+        now = self._clock()
+        self.failures.setdefault(key, [])
+        self.failures[key].append(now)
         # Keep only recent failures
-        self.failures[provider] = [t for t in self.failures[provider] if now - t < self.cooldown]
+        self.failures[key] = [t for t in self.failures[key] if now - t < self.cooldown]
 
-    def is_open(self, provider: str) -> bool:
-        now = time.time()
-        recent = [t for t in self.failures.get(provider, []) if now - t < self.cooldown]
+    def is_open(self, key: str) -> bool:
+        now = self._clock()
+        recent = [t for t in self.failures.get(key, []) if now - t < self.cooldown]
         return len(recent) >= self.threshold
 
-    def reset(self, provider: str):
-        self.failures[provider] = []
+    def reset(self, key: str):
+        self.failures[key] = []
 
 
 class LLMResponse(BaseModel):
@@ -66,6 +74,19 @@ class LLMResponse(BaseModel):
     cache_hit: bool = False
     latency_ms: float = 0.0
     cost_usd: float = 0.0  # v4.3 — populated by call_llm() from per-model pricing
+    selected_provider: str = ""
+    selected_model: str = ""
+    selection_reason: str = ""
+    task_profile: str = ""
+    fallback_used: bool = False
+    fallback_reason: str = ""
+    fallback_provider: str = ""
+    fallback_model: str = ""
+    failed_provider: str = ""
+    failed_model: str = ""
+    failed_error_type: str = ""
+    attempt_count: int = 0
+    attempts: list[dict] = Field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:
@@ -171,7 +192,15 @@ def _get_provider_gateway() -> DefaultProviderGateway:
         openai_executor=_call_openai,
         cache=_get_semantic_cache(),
         breaker=_breaker,
+        provider_availability={
+            Provider.ANTHROPIC.value: bool(ANTHROPIC_API_KEY),
+            Provider.OPENAI.value: bool(OPENAI_API_KEY),
+        },
     )
+
+
+def _safe_provider_error(category: str, provider: str, model: str) -> str:
+    return f"Provider call failed: category={category}, provider={provider}, model={model}"
 
 
 async def _call_anthropic(
@@ -205,6 +234,14 @@ async def _call_anthropic(
         response = await client.messages.create(**kwargs)
 
         text_parts = []
+        if not hasattr(response, "content") or response.content is None:
+            return LLMResponse(
+                ok=False,
+                error=_safe_provider_error(TRANSPORT_MALFORMED_RESPONSE, Provider.ANTHROPIC.value, model),
+                error_type=TRANSPORT_MALFORMED_RESPONSE,
+                model_used=model,
+                latency_ms=(time.time() - start) * 1000,
+            )
         for block in response.content:
             if block.type == "text":
                 text_parts.append(block.text)
@@ -222,15 +259,15 @@ async def _call_anthropic(
             cost_usd=estimate_cost(model, in_tok, out_tok, cache_tok),
             latency_ms=(time.time() - start) * 1000,
         )
-    except anthropic.RateLimitError:
-        return LLMResponse(ok=False, error="Rate limited", error_type="rate", model_used=model,
-                           latency_ms=(time.time() - start) * 1000)
-    except anthropic.AuthenticationError:
-        return LLMResponse(ok=False, error="Auth failed", error_type="auth", model_used=model,
-                           latency_ms=(time.time() - start) * 1000)
-    except Exception as e:
-        return LLMResponse(ok=False, error=str(e), error_type="network", model_used=model,
-                           latency_ms=(time.time() - start) * 1000)
+    except Exception as exc:
+        category = normalize_exception_category(exc)
+        return LLMResponse(
+            ok=False,
+            error=_safe_provider_error(category, Provider.ANTHROPIC.value, model),
+            error_type=category,
+            model_used=model,
+            latency_ms=(time.time() - start) * 1000,
+        )
 
 
 async def _call_openai(
@@ -254,9 +291,15 @@ async def _call_openai(
             kwargs["max_tokens"] = max_tokens
             kwargs["temperature"] = temperature
 
-        response = await client.chat.completions.create(
-            **kwargs,
-        )
+        response = await client.chat.completions.create(**kwargs)
+        if not getattr(response, "choices", None):
+            return LLMResponse(
+                ok=False,
+                error=_safe_provider_error(TRANSPORT_MALFORMED_RESPONSE, Provider.OPENAI.value, model),
+                error_type=TRANSPORT_MALFORMED_RESPONSE,
+                model_used=model,
+                latency_ms=(time.time() - start) * 1000,
+            )
         text = response.choices[0].message.content or ""
         usage = response.usage
         in_tok = getattr(usage, "prompt_tokens", 0)
@@ -268,15 +311,15 @@ async def _call_openai(
             cost_usd=estimate_cost(model, in_tok, out_tok),
             latency_ms=(time.time() - start) * 1000,
         )
-    except openai.RateLimitError:
-        return LLMResponse(ok=False, error="Rate limited", error_type="rate", model_used=model,
-                           latency_ms=(time.time() - start) * 1000)
-    except openai.AuthenticationError:
-        return LLMResponse(ok=False, error="Auth failed", error_type="auth", model_used=model,
-                           latency_ms=(time.time() - start) * 1000)
-    except Exception as e:
-        return LLMResponse(ok=False, error=str(e), error_type="network", model_used=model,
-                           latency_ms=(time.time() - start) * 1000)
+    except Exception as exc:
+        category = normalize_exception_category(exc)
+        return LLMResponse(
+            ok=False,
+            error=_safe_provider_error(category, Provider.OPENAI.value, model),
+            error_type=category,
+            model_used=model,
+            latency_ms=(time.time() - start) * 1000,
+        )
 
 
 def route_model(phase: str, complexity: str = "default",
@@ -317,6 +360,7 @@ async def call_llm(
     config_override: Optional[ModelConfig] = None,
     *,
     project_id: str = "",
+    before_attempt=None,
 ) -> LLMResponse:
     """
     Call an LLM with retry, fallback chain, and circuit breaker.
@@ -341,12 +385,16 @@ async def call_llm(
         allow_cache=RUNTIME_LAYER.cache_enabled,
     )
     gateway = _get_provider_gateway()
-    resp = await gateway.call(gateway_request, config_override=config_override)
+    resp = await gateway.call(
+        gateway_request,
+        config_override=config_override,
+        before_attempt=before_attempt,
+    )
     result = LLMResponse(
         text=resp.text,
         ok=not bool(resp.error),
         error=resp.error,
-        error_type=resp.error_type,
+        error_type=normalize_error_type(resp.error_type) if resp.error_type else "",
         model_used=resp.model_used,
         provider_used=resp.provider_used,
         input_tokens=resp.input_tokens,
@@ -355,6 +403,19 @@ async def call_llm(
         cache_hit=resp.cache_hit,
         latency_ms=resp.latency_ms,
         cost_usd=resp.cost_usd,
+        selected_provider=resp.selected_provider,
+        selected_model=resp.selected_model,
+        selection_reason=resp.selection_reason,
+        task_profile=resp.task_profile,
+        fallback_used=resp.fallback_used,
+        fallback_reason=resp.fallback_reason,
+        fallback_provider=resp.fallback_provider,
+        fallback_model=resp.fallback_model,
+        failed_provider=resp.failed_provider,
+        failed_model=resp.failed_model,
+        failed_error_type=resp.failed_error_type,
+        attempt_count=resp.attempt_count,
+        attempts=resp.attempts,
     )
     try:
         run_shadow_evaluation(

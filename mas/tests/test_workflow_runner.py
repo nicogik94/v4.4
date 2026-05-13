@@ -1032,6 +1032,115 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(updated.monitor)
         self.assertEqual(updated.monitor.commitment_score, 81)
 
+    async def test_pre_attempt_governance_denial_fails_without_retry_or_fallback(self):
+        state = make_completed_state("pre-attempt-governance")
+        state.phase_status["monitor"] = PhaseStatus.PENDING
+        state.monitor = None
+
+        async def fake_call_llm(*args, **kwargs):
+            state.kill_switch_active = True
+            state.kill_switch_reason = "operator stopped during provider routing"
+            gate_result = await kwargs["before_attempt"](None)
+            return LLMResponse(
+                ok=False,
+                error=gate_result["reason"],
+                error_type=gate_result["category"],
+                model_used="",
+                provider_used="",
+                fallback_used=False,
+                attempt_count=0,
+            )
+
+        call_mock = AsyncMock(side_effect=fake_call_llm)
+        with patch("orchestrator.call_llm", new=call_mock):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "monitor")
+
+        self.assertEqual(call_mock.await_count, 1)
+        self.assertEqual(updated.phase_status["monitor"], PhaseStatus.FAILED)
+        self.assertFalse(any(
+            event.get("event_type") == "llm_route"
+            and event.get("details", {}).get("fallback_used")
+            for event in updated.policy_audit_log
+        ))
+
+    async def test_schema_invalid_success_uses_existing_repair_path_not_provider_fallback(self):
+        state = make_completed_state("schema-invalid-no-provider-fallback")
+        state.phase_status["audit"] = PhaseStatus.PENDING
+        state.audit = None
+        state.audit_raw = None
+        first = make_response("not valid audit JSON", 18, 9, 0.04)
+        second = make_response("still not valid audit JSON", 18, 9, 0.04)
+
+        call_mock = AsyncMock(side_effect=[first, second])
+        with patch("orchestrator.call_llm", new=call_mock):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "audit")
+
+        self.assertEqual(call_mock.await_count, 2)
+        self.assertEqual(updated.phase_status["audit"], PhaseStatus.FAILED)
+        self.assertEqual(updated.audit_raw, second.text)
+        route_events = [
+            event.get("details", {})
+            for event in updated.policy_audit_log
+            if event.get("event_type") == "llm_route"
+        ]
+        self.assertEqual(len(route_events), 2)
+        self.assertFalse(any(event.get("fallback_used") for event in route_events))
+
+    async def test_safe_llm_route_metadata_is_recorded_without_sensitive_content(self):
+        state = make_completed_state("safe-route-metadata")
+        state.phase_status["monitor"] = PhaseStatus.PENDING
+        state.monitor = None
+        response = LLMResponse(
+            text=json.dumps(make_monitor_payload()),
+            ok=True,
+            model_used="gpt-5-mini",
+            provider_used="openai",
+            selected_provider="anthropic",
+            selected_model="claude-sonnet-4-6",
+            selection_reason="phase_routing",
+            task_profile="monitoring_ops",
+            fallback_used=True,
+            fallback_reason="rate_limited",
+            fallback_provider="openai",
+            fallback_model="gpt-5-mini",
+            failed_provider="anthropic",
+            failed_model="claude-sonnet-4-6",
+            failed_error_type="rate_limited",
+            attempt_count=2,
+            input_tokens=14,
+            output_tokens=7,
+            cost_usd=0.03,
+            latency_ms=12,
+        )
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "monitor")
+
+        route_events = [
+            event.get("details", {})
+            for event in updated.policy_audit_log
+            if event.get("event_type") == "llm_route"
+        ]
+        self.assertTrue(route_events)
+        details = route_events[-1]
+        self.assertEqual(details["task_profile"], "monitoring_ops")
+        self.assertEqual(details["selected_provider"], "anthropic")
+        self.assertEqual(details["final_provider"], "openai")
+        self.assertTrue(details["fallback_used"])
+        serialized = str(details)
+        for sentinel in (
+            "RAW_PROMPT_SENTINEL",
+            "RAW_RESPONSE_SENTINEL",
+            "sk-test-secret",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "C:\\Users\\example\\secret.txt",
+        ):
+            self.assertNotIn(sentinel, serialized)
+
     async def test_report_success_records_generation_metadata(self):
         state = make_completed_state("report-generation-metadata")
         state.phase_status["report"] = PhaseStatus.PENDING
