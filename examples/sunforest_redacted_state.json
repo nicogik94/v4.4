@@ -1,0 +1,125 @@
+{
+  "project_id": "example-sunforest-redacted",
+  "project_name": "Sunforest Placeholder Decision",
+  "brief": "Decide whether Placeholder Services should launch a bounded client operations pilot before committing to a full rollout.",
+  "report": "# Executive Summary\nLaunch a bounded 90-day pilot before committing to the full rollout.\n\n# The Decision\nDecide whether to begin the client operations pilot now or defer until additional discovery is complete.\n\n# Recommended Path\nLaunch a bounded 90-day pilot with named owners, weekly review, and explicit stop criteria.\n\n# Why This Is Recommended\nThe pilot gives the operator enough evidence to test adoption, cycle-time, and delivery quality assumptions without turning the recommendation into an unreviewed full rollout.\n\n# Evidence Used\nPlaceholder operator notes, redacted workflow samples, and internal review criteria.\n\n# Roadmap\n30d: confirm owner, data access, and baseline measures.\n60d: run controlled workflows and weekly review.\n90d: decide whether to scale, revise, or stop.\n\n# Monitoring and Kill Criteria\nReview weekly. Re-enter strategy if a critical assumption is contradicted or if KPI status remains red for two review cycles.\n",
+  "strategy": {
+    "executive_strategy": "Launch a bounded 90-day pilot with named owners, weekly review, and explicit stop criteria.",
+    "confidence": "medium",
+    "strategies": [
+      {
+        "action": "Confirm pilot owner, data access, and baseline measures.",
+        "timeline": "30d",
+        "owner": "Pilot owner",
+        "justification": "The pilot should not start until ownership and baseline evidence are explicit.",
+        "expected_impact": "Clear pilot launch readiness.",
+        "evidence_chain": [
+          "redacted operator notes",
+          {
+            "source": "placeholder workflow review"
+          }
+        ],
+        "risk_if_ignored": "The pilot begins without enough accountability to interpret results."
+      },
+      {
+        "action": "Run controlled workflows with weekly operator review.",
+        "timeline": "60d",
+        "owner": "Operations lead",
+        "justification": "Controlled workflows allow the operator to separate adoption risk from execution risk.",
+        "expected_impact": "Measured adoption and cycle-time evidence.",
+        "evidence_chain": [
+          "pilot workstream",
+          "weekly review log"
+        ],
+        "risk_if_ignored": "The team cannot tell whether poor outcomes are caused by the recommendation or by execution gaps."
+      },
+      {
+        "action": "Hold scale, revise, or stop decision review.",
+        "timeline": "90d",
+        "owner": "Executive sponsor",
+        "justification": "A bounded commitment point prevents pilot drift.",
+        "expected_impact": "Documented scale/no-scale decision.",
+        "evidence_chain": [
+          "KPI tracker",
+          "assumption review"
+        ],
+        "risk_if_ignored": "The pilot becomes an unreviewed rollout."
+      }
+    ],
+    "success_metrics": [
+      "Pilot activation rate reaches at least 65%.",
+      "Workflow cycle time falls below 5 days.",
+      "Delivery acceptance rate reaches at least 80%."
+    ],
+    "reentry_check": "Re-enter strategy if evidence materially changes the recommendation."
+  },
+  "critical_assumptions": [
+    {
+      "assumption": "Pilot teams can access required operational data.",
+      "falsification_trigger": "Required data access is unavailable after the first review cycle.",
+      "owner": "Pilot owner",
+      "confidence": "medium",
+      "evidence": [
+        "redacted access checklist"
+      ],
+      "notes": "Confirm before launch."
+    },
+    {
+      "assumption": "The workflow owner can hold weekly review cadence.",
+      "falsification_trigger": "Two consecutive weekly reviews are missed.",
+      "owner": "Executive sponsor",
+      "confidence": "medium",
+      "evidence": [
+        {
+          "source": "placeholder cadence agreement"
+        }
+      ],
+      "notes": "Cadence is a delivery constraint."
+    }
+  ],
+  "kpis": [
+    {
+      "name": "Pilot activation rate",
+      "indicator_type": "leading",
+      "threshold_red": 40,
+      "threshold_amber": 60,
+      "actual_value": 0,
+      "status": "unknown",
+      "owner": "Pilot owner",
+      "cadence": "weekly",
+      "notes": "Use redacted pilot cohort denominator."
+    },
+    {
+      "name": "Workflow cycle time",
+      "indicator_type": "leading",
+      "threshold_red": 8,
+      "threshold_amber": 5,
+      "actual_value": 0,
+      "status": "unknown",
+      "owner": "Operations lead",
+      "cadence": "weekly",
+      "notes": "Measured in business days."
+    },
+    {
+      "name": "Delivery acceptance rate",
+      "indicator_type": "lagging",
+      "threshold_red": 50,
+      "threshold_amber": 75,
+      "actual_value": 0,
+      "status": "unknown",
+      "owner": "Executive sponsor",
+      "cadence": "90d",
+      "notes": "Reviewed before scale decision."
+    }
+  ],
+  "review": {
+    "cadence": "weekly during pilot; final review at day 90",
+    "owner": "Executive sponsor",
+    "reentry_triggers": [
+      "Critical assumption is contradicted.",
+      "KPI remains red for two review cycles.",
+      "New evidence materially changes the recommendation."
+    ],
+    "notes": "Human operator reviews evidence, assumptions, risks, and recommendations before client delivery."
+  }
+}
