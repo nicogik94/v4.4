@@ -89,6 +89,7 @@ from exporters import (
     export_project_pdf_bytes,
     export_project_profile_bytes,
 )
+from config import APP_VERSION
 import store
 import observability
 
@@ -113,7 +114,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="v4 Universal Project Workflow",
     description="Multi-agent decision engine with 30 frameworks",
-    version="4.4.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -271,7 +272,7 @@ async def health():
     pool = await store._get_pool()
     return {
         "status": "ok",
-        "version": "4.4.0",
+        "version": APP_VERSION,
         "persistence": "postgres" if pool else "memory",
         "tracing": "langfuse" if observability.enabled() else "off",
     }

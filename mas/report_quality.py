@@ -46,6 +46,8 @@ THRESHOLD_WARNING = (
     "same decision. Confirm one decision matrix before acting."
 )
 
+RISK_CLASSIFICATION_WARNING = "Risk classification may understate generated risk content."
+
 NO_CONCRETE_LOCATORS_CLIENT_NOTE = (
     "No concrete citation locators were available for this project; evidence "
     "should be validated in Sprint 0."
@@ -259,6 +261,17 @@ class ReportQualityContext:
     telemetry_privacy_caveat: str = TELEMETRY_PRIVACY_CAVEAT
 
 
+@dataclass(frozen=True)
+class EvidenceMaturityProjection:
+    maturity: str
+    client_use_status: str
+    validation_required: str
+    uploaded_files: int = 0
+    imported_evidence: int = 0
+    imported_signals: int = 0
+    has_concrete_locators: bool = False
+
+
 def assess_report_quality_context(state: Any) -> ReportQualityContext:
     text = _combined_state_text(state)
     domain_text = _domain_source_text(state)
@@ -311,6 +324,56 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
         evidence_categories=list(evidence_categories),
         provisional_report=sparse_evidence and zero_clarifications,
         telemetry_privacy_required=requires_telemetry_privacy_caveat(text),
+    )
+
+
+def evidence_maturity_projection(
+    state: Any,
+    context: ReportQualityContext | None = None,
+) -> EvidenceMaturityProjection:
+    context = context or assess_report_quality_context(state)
+    uploaded_count = len(_uploaded_files(state))
+    imported_evidence_count = len(getattr(state, "imported_evidence", []) or [])
+    imported_signal_count = len(getattr(state, "imported_signals", []) or [])
+    has_locators = context.has_concrete_locators
+
+    if (
+        uploaded_count == 0
+        and imported_evidence_count == 0
+        and imported_signal_count == 0
+        and not has_locators
+    ):
+        return EvidenceMaturityProjection(
+            maturity="Hypothesis-only",
+            client_use_status="Internal planning only",
+            validation_required="Sprint 0 evidence pack",
+            uploaded_files=uploaded_count,
+            imported_evidence=imported_evidence_count,
+            imported_signals=imported_signal_count,
+            has_concrete_locators=has_locators,
+        )
+
+    if not context.sparse_evidence and has_locators and (
+        uploaded_count > 0 or imported_evidence_count > 0 or imported_signal_count > 0
+    ):
+        return EvidenceMaturityProjection(
+            maturity="Validated",
+            client_use_status="Review for delivery",
+            validation_required="Decision-critical locators present",
+            uploaded_files=uploaded_count,
+            imported_evidence=imported_evidence_count,
+            imported_signals=imported_signal_count,
+            has_concrete_locators=has_locators,
+        )
+
+    return EvidenceMaturityProjection(
+        maturity="Partial evidence",
+        client_use_status="Validate before client delivery",
+        validation_required="Targeted evidence follow-up",
+        uploaded_files=uploaded_count,
+        imported_evidence=imported_evidence_count,
+        imported_signals=imported_signal_count,
+        has_concrete_locators=has_locators,
     )
 
 
@@ -377,10 +440,10 @@ def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
     citation_repeated = len(re.findall(r"citation unavailable", value, flags=re.I)) > 1
     replacements = [
         (r"\b(?:FMEA-derived labels?|FMEA)\b", "structured risk review"),
-        (r"\b(?:RPN|risk priority numbers?)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "structured risk priority"),
-        (r"\b(?:Bayes factor|BF)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "internal confidence diagnostic"),
-        (r"\bDQ(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "evidence quality diagnostic"),
-        (r"\bH_norm(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "uncertainty diagnostic"),
+        (r"\b(?:RPN|risk priority numbers?)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "risk priority score"),
+        (r"\b(?:Bayes factor|BF)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "structural confidence signal"),
+        (r"\bDQ(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "evidence quality signal"),
+        (r"\bH_norm(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "uncertainty signal"),
         (
             r"\b(?:portfolio correlation|correlation coefficient|rho)(?:\s*[=:]\s*[01]?(?:\.\d+)?|\s+[01]?(?:\.\d+)?)?\b"
             r"|\bcorrelation\s*(?:[=:]\s*)?[01](?:\.\d+)?\b"
@@ -401,7 +464,39 @@ def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
         value = re.sub(r"\s*\(?citation unavailable\)?\.?", "", value, flags=re.I)
         value = f"{NO_CONCRETE_LOCATORS_CLIENT_NOTE}\n\n{value.strip()}"
     value = _cleanup_client_replacement_artifacts(value)
-    return _collapse_blank_lines(value)
+    return normalize_export_text(_collapse_blank_lines(value), audience="client")
+
+
+def normalize_export_text(text: str, audience: str = "client") -> str:
+    """Final export prose cleanup, scoped by audience and protected contexts."""
+    mode = "operator" if str(audience or "").lower() == "operator" else "client"
+    source = _renumber_repeated_ordered_markers(str(text or ""))
+    output: list[str] = []
+    in_code_block = False
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            output.append(line)
+            continue
+        if in_code_block or _looks_like_json_line(stripped):
+            output.append(line)
+            continue
+        output.append(_normalize_export_line(line, mode))
+    return "\n".join(output)
+
+
+def suppress_client_raw_evidence_ids(text: str) -> str:
+    """Hide raw evidence IDs in client-facing text when no concrete locator exists."""
+    value = str(text or "")
+    value = re.sub(
+        r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
+        "",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\s*\[#\d+\]", "", value)
+    return re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
 
 
 def commitment_score_text(score: Any, rationale: str = "") -> str:
@@ -466,7 +561,7 @@ def monitor_success_metric_lines(monitor: Any, limit: int = 8) -> list[str]:
 
 def threshold_consistency_warnings(state: Any, context: ReportQualityContext | None = None) -> list[str]:
     context = context or assess_report_quality_context(state)
-    text = _combined_state_text(state)
+    text = _strip_decision_gates_sections(_combined_state_text(state))
     warnings: list[str] = []
     if _has_conflicting_rho_thresholds(text) or _has_conflicting_canary_thresholds(text):
         warnings.append(THRESHOLD_WARNING)
@@ -478,6 +573,14 @@ def threshold_consistency_warnings(state: Any, context: ReportQualityContext | N
     if monitor and PLACEHOLDER_RATIONALE_PATTERN.match(getattr(monitor, "commitment_rationale", "") or ""):
         warnings.append("Commitment score is unconfirmed; operator confirmation is required before treating it as a score.")
     return _unique(warnings)
+
+
+def _strip_decision_gates_sections(text: str) -> str:
+    return re.sub(
+        r"(?ims)^#{1,6}\s+Decision Gates\s*$.*?(?=^#{1,6}\s+|\Z)",
+        "",
+        str(text or ""),
+    )
 
 
 def _has_conflicting_rho_thresholds(text: str) -> bool:
@@ -603,8 +706,8 @@ def _simplify_sparse_precision(value: str) -> str:
             continue
         simplified = line
         if re.search(r"\b(canary|threshold|stop|trip|warning sign|good sign|kill criteria|monitoring)\b", simplified, re.I):
-            simplified = re.sub(r"\b\d+(?:\.\d+)?\s*%", "operator-confirmed threshold required", simplified)
-            simplified = re.sub(r"\b\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\b", "operator-confirmed count threshold required", simplified)
+            simplified = re.sub(r"\b\d+(?:\.\d+)?\s*%", "provisional threshold", simplified)
+            simplified = re.sub(r"\b\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\b", "provisional count threshold", simplified)
         simplified = re.sub(
             r"\b(?:failure probability|predicted failure probability)\s*(?:of|=|:)?\s*(?:0\.\d+|\d{1,3}\s*%)",
             "high provisional failure risk",
@@ -613,25 +716,25 @@ def _simplify_sparse_precision(value: str) -> str:
         )
         simplified = re.sub(
             r"\b(?:probability|prior|likelihood|chance)\s*(?:of|=|:)?\s*\d{1,3}\s*%",
-            "model-generated prior",
+            "structural prior",
             simplified,
             flags=re.I,
         )
         simplified = re.sub(
             r"\b(?:scenario[_ -]?probability|structural probability|probability|prior|likelihood|chance)\s*(?:of|=|:)?\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\b",
-            "model-generated prior",
+            "structural prior",
             simplified,
             flags=re.I,
         )
         simplified = re.sub(
             r"\b\d{1,3}\s*%\s*(?:scenario[_ -]?probability|structural probability|probability|prior|likelihood|chance)\b",
-            "model-generated prior",
+            "structural prior",
             simplified,
             flags=re.I,
         )
         simplified = re.sub(
             r"\b(?:0(?:\.\d+)?|1(?:\.0+)?)\s*(?:scenario[_ -]?probability|structural probability|probability|prior|likelihood|chance)\b",
-            "model-generated prior",
+            "structural prior",
             simplified,
             flags=re.I,
         )
@@ -665,14 +768,21 @@ def _cleanup_client_replacement_artifacts(value: str) -> str:
         "internal confidence diagnostic",
         "evidence quality diagnostic",
         "uncertainty diagnostic",
-        "structured risk review",
         "structured risk priority",
+        "model-generated prior",
+        "structural confidence signal",
+        "evidence quality signal",
+        "uncertainty signal",
+        "structured risk review",
+        "risk priority score",
         "related-hypothesis risk",
         "schema overlap score",
         "forecast accuracy check",
         "calibration check",
-        "model-generated prior",
+        "structural prior",
         "high provisional failure risk",
+        "provisional risk estimate",
+        "provisional threshold",
     ]
     for phrase in phrases:
         escaped = re.escape(phrase)
@@ -682,6 +792,137 @@ def _cleanup_client_replacement_artifacts(value: str) -> str:
     value = re.sub(r"\s+([,.;:])", r"\1", value)
     value = re.sub(r"([,.;:])(?=\S)", r"\1 ", value)
     return value
+
+
+def _normalize_export_line(line: str, audience: str) -> str:
+    protected, fragments = _protect_export_fragments(str(line or ""))
+    value = _normalize_common_export_text(protected)
+    if audience == "client":
+        value = _normalize_client_export_text(value)
+    return _restore_export_fragments(value, fragments)
+
+
+def _normalize_common_export_text(value: str) -> str:
+    text = str(value or "")
+    ordered_prefix = re.match(r"^(\s*\d+\.\s+)(.*)$", text)
+    if ordered_prefix:
+        return ordered_prefix.group(1) + _normalize_common_export_text(ordered_prefix.group(2))
+    text = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", text)
+    text = re.sub(r"\bgreater than\s+greater than\b", "greater than", text, flags=re.I)
+    text = re.sub(
+        r"\boperator-confirmed threshold required prior probability\b",
+        "unconfirmed model-generated prior probability",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\boperator-confirmed threshold required coverage threshold\b",
+        "operator-confirmed coverage threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\b60\s*[–-]\s*operator-confirmed threshold required coverage threshold\b",
+        "60% operator-confirmed coverage threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\bthreshold required threshold\b", "threshold", text, flags=re.I)
+    text = re.sub(r"\bcoverage threshold threshold\b", "coverage threshold", text, flags=re.I)
+    text = _normalize_comparator_phrasing(text)
+    return text
+
+
+def _normalize_client_export_text(value: str) -> str:
+    text = str(value or "")
+    replacements = [
+        (r"\bmodel-generated prior probability\b", "structural prior"),
+        (r"\bmodel-generated prior\b", "structural prior"),
+        (r"\bunconfirmed structural prior probability\b", "structural prior"),
+        (r"\bunconfirmed model-generated prior probability\b", "structural prior"),
+        (r"\binternal confidence diagnostic\b", "structural confidence signal"),
+        (r"\bevidence quality diagnostic\b", "evidence quality signal"),
+        (r"\bstructured risk priority\b", "risk priority score"),
+        (r"\boperator-confirmed threshold required\b", "provisional threshold"),
+        (r"\bcitation unavailable\b", "No citation available"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text
+
+
+def _normalize_comparator_phrasing(value: str) -> str:
+    text = str(value or "")
+    metric_pattern = r"\b(BF|DQ|RPN|r|rho|D90|NRR|CAC|activation|retention|churn|PMF|Ellis score)\s+greater than\s+(\d+(?:\.\d+)?)"
+    text = re.sub(metric_pattern, lambda m: f"{m.group(1)} >{m.group(2)}", text, flags=re.I)
+    metric_less_pattern = r"\b(BF|DQ|RPN|r|rho|D90|NRR|CAC|activation|retention|churn|PMF|Ellis score)\s+less than\s+(\d+(?:\.\d+)?)"
+    text = re.sub(metric_less_pattern, lambda m: f"{m.group(1)} <{m.group(2)}", text, flags=re.I)
+    text = re.sub(r"\bgreater than\s+(\d+(?:\.\d+)?)", r">\1", text, flags=re.I)
+    text = re.sub(r"\bless than\s+(\d+(?:\.\d+)?)", r"<\1", text, flags=re.I)
+    return text
+
+
+def _renumber_repeated_ordered_markers(text: str) -> str:
+    output: list[str] = []
+    in_code_block = False
+    sequence = 0
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            output.append(line)
+            continue
+        if in_code_block or _looks_like_json_line(stripped):
+            output.append(line)
+            continue
+        match = re.match(r"^(\s*)1\.\s+(.+)$", line)
+        if match:
+            sequence += 1
+            output.append(f"{match.group(1)}{sequence}. {match.group(2)}")
+            continue
+        if re.match(r"^\s*\d+\.\s+", line):
+            try:
+                sequence = int(re.match(r"^\s*(\d+)\.", line).group(1))  # type: ignore[union-attr]
+            except Exception:
+                sequence = 0
+            output.append(line)
+            continue
+        if stripped:
+            sequence = 0
+        else:
+            sequence = 0
+        output.append(line)
+    return "\n".join(output)
+
+
+def _protect_export_fragments(value: str) -> tuple[str, list[str]]:
+    fragments: list[str] = []
+    pattern = re.compile(
+        r"https?://[^\s)>\]]+|file://[^\s)>\]]+|\b[A-Za-z]:[\\/][^\s|)>\]]+|\\\\[^\s|)>\]]+"
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        fragments.append(match.group(0))
+        return f"__EXPORT_PROTECTED_{len(fragments) - 1}__"
+
+    return pattern.sub(repl, value), fragments
+
+
+def _restore_export_fragments(value: str, fragments: list[str]) -> str:
+    text = str(value or "")
+    for index, fragment in enumerate(fragments):
+        text = text.replace(f"__EXPORT_PROTECTED_{index}__", fragment)
+    return text
+
+
+def _looks_like_json_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return False
+    return (
+        (stripped.startswith("{") and stripped.endswith("}"))
+        or (stripped.startswith("[") and stripped.endswith("]"))
+    )
 
 
 def _structured_locator(item: Any) -> str:

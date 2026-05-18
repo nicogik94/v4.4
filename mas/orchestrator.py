@@ -814,6 +814,27 @@ def _repair_strategy_payload(text: str) -> dict | None:
     return repaired
 
 
+def normalize_strategy_payload(payload):
+    """Normalize known flexible strategy fields before strict validation."""
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    reentry_check = normalized.get("reentry_check")
+    if reentry_check is None:
+        normalized["reentry_check"] = ""
+    elif isinstance(reentry_check, str):
+        normalized["reentry_check"] = reentry_check
+    elif isinstance(reentry_check, (dict, list)):
+        normalized["reentry_check"] = json.dumps(
+            reentry_check,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+    return normalized
+
+
 def _repair_audit_payload(text: str) -> dict | None:
     """Recover required audit fields from a truncated top-level JSON object."""
     repaired = {}
@@ -1460,7 +1481,7 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             state.audit = AuditOutput(**data)
             state.audit_raw = None
         elif phase == "strategy":
-            state.strategy = StrategyOutput(**data)
+            state.strategy = StrategyOutput(**normalize_strategy_payload(data))
             state.strategy_raw = None
         elif phase == "monitor":
             state.monitor = MonitorOutput(**data)

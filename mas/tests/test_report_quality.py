@@ -12,6 +12,8 @@ from report_quality import (  # noqa: E402
     SPARSE_CONFIDENCE_RULE,
     assess_report_quality_context,
     client_simplify_text,
+    evidence_maturity_projection,
+    normalize_export_text,
 )
 from state import ProjectState, StrategyOutput  # noqa: E402
 
@@ -104,13 +106,15 @@ class TestReportQualityHelpers(unittest.TestCase):
             "schema overlap score",
             "forecast accuracy check",
             "calibration check",
-            "structured risk priority",
+            "risk priority score",
             "related-hypothesis risk",
-            "model-generated prior",
+            "structural prior",
             "high provisional failure risk",
             "proposed planning gate is more than 15% activation",
         ):
             self.assertIn(expected, simplified)
+        self.assertNotIn("model-generated prior", simplified)
+        self.assertNotIn("structured risk priority", simplified)
 
     def test_client_simplification_fixes_missing_space_artifacts(self):
         text = (
@@ -129,10 +133,76 @@ class TestReportQualityHelpers(unittest.TestCase):
             "diagnosticinternal",
         ):
             self.assertNotIn(forbidden, simplified)
-        self.assertIn("internal confidence diagnostic values", simplified)
-        self.assertIn("internal confidence diagnostic progress", simplified)
-        self.assertIn("internal confidence diagnostic stalled", simplified)
-        self.assertIn("evidence quality diagnostic baseline", simplified)
+        self.assertIn("structural confidence signal values", simplified)
+        self.assertIn("structural confidence signal progress", simplified)
+        self.assertIn("structural confidence signal stalled", simplified)
+        self.assertIn("evidence quality signal baseline", simplified)
+
+    def test_normalize_export_text_client_cleans_artifacts_and_comparators(self):
+        text = (
+            "DQ greater than 70, BF greater than 10, r greater than 0.4, 2. 1, 0. 68, 70. 0. "
+            "operator-confirmed threshold required prior probability; structured risk priority; "
+            "model-generated prior; greater than greater than 70."
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        self.assertIn("DQ >70", normalized)
+        self.assertIn("BF >10", normalized)
+        self.assertIn("r >0.4", normalized)
+        self.assertIn("2.1", normalized)
+        self.assertIn("0.68", normalized)
+        self.assertIn("70.0", normalized)
+        self.assertIn("structural prior", normalized)
+        self.assertIn("risk priority score", normalized)
+        for forbidden in (
+            "operator-confirmed threshold required",
+            "model-generated prior",
+            "structured risk priority",
+            "greater than greater than",
+            "2. 1",
+            "0. 68",
+        ):
+            self.assertNotIn(forbidden, normalized)
+
+    def test_normalize_export_text_operator_keeps_traceability_terms(self):
+        text = (
+            "model-generated prior; internal confidence diagnostic; evidence quality diagnostic; "
+            "operator-confirmed threshold required prior probability; BF greater than 10."
+        )
+
+        normalized = normalize_export_text(text, audience="operator")
+
+        self.assertIn("model-generated prior", normalized)
+        self.assertIn("internal confidence diagnostic", normalized)
+        self.assertIn("evidence quality diagnostic", normalized)
+        self.assertIn("unconfirmed model-generated prior probability", normalized)
+        self.assertIn("BF >10", normalized)
+
+    def test_normalize_export_text_protects_urls_paths_code_and_json(self):
+        text = (
+            "See https://example.com/a. 1 and C:\\data\\2. 1\\file.txt\n"
+            "```json\n{\"value\":\"2. 1\",\"rule\":\"DQ greater than 70\"}\n```\n"
+            "{\"value\":\"0. 68\"}\n"
+            "Outside value 0. 68 and DQ greater than 70."
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        self.assertIn("https://example.com/a. 1", normalized)
+        self.assertIn("C:\\data\\2. 1\\file.txt", normalized)
+        self.assertIn("{\"value\":\"2. 1\",\"rule\":\"DQ greater than 70\"}", normalized)
+        self.assertIn("{\"value\":\"0. 68\"}", normalized)
+        self.assertIn("Outside value 0.68 and DQ >70", normalized)
+
+    def test_evidence_maturity_sparse_projects_are_hypothesis_only(self):
+        state = ProjectState(project_id="hypothesis-only", brief="Improve growth performance.")
+
+        projection = evidence_maturity_projection(state)
+
+        self.assertEqual(projection.maturity, "Hypothesis-only")
+        self.assertEqual(projection.client_use_status, "Internal planning only")
+        self.assertEqual(projection.validation_required, "Sprint 0 evidence pack")
 
 
 if __name__ == "__main__":

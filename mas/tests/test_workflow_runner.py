@@ -24,6 +24,7 @@ from orchestrator import (
     build_report_prompt,
     get_first_unfinished_phase,
     is_workflow_complete,
+    normalize_strategy_payload,
     run_phase_node,
     run_workflow_sequence,
 )
@@ -120,6 +121,39 @@ def make_strategy_output() -> StrategyOutput:
         ],
         success_metrics=["CTR up 15%"],
     )
+
+
+def make_strategy_payload(reentry_check="Re-evaluate at 30 days") -> dict:
+    return {
+        "preliminary_verdicts": [
+            {
+                "id": "H1",
+                "verdict": "LIKELY_CONFIRMED",
+                "evidence": "Initial signal in user research",
+                "monitoring_plan": "Track weekly retention",
+            }
+        ],
+        "executive_strategy": "Ship the keyword brief gate before the next editorial cycle.",
+        "strategies": [
+            {
+                "priority": "HIGH",
+                "action": "Implement keyword demand gate within sprint",
+                "justification": "Closes editorial planning gap",
+                "evidence_chain": "Audit FMEA RPN 336",
+                "expected_impact": "Lift organic reach by 20% within one quarter",
+                "effort": "2 weeks",
+                "timeline": "next sprint",
+                "risk_if_ignored": "Continued underperformance",
+                "framework_source": "FMEA",
+            }
+        ],
+        "implementation_sequence": "Brief -> review -> publish",
+        "success_metrics": ["Organic sessions"],
+        "monitoring_plan": "Weekly GSC review",
+        "review_date": "2026-06-01",
+        "confidence": "moderate",
+        "reentry_check": reentry_check,
+    }
 
 
 def make_completed_state(project_id: str = "workflow-complete") -> ProjectState:
@@ -739,6 +773,49 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertEqual(get_first_unfinished_phase(state), "strategy")
         self.assertFalse(is_workflow_complete(state))
 
+    def test_strategy_reentry_check_string_passes_unchanged(self):
+        payload = make_strategy_payload("Re-evaluate at 30 days")
+
+        strategy = StrategyOutput(**normalize_strategy_payload(payload))
+
+        self.assertEqual(strategy.reentry_check, "Re-evaluate at 30 days")
+
+    def test_strategy_reentry_check_dict_normalizes_to_compact_json(self):
+        payload = make_strategy_payload({"triggers": ["R8", "R1"], "target": "monitor"})
+
+        strategy = StrategyOutput(**normalize_strategy_payload(payload))
+
+        self.assertEqual(strategy.reentry_check, '{"target":"monitor","triggers":["R8","R1"]}')
+
+    def test_strategy_reentry_check_list_normalizes_to_compact_json(self):
+        payload = make_strategy_payload([{"target": "monitor"}, {"target": "audit"}])
+
+        strategy = StrategyOutput(**normalize_strategy_payload(payload))
+
+        self.assertEqual(strategy.reentry_check, '[{"target":"monitor"},{"target":"audit"}]')
+
+    def test_strategy_reentry_check_missing_normalizes_to_empty_string(self):
+        payload = make_strategy_payload()
+        del payload["reentry_check"]
+
+        strategy = StrategyOutput(**normalize_strategy_payload(payload))
+
+        self.assertEqual(strategy.reentry_check, "")
+
+    def test_strategy_reentry_check_none_normalizes_to_empty_string(self):
+        payload = make_strategy_payload(None)
+
+        strategy = StrategyOutput(**normalize_strategy_payload(payload))
+
+        self.assertEqual(strategy.reentry_check, "")
+
+    def test_strategy_normalization_does_not_weaken_unrelated_validation(self):
+        payload = make_strategy_payload({"target": "monitor"})
+        payload["preliminary_verdicts"] = [{"verdict": "LIKELY_CONFIRMED"}]
+
+        with self.assertRaises(Exception):
+            StrategyOutput(**normalize_strategy_payload(payload))
+
 
 class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
     async def test_hypotheses_success_sets_seal_and_confidence(self):
@@ -1000,6 +1077,27 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
             "Ship the keyword brief gate before the next editorial cycle.",
         )
         self.assertEqual(updated.strategy.preliminary_verdicts[0].id, "H1")
+
+    async def test_strategy_phase_normalizes_dict_reentry_check_and_completes(self):
+        state = make_completed_state("strategy-phase-dict-reentry-check")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        state.strategy = None
+        state.strategy_raw = "previous raw strategy"
+        payload = make_strategy_payload({"triggers": ["R8", "R1"], "target": "monitor"})
+        response = make_response(json.dumps(payload), 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.COMPLETED)
+        self.assertEqual(updated.phase_confidence["strategy"], 1.0)
+        self.assertIsNotNone(updated.strategy)
+        self.assertIsNone(updated.strategy_raw)
+        self.assertEqual(
+            updated.strategy.reentry_check,
+            '{"target":"monitor","triggers":["R8","R1"]}',
+        )
 
     async def test_malformed_strategy_stores_raw_and_fails_phase(self):
         state = make_completed_state("strategy-phase-malformed")

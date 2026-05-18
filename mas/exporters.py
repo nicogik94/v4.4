@@ -28,16 +28,20 @@ from reportlab.platypus import (
 
 from report_quality import (
     NO_CONCRETE_LOCATORS_CLIENT_NOTE,
+    RISK_CLASSIFICATION_WARNING,
     SPARSE_CONFIDENCE_RULE,
     TELEMETRY_PRIVACY_CAVEAT,
     WAVE2_GRADUATION_MATRIX,
     assess_report_quality_context,
     client_simplify_text,
     commitment_score_text,
+    evidence_maturity_projection,
     monitor_has_signals,
     monitor_success_metric_lines,
+    normalize_export_text,
     requires_productization_wave_matrix,
     requires_telemetry_privacy_caveat,
+    suppress_client_raw_evidence_ids,
     threshold_consistency_warnings,
 )
 import report_freshness
@@ -219,6 +223,52 @@ HUMAN_REVIEW_NOTE = (
     "safety, or compliance stakes are involved."
 )
 
+SPARSE_GROWTH_DECISION_GATES = """| Gate | Proceed | Extend | Stop / Escalate |
+|---|---|---|---|
+| Data quality | DQ ≥70 and billing delta <5% | DQ 50-69 with clear repair path | DQ <50 by Day 30 |
+| Measurement artifact | H10 rejected with reconciled data | H10 unresolved but improving data | H10 confirmed or data remains unreliable |
+| Retention | D90 >40% and NRR healthy | D90 30-40% | D90 <30% or NRR <85% |
+| PMF | Ellis score ≥40% with usable sample | 25-39%, segment-specific signal | <25% or activation <30% |
+| Channel concentration | No channel >60% or CAC stable | Concentration high but stable | Top channel >70% and CAC worsening |
+| Strategic action | One causal hypothesis BF >10 | Multiple hypotheses BF 3-8 | No hypothesis BF >10 by Week 8 |
+| Governance | Leadership accepts diagnostic hold | Limited canary only | Major spend/headcount proposed before gates |"""
+
+SPARSE_GROWTH_GOVERNANCE_FALLBACK = """If leadership chooses to act before diagnostic gates are met:
+
+- Limit spend to a capped canary budget.
+- Require one explicit hypothesis.
+- Require one success metric, one stop metric, and one review date.
+- Block permanent headcount, major acquisition spend, pricing overhaul, or full strategy pivot until DQ ≥70 and at least one causal hypothesis has BF >10.
+- Log the decision as an override with owner, reason, risk accepted, and revisit date."""
+
+SPARSE_GROWTH_SPRINT0_ACTIONS = """Allowed:
+
+- repair tracking
+- reconcile billing/product metrics
+- interview churned customers
+- pull cohort retention curves
+- map funnel and channel mix
+- prepare experiment briefs
+- run small no-regret lifecycle/onboarding fixes that do not require major spend
+
+Not allowed:
+
+- full strategy pivot
+- large acquisition spend increase
+- new channel scale-up
+- pricing overhaul
+- headcount expansion justified by unvalidated growth assumptions
+- permanent roadmap shift before diagnostic gates are met"""
+
+SPARSE_GROWTH_CAPACITY_NOTE = """Minimum staffing assumption: this plan assumes access to analytics, finance/billing, product usage data, sales/win-loss data, and customer success/churn data.
+
+If those roles or data owners are unavailable, use a reduced Sprint 0:
+
+1. billing reconciliation
+2. cohort retention
+3. funnel conversion
+4. 10 churn/user interviews"""
+
 EMPTY_HYPOTHESES = "No hypotheses have been generated yet."
 EMPTY_UPLOADED_FILES = "No uploaded files were attached."
 EMPTY_MONITORING = "No monitoring plan is available yet."
@@ -291,10 +341,13 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
 
     current_version = report_freshness.current_code_version()
     if profile_name == "report":
-        markdown = _prepend_report_freshness_warning(
-            _safe_report_markdown(state),
-            state,
-            current_code_version=current_version,
+        markdown = normalize_export_text(
+            _prepend_report_freshness_warning(
+                _safe_report_markdown(state),
+                state,
+                current_code_version=current_version,
+            ),
+            audience="client",
         )
     elif profile_name == "client_dossier":
         markdown = build_client_dossier_markdown(state, current_code_version=current_version)
@@ -320,6 +373,7 @@ def build_client_dossier_markdown(
     warning = _report_freshness_warning(state, current_code_version=current_code_version)
     if warning:
         lines.append(warning)
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=True))
     lines.extend(_quality_warning_blocks(state, quality, client=True))
     open_questions = client_section_from_report_or_fallback(
         state,
@@ -405,17 +459,25 @@ def build_client_dossier_markdown(
             body = _client_safe_text(body, quality)
             if not quality.has_concrete_locators:
                 body = _remove_empty_client_citation_marker_columns(body)
+                body = suppress_client_raw_evidence_ids(body)
+            if heading == "What to monitor" and _requires_sparse_growth_decision_package(quality):
+                body = "\n\n".join(["### Monitoring Details", body])
         lines.extend([
             f"## {heading}",
             body,
         ])
+        if heading == "Recommended path" and _requires_sparse_growth_decision_package(quality):
+            lines.extend(_sparse_growth_decision_package_sections(client=True))
         if heading == "Timeline / 7-30-60-90 roadmap" and requires_productization_wave_matrix(state, quality):
             lines.extend([
                 "## Wave 2 Graduation Matrix",
                 _client_safe_text(WAVE2_GRADUATION_MATRIX.replace("## Wave 2 Graduation Matrix\n\n", ""), quality),
             ])
 
-    return "\n\n".join(part for part in lines if str(part).strip())
+    return normalize_export_text(
+        "\n\n".join(part for part in lines if str(part).strip()),
+        audience="client",
+    )
 
 
 def build_operator_dossier_markdown(
@@ -432,6 +494,7 @@ def build_operator_dossier_markdown(
         warning = _operator_report_freshness_warning(state, current_code_version=current_code_version)
         if warning:
             lines.append(warning)
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=False))
     lines.extend(_quality_warning_blocks(state, quality, client=False))
     section_bodies = {
         "Cover / project metadata": operator_project_metadata(state),
@@ -463,7 +526,12 @@ def build_operator_dossier_markdown(
         ])
         if heading == "Strategy plan" and requires_productization_wave_matrix(state, quality):
             lines.append(WAVE2_GRADUATION_MATRIX)
-    return "\n\n".join(part for part in lines if str(part).strip())
+        if heading == "Strategy plan" and _requires_sparse_growth_decision_package(quality):
+            lines.extend(_sparse_growth_decision_package_sections(client=False))
+    return normalize_export_text(
+        "\n\n".join(part for part in lines if str(part).strip()),
+        audience="operator",
+    )
 
 
 def client_section_from_report_or_fallback(
@@ -479,6 +547,46 @@ def client_section_from_report_or_fallback(
     return fallback
 
 
+def _evidence_maturity_badge_markdown(state: ProjectState, quality, *, client: bool) -> list[str]:
+    projection = evidence_maturity_projection(state, quality)
+    lines = [
+        "## Evidence maturity",
+        f"Evidence maturity: {projection.maturity}",
+        f"Client-use status: {projection.client_use_status}",
+        f"Validation required: {projection.validation_required}",
+    ]
+    if client:
+        return lines
+    rows = [
+        ["Field", "Status"],
+        ["Uploaded files", str(projection.uploaded_files)],
+        ["Imported evidence", str(projection.imported_evidence)],
+        ["Imported signals", str(projection.imported_signals)],
+        ["Concrete locators", str(projection.has_concrete_locators)],
+    ]
+    return [*lines, _markdown_table(rows)]
+
+
+def _requires_sparse_growth_decision_package(quality) -> bool:
+    return bool(getattr(quality, "sparse_evidence", False) and getattr(quality, "decision_domain", "") == "growth")
+
+
+def _sparse_growth_decision_package_sections(*, client: bool) -> list[str]:
+    monitoring_label = "Monitoring Details" if client else "Operator Controls"
+    return [
+        "## Decision Gates",
+        SPARSE_GROWTH_DECISION_GATES,
+        f"## {monitoring_label}",
+        "The Decision Gates matrix is the source of truth for proceed, extend, stop, and escalation choices. Additional canaries or circuit breakers are implementation controls, not separate decision systems.",
+        "## Governance fallback if leadership overrides the diagnostic hold",
+        SPARSE_GROWTH_GOVERNANCE_FALLBACK,
+        "## What the team may do during Sprint 0",
+        SPARSE_GROWTH_SPRINT0_ACTIONS,
+        "## Minimum staffing assumption",
+        SPARSE_GROWTH_CAPACITY_NOTE,
+    ]
+
+
 def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> list[str]:
     blocks: list[str] = []
     if quality.sparse_evidence:
@@ -491,6 +599,8 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
         blocks.extend(["## Citation locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
     if quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state)):
         blocks.extend(["## Telemetry privacy note", TELEMETRY_PRIVACY_CAVEAT])
+    if _risk_classification_may_understate_generated_content(state):
+        blocks.extend(["## Risk classification note", RISK_CLASSIFICATION_WARNING])
     warnings = threshold_consistency_warnings(state, quality)
     if client and warnings:
         blocks.extend(["## Threshold note", "Confirm one decision matrix in Sprint 0 before acting on thresholds."])
@@ -520,6 +630,31 @@ def _quality_content_text(state: ProjectState) -> str:
         parts.append(state.monitor.commitment_rationale)
         parts.extend(monitor_success_metric_lines(state.monitor, limit=50))
     return "\n".join(str(part) for part in parts if part)
+
+
+def _risk_classification_may_understate_generated_content(state: ProjectState) -> bool:
+    if str(getattr(state, "risk_classification", "") or "").lower() != "minimal_risk":
+        return False
+    generated_text = "\n".join(
+        part
+        for part in [
+            getattr(state, "report", "") or "",
+            getattr(getattr(state, "strategy", None), "executive_strategy", "") or "",
+            getattr(getattr(state, "strategy", None), "monitoring_plan", "") or "",
+            getattr(getattr(state, "audit", None), "summary", "") or "",
+            "\n".join(getattr(getattr(state, "audit", None), "top_findings", []) or []),
+            "\n".join(getattr(getattr(state, "audit", None), "observation_needs", []) or []),
+        ]
+        if part
+    )
+    return bool(
+        re.search(
+            r"\b(high risk|critical risk|severe risk|circuit breaker|kill criteria|"
+            r"stop/escalate|escalate|major spend|headcount|compliance|safety|legal)\b",
+            generated_text,
+            re.I,
+        )
+    )
 
 
 def _client_decision_reviewed(state: ProjectState) -> str:
@@ -849,7 +984,7 @@ def operator_clarifications_summary(state: ProjectState) -> str:
 
 
 def operator_report_appendix(state: ProjectState) -> str:
-    return _safe_report_markdown(state) if state.report else "No report is available yet."
+    return _redact_unsafe_string(state.report or "") if state.report else "No report is available yet."
 
 
 def operator_technical_appendix(state: ProjectState) -> str:
@@ -881,7 +1016,7 @@ def build_machine_archive_payload(state: ProjectState) -> dict[str, Any]:
     decision_objects = _decision_objects_payload(state)
     files: dict[str, Any] = {
         "project_state.json": sanitize_for_export(state, "machine_archive", mode="redact"),
-        "report.md": _safe_report_markdown(state),
+        "report.md": _redact_unsafe_string(state.report or "No report available."),
         "phase_outputs.json": sanitize_for_export(_phase_outputs_payload(state), "machine_archive", mode="redact"),
         "decision_objects.json": sanitize_for_export(decision_objects, "machine_archive", mode="redact"),
         "clarifications.json": sanitize_for_export(_clarifications_payload(state), "machine_archive", mode="redact"),
@@ -1313,9 +1448,16 @@ def _safe_report_markdown(state: ProjectState) -> str:
     quality = assess_report_quality_context(state)
     if quality.sparse_evidence:
         markdown = _simplify_sparse_report_markdown(markdown, quality)
+    markdown = _prepend_evidence_maturity_badge(markdown, state, quality)
+    if _risk_classification_may_understate_generated_content(state) and RISK_CLASSIFICATION_WARNING not in markdown:
+        markdown = "\n\n".join([RISK_CLASSIFICATION_WARNING, markdown])
+    if _requires_sparse_growth_decision_package(quality):
+        markdown = _with_sparse_growth_decision_package(markdown)
     if requires_productization_wave_matrix(state, quality) and "Wave 2 Graduation Matrix" not in markdown:
         markdown = "\n\n".join([markdown.strip(), WAVE2_GRADUATION_MATRIX])
-    return markdown
+    if not quality.has_concrete_locators:
+        markdown = suppress_client_raw_evidence_ids(markdown)
+    return normalize_export_text(markdown, audience="client")
 
 
 def _prepend_report_freshness_warning(
@@ -1328,6 +1470,33 @@ def _prepend_report_freshness_warning(
     if not warning:
         return markdown
     return "\n\n".join([warning, markdown])
+
+
+def _prepend_evidence_maturity_badge(markdown: str, state: ProjectState, quality) -> str:
+    if "Evidence maturity:" in str(markdown or ""):
+        return markdown
+    badge = "\n".join(_evidence_maturity_badge_markdown(state, quality, client=True))
+    return "\n\n".join([badge, markdown.strip()])
+
+
+def _with_sparse_growth_decision_package(markdown: str) -> str:
+    source = _remove_markdown_section(markdown, "Decision Gates")
+    source = _remove_markdown_section(source, "Governance fallback if leadership overrides the diagnostic hold")
+    source = _remove_markdown_section(source, "What the team may do during Sprint 0")
+    source = _remove_markdown_section(source, "Minimum staffing assumption")
+    package = "\n\n".join(_sparse_growth_decision_package_sections(client=True))
+    road_map = re.search(r"(?im)^#{1,6}\s+(?:Roadmap|Timeline / 7-30-60-90 roadmap)\s*$", source)
+    if road_map:
+        return "\n\n".join([source[: road_map.start()].strip(), package, source[road_map.start():].strip()])
+    return "\n\n".join([source.strip(), package])
+
+
+def _remove_markdown_section(markdown: str, heading: str) -> str:
+    source = str(markdown or "")
+    pattern = re.compile(
+        rf"(?ims)^#{1,6}\s+{re.escape(heading)}\s*$.*?(?=^#{1,6}\s+|\Z)"
+    )
+    return pattern.sub("", source).strip()
 
 
 def _report_freshness_warning(
@@ -1351,8 +1520,6 @@ def _operator_report_freshness_warning(
         state,
         current_version=current_code_version,
     )
-    if not freshness.warning:
-        return ""
     metadata_rows = [
         ["Field", "Value"],
         ["Freshness status", freshness.status],
@@ -1361,10 +1528,11 @@ def _operator_report_freshness_warning(
         ["Generated at", freshness.generated_at or "unavailable"],
         ["Matching report hash", str(bool(freshness.matching_report_hash))],
     ]
-    return "\n\n".join([
-        freshness.warning,
-        "Freshness metadata:\n\n" + _markdown_table(metadata_rows),
-    ])
+    parts = []
+    if freshness.warning:
+        parts.append(freshness.warning)
+    parts.append("Freshness metadata:\n\n" + _markdown_table(metadata_rows))
+    return "\n\n".join(parts)
 
 
 def _simplify_sparse_report_markdown(markdown: str, quality) -> str:
@@ -1534,6 +1702,7 @@ def _is_empty_client_citation_cell(value: str) -> bool:
         "unavailable",
         "not available",
         "citation unavailable",
+        "no citation available",
         "no concrete locator registered",
         "no concrete citation locator registered",
         "no concrete citation locators available",
@@ -2277,8 +2446,7 @@ def _strip_inline_markdown(text: str) -> str:
     value = str(text or "")
     value = re.sub(r"`([^`]+)`", r"\1", value)
     value = value.replace("**", "").replace("__", "")
-    value = _spell_visible_comparators(value)
-    return value
+    return value.strip()
 
 
 def _spell_visible_comparators(text: str) -> str:

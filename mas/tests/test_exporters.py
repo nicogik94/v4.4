@@ -1,12 +1,12 @@
 """Tests for profile-based project exports."""
 import json
 import os
+import re
 import sys
 import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from docx import Document
@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import api  # noqa: E402
 import report_freshness  # noqa: E402
+from report_quality import RISK_CLASSIFICATION_WARNING  # noqa: E402
 from clarifications import (  # noqa: E402
     ClarificationCycle,
     ClarificationPriority,
@@ -235,6 +236,38 @@ Technical notes stay here.
     return state
 
 
+def make_sparse_growth_state(project_id: str = "sparse-growth"):
+    state = ProjectState(
+        project_id=project_id,
+        project_name="Improving growth performance",
+        brief="Improve growth performance across revenue operations, retention, churn, acquisition, and pipeline.",
+        report="""# Executive Summary
+Recommend a diagnostic hold before scaling. This has high risk and circuit breaker implications.
+H1 model-generated prior probability 0. 68 and structured risk priority 70. 0 [Evidence: ev-growth | citation unavailable].
+
+# The Decision
+Decide whether to scale growth spend before measurement is repaired.
+
+# Recommended Path
+1. Repair tracking.
+1. Reconcile billing and product metrics.
+1. Interview churned customers.
+DQ greater than 70 and BF greater than 10 are required before major spend.
+model-generated prior probability 0. 68 and structured risk priority 70. 0 should remain provisional.
+
+# Monitoring and Kill Criteria
+Top channel greater than 70 and CAC worsening. Stop threshold is 2. 1 issues.
+
+# Evidence Used
+No uploaded files, imported evidence, imported signals, or concrete locators are available.
+
+# Roadmap
+Run Sprint 0 first.
+""",
+    )
+    return state
+
+
 class TestCodeVersionFreshness(unittest.TestCase):
     def test_current_code_version_uses_safe_env_var_first(self):
         env = {
@@ -249,8 +282,15 @@ class TestCodeVersionFreshness(unittest.TestCase):
 
         run_mock.assert_not_called()
 
-    def test_current_code_version_ignores_unsafe_env_and_uses_git_root(self):
-        repo_root = ROOT.parent
+    def test_report_generation_metadata_uses_app_version_by_default(self):
+        env = {name: "" for name in report_freshness.CODE_VERSION_ENV_VARS}
+        with patch.dict(os.environ, env, clear=False):
+            metadata = report_freshness.build_report_generation_metadata("current report")
+
+        self.assertEqual(metadata["code_version"], "4.4.0")
+        self.assertNotEqual(metadata["code_version"], report_freshness.UNKNOWN_CODE_VERSION)
+
+    def test_current_code_version_ignores_unsafe_env_and_uses_app_version(self):
         env = {
             "V4_CODE_VERSION": r"abc123 C:\Users\example\secret.txt",
             "GIT_COMMIT": "",
@@ -258,21 +298,18 @@ class TestCodeVersionFreshness(unittest.TestCase):
             "SOURCE_VERSION": "",
         }
         with patch.dict(os.environ, env, clear=False):
-            with patch("report_freshness._detect_repo_root", return_value=repo_root):
-                with patch(
-                    "report_freshness.subprocess.run",
-                    return_value=SimpleNamespace(stdout="git789\n"),
-                ) as run_mock:
-                    self.assertEqual(report_freshness.current_code_version(), "git789")
+            with patch("report_freshness.subprocess.run") as run_mock:
+                self.assertEqual(report_freshness.current_code_version(), "4.4.0")
 
-        self.assertEqual(run_mock.call_args.kwargs["cwd"], str(repo_root))
+        run_mock.assert_not_called()
 
-    def test_current_code_version_returns_unknown_only_when_env_and_git_fail(self):
+    def test_current_code_version_returns_unknown_only_when_env_app_and_git_fail(self):
         env = {name: "" for name in report_freshness.CODE_VERSION_ENV_VARS}
         with patch.dict(os.environ, env, clear=False):
-            with patch("report_freshness._detect_repo_root", return_value=ROOT.parent):
-                with patch("report_freshness.subprocess.run", side_effect=FileNotFoundError):
-                    self.assertEqual(report_freshness.current_code_version(), report_freshness.UNKNOWN_CODE_VERSION)
+            with patch("report_freshness.APP_VERSION", ""):
+                with patch("report_freshness._detect_repo_root", return_value=ROOT.parent):
+                    with patch("report_freshness.subprocess.run", side_effect=FileNotFoundError):
+                        self.assertEqual(report_freshness.current_code_version(), report_freshness.UNKNOWN_CODE_VERSION)
 
     def test_export_manifest_uses_code_version_helper_for_manifest_and_freshness(self):
         state = make_export_state("manifest-version")
@@ -334,8 +371,8 @@ class TestProfileExporterHelpers(unittest.TestCase):
 
         text = _docx_text(payload)
         self.assertIn(
-            "Report freshness warning: this report was generated with code version old123; "
-            "current code version is new456. Regenerate the report before validation or client delivery.",
+            "Freshness check: report was generated with code version old123; "
+            "current code version is new456. Regenerate from the current branch before client delivery.",
             text,
         )
 
@@ -346,7 +383,7 @@ class TestProfileExporterHelpers(unittest.TestCase):
         with patch("report_freshness.current_code_version", return_value="new456"):
             markdown = build_client_dossier_markdown(state)
 
-        self.assertIn("Report freshness warning:", markdown)
+        self.assertIn("Freshness check:", markdown)
         self.assertIn("old123", markdown)
         self.assertIn("new456", markdown)
         self.assertNotIn("Freshness metadata", markdown)
@@ -358,7 +395,7 @@ class TestProfileExporterHelpers(unittest.TestCase):
         with patch("report_freshness.current_code_version", return_value="new456"):
             markdown = build_operator_dossier_markdown(state)
 
-        self.assertIn("Report freshness warning:", markdown)
+        self.assertIn("Freshness check:", markdown)
         self.assertIn("Freshness metadata", markdown)
         self.assertIn("Generated code version", markdown)
         self.assertIn("old123", markdown)
@@ -374,21 +411,57 @@ class TestProfileExporterHelpers(unittest.TestCase):
             client_markdown = build_client_dossier_markdown(state)
             operator_markdown = build_operator_dossier_markdown(state)
 
-        self.assertNotIn("Report freshness warning", _docx_text(report_payload))
-        self.assertNotIn("Report freshness warning", client_markdown)
-        self.assertNotIn("Report freshness warning", operator_markdown)
+        self.assertNotIn("Freshness check:", _docx_text(report_payload))
+        self.assertNotIn("Freshness check:", client_markdown)
+        self.assertNotIn("Freshness check:", operator_markdown)
+        self.assertIn("Freshness metadata", operator_markdown)
+        self.assertIn("fresh", operator_markdown)
+        self.assertIn("Matching report hash", operator_markdown)
 
-    def test_legacy_missing_generation_version_triggers_generic_freshness_warning(self):
+    def test_legacy_missing_generation_version_triggers_unproven_freshness_warning(self):
         state = make_export_state("legacy-report-profile")
 
         with patch("report_freshness.current_code_version", return_value="new456"):
             payload, _, _ = export_project_profile_bytes(state, "report", "docx")
 
         self.assertIn(
-            "Report freshness warning: this report may have been generated by an older code version. "
-            "Regenerate the report before using this export for validation or client delivery.",
+            "Freshness check: report generation metadata is missing or incomplete. "
+            "Regenerate from the current branch before client delivery.",
             _docx_text(payload),
         )
+
+    def test_matching_hash_unknown_version_uses_exact_unverified_warning(self):
+        state = make_export_state("unknown-version-report")
+        _attach_report_generation_metadata(state, code_version="unknown")
+
+        with patch("report_freshness.current_code_version", return_value="4.4.0"):
+            freshness = report_freshness.assess_report_freshness(state)
+            client_markdown = build_client_dossier_markdown(state)
+
+        expected = (
+            "Freshness check: report hash matches the stored report, but code-version metadata is unverified. "
+            "Regenerate from the current branch before client delivery."
+        )
+        self.assertEqual(freshness.status, "unproven")
+        self.assertTrue(freshness.matching_report_hash)
+        self.assertEqual(freshness.warning, expected)
+        self.assertIn(expected, client_markdown)
+
+    def test_content_mismatch_uses_content_mismatch_status_and_warning(self):
+        state = make_export_state("content-mismatch-report")
+        _attach_report_generation_metadata(state, code_version="4.4.0")
+        state.report += "\nChanged after report metadata was recorded."
+
+        with patch("report_freshness.current_code_version", return_value="4.4.0"):
+            freshness = report_freshness.assess_report_freshness(state)
+            operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertEqual(freshness.status, "content_mismatch")
+        self.assertFalse(freshness.matching_report_hash)
+        self.assertIn("Freshness check: stored report-generation metadata does not match", freshness.warning)
+        self.assertIn("content_mismatch", operator_markdown)
+        self.assertIn("Matching report hash", operator_markdown)
+        self.assertIn("False", operator_markdown)
 
     def test_client_dossier_includes_expected_sections_and_safe_cdp_wording(self):
         markdown = build_client_dossier_markdown(make_export_state("client-profile"))
@@ -517,9 +590,9 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         for expected in (
             "risk priority",
             "structured risk review",
-            "internal confidence diagnostic",
-            "evidence quality diagnostic",
-            "uncertainty diagnostic",
+            "structural confidence signal",
+            "evidence quality signal",
+            "uncertainty signal",
             "related-hypothesis risk",
             "user-value hypothesis",
             "schema overlap score",
@@ -532,6 +605,10 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         self.assertIn("RPN", operator_markdown)
         self.assertIn("BF 12", operator_markdown)
         self.assertIn("DQ 65", operator_markdown)
+        self.assertNotIn("model-generated prior", client_markdown)
+        self.assertNotIn("internal confidence diagnostic", client_markdown)
+        self.assertNotIn("evidence quality diagnostic", client_markdown)
+        self.assertNotIn("structured risk priority", client_markdown)
 
     def test_monitor_signals_fill_success_metrics_when_strategy_metrics_empty(self):
         state = make_export_state("monitor-success")
@@ -638,9 +715,11 @@ The proposed planning gate is more than 20% activation.
         self.assertNotIn("scenario_probability: 0.91", markdown)
         self.assertNotIn("structural probability=0.73", markdown)
         self.assertNotIn("failure probability 0.70", markdown)
-        self.assertIn("model-generated prior", markdown)
+        self.assertIn("structural prior", markdown)
+        self.assertNotIn("model-generated prior", markdown)
         self.assertIn("high provisional failure risk", markdown)
-        self.assertIn("operator-confirmed threshold required", markdown)
+        self.assertIn("provisional threshold", markdown)
+        self.assertNotIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
 
     def test_sparse_report_preserves_exact_values_in_technical_appendix(self):
@@ -662,6 +741,85 @@ BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
         for exact in ("BF=42", "DQ=70", "RPN=336", "correlation=0.44", "probability 70%"):
             self.assertNotIn(exact, main)
             self.assertIn(exact, appendix)
+
+    def test_sparse_growth_client_dossier_has_evidence_badge_and_decision_package(self):
+        state = make_sparse_growth_state("sparse-growth-client")
+
+        markdown = build_client_dossier_markdown(state)
+
+        self.assertIn("Evidence maturity: Hypothesis-only", markdown)
+        self.assertIn("Client-use status: Internal planning only", markdown)
+        self.assertIn("Validation required: Sprint 0 evidence pack", markdown)
+        self.assertEqual(len(re.findall(r"(?m)^## Decision Gates$", markdown)), 1)
+        for row in (
+            "Data quality",
+            "Measurement artifact",
+            "Retention",
+            "PMF",
+            "Channel concentration",
+            "Strategic action",
+            "Governance",
+        ):
+            self.assertIn(row, markdown)
+        self.assertNotIn("Threshold consistency warning", markdown)
+        self.assertNotIn("Confirm one decision matrix", markdown)
+
+    def test_sparse_growth_report_profile_has_single_decision_gates_section(self):
+        state = make_sparse_growth_state("sparse-growth-report")
+
+        markdown = _safe_report_markdown(state)
+
+        self.assertEqual(len(re.findall(r"(?m)^## Decision Gates$", markdown)), 1)
+        self.assertIn("Governance fallback if leadership overrides the diagnostic hold", markdown)
+        self.assertIn("What the team may do during Sprint 0", markdown)
+        self.assertIn("Minimum staffing assumption", markdown)
+
+    def test_sparse_growth_governance_sprint0_and_capacity_sections_render(self):
+        markdown = build_client_dossier_markdown(make_sparse_growth_state("sparse-growth-package"))
+
+        self.assertIn("Governance fallback if leadership overrides the diagnostic hold", markdown)
+        self.assertIn("capped canary budget", markdown)
+        self.assertIn("one explicit hypothesis", markdown)
+        self.assertIn("one success metric, one stop metric, and one review date", markdown)
+        self.assertIn("Block permanent headcount, major acquisition spend", markdown)
+        self.assertIn("What the team may do during Sprint 0", markdown)
+        self.assertIn("repair tracking", markdown)
+        self.assertIn("full strategy pivot", markdown)
+        self.assertIn("Minimum staffing assumption", markdown)
+        self.assertIn("billing reconciliation", markdown)
+        self.assertIn("cohort retention", markdown)
+        self.assertIn("funnel conversion", markdown)
+        self.assertIn("10 churn/user interviews", markdown)
+
+    def test_sparse_growth_client_artifact_regression(self):
+        markdown = build_client_dossier_markdown(make_sparse_growth_state("sparse-growth-artifacts"))
+
+        for forbidden in (
+            "operator-confirmed threshold required",
+            "model-generated prior",
+            "internal confidence diagnostic",
+            "evidence quality diagnostic",
+            "structured risk priority",
+            "greater than greater than",
+            "2. 1",
+            "0. 68",
+            "70. 0",
+            "ev-growth",
+        ):
+            self.assertNotIn(forbidden, markdown)
+        self.assertIn("structural prior", markdown)
+        self.assertIn("risk priority score", markdown)
+        self.assertIn("1. Repair tracking.", markdown)
+        self.assertIn("2. Reconcile billing and product metrics.", markdown)
+        self.assertIn("3. Interview churned customers.", markdown)
+
+    def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):
+        minimal = make_sparse_growth_state("risk-minimal")
+        limited = make_sparse_growth_state("risk-limited")
+        limited.risk_classification = "limited_risk"
+
+        self.assertIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(minimal))
+        self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(limited))
 
     def test_client_dossier_omits_empty_citation_marker_column_without_locators(self):
         state = ProjectState(
@@ -796,8 +954,7 @@ Stop if >2 critical assumptions remain unknown.
         self.assertNotIn("| Field | Detail |", text)
         self.assertNotIn("|---|---|", text)
         self.assertNotIn("---", text)
-        self.assertNotIn(">", text)
-        self.assertIn("greater than 2 critical assumptions", text)
+        self.assertIn(">2 critical assumptions", text)
         for line in text.splitlines():
             self.assertFalse(line.strip().startswith(">"), line)
 

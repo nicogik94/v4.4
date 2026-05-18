@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 
+APP_VERSION = "4.4.0"
+
 # ═══ LLM Provider Configuration ═══
 
 class Provider(str, Enum):
