@@ -17,9 +17,13 @@ SPARSE_EVIDENCE_CAVEAT = (
 )
 
 PROVISIONAL_CLARIFICATION_CAVEAT = (
-    "Provisional report: clarification questions have not been answered. "
-    "Recommendations should be reviewed after the operator answers the "
-    "decision-critical follow-up questions."
+    "Provisional report: decision-critical clarification questions have not "
+    "been answered. This is suitable for internal review only. Answer "
+    "clarifications and regenerate before client delivery."
+)
+
+PROVISIONAL_CLARIFICATION_NEXT_ACTION = (
+    "Next required operator action: answer clarification questions and regenerate the report."
 )
 
 TELEMETRY_PRIVACY_CAVEAT = (
@@ -45,8 +49,13 @@ THRESHOLD_WARNING = (
     "Threshold consistency warning: multiple thresholds appear to govern the "
     "same decision. Confirm one decision matrix before acting."
 )
+THRESHOLD_CONFLICT_UNKNOWN_WARNING = "Possible threshold conflict detected, source unknown."
+THRESHOLD_CONFLICT_BETWEEN_TEMPLATE = "Threshold conflict detected between: {section_a} and {section_b}."
 
 RISK_CLASSIFICATION_WARNING = "Risk classification may understate generated risk content."
+CLIENT_BF_CONFIDENCE_CAVEAT = (
+    "Current evidence does not meet the confidence threshold for selecting a specific growth lever."
+)
 
 NO_CONCRETE_LOCATORS_CLIENT_NOTE = (
     "No concrete citation locators were available for this project; evidence "
@@ -255,9 +264,11 @@ class ReportQualityContext:
     owner_roles: list[str] = field(default_factory=list)
     evidence_categories: list[str] = field(default_factory=list)
     provisional_report: bool = False
+    required_clarifications_open: bool = False
     telemetry_privacy_required: bool = False
     sparse_evidence_caveat: str = SPARSE_EVIDENCE_CAVEAT
     provisional_clarification_caveat: str = PROVISIONAL_CLARIFICATION_CAVEAT
+    provisional_clarification_next_action: str = PROVISIONAL_CLARIFICATION_NEXT_ACTION
     telemetry_privacy_caveat: str = TELEMETRY_PRIVACY_CAVEAT
 
 
@@ -281,6 +292,7 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
     clarification_count = len(getattr(state, "clarification_answers", []) or [])
     has_locators = has_concrete_evidence_locators(state)
     zero_clarifications = clarification_count == 0
+    required_clarifications_open = has_required_clarifications_open(state)
 
     sparse_reasons = []
     if uploaded_count == 0:
@@ -322,9 +334,152 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
         decision_domain=domain,
         owner_roles=list(roles),
         evidence_categories=list(evidence_categories),
-        provisional_report=sparse_evidence and zero_clarifications,
+        provisional_report=required_clarifications_open,
+        required_clarifications_open=required_clarifications_open,
         telemetry_privacy_required=requires_telemetry_privacy_caveat(text),
     )
+
+
+def has_required_clarifications_open(state: Any) -> bool:
+    """Return True when decision-critical clarification work remains open.
+
+    Only generated clarification questions can block client readiness. Missing
+    clarification state, empty cycles, or zero answers by themselves are not
+    evidence that required clarification work exists.
+    """
+    questions = _generated_clarification_questions(state)
+    if not questions:
+        return False
+
+    answered_ids = _answered_clarification_ids(state)
+    for question in questions:
+        if not _clarification_question_is_required(question):
+            continue
+        question_id = _clarification_item_id(question)
+        if question_id and question_id in answered_ids:
+            continue
+        if _clarification_question_is_resolved(question):
+            continue
+        if _clarification_question_is_open(question):
+            return True
+    return False
+
+
+def _generated_clarification_questions(state: Any) -> list[Any]:
+    questions: list[Any] = []
+    cycles = _clarification_get(state, "clarification_cycles")
+    if not cycles:
+        return questions
+    for cycle in _iter_clarification_values(cycles):
+        cycle_questions = _clarification_get(cycle, "questions")
+        if not cycle_questions:
+            continue
+        questions.extend(_iter_clarification_values(cycle_questions))
+    return questions
+
+
+def _answered_clarification_ids(state: Any) -> set[str]:
+    answered_ids: set[str] = set()
+    answers = _clarification_get(state, "clarification_answers")
+    if not answers:
+        return answered_ids
+    if isinstance(answers, dict):
+        for key, answer in answers.items():
+            key_text = str(key or "").strip()
+            if key_text:
+                answered_ids.add(key_text)
+            if not isinstance(answer, (str, bytes)):
+                answer_id = _clarification_item_id(answer)
+                if answer_id:
+                    answered_ids.add(answer_id)
+        return answered_ids
+    for answer in _iter_clarification_values(answers):
+        answer_id = _clarification_item_id(answer)
+        if answer_id:
+            answered_ids.add(answer_id)
+    return answered_ids
+
+
+def _clarification_question_is_required(question: Any) -> bool:
+    for field_name in ("priority", "severity", "importance"):
+        if _normalize_clarification_text(_clarification_get(question, field_name)) in {"critical", "high"}:
+            return True
+    for field_name in ("required", "is_required"):
+        if _boolish(_clarification_get(question, field_name)) is True:
+            return True
+    return False
+
+
+def _clarification_question_is_resolved(question: Any) -> bool:
+    if _boolish(_clarification_get(question, "answered")) is True:
+        return True
+    if _boolish(_clarification_get(question, "resolved")) is True:
+        return True
+    return _normalize_clarification_text(_clarification_get(question, "status")) in {
+        "answered",
+        "resolved",
+        "unavailable",
+        "superseded",
+        "closed",
+        "complete",
+        "completed",
+        "waived",
+        "not_applicable",
+        "n/a",
+    }
+
+
+def _clarification_question_is_open(question: Any) -> bool:
+    status = _normalize_clarification_text(_clarification_get(question, "status"))
+    if not status:
+        return True
+    return status in {"open", "pending", "unanswered", "required"}
+
+
+def _clarification_item_id(item: Any) -> str:
+    for field_name in ("question_id", "id", "clarification_id"):
+        value = _clarification_get(item, field_name)
+        text = str(getattr(value, "value", value) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _clarification_get(item: Any, field_name: str, default: Any = None) -> Any:
+    if item is None:
+        return default
+    if isinstance(item, dict):
+        return item.get(field_name, default)
+    return getattr(item, field_name, default)
+
+
+def _iter_clarification_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, (str, bytes)):
+        return []
+    try:
+        return list(value)
+    except TypeError:
+        return []
+
+
+def _normalize_clarification_text(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip().lower()
+
+
+def _boolish(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    normalized = _normalize_clarification_text(value)
+    if normalized in {"true", "yes", "1"}:
+        return True
+    if normalized in {"false", "no", "0"}:
+        return False
+    return None
 
 
 def evidence_maturity_projection(
@@ -437,6 +592,7 @@ def requires_telemetry_privacy_caveat(text: str) -> bool:
 def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
     """Translate technical report wording for client-facing dossier sections."""
     value = str(text or "")
+    value = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", value)
     citation_repeated = len(re.findall(r"citation unavailable", value, flags=re.I)) > 1
     replacements = [
         (r"\b(?:FMEA-derived labels?|FMEA)\b", "structured risk review"),
@@ -470,7 +626,7 @@ def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
 def normalize_export_text(text: str, audience: str = "client") -> str:
     """Final export prose cleanup, scoped by audience and protected contexts."""
     mode = "operator" if str(audience or "").lower() == "operator" else "client"
-    source = _renumber_repeated_ordered_markers(str(text or ""))
+    source = _renumber_repeated_ordered_markers(_join_standalone_list_markers(str(text or "")))
     output: list[str] = []
     in_code_block = False
     for line in source.splitlines():
@@ -497,6 +653,89 @@ def suppress_client_raw_evidence_ids(text: str) -> str:
     )
     value = re.sub(r"\s*\[#\d+\]", "", value)
     return re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+
+
+def guard_client_bf_confidence(text: str, state: Any) -> str:
+    """Keep sparse client prose from implying current causal confidence."""
+    value = str(text or "")
+    hypothesis_only = evidence_maturity_projection(state).maturity == "Hypothesis-only"
+    if not current_bf_below_action_threshold(state) and not hypothesis_only:
+        return value
+    value = re.sub(
+        r"\bconfirmed causal hypothesis\b",
+        "candidate causal hypothesis pending Sprint 0 validation",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bcausal hypothesis is confirmed\b",
+        "causal hypothesis remains unconfirmed",
+        value,
+        flags=re.I,
+    )
+    value = _hide_client_trace_values_outside_decision_gates(value)
+    if CLIENT_BF_CONFIDENCE_CAVEAT not in value:
+        value = "\n\n".join([CLIENT_BF_CONFIDENCE_CAVEAT, value.strip()])
+    return value
+
+
+def current_bf_below_action_threshold(state: Any, threshold: float = 10.0) -> bool:
+    classify = getattr(state, "classify", None)
+    try:
+        return float(getattr(classify, "bf", None)) < threshold
+    except (TypeError, ValueError):
+        return True
+
+
+def _hide_client_trace_values_outside_decision_gates(text: str) -> str:
+    lines: list[str] = []
+    in_decision_gates = False
+    in_code_block = False
+    for raw_line in str(text or "").splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(raw_line)
+            continue
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*$", stripped)
+        if heading:
+            in_decision_gates = _normalize_heading(heading.group(1)) == "decision gates"
+            lines.append(raw_line)
+            continue
+        if in_code_block or in_decision_gates or _looks_like_json_line(stripped):
+            lines.append(raw_line)
+            continue
+        lines.append(_hide_client_trace_values(raw_line))
+    return "\n".join(lines)
+
+
+def _hide_client_trace_values(line: str) -> str:
+    value = str(line or "")
+    value = re.sub(
+        r"\b(?:Bayes factor|BF)\s*(?:=|:)?\s*\d+(?:\.\d+)?\b",
+        "structural confidence signal",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bRPN\s*(?:=|:)?\s*\d+(?:\.\d+)?\b",
+        "provisional risk estimate",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bDQ\s*(?:=|:)?\s*\d+(?:\.\d+)?\b",
+        "diagnostic score",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\b(?:raw\s+)?(?:prior|priors)\s*(?:=|:)?\s*(?:0(?:\.\d+)?|1(?:\.0+)?|\d{1,3}\s*%)\b",
+        "structural prior",
+        value,
+        flags=re.I,
+    )
+    return value
 
 
 def commitment_score_text(score: Any, rationale: str = "") -> str:
@@ -561,10 +800,11 @@ def monitor_success_metric_lines(monitor: Any, limit: int = 8) -> list[str]:
 
 def threshold_consistency_warnings(state: Any, context: ReportQualityContext | None = None) -> list[str]:
     context = context or assess_report_quality_context(state)
-    text = _strip_decision_gates_sections(_combined_state_text(state))
     warnings: list[str] = []
-    if _has_conflicting_rho_thresholds(text) or _has_conflicting_canary_thresholds(text):
-        warnings.append(THRESHOLD_WARNING)
+    threshold_warning = threshold_conflict_warning(state, context)
+    if threshold_warning:
+        warnings.append(threshold_warning)
+    text = _combined_state_text(state)
     if _has_high_confidence_language(text) and context.sparse_evidence:
         warnings.append(SPARSE_CONFIDENCE_RULE)
     if _has_exact_dollar_estimate(text) and not context.has_budget_or_spend_evidence:
@@ -575,12 +815,165 @@ def threshold_consistency_warnings(state: Any, context: ReportQualityContext | N
     return _unique(warnings)
 
 
+def threshold_conflict_warning(state: Any, context: ReportQualityContext | None = None) -> str:
+    context = context or assess_report_quality_context(state)
+    report = str(getattr(state, "report", "") or "")
+    sections = _markdown_sections(report)
+    primary_sections = [
+        section for section in sections
+        if _section_has_threshold_content(section[1]) and _is_primary_threshold_section(section[0])
+    ]
+    subordinate_sections = [
+        section for section in sections
+        if _section_has_threshold_content(section[1]) and _is_subordinate_threshold_section(section[0])
+    ]
+    decision_gate_count = sum(1 for heading, _ in sections if _normalize_heading(heading) == "decision gates")
+    projected_sparse_growth_gate = context.sparse_evidence and context.decision_domain == "growth" and decision_gate_count == 0
+
+    if decision_gate_count == 1:
+        non_gate_primary = [
+            section for section in primary_sections
+            if _normalize_heading(section[0]) != "decision gates"
+        ]
+        if not non_gate_primary:
+            return ""
+        source_of_truth = "Decision Gates"
+        if len(non_gate_primary) == 1:
+            return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
+                section_a=source_of_truth,
+                section_b=non_gate_primary[0][0],
+            )
+        if len(non_gate_primary) == 1 and subordinate_sections:
+            return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
+                section_a=non_gate_primary[0][0],
+                section_b=subordinate_sections[0][0],
+            )
+        if len(non_gate_primary) >= 2:
+            return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
+                section_a=non_gate_primary[0][0],
+                section_b=non_gate_primary[1][0],
+            )
+        return THRESHOLD_CONFLICT_UNKNOWN_WARNING
+
+    if projected_sparse_growth_gate and primary_sections:
+        return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
+            section_a="projected Decision Gates",
+            section_b=primary_sections[0][0],
+        )
+
+    if len(primary_sections) >= 2:
+        return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
+            section_a=primary_sections[0][0],
+            section_b=primary_sections[1][0],
+        )
+
+    text = _strip_decision_gates_sections(_combined_state_text(state))
+    if projected_sparse_growth_gate and subordinate_sections and not primary_sections:
+        text = _strip_subordinate_threshold_sections(text)
+    if _has_conflicting_rho_thresholds(text) or _has_conflicting_canary_thresholds(text):
+        return THRESHOLD_CONFLICT_UNKNOWN_WARNING
+    return ""
+
+
 def _strip_decision_gates_sections(text: str) -> str:
     return re.sub(
         r"(?ims)^#{1,6}\s+Decision Gates\s*$.*?(?=^#{1,6}\s+|\Z)",
         "",
         str(text or ""),
     )
+
+
+def _markdown_sections(markdown: str) -> list[tuple[str, str]]:
+    sections: list[tuple[str, str]] = []
+    current_heading = ""
+    current_lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*$", line.strip())
+        if heading:
+            if current_heading:
+                sections.append((current_heading, "\n".join(current_lines)))
+            current_heading = heading.group(1).strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_heading:
+        sections.append((current_heading, "\n".join(current_lines)))
+    return sections
+
+
+def _section_has_threshold_content(value: str) -> bool:
+    text = str(value or "")
+    return bool(
+        re.search(r"\b(threshold|gate|gates|proceed|extend|stop|escalate|kill criteria|circuit breaker|canary)\b", text, re.I)
+        and re.search(r"([<>≥≤]\s*\d|\b\d+(?:\.\d+)?\s*%|\b\d+(?:\.\d+)?\s*/\s*\d+|\bBF\b|\bDQ\b|\bD90\b|\bNRR\b|\bCAC\b)", text, re.I)
+    )
+
+
+def _is_primary_threshold_section(heading: str) -> bool:
+    normalized = _normalize_heading(heading)
+    if normalized in {
+        "decision gates",
+        "decision matrix",
+        "decision thresholds",
+        "thresholds",
+        "convergence gates",
+        "gate policy",
+        "spend authorization gate",
+    }:
+        return True
+    return bool(
+        re.search(r"\b(thresholds?|decision|gates?|matrix)\b", normalized)
+        and not _is_subordinate_threshold_section(heading)
+    )
+
+
+def _is_subordinate_threshold_section(heading: str) -> bool:
+    normalized = _normalize_heading(heading)
+    subordinate = {
+        "monitoring details",
+        "monitoring and kill criteria",
+        "operator controls",
+        "roadmap",
+        "key risks",
+        "early warning signal",
+        "early warning signals",
+        "mitigation",
+        "stop change course threshold",
+        "stop change course thresholds",
+        "stop change course",
+        "canaries",
+        "circuit breakers",
+    }
+    return normalized in subordinate
+
+
+def _normalize_heading(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _strip_subordinate_threshold_sections(text: str) -> str:
+    source = str(text or "")
+    for heading in (
+        "Monitoring Details",
+        "Monitoring and Kill Criteria",
+        "Operator Controls",
+        "Roadmap",
+        "Key Risks",
+        "Early Warning Signal",
+        "Early Warning Signals",
+        "Mitigation",
+        "Stop / Change-Course Threshold",
+        "Stop / Change-Course Thresholds",
+        "Stop / Change-Course",
+        "Canaries",
+        "Circuit breakers",
+    ):
+        source = re.sub(
+            rf"(?ims)^#{{1,6}}\s+{re.escape(heading)}\s*$.*?(?=^#{{1,6}}\s+|\Z)",
+            "",
+            source,
+        )
+    return source
 
 
 def _has_conflicting_rho_thresholds(text: str) -> bool:
@@ -799,15 +1192,69 @@ def _normalize_export_line(line: str, audience: str) -> str:
     value = _normalize_common_export_text(protected)
     if audience == "client":
         value = _normalize_client_export_text(value)
+    else:
+        value = _normalize_operator_export_text(value)
     return _restore_export_fragments(value, fragments)
 
 
 def _normalize_common_export_text(value: str) -> str:
     text = str(value or "")
+    reduced_sprint0 = re.match(
+        r"^(\s*)([1-4])\s+(billing reconciliation|cohort retention|funnel conversion|10 churn/user interviews)\s*$",
+        text,
+        flags=re.I,
+    )
+    if reduced_sprint0:
+        return f"{reduced_sprint0.group(1)}{reduced_sprint0.group(2)}. {reduced_sprint0.group(3)}"
     ordered_prefix = re.match(r"^(\s*\d+\.\s+)(.*)$", text)
     if ordered_prefix:
         return ordered_prefix.group(1) + _normalize_common_export_text(ordered_prefix.group(2))
     text = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", text)
+    text = re.sub(
+        r"\bless than provisional threshold\s+[\"“]([^\"”]+)[\"”]",
+        r'below the operator-defined threshold for "\1"',
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bmore than provisional threshold\s+week[- ]over[- ]week\b",
+        "above the operator-defined threshold week over week",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bless than provisional threshold of the expected signal\b",
+        "below the pre-registered interim threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bprovisional threshold of the planned run time\b",
+        "halfway through the planned run time",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bprovisional threshold of the provisional threshold\b",
+        "pre-registered interim threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bthreshold of the expected signal after threshold of the planned run time\b",
+        "expected signal at the planned interim review",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\bless than provisional threshold\b", "below the operator-defined threshold", text, flags=re.I)
+    text = re.sub(r"\bmore than provisional threshold\b", "above the operator-defined threshold", text, flags=re.I)
+    text = re.sub(r"\bprovisional effort estimate\b", "operator-defined effort estimate", text, flags=re.I)
+    text = re.sub(r"\bstructural prior s\b", "structural priors", text, flags=re.I)
+    text = re.sub(r"\bsystem blindness,\s+", "system blindness,", text, flags=re.I)
+    text = re.sub(r"\breference-class prior s\b", "reference-class priors", text, flags=re.I)
+    text = re.sub(r"\bmodel-generated prior s\b", "model-generated priors", text, flags=re.I)
+    text = re.sub(r"\bdiagnostic score s\b", "diagnostic scores", text, flags=re.I)
+    text = re.sub(r"\bprovisional risk estimate s\b", "provisional risk estimates", text, flags=re.I)
     text = re.sub(r"\bgreater than\s+greater than\b", "greater than", text, flags=re.I)
     text = re.sub(
         r"\boperator-confirmed threshold required prior probability\b",
@@ -836,6 +1283,8 @@ def _normalize_common_export_text(value: str) -> str:
 def _normalize_client_export_text(value: str) -> str:
     text = str(value or "")
     replacements = [
+        (r"\bmodel-generated prior probabilities\b", "structural priors"),
+        (r"\bmodel-generated priors\b", "structural priors"),
         (r"\bmodel-generated prior probability\b", "structural prior"),
         (r"\bmodel-generated prior\b", "structural prior"),
         (r"\bunconfirmed structural prior probability\b", "structural prior"),
@@ -848,6 +1297,50 @@ def _normalize_client_export_text(value: str) -> str:
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.I)
+    text = re.sub(r"\bstructural prior(?:\s+structural prior)+\b", "structural prior", text, flags=re.I)
+    text = re.sub(r"\bstructural prior\.\s*\d+\b", "structural prior", text, flags=re.I)
+    text = re.sub(r"\brisk priority score\s+\d+(?:\.\d+)?\b", "risk priority score", text, flags=re.I)
+    return text
+
+
+def _normalize_operator_export_text(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(
+        r"\bBF\s*=\s*(\d+(?:\.\d+)?)\b",
+        r"structural BF estimate=\1 (operator trace, not measured posterior)",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bBF\s+(\d+(?:\.\d+)?)(?!\s*[-–])\b",
+        r"structural BF estimate=\1 (operator trace, not measured posterior)",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bRPN\s*=\s*(\d+(?:\.\d+)?)\b",
+        r"RPN=\1, provisional risk estimate",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bRPN\s+(\d+(?:\.\d+)?)(?!\s*[-–])\b",
+        r"RPN=\1, provisional risk estimate",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bDQ\s*=\s*(\d+(?:\.\d+)?)\b",
+        r"DQ=\1, diagnostic score",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bDQ\s+(\d+(?:\.\d+)?)(?!\s*[-–])\b",
+        r"DQ=\1, diagnostic score",
+        text,
+        flags=re.I,
+    )
     return text
 
 
@@ -895,10 +1388,39 @@ def _renumber_repeated_ordered_markers(text: str) -> str:
     return "\n".join(output)
 
 
+def _join_standalone_list_markers(text: str) -> str:
+    lines = str(text or "").splitlines()
+    output: list[str] = []
+    index = 0
+    in_code_block = False
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            output.append(line)
+            index += 1
+            continue
+        if (
+            not in_code_block
+            and stripped in {"-", "*", "•"}
+            and index + 1 < len(lines)
+            and lines[index + 1].strip()
+            and not _looks_like_json_line(lines[index + 1].strip())
+        ):
+            indent = re.match(r"^(\s*)", line).group(1)  # type: ignore[union-attr]
+            output.append(f"{indent}{stripped} {lines[index + 1].strip()}")
+            index += 2
+            continue
+        output.append(line)
+        index += 1
+    return "\n".join(output)
+
+
 def _protect_export_fragments(value: str) -> tuple[str, list[str]]:
     fragments: list[str] = []
     pattern = re.compile(
-        r"https?://[^\s)>\]]+|file://[^\s)>\]]+|\b[A-Za-z]:[\\/][^\s|)>\]]+|\\\\[^\s|)>\]]+"
+        r"https?://[^\s)>\]]+|file://[^\s)>\]]+|\b[A-Za-z]:[\\/][^\n|)>\]]+|\\\\[^\n|)>\]]+"
     )
 
     def repl(match: re.Match[str]) -> str:

@@ -36,6 +36,7 @@ from report_quality import (
     client_simplify_text,
     commitment_score_text,
     evidence_maturity_projection,
+    guard_client_bf_confidence,
     monitor_has_signals,
     monitor_success_metric_lines,
     normalize_export_text,
@@ -269,6 +270,36 @@ If those roles or data owners are unavailable, use a reduced Sprint 0:
 3. funnel conversion
 4. 10 churn/user interviews"""
 
+SPARSE_GROWTH_SPEND_GATE = """Before Sprint 0 begins, assign one named owner for the Spend Authorization Gate. Until this is documented, the gate is advisory rather than enforceable.
+
+Required fields:
+
+- Gate owner name / role
+- Spend categories covered
+- Diagnostic-spend exemptions
+- DQ and BF thresholds
+- Override process
+- Review date
+
+Default owner: Executive Sponsor or Growth Lead. If no owner is assigned, the recommendation should be treated as incomplete."""
+
+SPARSE_GROWTH_MAIN_LIMITATION = """This recommendation is strongest as a diagnostic plan, not as a growth strategy. Its weakest point is governance: the spend gate only works if leadership assigns a named owner, defines covered spend categories, and agrees to an override process before Sprint 0 begins.
+
+What would change this recommendation?
+
+- If reliable existing data already shows one bottleneck, skip broad diagnosis and act on that bottleneck.
+- If leadership will not honor the spend gate, run only capped canary experiments.
+- If measurement cannot be repaired within 30 days, reduce scope to billing reconciliation, cohort retention, funnel conversion, and 10 user/churn interviews."""
+
+SPARSE_GROWTH_SPRINT0_EVIDENCE_PACK = """Collect one evidence pack before treating this as a measured growth recommendation:
+
+- billing/product metric reconciliation
+- cohort retention curves
+- funnel and channel-mix review
+- churned-customer interviews
+- win/loss or pipeline conversion review
+- CAC, LTV, NRR, and expansion baseline"""
+
 EMPTY_HYPOTHESES = "No hypotheses have been generated yet."
 EMPTY_UPLOADED_FILES = "No uploaded files were attached."
 EMPTY_MONITORING = "No monitoring plan is available yet."
@@ -450,7 +481,11 @@ def build_client_dossier_markdown(
     if state.monitor and monitor_fallback and monitor_fallback not in section_bodies["What to monitor"]:
         section_bodies["What to monitor"] = "\n\n".join([section_bodies["What to monitor"], monitor_fallback])
     sprint0_pack = _client_sprint0_pack(quality)
-    if sprint0_pack and sprint0_pack not in section_bodies["What evidence was used"]:
+    if (
+        sprint0_pack
+        and not _requires_sparse_growth_decision_package(quality)
+        and sprint0_pack not in section_bodies["What evidence was used"]
+    ):
         section_bodies["What evidence was used"] = "\n\n".join([section_bodies["What evidence was used"], sprint0_pack])
 
     for heading in CLIENT_DOSSIER_HEADINGS:
@@ -474,10 +509,14 @@ def build_client_dossier_markdown(
                 _client_safe_text(WAVE2_GRADUATION_MATRIX.replace("## Wave 2 Graduation Matrix\n\n", ""), quality),
             ])
 
-    return normalize_export_text(
+    markdown = normalize_export_text(
         "\n\n".join(part for part in lines if str(part).strip()),
         audience="client",
     )
+    if _requires_sparse_growth_decision_package(quality):
+        markdown = _dedupe_client_sparse_growth_sprint0(markdown)
+        markdown = guard_client_bf_confidence(markdown, state)
+    return markdown
 
 
 def build_operator_dossier_markdown(
@@ -576,14 +615,20 @@ def _sparse_growth_decision_package_sections(*, client: bool) -> list[str]:
     return [
         "## Decision Gates",
         SPARSE_GROWTH_DECISION_GATES,
+        "## Sprint 0 Evidence Pack Required",
+        SPARSE_GROWTH_SPRINT0_EVIDENCE_PACK,
         f"## {monitoring_label}",
         "The Decision Gates matrix is the source of truth for proceed, extend, stop, and escalation choices. Additional canaries or circuit breakers are implementation controls, not separate decision systems.",
         "## Governance fallback if leadership overrides the diagnostic hold",
         SPARSE_GROWTH_GOVERNANCE_FALLBACK,
+        "## Spend Gate Owner and Enforcement",
+        SPARSE_GROWTH_SPEND_GATE,
         "## What the team may do during Sprint 0",
         SPARSE_GROWTH_SPRINT0_ACTIONS,
         "## Minimum staffing assumption",
         SPARSE_GROWTH_CAPACITY_NOTE,
+        "## Main limitation of this recommendation",
+        SPARSE_GROWTH_MAIN_LIMITATION,
     ]
 
 
@@ -594,7 +639,13 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
     elif quality.evidence_warning and not client:
         blocks.extend(["## Evidence maturity warning", "Some evidence channels are missing: " + "; ".join(quality.sparse_reasons)])
     if quality.provisional_report:
-        blocks.extend(["## Provisional report warning", quality.provisional_clarification_caveat])
+        blocks.extend([
+            "## Provisional report warning",
+            "\n\n".join([
+                quality.provisional_clarification_caveat,
+                quality.provisional_clarification_next_action,
+            ]),
+        ])
     if client and not quality.has_concrete_locators:
         blocks.extend(["## Citation locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
     if quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state)):
@@ -603,10 +654,10 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
         blocks.extend(["## Risk classification note", RISK_CLASSIFICATION_WARNING])
     warnings = threshold_consistency_warnings(state, quality)
     if client and warnings:
-        blocks.extend(["## Threshold note", "Confirm one decision matrix in Sprint 0 before acting on thresholds."])
+        blocks.extend(["## Threshold note", "\n".join(f"- {warning}" for warning in warnings)])
     elif not client:
         if warnings:
-            blocks.extend(["## Threshold consistency warnings", "\n".join(f"- {warning}" for warning in warnings)])
+            blocks.extend(["## Threshold warnings", "\n".join(f"- {warning}" for warning in warnings)])
     return blocks
 
 
@@ -697,9 +748,11 @@ def _client_evidence_used(state: ProjectState) -> str:
             if quality.has_concrete_locators
             else NO_CONCRETE_LOCATORS_CLIENT_NOTE
         )
-        return "\n\n".join(part for part in [_markdown_table(rows), citation_summary, _client_sprint0_pack(quality)] if part)
+        sprint_pack = "" if _requires_sparse_growth_decision_package(quality) else _client_sprint0_pack(quality)
+        return "\n\n".join(part for part in [_markdown_table(rows), citation_summary, sprint_pack] if part)
     if quality.sparse_evidence:
-        return "\n\n".join([EMPTY_EVIDENCE, _client_sprint0_pack(quality)])
+        sprint_pack = "" if _requires_sparse_growth_decision_package(quality) else _client_sprint0_pack(quality)
+        return "\n\n".join(part for part in [EMPTY_EVIDENCE, sprint_pack] if part)
     return EMPTY_EVIDENCE
 
 
@@ -763,6 +816,8 @@ def _client_open_questions(state: ProjectState) -> str:
 def _client_sprint0_pack(quality) -> str:
     if not (quality.sparse_evidence or quality.evidence_warning):
         return ""
+    if _requires_sparse_growth_decision_package(quality):
+        return "### Sprint 0 Evidence Pack Required\n\n" + SPARSE_GROWTH_SPRINT0_EVIDENCE_PACK
     rows = [["Evidence to collect in Sprint 0", "Why it matters"]]
     for category in quality.evidence_categories[:8]:
         rows.append([category, "Validates assumptions before implementation."])
@@ -833,9 +888,9 @@ def operator_classification_summary(state: ProjectState) -> str:
         ["Field", "Value"],
         ["Domain", c.domain],
         ["Justification", c.justification],
-        ["Bayes factor", _fmt_value(c.bf)],
+        ["Structural BF estimate (operator trace, not measured posterior)", _fmt_value(c.bf)],
         ["Reference class", c.reference_class],
-        ["DQ", ", ".join(_fmt_value(value) for value in c.dq)],
+        ["DQ diagnostic score", ", ".join(_fmt_value(value) for value in c.dq)],
         ["Variety gaps", c.variety_gaps],
         ["RPD pattern", c.rpd_pattern],
         ["Sensemaking anchors", c.sensemaking_anchors],
@@ -1120,7 +1175,7 @@ def _phase_output_digest(state: ProjectState, phase: str) -> str:
 
 
 def summarize_hypotheses(state: ProjectState) -> str:
-    rows = [["ID", "Hypothesis", "Alpha/Beta", "Status", "Confirm", "Reject", "EVOI", "Cluster"]]
+    rows = [["ID", "Hypothesis", "Alpha/Beta structural priors", "Status", "Confirm", "Reject", "EVOI", "Cluster"]]
     for hypothesis in state.hypotheses or []:
         rows.append([
             hypothesis.id,
@@ -1449,6 +1504,13 @@ def _safe_report_markdown(state: ProjectState) -> str:
     if quality.sparse_evidence:
         markdown = _simplify_sparse_report_markdown(markdown, quality)
     markdown = _prepend_evidence_maturity_badge(markdown, state, quality)
+    if quality.provisional_report and quality.provisional_clarification_caveat not in markdown:
+        provisional_warning = "\n\n".join([
+            "## Provisional report warning",
+            quality.provisional_clarification_caveat,
+            quality.provisional_clarification_next_action,
+        ])
+        markdown = "\n\n".join([provisional_warning, markdown.strip()])
     if _risk_classification_may_understate_generated_content(state) and RISK_CLASSIFICATION_WARNING not in markdown:
         markdown = "\n\n".join([RISK_CLASSIFICATION_WARNING, markdown])
     if _requires_sparse_growth_decision_package(quality):
@@ -1457,7 +1519,11 @@ def _safe_report_markdown(state: ProjectState) -> str:
         markdown = "\n\n".join([markdown.strip(), WAVE2_GRADUATION_MATRIX])
     if not quality.has_concrete_locators:
         markdown = suppress_client_raw_evidence_ids(markdown)
-    return normalize_export_text(markdown, audience="client")
+    markdown = normalize_export_text(markdown, audience="client")
+    if _requires_sparse_growth_decision_package(quality):
+        markdown = _dedupe_client_sparse_growth_sprint0(markdown)
+        markdown = guard_client_bf_confidence(markdown, state)
+    return markdown
 
 
 def _prepend_report_freshness_warning(
@@ -1481,9 +1547,12 @@ def _prepend_evidence_maturity_badge(markdown: str, state: ProjectState, quality
 
 def _with_sparse_growth_decision_package(markdown: str) -> str:
     source = _remove_markdown_section(markdown, "Decision Gates")
+    source = _remove_markdown_section(source, "Sprint 0 Evidence Pack Required")
     source = _remove_markdown_section(source, "Governance fallback if leadership overrides the diagnostic hold")
+    source = _remove_markdown_section(source, "Spend Gate Owner and Enforcement")
     source = _remove_markdown_section(source, "What the team may do during Sprint 0")
     source = _remove_markdown_section(source, "Minimum staffing assumption")
+    source = _remove_markdown_section(source, "Main limitation of this recommendation")
     package = "\n\n".join(_sparse_growth_decision_package_sections(client=True))
     road_map = re.search(r"(?im)^#{1,6}\s+(?:Roadmap|Timeline / 7-30-60-90 roadmap)\s*$", source)
     if road_map:
@@ -1491,10 +1560,46 @@ def _with_sparse_growth_decision_package(markdown: str) -> str:
     return "\n\n".join([source.strip(), package])
 
 
+def _dedupe_client_sparse_growth_sprint0(markdown: str) -> str:
+    source = str(markdown or "")
+    split_match = re.search(
+        r"(?im)^#{1,6}\s+(?:Appendix|Technical appendix|SQI / quality review|Detailed evidence appendix)\b.*$",
+        source,
+    )
+    if split_match:
+        main = source[: split_match.start()]
+        appendix = source[split_match.start():]
+    else:
+        main = source
+        appendix = ""
+
+    seen = False
+
+    def sprint_section_repl(match: re.Match[str]) -> str:
+        nonlocal seen
+        if seen:
+            return ""
+        seen = True
+        return match.group(0)
+
+    main = re.sub(
+        r"(?ims)^#{1,6}\s+Sprint 0 Evidence Pack Required\s*$.*?(?=^#{1,6}\s+|\Z)",
+        sprint_section_repl,
+        main,
+    )
+    if seen:
+        main = re.sub(
+            r"(?ims)^\|\s*Evidence Item\s*\|\s*Why It Is Needed\s*\|\s*Decision It Validates\s*\|.*?(?=^\s*$|^#{1,6}\s+|\Z)",
+            "",
+            main,
+        )
+    return "\n\n".join(part.strip() for part in (main, appendix) if part.strip())
+
+
 def _remove_markdown_section(markdown: str, heading: str) -> str:
     source = str(markdown or "")
     pattern = re.compile(
-        rf"(?ims)^#{1,6}\s+{re.escape(heading)}\s*$.*?(?=^#{1,6}\s+|\Z)"
+        rf"(?ims)^#{{1,6}}\s+{re.escape(heading)}\s*$.*?(?=^#{{1,6}}\s+|\Z)"
     )
     return pattern.sub("", source).strip()
 
@@ -2272,10 +2377,10 @@ def _markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
         elif _is_markdown_divider(line):
             flush_lists()
             blocks.append({"type": "divider"})
-        elif re.match(r"^(-|\*)\s+", line):
+        elif re.match(r"^(-|\*|•)\s+", line):
             if numbered:
                 flush_lists()
-            bullets.append(re.sub(r"^(-|\*)\s+", "", line).strip())
+            bullets.append(re.sub(r"^(-|\*|•)\s+", "", line).strip())
         elif re.match(r"^\d+\.\s+", line):
             if bullets:
                 flush_lists()

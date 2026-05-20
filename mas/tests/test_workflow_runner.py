@@ -445,7 +445,11 @@ class TestWorkflowHelpers(unittest.TestCase):
         prompt = build_report_prompt(state)
 
         self.assertIn("This is a structured hypothesis map, not a measured audit.", prompt)
-        self.assertIn("Provisional report: clarification questions have not been answered.", prompt)
+        self.assertNotIn(
+            "Provisional report: decision-critical clarification questions have not been answered. "
+            "This is suitable for internal review only. Answer clarifications and regenerate before client delivery.",
+            prompt,
+        )
         self.assertIn("BF, DQ, RPN, H_norm, correlation/rho, priors, probabilities, dollars, and percentages", prompt)
         self.assertIn(SPARSE_CONFIDENCE_RULE, prompt)
 

@@ -19,8 +19,15 @@ if str(ROOT) not in sys.path:
 
 import api  # noqa: E402
 import report_freshness  # noqa: E402
-from report_quality import RISK_CLASSIFICATION_WARNING  # noqa: E402
+from report_quality import (  # noqa: E402
+    CLIENT_BF_CONFIDENCE_CAVEAT,
+    PROVISIONAL_CLARIFICATION_CAVEAT,
+    PROVISIONAL_CLARIFICATION_NEXT_ACTION,
+    RISK_CLASSIFICATION_WARNING,
+    THRESHOLD_CONFLICT_UNKNOWN_WARNING,
+)
 from clarifications import (  # noqa: E402
+    ClarificationAnswer,
     ClarificationCycle,
     ClarificationPriority,
     ClarificationQuestion,
@@ -37,6 +44,7 @@ from exporters import (  # noqa: E402
 )
 from state import (  # noqa: E402
     AuditOutput,
+    ClassifyOutput,
     FMEAItem,
     KnowledgeItem,
     KnowledgeLayerState,
@@ -537,7 +545,8 @@ class TestProfileExporterHelpers(unittest.TestCase):
         ):
             self.assertIn(expected, combined)
         self.assertIn("This is a structured hypothesis map, not a measured audit.", combined)
-        self.assertIn("Provisional report: clarification questions have not been answered.", combined)
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_CAVEAT, combined)
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, combined)
         self.assertIn("Sprint 0 evidence collection should validate", client_markdown)
 
     def test_client_dossier_simplifies_internal_jargon_but_operator_keeps_detail(self):
@@ -603,8 +612,9 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
             self.assertIn(expected, client_markdown)
         self.assertIn("FMEA", operator_markdown)
         self.assertIn("RPN", operator_markdown)
-        self.assertIn("BF 12", operator_markdown)
-        self.assertIn("DQ 65", operator_markdown)
+        self.assertIn("structural BF estimate=12", operator_markdown)
+        self.assertIn("operator trace, not measured posterior", operator_markdown)
+        self.assertIn("DQ=65, diagnostic score", operator_markdown)
         self.assertNotIn("model-generated prior", client_markdown)
         self.assertNotIn("internal confidence diagnostic", client_markdown)
         self.assertNotIn("evidence quality diagnostic", client_markdown)
@@ -677,8 +687,12 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
             "Canary success more than 5/20 in each table. rho target 0.45.\n"
         )
 
-        self.assertIn("Threshold consistency warning", build_operator_dossier_markdown(conflict))
-        self.assertIn("Confirm one decision matrix in Sprint 0", build_client_dossier_markdown(conflict))
+        conflict_operator = build_operator_dossier_markdown(conflict)
+        conflict_client = build_client_dossier_markdown(conflict)
+        self.assertIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, conflict_operator)
+        self.assertIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, conflict_client)
+        self.assertNotIn("Threshold consistency warning", conflict_operator)
+        self.assertNotIn("Confirm one decision matrix in Sprint 0", conflict_client)
         self.assertNotIn("Threshold consistency warning", build_operator_dossier_markdown(consistent))
 
     def test_exact_dollar_estimate_without_budget_evidence_is_caveated(self):
@@ -718,7 +732,7 @@ The proposed planning gate is more than 20% activation.
         self.assertIn("structural prior", markdown)
         self.assertNotIn("model-generated prior", markdown)
         self.assertIn("high provisional failure risk", markdown)
-        self.assertIn("provisional threshold", markdown)
+        self.assertIn("above the operator-defined threshold", markdown)
         self.assertNotIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
 
@@ -770,9 +784,96 @@ BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
         markdown = _safe_report_markdown(state)
 
         self.assertEqual(len(re.findall(r"(?m)^## Decision Gates$", markdown)), 1)
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_CAVEAT, markdown)
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, markdown)
         self.assertIn("Governance fallback if leadership overrides the diagnostic hold", markdown)
         self.assertIn("What the team may do during Sprint 0", markdown)
         self.assertIn("Minimum staffing assumption", markdown)
+
+    def test_sparse_growth_no_generated_questions_omits_provisional_warning_everywhere(self):
+        state = make_sparse_growth_state("sparse-growth-no-clarification-warning")
+        state.clarification_cycles = []
+        state.clarification_answers = []
+        _attach_report_generation_metadata(state, code_version="4.4.0")
+
+        client_markdown = build_client_dossier_markdown(state, current_code_version="4.4.0")
+        operator_markdown = build_operator_dossier_markdown(state, current_code_version="4.4.0")
+        report_markdown = _safe_report_markdown(state)
+
+        for markdown in (client_markdown, operator_markdown, report_markdown):
+            self.assertNotIn(PROVISIONAL_CLARIFICATION_CAVEAT, markdown)
+            self.assertNotIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, markdown)
+        self.assertNotIn("Freshness check:", client_markdown)
+
+    def test_open_required_clarifications_show_provisional_operator_action(self):
+        state = make_sparse_growth_state("sparse-growth-open-clarification")
+        state.clarification_cycles = [
+            ClarificationCycle(
+                cycle_id="cycle-critical",
+                project_id=state.project_id,
+                questions=[
+                    ClarificationQuestion(
+                        question_id="critical",
+                        text="Who owns the spend gate?",
+                        why_it_matters="Ownership makes the gate enforceable.",
+                        priority=ClarificationPriority.CRITICAL,
+                        affected_phase="strategy",
+                        source_gap="owner",
+                        status=ClarificationStatus.OPEN,
+                    )
+                ],
+            )
+        ]
+        _attach_report_generation_metadata(state, code_version="4.4.0")
+
+        markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+
+        self.assertIn(PROVISIONAL_CLARIFICATION_CAVEAT, markdown)
+        self.assertIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, markdown)
+        self.assertIn(PROVISIONAL_CLARIFICATION_CAVEAT, operator_markdown)
+        self.assertIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, operator_markdown)
+        self.assertIn(PROVISIONAL_CLARIFICATION_CAVEAT, report_markdown)
+        self.assertIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, report_markdown)
+        self.assertNotIn("Freshness check:", markdown)
+
+    def test_resolved_required_clarifications_hide_provisional_warning(self):
+        state = make_sparse_growth_state("sparse-growth-resolved-clarification")
+        state.clarification_cycles = [
+            ClarificationCycle(
+                cycle_id="cycle-critical",
+                project_id=state.project_id,
+                questions=[
+                    ClarificationQuestion(
+                        question_id="critical",
+                        text="Who owns the spend gate?",
+                        why_it_matters="Ownership makes the gate enforceable.",
+                        priority=ClarificationPriority.CRITICAL,
+                        affected_phase="strategy",
+                        source_gap="owner",
+                        status=ClarificationStatus.ANSWERED,
+                    )
+                ],
+            )
+        ]
+        state.clarification_answers = [
+            ClarificationAnswer(
+                answer_id="answer-critical",
+                question_id="critical",
+                answer_text="Growth Lead",
+                status=ClarificationStatus.ANSWERED,
+            )
+        ]
+        _attach_report_generation_metadata(state, code_version="4.4.0")
+
+        markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_CAVEAT, markdown)
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, markdown)
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_CAVEAT, report_markdown)
+        self.assertNotIn(PROVISIONAL_CLARIFICATION_NEXT_ACTION, report_markdown)
 
     def test_sparse_growth_governance_sprint0_and_capacity_sections_render(self):
         markdown = build_client_dossier_markdown(make_sparse_growth_state("sparse-growth-package"))
@@ -791,6 +892,94 @@ BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
         self.assertIn("funnel conversion", markdown)
         self.assertIn("10 churn/user interviews", markdown)
 
+    def test_sparse_growth_spend_gate_owner_and_enforcement_section_renders(self):
+        state = make_sparse_growth_state("sparse-growth-spend-gate")
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        for markdown in (client_markdown, operator_markdown):
+            self.assertIn("Spend Gate Owner and Enforcement", markdown)
+            self.assertIn(
+                "Before Sprint 0 begins, assign one named owner for the Spend Authorization Gate.",
+                markdown,
+            )
+            self.assertIn("advisory rather than enforceable", markdown)
+            self.assertIn("Gate owner name / role", markdown)
+            self.assertIn("Spend categories covered", markdown)
+            self.assertIn("Diagnostic-spend exemptions", markdown)
+            self.assertIn("DQ and BF thresholds", markdown)
+            self.assertIn("Override process", markdown)
+            self.assertIn("Review date", markdown)
+            self.assertIn("Default owner: Executive Sponsor or Growth Lead.", markdown)
+
+    def test_sparse_growth_client_bf_guard_and_limitation_section_render(self):
+        state = make_sparse_growth_state("sparse-growth-bf-guard")
+        state.classify = ClassifyOutput(bf=12.0)
+        state.report += "\n# Additional Analysis\nBF=12.0 says a confirmed causal hypothesis is retention."
+
+        markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn(CLIENT_BF_CONFIDENCE_CAVEAT, markdown)
+        self.assertNotIn("confirmed causal hypothesis", markdown.lower())
+        self.assertNotIn("BF=12.0", markdown)
+        self.assertIn("BF >10", markdown)
+        self.assertIn("structural BF estimate=12.0", operator_markdown)
+        self.assertIn("operator trace, not measured posterior", operator_markdown)
+        self.assertIn("Main limitation of this recommendation", markdown)
+        self.assertIn("This recommendation is strongest as a diagnostic plan, not as a growth strategy.", markdown)
+        self.assertIn("If reliable existing data already shows one bottleneck", markdown)
+        self.assertIn("If leadership will not honor the spend gate", markdown)
+        self.assertIn("If measurement cannot be repaired within 30 days", markdown)
+
+    def test_sparse_growth_main_limitation_precedes_appendix_in_report(self):
+        state = make_sparse_growth_state("sparse-growth-limitation-before-appendix")
+        state.report += "\n# Appendix: Technical Analysis\nTrace details."
+
+        markdown = _safe_report_markdown(state)
+
+        self.assertLess(
+            markdown.find("Main limitation of this recommendation"),
+            markdown.find("Appendix: Technical Analysis"),
+        )
+
+    def test_sparse_growth_threshold_warning_suppressed_when_decision_gates_are_canonical(self):
+        state = make_sparse_growth_state("sparse-growth-canonical-thresholds")
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        for markdown in (client_markdown, operator_markdown):
+            self.assertNotIn("Threshold consistency warning", markdown)
+            self.assertNotIn("Confirm one decision matrix", markdown)
+            self.assertNotIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, markdown)
+
+    def test_threshold_conflict_warnings_are_specific_or_source_unknown(self):
+        specific = make_export_state("specific-threshold-conflict")
+        specific.report = """# Decision Gates
+Proceed if DQ >70.
+
+# Alternative Thresholds
+Proceed if DQ >50.
+"""
+        ambiguous = make_export_state("ambiguous-threshold-conflict")
+        ambiguous.report = "Canary success more than 5/20 in one place and more than 15% elsewhere."
+
+        self.assertIn(
+            "Threshold conflict detected between: Decision Gates and Alternative Thresholds.",
+            build_operator_dossier_markdown(specific),
+        )
+        self.assertIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, build_operator_dossier_markdown(ambiguous))
+
+    def test_sparse_growth_client_has_single_sprint0_evidence_section(self):
+        markdown = build_client_dossier_markdown(make_sparse_growth_state("sparse-growth-evidence-dedupe"))
+
+        self.assertEqual(len(re.findall(r"(?m)^## Sprint 0 Evidence Pack Required$", markdown)), 1)
+        self.assertNotIn("Validates assumptions before implementation.", markdown)
+        self.assertIn("billing/product metric reconciliation", markdown)
+        self.assertIn("cohort retention curves", markdown)
+
     def test_sparse_growth_client_artifact_regression(self):
         markdown = build_client_dossier_markdown(make_sparse_growth_state("sparse-growth-artifacts"))
 
@@ -804,9 +993,35 @@ BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
             "2. 1",
             "0. 68",
             "70. 0",
+            "provisional threshold of the expected signal",
+            "provisional threshold of the planned run time",
+            "less than provisional threshold",
+            "more than provisional threshold",
+            "provisional effort estimate",
+            "structural prior s",
+            "Threshold consistency warning",
+            "Confirm one decision matrix",
+            THRESHOLD_CONFLICT_UNKNOWN_WARNING,
+            "BF=12.0",
+            "BF = 12.0",
+            "BF=12",
             "ev-growth",
         ):
             self.assertNotIn(forbidden, markdown)
+        for expected in (
+            "Evidence maturity: Hypothesis-only",
+            "Client-use status: Internal planning only",
+            "Validation required: Sprint 0 evidence pack",
+            "Decision Gates",
+            "Monitoring Details",
+            "Governance fallback if leadership overrides the diagnostic hold",
+            "Spend Gate Owner and Enforcement",
+            "What the team may do during Sprint 0",
+            "Minimum staffing assumption",
+            "Main limitation of this recommendation",
+            CLIENT_BF_CONFIDENCE_CAVEAT,
+        ):
+            self.assertIn(expected, markdown)
         self.assertIn("structural prior", markdown)
         self.assertIn("risk priority score", markdown)
         self.assertIn("1. Repair tracking.", markdown)
