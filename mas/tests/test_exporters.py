@@ -756,6 +756,9 @@ BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
 
         for exact in ("BF=42", "DQ=70", "RPN=336", "correlation=0.44", "probability 70%"):
             self.assertNotIn(exact, main)
+        self.assertIn("structural BF estimate=42 (operator trace, not measured posterior)", appendix)
+        self.assertNotIn("BF=42", appendix)
+        for exact in ("DQ=70", "RPN=336", "correlation=0.44", "probability 70%"):
             self.assertIn(exact, appendix)
 
     def test_sparse_growth_client_dossier_has_evidence_badge_and_decision_package(self):
@@ -957,6 +960,36 @@ BF=42 DQ=70 RPN=336 correlation=0.44 probability 70%.
             self.assertNotIn("Confirm one decision matrix", markdown)
             self.assertNotIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, markdown)
 
+    def test_operator_threshold_debug_is_safe_and_client_hidden(self):
+        state = make_export_state("threshold-debug-safe")
+        state.report = """# Decision Gates
+Proceed if DQ >70.
+
+# Technical Appendix
+Stop/change-course threshold is churn >15%.
+
+# Convergence Gate Status
+Status remains pending until DQ >70.
+
+# Framework References
+Canary example: CAC >20%.
+"""
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertNotIn("Threshold section classification", client_markdown)
+        self.assertIn("Threshold section classification", operator_markdown)
+        self.assertIn("Decision Gates", operator_markdown)
+        self.assertIn("primary", operator_markdown)
+        self.assertIn("Technical Appendix", operator_markdown)
+        self.assertIn("subordinate", operator_markdown)
+        self.assertIn("Convergence Gate Status", operator_markdown)
+        self.assertIn("Framework References", operator_markdown)
+        self.assertNotIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, operator_markdown)
+        self.assertNotIn(r"C:\\Users", operator_markdown)
+        self.assertNotIn("upload:file-1", operator_markdown)
+
     def test_threshold_conflict_warnings_are_specific_or_source_unknown(self):
         specific = make_export_state("specific-threshold-conflict")
         specific.report = """# Decision Gates
@@ -1042,7 +1075,8 @@ Proceed if DQ >50.
                         item_id="ev1",
                         evidence_id="ev1",
                         title="Uploaded note",
-                        source_ref="upload:file-1:metrics.md",
+                        source_ref="upload:file-1:metrics.md#chunk=1",
+                        structured_payload={"locator": "chunk=1"},
                     )
                 ],
                 uploaded_files=[
@@ -1130,10 +1164,18 @@ Proceed if DQ >50.
             data="Pricing notes: Starter tier is $499/month.",
             report="""# Executive Summary
 Onboarding friction is confirmed by the supplied files.
+Support ticket volume confirms an onboarding problem.
+BF = 12.0 — domain complexity confirmed.
+target threshold <provisional threshold.
+exceeds crux threshold by provisional threshold.
 The source note says "confirmed by customer interview" and should remain quoted.
 
 # Why This Is Recommended
 Onboarding friction is confirmed by the supplied files.
+Support ticket volume confirms an onboarding problem.
+BF = 12.0 — domain complexity confirmed.
+target threshold <provisional threshold.
+exceeds crux threshold by provisional threshold.
 
 # Recommended Path
 -
@@ -1179,6 +1221,12 @@ Starter tier at provisional planning estimate.
         self.assertIn("Starter tier at $499/month.", markdown)
         self.assertNotIn("Starter tier at provisional planning estimate", markdown)
         self.assertIn("Onboarding friction is supported by multiple supplied evidence files", markdown)
+        self.assertIn("Support ticket volume supports an onboarding problem.", markdown)
+        self.assertIn("structural BF estimate=12.0 (operator trace, not measured posterior)", markdown)
+        self.assertIn("target threshold below the operator-defined threshold.", markdown)
+        self.assertIn("exceeds the crux threshold by the operator-defined margin.", markdown)
+        self.assertNotIn("domain complexity confirmed", markdown)
+        self.assertNotIn("provisional threshold", markdown)
         self.assertIn('"confirmed by customer interview"', markdown)
 
     def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):

@@ -23,6 +23,7 @@ from report_quality import (  # noqa: E402
     guard_client_bf_confidence,
     normalize_export_text,
     threshold_consistency_warnings,
+    threshold_section_classification,
 )
 from clarifications import (  # noqa: E402
     ClarificationAnswer,
@@ -252,7 +253,8 @@ class TestReportQualityHelpers(unittest.TestCase):
                         item_id="ev1",
                         evidence_id="ev1",
                         title="Uploaded note",
-                        source_ref="upload:file-1:metrics.md",
+                        source_ref="upload:file-1:metrics.md#chunk=1",
+                        structured_payload={"locator": "chunk=1"},
                     )
                 ],
                 uploaded_files=[
@@ -544,10 +546,32 @@ Run channel checks if sample coverage >60%.
 
 # Roadmap
 Review if NRR <85%.
+
+# Technical Appendix
+Framework note: stop/change-course threshold is churn >15%.
+
+# Convergence Gate Status
+Gate status is pending until DQ >70.
+
+# Framework References
+Canary threshold example: activate review if CAC >20%.
+
+# Report appendix
+Monitoring threshold reference: escalate if NRR <85%.
 """,
         )
 
         self.assertEqual(threshold_consistency_warnings(state), [])
+        classifications = {
+            item.section_name: item.classification
+            for item in threshold_section_classification(state)
+            if item.threshold_like
+        }
+        self.assertEqual(classifications["Decision Gates"], "primary")
+        self.assertEqual(classifications["Technical Appendix"], "subordinate")
+        self.assertEqual(classifications["Convergence Gate Status"], "subordinate")
+        self.assertEqual(classifications["Framework References"], "subordinate")
+        self.assertEqual(classifications["Report appendix"], "subordinate")
 
     def test_threshold_two_primary_sections_report_specific_conflict(self):
         state = ProjectState(
@@ -588,6 +612,23 @@ Proceed if DQ >55.
 
         self.assertIn(
             "Threshold conflict detected between: Decision Gates and Convergence Gates.",
+            threshold_consistency_warnings(state),
+        )
+
+    def test_decision_gates_and_decision_criteria_report_specific_conflict(self):
+        state = ProjectState(
+            project_id="threshold-decision-criteria",
+            brief="Improve growth performance.",
+            report="""# Decision Gates
+Proceed if DQ >70.
+
+# Decision Criteria
+Proceed if DQ >55.
+""",
+        )
+
+        self.assertIn(
+            "Threshold conflict detected between: Decision Gates and Decision Criteria.",
             threshold_consistency_warnings(state),
         )
 
@@ -653,7 +694,9 @@ Proceed if DQ >55.
             "reference-class prior s\n"
             "model-generated prior s\n"
             "diagnostic score s\n"
-            "provisional risk estimate s"
+            "provisional risk estimate s\n"
+            "target threshold <provisional threshold\n"
+            "exceeds crux threshold by provisional threshold"
         )
 
         normalized = normalize_export_text(text, audience="client")
@@ -667,6 +710,8 @@ Proceed if DQ >55.
         self.assertIn("structural priors", normalized)
         self.assertIn("diagnostic scores", normalized)
         self.assertIn("provisional risk estimates", normalized)
+        self.assertIn("target threshold below the operator-defined threshold", normalized)
+        self.assertIn("exceeds the crux threshold by the operator-defined margin", normalized)
         for forbidden in (
             "less than provisional threshold",
             "more than provisional threshold",
@@ -676,6 +721,8 @@ Proceed if DQ >55.
             "model-generated prior s",
             "diagnostic score s",
             "provisional risk estimate s",
+            "target threshold <provisional threshold",
+            "exceeds crux threshold by provisional threshold",
         ):
             self.assertNotIn(forbidden, normalized)
 
@@ -707,8 +754,10 @@ funnel and channel-mix review
             "C:\\data\\more than provisional threshold week-over-week\\file.txt\n"
             "```json\n"
             '{"phrase":"less than provisional threshold"}\n'
+            '{"phrase":"target threshold <provisional threshold"}\n'
             "```\n"
             '{"phrase":"more than provisional threshold"}\n'
+            "[Evidence: ev1 | chunk=1]\n"
             'less than provisional threshold "very disappointed"'
         )
 
@@ -717,7 +766,9 @@ funnel and channel-mix review
         self.assertIn('https://example.com/less than provisional threshold "very disappointed"', normalized)
         self.assertIn("C:\\data\\more than provisional threshold week-over-week\\file.txt", normalized)
         self.assertIn('{"phrase":"less than provisional threshold"}', normalized)
+        self.assertIn('{"phrase":"target threshold <provisional threshold"}', normalized)
         self.assertIn('{"phrase":"more than provisional threshold"}', normalized)
+        self.assertIn("[Evidence: ev1 | chunk=1]", normalized)
         self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
 
 

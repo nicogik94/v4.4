@@ -70,6 +70,57 @@ THRESHOLD_WARNING = (
 THRESHOLD_CONFLICT_UNKNOWN_WARNING = "Possible threshold conflict detected, source unknown."
 THRESHOLD_CONFLICT_BETWEEN_TEMPLATE = "Threshold conflict detected between: {section_a} and {section_b}."
 
+PRIMARY_THRESHOLD_SECTION_NAMES = {
+    "decision gates",
+    "decision matrix",
+    "decision thresholds",
+    "decision criteria",
+    "thresholds",
+    "convergence gates",
+    "gate policy",
+    "spend authorization gate",
+}
+
+SUBORDINATE_THRESHOLD_SECTION_NAMES = {
+    "monitoring",
+    "monitoring details",
+    "monitoring and kill criteria",
+    "governance fallback",
+    "governance fallback if leadership overrides the diagnostic hold",
+    "spend gate",
+    "spend gate owner and enforcement",
+    "what the team may do during sprint 0",
+    "what the team may not do during sprint 0",
+    "sprint 0 controls",
+    "sprint 0 allowed controls",
+    "sprint 0 not allowed controls",
+    "sprint 0 evidence pack required",
+    "minimum staffing assumption",
+    "main limitation of this recommendation",
+    "operator controls",
+    "roadmap",
+    "key risks",
+    "early warning signal",
+    "early warning signals",
+    "mitigation",
+    "stop change course threshold",
+    "stop change course thresholds",
+    "stop change course",
+    "stop change course section",
+    "stop and change course",
+    "stop and change course threshold",
+    "stop and change course thresholds",
+    "stop change course sections",
+    "canaries",
+    "circuit breakers",
+    "technical appendix",
+    "appendix technical analysis",
+    "framework references",
+    "framework reference",
+    "convergence gate status",
+    "report appendix",
+}
+
 RISK_CLASSIFICATION_WARNING = "Risk classification may understate generated risk content."
 CLIENT_BF_CONFIDENCE_CAVEAT = (
     "Current evidence does not meet the confidence threshold for selecting a specific growth lever."
@@ -332,6 +383,14 @@ class EvidenceAccountingProjection:
     explicit_missing_file_display_names: tuple[str, ...] = ()
     unsupported_or_missing_warning: str = ""
     category_coverage_warning: str = ""
+
+
+@dataclass(frozen=True)
+class ThresholdSectionClassification:
+    section_name: str
+    classification: str
+    reason: str
+    threshold_like: bool = False
 
 
 def assess_report_quality_context(state: Any) -> ReportQualityContext:
@@ -689,11 +748,17 @@ def client_simplify_text(text: str, *, sparse_evidence: bool = False) -> str:
     """Translate technical report wording for client-facing dossier sections."""
     value = str(text or "")
     value = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", value)
+    value = re.sub(
+        r"\bBF\s*=\s*(\d+(?:\.\d+)?)\b(?:\s*[—-]\s*domain complexity confirmed\b)?",
+        r"structural BF estimate=\1 (operator trace, not measured posterior)",
+        value,
+        flags=re.I,
+    )
     citation_repeated = len(re.findall(r"citation unavailable", value, flags=re.I)) > 1
     replacements = [
         (r"\b(?:FMEA-derived labels?|FMEA)\b", "structured risk review"),
         (r"\b(?:RPN|risk priority numbers?)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "risk priority score"),
-        (r"\b(?:Bayes factor|BF)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "structural confidence signal"),
+        (r"(?<!structural\s)\b(?:Bayes factor|BF)(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "structural confidence signal"),
         (r"\bDQ(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "evidence quality signal"),
         (r"\bH_norm(?:\s*[=:]\s*\d+(?:\.\d+)?|\s+\d+(?:\.\d+)?)?\b", "uncertainty signal"),
         (
@@ -915,21 +980,18 @@ def threshold_conflict_warning(state: Any, context: ReportQualityContext | None 
     context = context or assess_report_quality_context(state)
     report = str(getattr(state, "report", "") or "")
     sections = _markdown_sections(report)
+    classifications = threshold_section_classification(state, context)
     primary_sections = [
-        section for section in sections
-        if _section_has_threshold_content(section[1]) and _is_primary_threshold_section(section[0])
+        classification for classification in classifications
+        if classification.threshold_like and classification.classification == "primary"
     ]
-    subordinate_sections = [
-        section for section in sections
-        if _section_has_threshold_content(section[1]) and _is_subordinate_threshold_section(section[0])
-    ]
-    decision_gate_count = sum(1 for heading, _ in sections if _normalize_heading(heading) == "decision gates")
+    decision_gate_count = sum(1 for section in primary_sections if _normalize_heading(section.section_name) == "decision gates")
     projected_sparse_growth_gate = context.sparse_evidence and context.decision_domain == "growth" and decision_gate_count == 0
 
     if decision_gate_count == 1:
         non_gate_primary = [
             section for section in primary_sections
-            if _normalize_heading(section[0]) != "decision gates"
+            if _normalize_heading(section.section_name) != "decision gates"
         ]
         if not non_gate_primary:
             return ""
@@ -937,37 +999,89 @@ def threshold_conflict_warning(state: Any, context: ReportQualityContext | None 
         if len(non_gate_primary) == 1:
             return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
                 section_a=source_of_truth,
-                section_b=non_gate_primary[0][0],
-            )
-        if len(non_gate_primary) == 1 and subordinate_sections:
-            return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
-                section_a=non_gate_primary[0][0],
-                section_b=subordinate_sections[0][0],
+                section_b=non_gate_primary[0].section_name,
             )
         if len(non_gate_primary) >= 2:
             return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
-                section_a=non_gate_primary[0][0],
-                section_b=non_gate_primary[1][0],
+                section_a=non_gate_primary[0].section_name,
+                section_b=non_gate_primary[1].section_name,
             )
         return THRESHOLD_CONFLICT_UNKNOWN_WARNING
 
     if projected_sparse_growth_gate and primary_sections:
         return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
             section_a="projected Decision Gates",
-            section_b=primary_sections[0][0],
+            section_b=primary_sections[0].section_name,
         )
 
     if len(primary_sections) >= 2:
         return THRESHOLD_CONFLICT_BETWEEN_TEMPLATE.format(
-            section_a=primary_sections[0][0],
-            section_b=primary_sections[1][0],
+            section_a=primary_sections[0].section_name,
+            section_b=primary_sections[1].section_name,
         )
 
-    text = _strip_decision_gates_sections(report or _combined_state_text(state))
-    text = _strip_subordinate_threshold_sections(text)
+    text = _strip_markdown_heading_sections(report) if sections else (report or _combined_state_text(state))
     if _has_conflicting_rho_thresholds(text) or _has_conflicting_canary_thresholds(text):
         return THRESHOLD_CONFLICT_UNKNOWN_WARNING
     return ""
+
+
+def threshold_section_classification(
+    state: Any,
+    context: ReportQualityContext | None = None,
+) -> tuple[ThresholdSectionClassification, ...]:
+    """Classify report sections for threshold warning/debug output.
+
+    This is intentionally section-name only. It never returns report excerpts,
+    uploaded source text, storage refs, or provider payloads.
+    """
+    report = str(getattr(state, "report", "") or "")
+    sections = _markdown_sections(report)
+    classifications: list[ThresholdSectionClassification] = []
+    preamble = _markdown_preamble(report)
+    if preamble.strip() and _section_has_threshold_content(preamble):
+        classifications.append(
+            ThresholdSectionClassification(
+                section_name="Unheaded report text",
+                classification="unheaded",
+                reason="Threshold-like content appears outside a markdown heading.",
+                threshold_like=True,
+            )
+        )
+    for heading, body in sections:
+        classifications.append(_classify_threshold_section(heading, body))
+    return tuple(classifications)
+
+
+def _classify_threshold_section(heading: str, body: str) -> ThresholdSectionClassification:
+    threshold_like = _section_has_threshold_content(body)
+    if not threshold_like:
+        return ThresholdSectionClassification(
+            section_name=str(heading or "Untitled section").strip() or "Untitled section",
+            classification="ignored",
+            reason="No threshold-like decision-control content detected.",
+            threshold_like=False,
+        )
+    if _is_subordinate_threshold_section(heading):
+        return ThresholdSectionClassification(
+            section_name=str(heading or "Untitled section").strip() or "Untitled section",
+            classification="subordinate",
+            reason="Status/control section; does not define a competing decision system.",
+            threshold_like=True,
+        )
+    if _is_primary_threshold_section(heading):
+        return ThresholdSectionClassification(
+            section_name=str(heading or "Untitled section").strip() or "Untitled section",
+            classification="primary",
+            reason="Primary gate, criteria, threshold, or decision-matrix section.",
+            threshold_like=True,
+        )
+    return ThresholdSectionClassification(
+        section_name=str(heading or "Untitled section").strip() or "Untitled section",
+        classification="ignored",
+        reason="Threshold-like content is under a non-gate narrative heading.",
+        threshold_like=True,
+    )
 
 
 def _strip_decision_gates_sections(text: str) -> str:
@@ -996,6 +1110,11 @@ def _markdown_sections(markdown: str) -> list[tuple[str, str]]:
     return sections
 
 
+def _markdown_preamble(markdown: str) -> str:
+    match = re.search(r"(?m)^#{1,6}\s+", str(markdown or ""))
+    return str(markdown or "")[: match.start()] if match else str(markdown or "")
+
+
 def _section_has_threshold_content(value: str) -> bool:
     text = str(value or "")
     return bool(
@@ -1006,52 +1125,18 @@ def _section_has_threshold_content(value: str) -> bool:
 
 def _is_primary_threshold_section(heading: str) -> bool:
     normalized = _normalize_heading(heading)
-    if normalized in {
-        "decision gates",
-        "decision matrix",
-        "decision thresholds",
-        "thresholds",
-        "convergence gates",
-        "gate policy",
-        "spend authorization gate",
-    }:
+    if _is_subordinate_threshold_section(heading):
+        return False
+    if normalized in PRIMARY_THRESHOLD_SECTION_NAMES:
         return True
     return bool(
-        re.search(r"\b(thresholds?|decision|gates?|matrix)\b", normalized)
-        and not _is_subordinate_threshold_section(heading)
+        re.search(r"\b(thresholds?|decision|gates?|matrix|criteria)\b", normalized)
     )
 
 
 def _is_subordinate_threshold_section(heading: str) -> bool:
     normalized = _normalize_heading(heading)
-    subordinate = {
-        "monitoring details",
-        "monitoring and kill criteria",
-        "governance fallback",
-        "governance fallback if leadership overrides the diagnostic hold",
-        "spend gate",
-        "spend gate owner and enforcement",
-        "what the team may do during sprint 0",
-        "what the team may not do during sprint 0",
-        "sprint 0 controls",
-        "sprint 0 allowed controls",
-        "sprint 0 not allowed controls",
-        "sprint 0 evidence pack required",
-        "minimum staffing assumption",
-        "main limitation of this recommendation",
-        "operator controls",
-        "roadmap",
-        "key risks",
-        "early warning signal",
-        "early warning signals",
-        "mitigation",
-        "stop change course threshold",
-        "stop change course thresholds",
-        "stop change course",
-        "canaries",
-        "circuit breakers",
-    }
-    return normalized in subordinate
+    return normalized in SUBORDINATE_THRESHOLD_SECTION_NAMES
 
 
 def _normalize_heading(value: str) -> str:
@@ -1061,6 +1146,7 @@ def _normalize_heading(value: str) -> str:
 def _strip_subordinate_threshold_sections(text: str) -> str:
     source = str(text or "")
     for heading in (
+        "Monitoring",
         "Monitoring Details",
         "Monitoring and Kill Criteria",
         "Governance fallback",
@@ -1084,8 +1170,14 @@ def _strip_subordinate_threshold_sections(text: str) -> str:
         "Stop / Change-Course Threshold",
         "Stop / Change-Course Thresholds",
         "Stop / Change-Course",
+        "Stop and Change Course",
         "Canaries",
         "Circuit breakers",
+        "Technical Appendix",
+        "Appendix: Technical Analysis",
+        "Framework References",
+        "Convergence Gate Status",
+        "Report appendix",
     ):
         source = re.sub(
             rf"(?ims)^#{{1,6}}\s+{re.escape(heading)}\s*$.*?(?=^#{{1,6}}\s+|\Z)",
@@ -1093,6 +1185,10 @@ def _strip_subordinate_threshold_sections(text: str) -> str:
             source,
         )
     return source
+
+
+def _strip_markdown_heading_sections(text: str) -> str:
+    return re.sub(r"(?ims)^#{1,6}\s+.+?\s*$.*?(?=^#{1,6}\s+|\Z)", "", str(text or ""))
 
 
 def _has_conflicting_rho_thresholds(text: str) -> bool:
@@ -1293,9 +1389,8 @@ def _concrete_source_locator_count(state: Any) -> int:
         entries = []
     count = 0
     for entry in entries:
-        has_concrete = bool(getattr(entry, "has_concrete_locator", False))
         locators = list(getattr(entry, "locators", []) or [])
-        if has_concrete or any(_is_concrete_locator(locator) for locator in locators):
+        if any(_is_concrete_locator(locator) for locator in locators):
             count += 1
     return count
 
@@ -1511,6 +1606,18 @@ def _normalize_common_export_text(value: str) -> str:
     if ordered_prefix:
         return ordered_prefix.group(1) + _normalize_common_export_text(ordered_prefix.group(2))
     text = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", text)
+    text = re.sub(
+        r"\btarget threshold\s*<\s*provisional threshold\b",
+        "target threshold below the operator-defined threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bexceeds crux threshold by provisional threshold\b",
+        "exceeds the crux threshold by the operator-defined margin",
+        text,
+        flags=re.I,
+    )
     text = re.sub(
         r"\bless than provisional threshold\s+[\"“]([^\"”]+)[\"”]",
         r'below the operator-defined threshold for "\1"',
@@ -1762,7 +1869,11 @@ def _is_concrete_locator(value: Any) -> bool:
         return False
     if re.search(r"unavailable|unknown|none|missing|\.\.\.", text, re.I):
         return False
-    return bool(re.search(r"(#|chunk=|row=|page=|upload:|fixture://|http://|https://)", text, re.I))
+    if re.fullmatch(r"chunk\s*=\s*[^;\s]+", text, re.I):
+        return False
+    if re.match(r"(?i)^(upload:|source[_ -]?chunk|knowledge[_ -]?id)", text):
+        return False
+    return bool(re.search(r"(row=|page=|sheet=|fixture://|http://|https://)", text, re.I))
 
 
 def _format_number(value: float) -> str:

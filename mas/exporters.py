@@ -49,6 +49,7 @@ from report_quality import (
     requires_telemetry_privacy_caveat,
     suppress_client_raw_evidence_ids,
     threshold_consistency_warnings,
+    threshold_section_classification,
 )
 import report_freshness
 from state import ProjectState
@@ -593,6 +594,7 @@ def _finalize_export_markdown(
     value = _apply_pricing_placeholder_cleanup(str(markdown or ""), state)
     value = normalize_export_text(value, audience=mode)
     if mode == "client":
+        value = _label_client_bf_trace_language(value)
         value = _soften_unvalidated_confirmed_language(value, state, quality)
         value = normalize_export_text(value, audience=mode)
     return value
@@ -634,6 +636,33 @@ def _state_contains_starter_price(state: ProjectState) -> bool:
                 getattr(action, "expected_impact", ""),
             ])
     return bool(re.search(r"\$\s*499\s*/\s*month|\$499/month", "\n".join(str(part) for part in parts), re.I))
+
+
+def _label_client_bf_trace_language(markdown: str) -> str:
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(markdown or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if (
+            in_code_block
+            or _looks_like_json_line(stripped)
+            or stripped.startswith(">")
+            or stripped.startswith("|")
+        ):
+            lines.append(line)
+            continue
+        value = re.sub(
+            r"\bBF\s*=\s*(\d+(?:\.\d+)?)\b(?:\s*[—-]\s*domain complexity confirmed\b)?",
+            r"structural BF estimate=\1 (operator trace, not measured posterior)",
+            line,
+            flags=re.I,
+        )
+        lines.append(value)
+    return "\n".join(lines)
 
 
 def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, quality) -> str:
@@ -689,8 +718,10 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
             value,
             flags=re.I,
         )
+        value = re.sub(r"\bconfirms\b", "supports", value, flags=re.I)
         value = re.sub(r"\bis confirmed\b", f"is {support_phrase}", value, flags=re.I)
         value = re.sub(r"\bwas confirmed\b", f"was {support_phrase}", value, flags=re.I)
+        value = re.sub(r"\bdomain complexity confirmed\b", "domain complexity is directionally supported", value, flags=re.I)
         lines.append(value)
     return "\n".join(lines)
 
@@ -1124,6 +1155,9 @@ def operator_evidence_summary(state: ProjectState) -> str:
         parts.append(accounting.unsupported_or_missing_warning)
     elif accounting.category_coverage_warning:
         parts.append(accounting.category_coverage_warning)
+    threshold_debug = _operator_threshold_section_classification_markdown(state)
+    if threshold_debug:
+        parts.extend(["### Threshold section classification", threshold_debug])
     evidence_rows = [["Evidence ID", "Title", "Summary", "Source phase"]]
     for evidence in state.imported_evidence or []:
         evidence_rows.append([evidence.evidence_id, evidence.title, evidence.summary, evidence.source_phase])
@@ -1164,6 +1198,30 @@ def operator_evidence_summary(state: ProjectState) -> str:
     if citation_summary:
         parts.extend(["### Citation locator review", citation_summary])
     return "\n\n".join(parts)
+
+
+def _operator_threshold_section_classification_markdown(state: ProjectState) -> str:
+    classifications = threshold_section_classification(state)
+    if not classifications:
+        return ""
+    rows = [["Section", "Classification", "Reason"]]
+    for item in classifications:
+        if item.classification == "ignored" and not item.threshold_like:
+            continue
+        rows.append([
+            _safe_threshold_debug_text(item.section_name),
+            _safe_threshold_debug_text(item.classification),
+            _safe_threshold_debug_text(item.reason),
+        ])
+    return _markdown_table(rows) if len(rows) > 1 else ""
+
+
+def _safe_threshold_debug_text(value: str) -> str:
+    text = _redact_unsafe_string(str(value or ""))
+    text = re.sub(r"\bupload:[^\s|]+", REDACTED, text, flags=re.I)
+    text = re.sub(r"\bstorage:[^\s|]+", REDACTED, text, flags=re.I)
+    text = re.sub(r"\bprovider[_-]?payload\b.*", "provider payload redacted", text, flags=re.I)
+    return _short_text(text, 140)
 
 
 def operator_strategy_summary(state: ProjectState) -> str:
