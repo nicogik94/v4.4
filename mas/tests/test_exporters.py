@@ -45,6 +45,8 @@ from exporters import (  # noqa: E402
 from state import (  # noqa: E402
     AuditOutput,
     ClassifyOutput,
+    FileParseStatus,
+    FileParseSummary,
     FMEAItem,
     KnowledgeItem,
     KnowledgeLayerState,
@@ -689,8 +691,8 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
 
         conflict_operator = build_operator_dossier_markdown(conflict)
         conflict_client = build_client_dossier_markdown(conflict)
-        self.assertIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, conflict_operator)
-        self.assertIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, conflict_client)
+        self.assertNotIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, conflict_operator)
+        self.assertNotIn(THRESHOLD_CONFLICT_UNKNOWN_WARNING, conflict_client)
         self.assertNotIn("Threshold consistency warning", conflict_operator)
         self.assertNotIn("Confirm one decision matrix in Sprint 0", conflict_client)
         self.assertNotIn("Threshold consistency warning", build_operator_dossier_markdown(consistent))
@@ -1027,6 +1029,157 @@ Proceed if DQ >50.
         self.assertIn("1. Repair tracking.", markdown)
         self.assertIn("2. Reconcile billing and product metrics.", markdown)
         self.assertIn("3. Interview churned customers.", markdown)
+
+    def test_evidence_backed_operator_accounting_separates_markers_from_locators(self):
+        state = ProjectState(
+            project_id="evidence-accounting",
+            project_name="Evidence accounting",
+            brief="Improve growth performance with cohort retention evidence.",
+            report="# Evidence Used\nUploaded notes support the direction [Evidence: ev1 | chunk=1].",
+            knowledge_layer=KnowledgeLayerState(
+                items=[
+                    KnowledgeItem(
+                        item_id="ev1",
+                        evidence_id="ev1",
+                        title="Uploaded note",
+                        source_ref="upload:file-1:metrics.md",
+                    )
+                ],
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="metrics.md",
+                        parse_summary=FileParseSummary(
+                            status=FileParseStatus.COMPLETED,
+                            knowledge_item_count=1,
+                            chunk_count=1,
+                        ),
+                    )
+                ],
+            ),
+        )
+
+        markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Evidence maturity: Partial evidence", markdown)
+        self.assertIn("citation_marker_count", markdown)
+        self.assertIn("citation_markers_resolved_count", markdown)
+        self.assertIn("citation_markers_resolved", markdown)
+        self.assertIn("concrete_source_locator_count", markdown)
+        self.assertIn("concrete_source_locators_available", markdown)
+        self.assertIn("uploaded_file_count", markdown)
+        self.assertIn("parsed_file_count", markdown)
+        self.assertIn("rejected_or_unsupported_file_count", markdown)
+        self.assertIn("imported_evidence_count", markdown)
+        self.assertIn("imported_signal_count", markdown)
+        self.assertIn("| concrete_source_locator_count | 0 |", markdown)
+        self.assertIn("| concrete_source_locators_available | False |", markdown)
+        self.assertIn("Uploaded knowledge chunks available; imported evidence records unavailable.", markdown)
+        self.assertIn("metrics.md", markdown)
+        self.assertNotIn("upload:file-1:metrics.md", markdown)
+
+    def test_evidence_backed_missing_warning_requires_explicit_filename(self):
+        explicit = ProjectState(
+            project_id="explicit-missing-evidence",
+            project_name="Explicit missing evidence",
+            brief="Expected evidence files: 02_cohort_retention_snapshot.json and metrics.md.",
+            knowledge_layer=KnowledgeLayerState(
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="metrics.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    )
+                ]
+            ),
+        )
+        generic = ProjectState(
+            project_id="generic-missing-evidence",
+            project_name="Generic missing evidence",
+            brief="Improve growth with cohort retention and channel performance evidence.",
+            knowledge_layer=KnowledgeLayerState(
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="metrics.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    )
+                ]
+            ),
+        )
+
+        explicit_markdown = build_operator_dossier_markdown(explicit)
+        generic_markdown = build_operator_dossier_markdown(generic)
+
+        self.assertIn(
+            "Some uploaded evidence files were not ingested. Convert unsupported files to .md/.txt or enable JSON ingestion.",
+            explicit_markdown,
+        )
+        self.assertIn("02_cohort_retention_snapshot.json", explicit_markdown)
+        self.assertNotIn("Some uploaded evidence files were not ingested", generic_markdown)
+        self.assertIn(
+            "Some expected evidence categories may be incomplete; verify uploaded source coverage.",
+            generic_markdown,
+        )
+
+    def test_final_client_markdown_cleanup_handles_bullets_pricing_and_partial_confirmed(self):
+        state = ProjectState(
+            project_id="final-client-cleanup",
+            project_name="Final client cleanup",
+            brief="Improve growth performance with cohort retention evidence.",
+            data="Pricing notes: Starter tier is $499/month.",
+            report="""# Executive Summary
+Onboarding friction is confirmed by the supplied files.
+The source note says "confirmed by customer interview" and should remain quoted.
+
+# Why This Is Recommended
+Onboarding friction is confirmed by the supplied files.
+
+# Recommended Path
+-
+Repair measurement
+*
+Review onboarding
+1 billing reconciliation
+2 cohort retention
+3 funnel conversion
+4 10 churn/user interviews
+Starter tier at provisional planning estimate.
+
+# Evidence Used
+| Evidence | What it says |
+|---|---|
+| Interview note | "confirmed by customer interview" |
+""",
+            knowledge_layer=KnowledgeLayerState(
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="pricing.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    ),
+                    UploadedFileManifest(
+                        file_id="file-2",
+                        filename="interviews.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    ),
+                ]
+            ),
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        self.assertNotRegex(markdown, r"(?m)^\s*[-*•]\s*$")
+        self.assertIn("- Repair measurement", markdown)
+        self.assertIn("* Review onboarding", markdown)
+        self.assertIn("1. billing reconciliation", markdown)
+        self.assertIn("2. cohort retention", markdown)
+        self.assertIn("3. funnel conversion", markdown)
+        self.assertIn("4. 10 churn/user interviews", markdown)
+        self.assertIn("Starter tier at $499/month.", markdown)
+        self.assertNotIn("Starter tier at provisional planning estimate", markdown)
+        self.assertIn("Onboarding friction is supported by multiple supplied evidence files", markdown)
+        self.assertIn('"confirmed by customer interview"', markdown)
 
     def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):
         minimal = make_sparse_growth_state("risk-minimal")

@@ -10,12 +10,15 @@ if str(ROOT) not in sys.path:
 
 from report_quality import (  # noqa: E402
     CLIENT_BF_CONFIDENCE_CAVEAT,
+    EVIDENCE_CATEGORY_COVERAGE_WARNING,
     PROVISIONAL_CLARIFICATION_CAVEAT,
     PROVISIONAL_CLARIFICATION_NEXT_ACTION,
     SPARSE_CONFIDENCE_RULE,
     THRESHOLD_CONFLICT_UNKNOWN_WARNING,
+    UNSUPPORTED_EVIDENCE_FILES_WARNING,
     assess_report_quality_context,
     client_simplify_text,
+    evidence_accounting_projection,
     evidence_maturity_projection,
     guard_client_bf_confidence,
     normalize_export_text,
@@ -28,7 +31,16 @@ from clarifications import (  # noqa: E402
     ClarificationQuestion,
     ClarificationStatus,
 )
-from state import ClassifyOutput, ProjectState, StrategyOutput  # noqa: E402
+from state import (  # noqa: E402
+    ClassifyOutput,
+    FileParseStatus,
+    FileParseSummary,
+    KnowledgeItem,
+    KnowledgeLayerState,
+    ProjectState,
+    StrategyOutput,
+    UploadedFileManifest,
+)
 
 
 def _question(question_id: str, priority=ClarificationPriority.CRITICAL, status=ClarificationStatus.OPEN):
@@ -229,6 +241,90 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertEqual(projection.client_use_status, "Internal planning only")
         self.assertEqual(projection.validation_required, "Sprint 0 evidence pack")
 
+    def test_uploaded_chunks_without_imported_evidence_are_partial_not_validated(self):
+        state = ProjectState(
+            project_id="partial-uploaded",
+            brief="Improve growth performance with cohort retention evidence.",
+            report="# Evidence Used\nUploaded notes support the direction [Evidence: ev1 | chunk=1].",
+            knowledge_layer=KnowledgeLayerState(
+                items=[
+                    KnowledgeItem(
+                        item_id="ev1",
+                        evidence_id="ev1",
+                        title="Uploaded note",
+                        source_ref="upload:file-1:metrics.md",
+                    )
+                ],
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="metrics.md",
+                        parse_summary=FileParseSummary(
+                            status=FileParseStatus.COMPLETED,
+                            knowledge_item_count=1,
+                            chunk_count=1,
+                        ),
+                    )
+                ],
+            ),
+        )
+
+        projection = evidence_maturity_projection(state)
+        accounting = evidence_accounting_projection(state)
+
+        self.assertEqual(projection.maturity, "Partial evidence")
+        self.assertEqual(accounting.citation_marker_count, 1)
+        self.assertEqual(accounting.citation_markers_resolved_count, 1)
+        self.assertTrue(accounting.citation_markers_resolved)
+        self.assertEqual(accounting.concrete_source_locator_count, 0)
+        self.assertFalse(accounting.concrete_source_locators_available)
+        self.assertEqual(accounting.uploaded_file_count, 1)
+        self.assertEqual(accounting.parsed_file_count, 1)
+        self.assertEqual(accounting.imported_evidence_count, 0)
+        self.assertFalse(accounting.imported_evidence_available)
+
+    def test_explicit_missing_filename_triggers_file_level_warning(self):
+        state = ProjectState(
+            project_id="explicit-missing-file",
+            brief="Expected evidence files: 02_cohort_retention_snapshot.json and metrics.md.",
+            knowledge_layer=KnowledgeLayerState(
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="metrics.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    )
+                ]
+            ),
+        )
+
+        accounting = evidence_accounting_projection(state)
+
+        self.assertEqual(accounting.rejected_or_unsupported_file_count, 1)
+        self.assertIn("02_cohort_retention_snapshot.json", accounting.rejected_file_display_names)
+        self.assertEqual(accounting.unsupported_or_missing_warning, UNSUPPORTED_EVIDENCE_FILES_WARNING)
+
+    def test_generic_evidence_categories_do_not_trigger_file_level_warning(self):
+        state = ProjectState(
+            project_id="generic-category-gap",
+            brief="Improve growth using cohort retention and channel performance evidence.",
+            knowledge_layer=KnowledgeLayerState(
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="metrics.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    )
+                ]
+            ),
+        )
+
+        accounting = evidence_accounting_projection(state)
+
+        self.assertEqual(accounting.rejected_or_unsupported_file_count, 0)
+        self.assertEqual(accounting.unsupported_or_missing_warning, "")
+        self.assertEqual(accounting.category_coverage_warning, EVIDENCE_CATEGORY_COVERAGE_WARNING)
+
     def test_no_generated_clarifications_do_not_trigger_provisional_warning(self):
         state = ProjectState(project_id="no-generated-clarifications", brief="Improve growth performance.")
         state.clarification_cycles = []
@@ -420,6 +516,34 @@ Trip circuit breaker if CAC >20%.
 
 # Early Warning Signal
 Escalate if NRR <85%.
+""",
+        )
+
+        self.assertEqual(threshold_consistency_warnings(state), [])
+
+    def test_threshold_evidence_backed_subordinate_controls_do_not_warn(self):
+        state = ProjectState(
+            project_id="evidence-backed-subordinate-thresholds",
+            brief="Improve growth performance across retention, churn, acquisition, and pipeline.",
+            report="""# Decision Gates
+| Gate | Proceed | Stop |
+|---|---|---|
+| Data quality | DQ >70 | DQ <50 |
+
+# Monitoring Details
+Stop canary if churn >15%.
+
+# Governance fallback if leadership overrides the diagnostic hold
+Require owner review if CAC >20%.
+
+# Spend Gate Owner and Enforcement
+Escalate if spend exceeds 10%.
+
+# What the team may do during Sprint 0
+Run channel checks if sample coverage >60%.
+
+# Roadmap
+Review if NRR <85%.
 """,
         )
 

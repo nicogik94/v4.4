@@ -27,14 +27,19 @@ from reportlab.platypus import (
 )
 
 from report_quality import (
+    EVIDENCE_CATEGORY_COVERAGE_WARNING,
     NO_CONCRETE_LOCATORS_CLIENT_NOTE,
+    PARTIAL_EVIDENCE_CAVEAT,
     RISK_CLASSIFICATION_WARNING,
     SPARSE_CONFIDENCE_RULE,
     TELEMETRY_PRIVACY_CAVEAT,
+    UPLOADED_KNOWLEDGE_NO_IMPORTED_EVIDENCE_NOTE,
+    UNSUPPORTED_EVIDENCE_FILES_WARNING,
     WAVE2_GRADUATION_MATRIX,
     assess_report_quality_context,
     client_simplify_text,
     commitment_score_text,
+    evidence_accounting_projection,
     evidence_maturity_projection,
     guard_client_bf_confidence,
     monitor_has_signals,
@@ -372,12 +377,13 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
 
     current_version = report_freshness.current_code_version()
     if profile_name == "report":
-        markdown = normalize_export_text(
+        markdown = _finalize_export_markdown(
             _prepend_report_freshness_warning(
                 _safe_report_markdown(state),
                 state,
                 current_code_version=current_version,
             ),
+            state,
             audience="client",
         )
     elif profile_name == "client_dossier":
@@ -516,7 +522,7 @@ def build_client_dossier_markdown(
     if _requires_sparse_growth_decision_package(quality):
         markdown = _dedupe_client_sparse_growth_sprint0(markdown)
         markdown = guard_client_bf_confidence(markdown, state)
-    return markdown
+    return _finalize_export_markdown(markdown, state, audience="client", quality=quality)
 
 
 def build_operator_dossier_markdown(
@@ -567,9 +573,141 @@ def build_operator_dossier_markdown(
             lines.append(WAVE2_GRADUATION_MATRIX)
         if heading == "Strategy plan" and _requires_sparse_growth_decision_package(quality):
             lines.extend(_sparse_growth_decision_package_sections(client=False))
-    return normalize_export_text(
+    return _finalize_export_markdown(
         "\n\n".join(part for part in lines if str(part).strip()),
+        state,
         audience="operator",
+        quality=quality,
+    )
+
+
+def _finalize_export_markdown(
+    markdown: str,
+    state: ProjectState,
+    *,
+    audience: str,
+    quality=None,
+) -> str:
+    mode = "operator" if str(audience or "").lower() == "operator" else "client"
+    quality = quality or assess_report_quality_context(state)
+    value = _apply_pricing_placeholder_cleanup(str(markdown or ""), state)
+    value = normalize_export_text(value, audience=mode)
+    if mode == "client":
+        value = _soften_unvalidated_confirmed_language(value, state, quality)
+        value = normalize_export_text(value, audience=mode)
+    return value
+
+
+def _apply_pricing_placeholder_cleanup(markdown: str, state: ProjectState) -> str:
+    replacement = (
+        "Starter tier at $499/month"
+        if _state_contains_starter_price(state)
+        else "Starter tier based on the supplied pricing notes."
+    )
+    return re.sub(
+        r"\bStarter tier at provisional planning estimate\b",
+        replacement,
+        str(markdown or ""),
+        flags=re.I,
+    )
+
+
+def _state_contains_starter_price(state: ProjectState) -> bool:
+    parts = [
+        getattr(state, "brief", ""),
+        getattr(state, "data", ""),
+        getattr(state, "report", ""),
+    ]
+    for item in list(getattr(getattr(state, "knowledge_layer", None), "items", []) or []):
+        parts.extend([getattr(item, "title", ""), getattr(item, "summary", ""), getattr(item, "source_ref", "")])
+    strategy = getattr(state, "strategy", None)
+    if strategy:
+        parts.extend([
+            getattr(strategy, "executive_strategy", ""),
+            getattr(strategy, "implementation_sequence", ""),
+            getattr(strategy, "monitoring_plan", ""),
+        ])
+        for action in list(getattr(strategy, "strategies", []) or []):
+            parts.extend([
+                getattr(action, "action", ""),
+                getattr(action, "justification", ""),
+                getattr(action, "expected_impact", ""),
+            ])
+    return bool(re.search(r"\$\s*499\s*/\s*month|\$499/month", "\n".join(str(part) for part in parts), re.I))
+
+
+def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, quality) -> str:
+    projection = evidence_maturity_projection(state, quality)
+    if projection.maturity == "Validated":
+        return markdown
+    accounting = evidence_accounting_projection(state)
+    support_phrase = (
+        "supported by multiple supplied evidence files"
+        if accounting.parsed_file_count >= 2 or accounting.uploaded_file_count >= 2
+        else "directionally supported"
+    )
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(markdown or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if (
+            in_code_block
+            or _looks_like_json_line(stripped)
+            or stripped.startswith(">")
+            or stripped.startswith("|")
+            or _line_has_quoted_confirmed(line)
+            or _line_looks_like_operator_label(line)
+        ):
+            lines.append(line)
+            continue
+        value = line
+        value = re.sub(
+            r"\b(onboarding friction) is confirmed(?:\s+by\s+[^.;\n]+)?",
+            lambda match: f"{match.group(1)} is {support_phrase}",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bconfirmed causal hypothesis\b",
+            "candidate causal hypothesis pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bcausal hypothesis is confirmed\b",
+            "causal hypothesis remains pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bconfirmed (driver|cause|bottleneck|friction|finding|growth lever|lever)\b",
+            lambda match: f"{support_phrase} {match.group(1)}",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\bis confirmed\b", f"is {support_phrase}", value, flags=re.I)
+        value = re.sub(r"\bwas confirmed\b", f"was {support_phrase}", value, flags=re.I)
+        lines.append(value)
+    return "\n".join(lines)
+
+
+def _line_has_quoted_confirmed(line: str) -> bool:
+    return bool(re.search(r"[\"'“][^\"'”]*\bconfirmed\b[^\"'”]*[\"'”]", str(line or ""), re.I))
+
+
+def _line_looks_like_operator_label(line: str) -> bool:
+    return bool(re.search(r"\b(operator trace|not measured posterior|diagnostic score|provisional risk estimate)\b", str(line or ""), re.I))
+
+
+def _looks_like_json_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    return bool(stripped) and (
+        (stripped.startswith("{") and stripped.endswith("}"))
+        or (stripped.startswith("[") and stripped.endswith("]"))
     )
 
 
@@ -588,6 +726,7 @@ def client_section_from_report_or_fallback(
 
 def _evidence_maturity_badge_markdown(state: ProjectState, quality, *, client: bool) -> list[str]:
     projection = evidence_maturity_projection(state, quality)
+    accounting = evidence_accounting_projection(state)
     lines = [
         "## Evidence maturity",
         f"Evidence maturity: {projection.maturity}",
@@ -598,11 +737,23 @@ def _evidence_maturity_badge_markdown(state: ProjectState, quality, *, client: b
         return lines
     rows = [
         ["Field", "Status"],
-        ["Uploaded files", str(projection.uploaded_files)],
-        ["Imported evidence", str(projection.imported_evidence)],
-        ["Imported signals", str(projection.imported_signals)],
-        ["Concrete locators", str(projection.has_concrete_locators)],
+        ["citation_marker_count", str(accounting.citation_marker_count)],
+        ["citation_markers_resolved_count", str(accounting.citation_markers_resolved_count)],
+        ["citation_markers_resolved", str(accounting.citation_markers_resolved)],
+        ["concrete_source_locator_count", str(accounting.concrete_source_locator_count)],
+        ["concrete_source_locators_available", str(accounting.concrete_source_locators_available)],
+        ["uploaded_file_count", str(accounting.uploaded_file_count)],
+        ["parsed_file_count", str(accounting.parsed_file_count)],
+        ["rejected_or_unsupported_file_count", str(accounting.rejected_or_unsupported_file_count)],
+        ["imported_evidence_count", str(accounting.imported_evidence_count)],
+        ["imported_evidence_available", str(accounting.imported_evidence_available)],
+        ["imported_signal_count", str(accounting.imported_signal_count)],
+        ["imported_signals_available", str(accounting.imported_signals_available)],
     ]
+    if accounting.parsed_file_display_names:
+        rows.append(["parsed_file_display_names", ", ".join(accounting.parsed_file_display_names)])
+    if accounting.rejected_file_display_names:
+        rows.append(["rejected_file_display_names", ", ".join(accounting.rejected_file_display_names)])
     return [*lines, _markdown_table(rows)]
 
 
@@ -634,8 +785,24 @@ def _sparse_growth_decision_package_sections(*, client: bool) -> list[str]:
 
 def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> list[str]:
     blocks: list[str] = []
+    projection = evidence_maturity_projection(state, quality)
+    accounting = evidence_accounting_projection(state)
     if quality.sparse_evidence:
-        blocks.extend(["## Evidence maturity warning", quality.sparse_evidence_caveat])
+        warnings = [quality.sparse_evidence_caveat]
+        if accounting.unsupported_or_missing_warning:
+            warnings.append(accounting.unsupported_or_missing_warning)
+        elif accounting.category_coverage_warning:
+            warnings.append(accounting.category_coverage_warning)
+        blocks.extend(["## Evidence maturity warning", "\n\n".join(warnings)])
+    elif projection.maturity == "Partial evidence":
+        warnings = [PARTIAL_EVIDENCE_CAVEAT]
+        if accounting.parsed_file_count > 0 and accounting.imported_evidence_count == 0:
+            warnings.append(UPLOADED_KNOWLEDGE_NO_IMPORTED_EVIDENCE_NOTE)
+        if accounting.unsupported_or_missing_warning:
+            warnings.append(accounting.unsupported_or_missing_warning)
+        elif accounting.category_coverage_warning:
+            warnings.append(accounting.category_coverage_warning)
+        blocks.extend(["## Evidence maturity warning", "\n\n".join(warnings)])
     elif quality.evidence_warning and not client:
         blocks.extend(["## Evidence maturity warning", "Some evidence channels are missing: " + "; ".join(quality.sparse_reasons)])
     if quality.provisional_report:
@@ -853,15 +1020,19 @@ def operator_current_recommendation(state: ProjectState) -> str:
 
 
 def operator_decision_snapshot(state: ProjectState) -> str:
+    accounting = evidence_accounting_projection(state)
     rows = [
         ["Field", "Value"],
         ["Project status", _project_status_value(state)],
         ["Current phase", state.current_phase],
         ["Report status", _enum_value(state.phase_status.get("report", ""))],
         ["Risk classification", state.risk_classification],
-        ["Uploaded files", str(len(_uploaded_file_manifest_payload(state)))],
-        ["Imported evidence", str(len(state.imported_evidence or []))],
-        ["Imported signals", str(len(state.imported_signals or []))],
+        ["uploaded_file_count", str(accounting.uploaded_file_count)],
+        ["parsed_file_count", str(accounting.parsed_file_count)],
+        ["rejected_or_unsupported_file_count", str(accounting.rejected_or_unsupported_file_count)],
+        ["imported_evidence_count", str(accounting.imported_evidence_count)],
+        ["imported_signal_count", str(accounting.imported_signal_count)],
+        ["concrete_source_locator_count", str(accounting.concrete_source_locator_count)],
         ["Clarification answers", str(len(state.clarification_answers or []))],
     ]
     return _markdown_table(rows)
@@ -928,6 +1099,31 @@ def operator_audit_summary(state: ProjectState) -> str:
 
 def operator_evidence_summary(state: ProjectState) -> str:
     parts = []
+    accounting = evidence_accounting_projection(state)
+    rows = [
+        ["Field", "Value"],
+        ["citation_marker_count", str(accounting.citation_marker_count)],
+        ["citation_markers_resolved_count", str(accounting.citation_markers_resolved_count)],
+        ["citation_markers_resolved", str(accounting.citation_markers_resolved)],
+        ["concrete_source_locator_count", str(accounting.concrete_source_locator_count)],
+        ["concrete_source_locators_available", str(accounting.concrete_source_locators_available)],
+        ["uploaded_file_count", str(accounting.uploaded_file_count)],
+        ["parsed_file_count", str(accounting.parsed_file_count)],
+        ["rejected_or_unsupported_file_count", str(accounting.rejected_or_unsupported_file_count)],
+        ["imported_evidence_count", str(accounting.imported_evidence_count)],
+        ["imported_evidence_available", str(accounting.imported_evidence_available)],
+        ["imported_signal_count", str(accounting.imported_signal_count)],
+        ["imported_signals_available", str(accounting.imported_signals_available)],
+    ]
+    if accounting.parsed_file_display_names:
+        rows.append(["parsed_file_display_names", ", ".join(accounting.parsed_file_display_names)])
+    if accounting.rejected_file_display_names:
+        rows.append(["rejected_file_display_names", ", ".join(accounting.rejected_file_display_names)])
+    parts.extend(["### Evidence accounting", _markdown_table(rows)])
+    if accounting.unsupported_or_missing_warning:
+        parts.append(accounting.unsupported_or_missing_warning)
+    elif accounting.category_coverage_warning:
+        parts.append(accounting.category_coverage_warning)
     evidence_rows = [["Evidence ID", "Title", "Summary", "Source phase"]]
     for evidence in state.imported_evidence or []:
         evidence_rows.append([evidence.evidence_id, evidence.title, evidence.summary, evidence.source_phase])
@@ -1523,7 +1719,7 @@ def _safe_report_markdown(state: ProjectState) -> str:
     if _requires_sparse_growth_decision_package(quality):
         markdown = _dedupe_client_sparse_growth_sprint0(markdown)
         markdown = guard_client_bf_confidence(markdown, state)
-    return markdown
+    return _finalize_export_markdown(markdown, state, audience="client", quality=quality)
 
 
 def _prepend_report_freshness_warning(
@@ -1675,7 +1871,7 @@ def _collapse_markdown_blank_lines(value: str) -> str:
 
 
 def _client_safe_text(text: str, quality) -> str:
-    value = client_simplify_text(text, sparse_evidence=quality.sparse_evidence)
+    value = client_simplify_text(text, sparse_evidence=quality.sparse_evidence or quality.evidence_warning)
     if quality.decision_domain == "growth":
         replacements = {
             "Search Console": "growth analytics",
@@ -1882,7 +2078,7 @@ def _citation_locator_summary_markdown(state: ProjectState, *, include_registry:
         return ""
 
     lines = [
-        "Citation locator review summary — confirms marker/locator availability only, not semantic support.",
+        "Citation locator review summary — confirms citation marker resolution only, not semantic support or concrete source locator availability.",
     ]
     if result.summary_counts:
         rows = [["Metric", "Count"]]

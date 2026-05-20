@@ -16,6 +16,24 @@ SPARSE_EVIDENCE_CAVEAT = (
     "rankings as provisional priors until Sprint 0 validates them."
 )
 
+PARTIAL_EVIDENCE_CAVEAT = (
+    "Some project evidence was supplied, but validation is incomplete and some "
+    "decision-critical evidence is missing or degraded."
+)
+
+UPLOADED_KNOWLEDGE_NO_IMPORTED_EVIDENCE_NOTE = (
+    "Uploaded knowledge chunks available; imported evidence records unavailable."
+)
+
+UNSUPPORTED_EVIDENCE_FILES_WARNING = (
+    "Some uploaded evidence files were not ingested. Convert unsupported files "
+    "to .md/.txt or enable JSON ingestion."
+)
+
+EVIDENCE_CATEGORY_COVERAGE_WARNING = (
+    "Some expected evidence categories may be incomplete; verify uploaded source coverage."
+)
+
 PROVISIONAL_CLARIFICATION_CAVEAT = (
     "Provisional report: decision-critical clarification questions have not "
     "been answered. This is suitable for internal review only. Answer "
@@ -281,16 +299,51 @@ class EvidenceMaturityProjection:
     imported_evidence: int = 0
     imported_signals: int = 0
     has_concrete_locators: bool = False
+    citation_marker_count: int = 0
+    citation_markers_resolved_count: int = 0
+    citation_markers_resolved: bool = False
+    concrete_source_locator_count: int = 0
+    concrete_source_locators_available: bool = False
+    uploaded_file_count: int = 0
+    parsed_file_count: int = 0
+    rejected_or_unsupported_file_count: int = 0
+    imported_evidence_count: int = 0
+    imported_evidence_available: bool = False
+    imported_signal_count: int = 0
+    imported_signals_available: bool = False
+
+
+@dataclass(frozen=True)
+class EvidenceAccountingProjection:
+    citation_marker_count: int = 0
+    citation_markers_resolved_count: int = 0
+    citation_markers_resolved: bool = False
+    concrete_source_locator_count: int = 0
+    concrete_source_locators_available: bool = False
+    uploaded_file_count: int = 0
+    parsed_file_count: int = 0
+    rejected_or_unsupported_file_count: int = 0
+    imported_evidence_count: int = 0
+    imported_evidence_available: bool = False
+    imported_signal_count: int = 0
+    imported_signals_available: bool = False
+    parsed_file_display_names: tuple[str, ...] = ()
+    rejected_file_display_names: tuple[str, ...] = ()
+    explicit_missing_file_display_names: tuple[str, ...] = ()
+    unsupported_or_missing_warning: str = ""
+    category_coverage_warning: str = ""
 
 
 def assess_report_quality_context(state: Any) -> ReportQualityContext:
     text = _combined_state_text(state)
     domain_text = _domain_source_text(state)
-    uploaded_count = len(_uploaded_files(state))
-    imported_evidence_count = len(getattr(state, "imported_evidence", []) or [])
-    imported_signal_count = len(getattr(state, "imported_signals", []) or [])
+    accounting = evidence_accounting_projection(state)
+    uploaded_count = accounting.uploaded_file_count
+    parsed_file_count = accounting.parsed_file_count
+    imported_evidence_count = accounting.imported_evidence_count
+    imported_signal_count = accounting.imported_signal_count
     clarification_count = len(getattr(state, "clarification_answers", []) or [])
-    has_locators = has_concrete_evidence_locators(state)
+    has_locators = accounting.concrete_source_locators_available
     zero_clarifications = clarification_count == 0
     required_clarifications_open = has_required_clarifications_open(state)
 
@@ -309,16 +362,18 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
     if explicit_sparse:
         sparse_reasons.append("Project context says evidence is unknown, unavailable, absent, or uncited.")
 
-    absent_count = sum(
-        [
-            uploaded_count == 0,
-            imported_evidence_count == 0,
-            imported_signal_count == 0,
-            zero_clarifications,
-            not has_locators,
-        ]
+    has_uploaded_knowledge = uploaded_count > 0 or parsed_file_count > 0
+    sparse_evidence = (
+        not has_uploaded_knowledge
+        and imported_evidence_count == 0
+        and imported_signal_count == 0
+        and not has_locators
+    ) or (
+        explicit_sparse
+        and not has_uploaded_knowledge
+        and imported_evidence_count == 0
+        and imported_signal_count == 0
     )
-    sparse_evidence = absent_count >= 4 or explicit_sparse
     evidence_warning = bool(sparse_reasons) and not sparse_evidence
     domain = infer_decision_domain(domain_text)
     roles = OWNER_ROLE_MAPS.get(domain, OWNER_ROLE_MAPS["general_business"])
@@ -482,15 +537,49 @@ def _boolish(value: Any) -> bool | None:
     return None
 
 
+def evidence_accounting_projection(state: Any) -> EvidenceAccountingProjection:
+    """Return export-facing evidence accounting without changing state."""
+    uploaded_files = _uploaded_files(state)
+    parsed_names = _parsed_file_display_names(uploaded_files)
+    explicit_missing = _explicit_missing_evidence_file_names(state, parsed_names)
+    rejected_names = _explicit_rejected_file_display_names(state)
+    missing_or_rejected = _unique_file_names([*explicit_missing, *rejected_names])
+    citation_marker_count, resolved_count = _citation_marker_counts(state)
+    concrete_count = _concrete_source_locator_count(state)
+    generic_category_warning = ""
+    if not missing_or_rejected and _generic_evidence_categories_look_incomplete(state):
+        generic_category_warning = EVIDENCE_CATEGORY_COVERAGE_WARNING
+    return EvidenceAccountingProjection(
+        citation_marker_count=citation_marker_count,
+        citation_markers_resolved_count=resolved_count,
+        citation_markers_resolved=citation_marker_count > 0 and resolved_count >= citation_marker_count,
+        concrete_source_locator_count=concrete_count,
+        concrete_source_locators_available=concrete_count > 0,
+        uploaded_file_count=len(uploaded_files),
+        parsed_file_count=len(parsed_names),
+        rejected_or_unsupported_file_count=len(missing_or_rejected),
+        imported_evidence_count=len(getattr(state, "imported_evidence", []) or []),
+        imported_evidence_available=bool(getattr(state, "imported_evidence", []) or []),
+        imported_signal_count=len(getattr(state, "imported_signals", []) or []),
+        imported_signals_available=bool(getattr(state, "imported_signals", []) or []),
+        parsed_file_display_names=tuple(parsed_names),
+        rejected_file_display_names=tuple(missing_or_rejected),
+        explicit_missing_file_display_names=tuple(explicit_missing),
+        unsupported_or_missing_warning=UNSUPPORTED_EVIDENCE_FILES_WARNING if missing_or_rejected else "",
+        category_coverage_warning=generic_category_warning,
+    )
+
+
 def evidence_maturity_projection(
     state: Any,
     context: ReportQualityContext | None = None,
 ) -> EvidenceMaturityProjection:
     context = context or assess_report_quality_context(state)
-    uploaded_count = len(_uploaded_files(state))
-    imported_evidence_count = len(getattr(state, "imported_evidence", []) or [])
-    imported_signal_count = len(getattr(state, "imported_signals", []) or [])
-    has_locators = context.has_concrete_locators
+    accounting = evidence_accounting_projection(state)
+    uploaded_count = accounting.uploaded_file_count
+    imported_evidence_count = accounting.imported_evidence_count
+    imported_signal_count = accounting.imported_signal_count
+    has_locators = accounting.concrete_source_locators_available
 
     if (
         uploaded_count == 0
@@ -506,10 +595,11 @@ def evidence_maturity_projection(
             imported_evidence=imported_evidence_count,
             imported_signals=imported_signal_count,
             has_concrete_locators=has_locators,
+            **_evidence_accounting_kwargs(accounting),
         )
 
     if not context.sparse_evidence and has_locators and (
-        uploaded_count > 0 or imported_evidence_count > 0 or imported_signal_count > 0
+        imported_evidence_count > 0 or imported_signal_count > 0
     ):
         return EvidenceMaturityProjection(
             maturity="Validated",
@@ -519,6 +609,7 @@ def evidence_maturity_projection(
             imported_evidence=imported_evidence_count,
             imported_signals=imported_signal_count,
             has_concrete_locators=has_locators,
+            **_evidence_accounting_kwargs(accounting),
         )
 
     return EvidenceMaturityProjection(
@@ -529,7 +620,25 @@ def evidence_maturity_projection(
         imported_evidence=imported_evidence_count,
         imported_signals=imported_signal_count,
         has_concrete_locators=has_locators,
+        **_evidence_accounting_kwargs(accounting),
     )
+
+
+def _evidence_accounting_kwargs(accounting: EvidenceAccountingProjection) -> dict[str, Any]:
+    return {
+        "citation_marker_count": accounting.citation_marker_count,
+        "citation_markers_resolved_count": accounting.citation_markers_resolved_count,
+        "citation_markers_resolved": accounting.citation_markers_resolved,
+        "concrete_source_locator_count": accounting.concrete_source_locator_count,
+        "concrete_source_locators_available": accounting.concrete_source_locators_available,
+        "uploaded_file_count": accounting.uploaded_file_count,
+        "parsed_file_count": accounting.parsed_file_count,
+        "rejected_or_unsupported_file_count": accounting.rejected_or_unsupported_file_count,
+        "imported_evidence_count": accounting.imported_evidence_count,
+        "imported_evidence_available": accounting.imported_evidence_available,
+        "imported_signal_count": accounting.imported_signal_count,
+        "imported_signals_available": accounting.imported_signals_available,
+    }
 
 
 def infer_decision_domain(text: str) -> str:
@@ -564,20 +673,7 @@ def requires_productization_wave_matrix(state: Any, context: ReportQualityContex
 
 
 def has_concrete_evidence_locators(state: Any) -> bool:
-    layer = getattr(state, "knowledge_layer", None)
-    for item in list(getattr(layer, "items", []) or []):
-        for value in (
-            getattr(item, "locator", ""),
-            getattr(item, "source_ref", ""),
-            _structured_locator(item),
-        ):
-            if _is_concrete_locator(value):
-                return True
-    for evidence in list(getattr(state, "imported_evidence", []) or []):
-        provenance = getattr(evidence, "provenance", None)
-        if _is_concrete_locator(getattr(provenance, "external_uri", "")):
-            return True
-    return False
+    return _concrete_source_locator_count(state) > 0
 
 
 def has_budget_or_spend_evidence(state: Any) -> bool:
@@ -867,9 +963,8 @@ def threshold_conflict_warning(state: Any, context: ReportQualityContext | None 
             section_b=primary_sections[1][0],
         )
 
-    text = _strip_decision_gates_sections(_combined_state_text(state))
-    if projected_sparse_growth_gate and subordinate_sections and not primary_sections:
-        text = _strip_subordinate_threshold_sections(text)
+    text = _strip_decision_gates_sections(report or _combined_state_text(state))
+    text = _strip_subordinate_threshold_sections(text)
     if _has_conflicting_rho_thresholds(text) or _has_conflicting_canary_thresholds(text):
         return THRESHOLD_CONFLICT_UNKNOWN_WARNING
     return ""
@@ -932,6 +1027,18 @@ def _is_subordinate_threshold_section(heading: str) -> bool:
     subordinate = {
         "monitoring details",
         "monitoring and kill criteria",
+        "governance fallback",
+        "governance fallback if leadership overrides the diagnostic hold",
+        "spend gate",
+        "spend gate owner and enforcement",
+        "what the team may do during sprint 0",
+        "what the team may not do during sprint 0",
+        "sprint 0 controls",
+        "sprint 0 allowed controls",
+        "sprint 0 not allowed controls",
+        "sprint 0 evidence pack required",
+        "minimum staffing assumption",
+        "main limitation of this recommendation",
         "operator controls",
         "roadmap",
         "key risks",
@@ -956,6 +1063,18 @@ def _strip_subordinate_threshold_sections(text: str) -> str:
     for heading in (
         "Monitoring Details",
         "Monitoring and Kill Criteria",
+        "Governance fallback",
+        "Governance fallback if leadership overrides the diagnostic hold",
+        "Spend Gate",
+        "Spend Gate Owner and Enforcement",
+        "What the team may do during Sprint 0",
+        "What the team may not do during Sprint 0",
+        "Sprint 0 Controls",
+        "Sprint 0 allowed controls",
+        "Sprint 0 not allowed controls",
+        "Sprint 0 Evidence Pack Required",
+        "Minimum staffing assumption",
+        "Main limitation of this recommendation",
         "Operator Controls",
         "Roadmap",
         "Key Risks",
@@ -1011,6 +1130,188 @@ def _has_exact_dollar_estimate(text: str) -> bool:
 def _uploaded_files(state: Any) -> list[Any]:
     layer = getattr(state, "knowledge_layer", None)
     return list(getattr(layer, "uploaded_files", []) or [])
+
+
+def _parsed_file_display_names(uploaded_files: list[Any]) -> list[str]:
+    names: list[str] = []
+    for manifest in uploaded_files:
+        parse_summary = _field_get(manifest, "parse_summary")
+        status = _status_text(_field_get(parse_summary, "status"))
+        if status and status not in {"completed", "complete"}:
+            continue
+        name = _safe_display_file_name(_field_get(manifest, "filename"))
+        if name:
+            names.append(name)
+    return _unique_file_names(names)
+
+
+def _explicit_missing_evidence_file_names(state: Any, parsed_names: list[str]) -> list[str]:
+    parsed_lookup = {_filename_key(name) for name in parsed_names}
+    expected = _explicit_expected_file_names(state)
+    return [
+        name for name in expected
+        if _filename_key(name) and _filename_key(name) not in parsed_lookup
+    ]
+
+
+def _explicit_expected_file_names(state: Any) -> list[str]:
+    names: list[str] = []
+    for field_name in ("expected_evidence_files", "expected_files"):
+        names.extend(_file_names_from_value(_field_get(state, field_name)))
+    uploaded_manifest = _field_get(state, "uploaded_manifest")
+    for row in _iter_maybe(uploaded_manifest):
+        status = _status_text(_field_get(row, "status") or _field_get(row, "parse_status"))
+        if status in {"expected", "missing", "rejected", "skipped", "unsupported", "failed"}:
+            names.extend(_file_names_from_value(row))
+    names.extend(_explicit_file_names_in_brief(getattr(state, "brief", "")))
+    return _unique_file_names(names)
+
+
+def _explicit_rejected_file_display_names(state: Any) -> list[str]:
+    names: list[str] = []
+    for field_name in ("rejected_files", "skipped_files", "unsupported_files"):
+        names.extend(_file_names_from_value(_field_get(state, field_name)))
+    uploaded_manifest = _field_get(state, "uploaded_manifest")
+    for row in _iter_maybe(uploaded_manifest):
+        status = _status_text(_field_get(row, "status") or _field_get(row, "parse_status"))
+        if status in {"rejected", "skipped", "unsupported", "failed"}:
+            names.extend(_file_names_from_value(row))
+    return _unique_file_names(names)
+
+
+def _explicit_file_names_in_brief(value: Any) -> list[str]:
+    names: list[str] = []
+    for line in str(value or "").splitlines():
+        if not re.search(r"\b(expected|evidence|uploaded|manifest|missing|skipped|rejected|source\s+files?|files?)\b", line, re.I):
+            continue
+        names.extend(_file_name_matches(line))
+    return _unique_file_names(names)
+
+
+def _file_names_from_value(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, dict):
+        names: list[str] = []
+        for key in ("filename", "file_name", "original_filename", "display_name", "name", "path"):
+            names.extend(_file_names_from_value(value.get(key)))
+        for item in value.values():
+            if isinstance(item, (dict, list, tuple, set)):
+                names.extend(_file_names_from_value(item))
+        return _unique_file_names(names)
+    if isinstance(value, (list, tuple, set)):
+        names: list[str] = []
+        for item in value:
+            names.extend(_file_names_from_value(item))
+        return _unique_file_names(names)
+    for key in ("filename", "file_name", "original_filename", "display_name", "name", "path"):
+        attr = getattr(value, key, None)
+        if attr not in (None, ""):
+            return _file_names_from_value(attr)
+    return _file_name_matches(str(value))
+
+
+def _file_name_matches(value: str) -> list[str]:
+    matches = re.findall(
+        r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.() -]*\.(?:json|pdf|docx|txt|md|csv|xlsx))(?![A-Za-z0-9_.-])",
+        str(value or ""),
+        flags=re.I,
+    )
+    return _unique_file_names(_safe_display_file_name(match) for match in matches)
+
+
+def _safe_display_file_name(value: Any) -> str:
+    text = str(value or "").strip().strip("'\"")
+    if not text:
+        return ""
+    text = re.split(r"[\\/]", text)[-1]
+    text = re.sub(r"[^A-Za-z0-9_.() -]+", "", text).strip(" .")
+    if not re.search(r"\.(?:json|pdf|docx|txt|md|csv|xlsx)$", text, re.I):
+        return ""
+    return text
+
+
+def _filename_key(value: str) -> str:
+    return _safe_display_file_name(value).lower()
+
+
+def _unique_file_names(values: Any) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values or []:
+        name = _safe_display_file_name(value)
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            output.append(name)
+    return output
+
+
+def _status_text(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip().lower()
+
+
+def _field_get(item: Any, field_name: str, default: Any = None) -> Any:
+    if item is None:
+        return default
+    if isinstance(item, dict):
+        return item.get(field_name, default)
+    return getattr(item, field_name, default)
+
+
+def _iter_maybe(value: Any) -> list[Any]:
+    if value is None or isinstance(value, (str, bytes)):
+        return []
+    if isinstance(value, dict):
+        return list(value.values())
+    try:
+        return list(value)
+    except TypeError:
+        return []
+
+
+def _citation_marker_counts(state: Any) -> tuple[int, int]:
+    try:
+        from cdp.citation_resolvability import build_defense_pass_result
+
+        result = build_defense_pass_result(state)
+    except Exception:
+        return 0, 0
+    summary = getattr(result, "summary_counts", {}) or {}
+    marker_count = int(summary.get("canonical_marker_count", 0) or len(getattr(result, "markers", []) or []))
+    resolved_count = int(summary.get("resolved_exact", 0) or 0) + int(summary.get("resolved_id_only", 0) or 0)
+    return marker_count, resolved_count
+
+
+def _concrete_source_locator_count(state: Any) -> int:
+    try:
+        from cdp.citation_resolvability import build_evidence_locator_registry
+
+        entries = build_evidence_locator_registry(state)
+    except Exception:
+        entries = []
+    count = 0
+    for entry in entries:
+        has_concrete = bool(getattr(entry, "has_concrete_locator", False))
+        locators = list(getattr(entry, "locators", []) or [])
+        if has_concrete or any(_is_concrete_locator(locator) for locator in locators):
+            count += 1
+    return count
+
+
+def _generic_evidence_categories_look_incomplete(state: Any) -> bool:
+    accounting_text = _domain_source_text(state)
+    domain = infer_decision_domain(accounting_text)
+    if domain == "general_business":
+        return False
+    categories = evidence_categories_for_domain(domain, accounting_text)
+    if not any(re.search(re.escape(category.split(" / ")[0]), accounting_text, re.I) for category in categories):
+        return False
+    uploaded_count = len(_uploaded_files(state))
+    imported_evidence_count = len(getattr(state, "imported_evidence", []) or [])
+    imported_signal_count = len(getattr(state, "imported_signals", []) or [])
+    return uploaded_count > 0 and (imported_evidence_count == 0 or imported_signal_count == 0)
 
 
 def _domain_source_text(state: Any) -> str:
@@ -1420,7 +1721,8 @@ def _join_standalone_list_markers(text: str) -> str:
 def _protect_export_fragments(value: str) -> tuple[str, list[str]]:
     fragments: list[str] = []
     pattern = re.compile(
-        r"https?://[^\s)>\]]+|file://[^\s)>\]]+|\b[A-Za-z]:[\\/][^\n|)>\]]+|\\\\[^\n|)>\]]+"
+        r"https?://[^\s)>\]]+|file://[^\s)>\]]+|upload:[^\s|)>\]]+|"
+        r"\b[A-Za-z]:[\\/][^\n|)>\]]+|\\\\[^\n|)>\]]+"
     )
 
     def repl(match: re.Match[str]) -> str:

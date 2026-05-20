@@ -110,6 +110,10 @@ class TestUploadParsers(unittest.TestCase):
         with self.assertRaises(UploadParseError):
             parse_upload_bytes("photo.png", "image/png", b"fake")
 
+    def test_json_upload_is_rejected_until_ingestion_is_enabled(self):
+        with self.assertRaises(UploadParseError):
+            parse_upload_bytes("cohort_snapshot.json", "application/json", b'{"retention": 0.82}')
+
     def test_oversize_upload_is_rejected(self):
         with patch.object(UPLOAD_LAYER, "max_file_bytes", 10):
             with self.assertRaises(UploadParseError):
