@@ -1163,19 +1163,30 @@ Proceed if DQ >50.
             brief="Improve growth performance with cohort retention evidence.",
             data="Pricing notes: Starter tier is $499/month.",
             report="""# Executive Summary
+Direct project evidence: Partial — 7 evidence files supplied.
 Onboarding friction is confirmed by the supplied files.
+Support ticket themes confirm that setup and integration friction is preventing value delivery.
+Pricing and packaging notes confirm that the starter tier is constrained.
 Support ticket volume confirms an onboarding problem.
 BF = 12.0 — domain complexity confirmed.
 target threshold <provisional threshold.
 exceeds crux threshold by provisional threshold.
+If the top channel's share rises above provisional threshold of new ARR, pause acquisition spend.
 The source note says "confirmed by customer interview" and should remain quoted.
+The source note says "confirm that setup is difficult" and should remain quoted.
 
 # Why This Is Recommended
+Direct project evidence: Partial — 7 evidence files supplied.
 Onboarding friction is confirmed by the supplied files.
+Support ticket themes confirm that setup and integration friction is preventing value delivery.
+Pricing and packaging notes confirm that the starter tier is constrained.
 Support ticket volume confirms an onboarding problem.
 BF = 12.0 — domain complexity confirmed.
 target threshold <provisional threshold.
 exceeds crux threshold by provisional threshold.
+If the top channel's share rises above provisional threshold of new ARR, pause acquisition spend.
+If Sprint 0 data confirms that activation exceeds the gate, proceed.
+The source note says "confirm that setup is difficult" and should remain quoted.
 
 # Recommended Path
 -
@@ -1221,13 +1232,26 @@ Starter tier at provisional planning estimate.
         self.assertIn("Starter tier at $499/month.", markdown)
         self.assertNotIn("Starter tier at provisional planning estimate", markdown)
         self.assertIn("Onboarding friction is supported by multiple supplied evidence files", markdown)
+        self.assertIn(
+            "Direct project evidence: Partial — supplied evidence exists, but several decision-critical categories remain incomplete or unavailable.",
+            markdown,
+        )
+        self.assertNotIn("7 evidence files supplied", markdown)
+        self.assertIn(
+            "Support ticket themes indicate that setup and integration friction is preventing value delivery.",
+            markdown,
+        )
+        self.assertIn("Pricing and packaging notes indicate that the starter tier is constrained.", markdown)
         self.assertIn("Support ticket volume supports an onboarding problem.", markdown)
         self.assertIn("structural BF estimate=12.0 (operator trace, not measured posterior)", markdown)
         self.assertIn("target threshold below the operator-defined threshold.", markdown)
         self.assertIn("exceeds the crux threshold by the operator-defined margin.", markdown)
+        self.assertIn("rises above the operator-defined share threshold of new ARR", markdown)
+        self.assertIn("If Sprint 0 data confirms that activation exceeds the gate, proceed.", markdown)
         self.assertNotIn("domain complexity confirmed", markdown)
         self.assertNotIn("provisional threshold", markdown)
         self.assertIn('"confirmed by customer interview"', markdown)
+        self.assertIn('"confirm that setup is difficult"', markdown)
 
     def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):
         minimal = make_sparse_growth_state("risk-minimal")

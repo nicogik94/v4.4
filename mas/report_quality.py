@@ -1619,6 +1619,24 @@ def _normalize_common_export_text(value: str) -> str:
         flags=re.I,
     )
     text = re.sub(
+        r"\bprovisional threshold of new ARR\b",
+        "the operator-defined share threshold of new ARR",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\babove provisional threshold of ([^.;,\n]+)",
+        lambda match: f"above the operator-defined threshold for {match.group(1).strip()}",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bbelow provisional threshold of ([^.;,\n]+)",
+        lambda match: f"below the operator-defined threshold for {match.group(1).strip()}",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
         r"\bless than provisional threshold\s+[\"“]([^\"”]+)[\"”]",
         r'below the operator-defined threshold for "\1"',
         text,

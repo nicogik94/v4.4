@@ -594,6 +594,7 @@ def _finalize_export_markdown(
     value = _apply_pricing_placeholder_cleanup(str(markdown or ""), state)
     value = normalize_export_text(value, audience=mode)
     if mode == "client":
+        value = _normalize_client_evidence_count_language(value, state, quality)
         value = _label_client_bf_trace_language(value)
         value = _soften_unvalidated_confirmed_language(value, state, quality)
         value = normalize_export_text(value, audience=mode)
@@ -636,6 +637,42 @@ def _state_contains_starter_price(state: ProjectState) -> bool:
                 getattr(action, "expected_impact", ""),
             ])
     return bool(re.search(r"\$\s*499\s*/\s*month|\$499/month", "\n".join(str(part) for part in parts), re.I))
+
+
+def _normalize_client_evidence_count_language(markdown: str, state: ProjectState, quality) -> str:
+    projection = evidence_maturity_projection(state, quality)
+    if projection.maturity == "Validated":
+        return markdown
+    replacement = (
+        "Direct project evidence: Partial — supplied evidence exists, but several "
+        "decision-critical categories remain incomplete or unavailable"
+    )
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(markdown or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if (
+            in_code_block
+            or _looks_like_json_line(stripped)
+            or stripped.startswith(">")
+            or stripped.startswith("|")
+            or _line_has_quoted_confirmed(line)
+        ):
+            lines.append(line)
+            continue
+        value = re.sub(
+            r"\bDirect project evidence:\s*Partial\s*[—-]\s*\d+\s+(?:parsed\s+)?evidence files?\s+supplied\b"
+            r"(?:;?\s*additional evidence categories remain incomplete or unavailable)?",
+            replacement,
+            line,
+            flags=re.I,
+        )
+        lines.append(value)
+    return "\n".join(lines)
 
 
 def _label_client_bf_trace_language(markdown: str) -> str:
@@ -690,6 +727,7 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
             or stripped.startswith("|")
             or _line_has_quoted_confirmed(line)
             or _line_looks_like_operator_label(line)
+            or _line_looks_like_future_confirmation_gate(line)
         ):
             lines.append(line)
             continue
@@ -718,6 +756,7 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
             value,
             flags=re.I,
         )
+        value = re.sub(r"\bconfirm(?:s|ed)?\s+that\b", "indicate that", value, flags=re.I)
         value = re.sub(r"\bconfirms\b", "supports", value, flags=re.I)
         value = re.sub(r"\bis confirmed\b", f"is {support_phrase}", value, flags=re.I)
         value = re.sub(r"\bwas confirmed\b", f"was {support_phrase}", value, flags=re.I)
@@ -727,11 +766,19 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
 
 
 def _line_has_quoted_confirmed(line: str) -> bool:
-    return bool(re.search(r"[\"'“][^\"'”]*\bconfirmed\b[^\"'”]*[\"'”]", str(line or ""), re.I))
+    return bool(re.search(r"[\"'“][^\"'”]*\bconfirm(?:s|ed)?\b[^\"'”]*[\"'”]", str(line or ""), re.I))
 
 
 def _line_looks_like_operator_label(line: str) -> bool:
     return bool(re.search(r"\b(operator trace|not measured posterior|diagnostic score|provisional risk estimate)\b", str(line or ""), re.I))
+
+
+def _line_looks_like_future_confirmation_gate(line: str) -> bool:
+    value = str(line or "")
+    return bool(
+        re.search(r"\b(if|when|once|before|after)\b[^\n.]{0,160}\bconfirm(?:s|ed)?\b", value, re.I)
+        and re.search(r"\b(gate|threshold|proceed|stop|extend|kill|sprint\s*0|decision)\b", value, re.I)
+    )
 
 
 def _looks_like_json_line(value: str) -> bool:

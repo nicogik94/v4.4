@@ -696,7 +696,10 @@ Proceed if DQ >55.
             "diagnostic score s\n"
             "provisional risk estimate s\n"
             "target threshold <provisional threshold\n"
-            "exceeds crux threshold by provisional threshold"
+            "exceeds crux threshold by provisional threshold\n"
+            "above provisional threshold of activation\n"
+            "below provisional threshold of retention\n"
+            "If the top channel's share rises above provisional threshold of new ARR, pause acquisition spend."
         )
 
         normalized = normalize_export_text(text, audience="client")
@@ -712,6 +715,9 @@ Proceed if DQ >55.
         self.assertIn("provisional risk estimates", normalized)
         self.assertIn("target threshold below the operator-defined threshold", normalized)
         self.assertIn("exceeds the crux threshold by the operator-defined margin", normalized)
+        self.assertIn("above the operator-defined threshold for activation", normalized)
+        self.assertIn("below the operator-defined threshold for retention", normalized)
+        self.assertIn("rises above the operator-defined share threshold of new ARR", normalized)
         for forbidden in (
             "less than provisional threshold",
             "more than provisional threshold",
@@ -723,6 +729,7 @@ Proceed if DQ >55.
             "provisional risk estimate s",
             "target threshold <provisional threshold",
             "exceeds crux threshold by provisional threshold",
+            "provisional threshold of new ARR",
         ):
             self.assertNotIn(forbidden, normalized)
 
@@ -755,6 +762,7 @@ funnel and channel-mix review
             "```json\n"
             '{"phrase":"less than provisional threshold"}\n'
             '{"phrase":"target threshold <provisional threshold"}\n'
+            '{"phrase":"above provisional threshold of activation"}\n'
             "```\n"
             '{"phrase":"more than provisional threshold"}\n'
             "[Evidence: ev1 | chunk=1]\n"
@@ -767,6 +775,7 @@ funnel and channel-mix review
         self.assertIn("C:\\data\\more than provisional threshold week-over-week\\file.txt", normalized)
         self.assertIn('{"phrase":"less than provisional threshold"}', normalized)
         self.assertIn('{"phrase":"target threshold <provisional threshold"}', normalized)
+        self.assertIn('{"phrase":"above provisional threshold of activation"}', normalized)
         self.assertIn('{"phrase":"more than provisional threshold"}', normalized)
         self.assertIn("[Evidence: ev1 | chunk=1]", normalized)
         self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
