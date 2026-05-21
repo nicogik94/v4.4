@@ -805,15 +805,51 @@ def normalize_export_text(text: str, audience: str = "client") -> str:
 
 def suppress_client_raw_evidence_ids(text: str) -> str:
     """Hide raw evidence IDs in client-facing text when no concrete locator exists."""
-    value = str(text or "")
-    value = re.sub(
-        r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if in_code_block or _looks_like_json_line(stripped):
+            lines.append(line)
+            continue
+        value = _remove_marker_orphan_fragments(line)
+        value = re.sub(
+            r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\s*\[#\d+\]", "", value)
+        value = re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+        value = _remove_subjectless_evidence_fragments(value)
+        lines.append(value)
+    return "\n".join(lines)
+
+
+def _remove_marker_orphan_fragments(line: str) -> str:
+    marker = r"(?:\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]|\[#\d+\])"
+    orphan_starter = r"(?:suggests|provides evidence|provides context|indicates|supports)"
+    return re.sub(
+        rf"\s*{marker}\s+{orphan_starter}\b[^.?!]*(?:[.?!]|$)",
         "",
-        value,
+        str(line or ""),
         flags=re.I,
     )
-    value = re.sub(r"\s*\[#\d+\]", "", value)
-    return re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+
+
+def _remove_subjectless_evidence_fragments(line: str) -> str:
+    orphan_starter = r"(?:suggests|provides evidence|provides context|indicates|supports)"
+    value = re.sub(
+        rf"(^|[.?!][\"”]?\s+){orphan_starter}\b[^.?!]*(?:[.?!]|$)",
+        lambda match: match.group(1).rstrip(),
+        str(line or ""),
+        flags=re.I,
+    )
+    return value.strip() if str(line or "").strip() else value
 
 
 def guard_client_bf_confidence(text: str, state: Any) -> str:
@@ -1607,6 +1643,18 @@ def _normalize_common_export_text(value: str) -> str:
         return ordered_prefix.group(1) + _normalize_common_export_text(ordered_prefix.group(2))
     text = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", text)
     text = re.sub(
+        r"\btarget threshold:\s*>\s*provisional threshold\b",
+        "target threshold: above the operator-defined threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\btarget threshold:\s*<\s*provisional threshold\b",
+        "target threshold: below the operator-defined threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
         r"\btarget threshold\s*<\s*provisional threshold\b",
         "target threshold below the operator-defined threshold",
         text,
@@ -1615,6 +1663,20 @@ def _normalize_common_export_text(value: str) -> str:
     text = re.sub(
         r"\bexceeds crux threshold by provisional threshold\b",
         "exceeds the crux threshold by the operator-defined margin",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r">\s*provisional threshold\b", "above the operator-defined threshold", text, flags=re.I)
+    text = re.sub(r"<\s*provisional threshold\b", "below the operator-defined threshold", text, flags=re.I)
+    text = re.sub(
+        r"\bcrosses provisional threshold threshold\b",
+        "crosses the operator-defined threshold",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bprovisional planning estimateK/mo estimate\b",
+        "operator-defined planning estimate",
         text,
         flags=re.I,
     )

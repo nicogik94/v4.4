@@ -1176,15 +1176,24 @@ The source note says "confirmed by customer interview" and should remain quoted.
 The source note says "confirm that setup is difficult" and should remain quoted.
 
 # Why This Is Recommended
-Direct project evidence: Partial — 7 evidence files supplied.
+Direct project evidence: Partial — seven source files supplied; four evidence channels remain incomplete or absent.
+Direct project evidence: Partial — seven evidence files supplied.
+Direct project evidence: Partial — 7 source files supplied.
 Onboarding friction is confirmed by the supplied files.
 Support ticket themes confirm that setup and integration friction is preventing value delivery.
 Pricing and packaging notes confirm that the starter tier is constrained.
 Support ticket volume confirms an onboarding problem.
+[Evidence: knowledge_x | chunk=1] suggests the growth metrics snapshot shows meaningful deceleration.
+[Evidence: knowledge_y | chunk=2] provides evidence interpretation context indicating the severity of the trend.
+The analytics audit suggests instrumentation is degraded [Evidence: knowledge_z | chunk=3].
 BF = 12.0 — domain complexity confirmed.
 target threshold <provisional threshold.
 exceeds crux threshold by provisional threshold.
 If the top channel's share rises above provisional threshold of new ARR, pause acquisition spend.
+target threshold: >provisional threshold.
+target threshold: <provisional threshold.
+crosses provisional threshold threshold.
+provisional planning estimateK/mo estimate.
 If Sprint 0 data confirms that activation exceeds the gate, proceed.
 The source note says "confirm that setup is difficult" and should remain quoted.
 
@@ -1233,23 +1242,38 @@ Starter tier at provisional planning estimate.
         self.assertNotIn("Starter tier at provisional planning estimate", markdown)
         self.assertIn("Onboarding friction is supported by multiple supplied evidence files", markdown)
         self.assertIn(
-            "Direct project evidence: Partial — supplied evidence exists, but several decision-critical categories remain incomplete or unavailable.",
+            "Direct project evidence: Partial — supplied evidence exists, but several decision-critical evidence channels remain incomplete or unavailable.",
             markdown,
         )
         self.assertNotIn("7 evidence files supplied", markdown)
+        self.assertNotIn("seven source files supplied", markdown)
+        self.assertNotIn("seven evidence files supplied", markdown)
+        self.assertNotIn("7 source files supplied", markdown)
         self.assertIn(
             "Support ticket themes indicate that setup and integration friction is preventing value delivery.",
             markdown,
         )
         self.assertIn("Pricing and packaging notes indicate that the starter tier is constrained.", markdown)
+        self.assertIn("The analytics audit suggests instrumentation is degraded.", markdown)
+        self.assertNotIn("suggests the growth metrics snapshot", markdown)
+        self.assertNotIn("provides evidence interpretation context", markdown)
+        self.assertNotIn("[Evidence: knowledge_x", markdown)
+        self.assertNotIn("[Evidence: knowledge_y", markdown)
+        self.assertNotIn("[Evidence: knowledge_z", markdown)
         self.assertIn("Support ticket volume supports an onboarding problem.", markdown)
         self.assertIn("structural BF estimate=12.0 (operator trace, not measured posterior)", markdown)
         self.assertIn("target threshold below the operator-defined threshold.", markdown)
         self.assertIn("exceeds the crux threshold by the operator-defined margin.", markdown)
         self.assertIn("rises above the operator-defined share threshold of new ARR", markdown)
+        self.assertIn("target threshold: above the operator-defined threshold.", markdown)
+        self.assertIn("target threshold: below the operator-defined threshold.", markdown)
+        self.assertIn("crosses the operator-defined threshold.", markdown)
+        self.assertIn("operator-defined planning estimate.", markdown)
         self.assertIn("If Sprint 0 data confirms that activation exceeds the gate, proceed.", markdown)
         self.assertNotIn("domain complexity confirmed", markdown)
         self.assertNotIn("provisional threshold", markdown)
+        self.assertNotIn("provisional threshold threshold", markdown)
+        self.assertNotIn("provisional planning estimateK", markdown)
         self.assertIn('"confirmed by customer interview"', markdown)
         self.assertIn('"confirm that setup is difficult"', markdown)
 

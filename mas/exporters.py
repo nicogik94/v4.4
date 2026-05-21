@@ -645,7 +645,11 @@ def _normalize_client_evidence_count_language(markdown: str, state: ProjectState
         return markdown
     replacement = (
         "Direct project evidence: Partial — supplied evidence exists, but several "
-        "decision-critical categories remain incomplete or unavailable"
+        "decision-critical evidence channels remain incomplete or unavailable."
+    )
+    number_token = (
+        r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)"
     )
     lines: list[str] = []
     in_code_block = False
@@ -665,8 +669,8 @@ def _normalize_client_evidence_count_language(markdown: str, state: ProjectState
             lines.append(line)
             continue
         value = re.sub(
-            r"\bDirect project evidence:\s*Partial\s*[—-]\s*\d+\s+(?:parsed\s+)?evidence files?\s+supplied\b"
-            r"(?:;?\s*additional evidence categories remain incomplete or unavailable)?",
+            rf"\bDirect project evidence:\s*Partial\s*[—-]\s*{number_token}\s+"
+            r"(?:parsed\s+)?(?:evidence|source)\s+files?\s+supplied\b[^\n]*",
             replacement,
             line,
             flags=re.I,

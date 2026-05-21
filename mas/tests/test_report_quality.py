@@ -22,6 +22,7 @@ from report_quality import (  # noqa: E402
     evidence_maturity_projection,
     guard_client_bf_confidence,
     normalize_export_text,
+    suppress_client_raw_evidence_ids,
     threshold_consistency_warnings,
     threshold_section_classification,
 )
@@ -699,7 +700,11 @@ Proceed if DQ >55.
             "exceeds crux threshold by provisional threshold\n"
             "above provisional threshold of activation\n"
             "below provisional threshold of retention\n"
-            "If the top channel's share rises above provisional threshold of new ARR, pause acquisition spend."
+            "If the top channel's share rises above provisional threshold of new ARR, pause acquisition spend.\n"
+            "target threshold: >provisional threshold\n"
+            "target threshold: <provisional threshold\n"
+            "crosses provisional threshold threshold\n"
+            "provisional planning estimateK/mo estimate"
         )
 
         normalized = normalize_export_text(text, audience="client")
@@ -718,6 +723,10 @@ Proceed if DQ >55.
         self.assertIn("above the operator-defined threshold for activation", normalized)
         self.assertIn("below the operator-defined threshold for retention", normalized)
         self.assertIn("rises above the operator-defined share threshold of new ARR", normalized)
+        self.assertIn("target threshold: above the operator-defined threshold", normalized)
+        self.assertIn("target threshold: below the operator-defined threshold", normalized)
+        self.assertIn("crosses the operator-defined threshold", normalized)
+        self.assertIn("operator-defined planning estimate", normalized)
         for forbidden in (
             "less than provisional threshold",
             "more than provisional threshold",
@@ -730,6 +739,8 @@ Proceed if DQ >55.
             "target threshold <provisional threshold",
             "exceeds crux threshold by provisional threshold",
             "provisional threshold of new ARR",
+            "provisional threshold threshold",
+            "provisional planning estimateK",
         ):
             self.assertNotIn(forbidden, normalized)
 
@@ -763,6 +774,7 @@ funnel and channel-mix review
             '{"phrase":"less than provisional threshold"}\n'
             '{"phrase":"target threshold <provisional threshold"}\n'
             '{"phrase":"above provisional threshold of activation"}\n'
+            '{"phrase":"target threshold: >provisional threshold"}\n'
             "```\n"
             '{"phrase":"more than provisional threshold"}\n'
             "[Evidence: ev1 | chunk=1]\n"
@@ -776,9 +788,29 @@ funnel and channel-mix review
         self.assertIn('{"phrase":"less than provisional threshold"}', normalized)
         self.assertIn('{"phrase":"target threshold <provisional threshold"}', normalized)
         self.assertIn('{"phrase":"above provisional threshold of activation"}', normalized)
+        self.assertIn('{"phrase":"target threshold: >provisional threshold"}', normalized)
         self.assertIn('{"phrase":"more than provisional threshold"}', normalized)
         self.assertIn("[Evidence: ev1 | chunk=1]", normalized)
         self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
+
+    def test_suppress_client_raw_evidence_ids_removes_orphan_marker_fragments(self):
+        text = (
+            'The team asked "in what order?" [Evidence: knowledge_x | chunk=1] '
+            "suggests the growth metrics snapshot shows meaningful deceleration. "
+            "[Evidence: knowledge_y | chunk=2] provides evidence interpretation context indicating the severity of the trend.\n"
+            "The analytics audit suggests instrumentation is degraded [Evidence: knowledge_z | chunk=3].\n"
+            "```text\n[Evidence: knowledge_code | chunk=4] suggests preserved in code.\n```"
+        )
+
+        cleaned = suppress_client_raw_evidence_ids(text)
+
+        self.assertIn('The team asked "in what order?"', cleaned)
+        self.assertIn("The analytics audit suggests instrumentation is degraded.", cleaned)
+        self.assertIn("[Evidence: knowledge_code | chunk=4] suggests preserved in code.", cleaned)
+        self.assertNotIn("suggests the growth metrics snapshot", cleaned)
+        self.assertNotIn("provides evidence interpretation context", cleaned)
+        self.assertNotIn("[Evidence: knowledge_x", cleaned)
+        self.assertNotIn("[Evidence: knowledge_y", cleaned)
 
 
 if __name__ == "__main__":
