@@ -43,6 +43,26 @@ class FileUploadResult:
     knowledge_summary: dict
 
 
+@dataclass(frozen=True)
+class UploadStoreHealth:
+    status: str
+    path: str
+    writable: bool
+    message: str
+
+
+class UploadStorageError(RuntimeError):
+    """Controlled error for local upload storage failures."""
+
+    public_message = "Upload storage is unavailable. Check server-side upload storage configuration."
+
+    def __init__(self, *, path: str = "", operation: str = "", cause: Exception | None = None):
+        super().__init__(self.public_message)
+        self.path = path
+        self.operation = operation
+        self.cause = cause
+
+
 def list_uploaded_files(state: ProjectState) -> list[UploadedFileManifest]:
     layer = state.knowledge_layer
     if layer is None:
@@ -83,9 +103,10 @@ def ingest_uploaded_file(
     file_id = stable_object_id("file", state.project_id, filename, now, uuid.uuid4().hex)
     source_id = stable_object_id("knowledge_source", state.project_id, file_id)
     checksum = hashlib.sha256(content).hexdigest()
-    storage_ref = _store_upload_bytes(state.project_id, file_id, filename, content)
+    storage_ref = ""
 
     try:
+        storage_ref = _store_upload_bytes(state.project_id, file_id, filename, content)
         parsed = parse_upload_bytes(filename, media_type, content, sheet_name=sheet_name)
         role_value = _normalize_role(role)
         layer = ensure_knowledge_layer(state)
@@ -263,10 +284,43 @@ def _store_upload_bytes(project_id: str, file_id: str, filename: str, content: b
     extension = Path(filename or "").suffix.lower()
     base = Path(UPLOAD_LAYER.storage_dir)
     target_dir = base / project_id
-    target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{file_id}{extension}"
-    target.write_bytes(content)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    except OSError as exc:
+        operation = "write" if target_dir.exists() else "mkdir"
+        raise UploadStorageError(path=str(target), operation=operation, cause=exc) from exc
     return str(target)
+
+
+def check_upload_store_writable(storage_dir: str | None = None) -> UploadStoreHealth:
+    base = Path(storage_dir or UPLOAD_LAYER.storage_dir)
+    probe = base / f".upload_store_probe_{uuid.uuid4().hex}"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        if not base.is_dir():
+            return UploadStoreHealth(
+                status="fail",
+                path=str(base),
+                writable=False,
+                message="Upload storage path exists but is not a directory.",
+            )
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError:
+        return UploadStoreHealth(
+            status="fail",
+            path=str(base),
+            writable=False,
+            message="Upload storage is not writable; see server logs for path details.",
+        )
+    return UploadStoreHealth(
+        status="ok",
+        path=str(base),
+        writable=True,
+        message="Upload storage root is writable.",
+    )
 
 
 def _delete_storage_ref(storage_ref: str) -> None:

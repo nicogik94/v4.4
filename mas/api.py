@@ -40,6 +40,7 @@ from explainability import (
     build_project_trace,
 )
 from knowledge import (
+    UploadStorageError,
     delete_project_uploads,
     PhaseKnowledgeRetrievalView,
     ProjectKnowledgeRetrievalSummary,
@@ -79,6 +80,7 @@ from extensions.connectors import (
 )
 from ingestion import merge_imported_records
 from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
+from runtime.preflight import build_runtime_preflight
 from tools.scoring import (
     check_gate, compute_det_scores, invalidate_downstream, summarize_phase_output,
 )
@@ -276,6 +278,11 @@ async def health():
         "persistence": "postgres" if pool else "memory",
         "tracing": "langfuse" if observability.enabled() else "off",
     }
+
+
+@app.get("/runtime/preflight")
+async def runtime_preflight():
+    return await build_runtime_preflight(running_project_ids=running)
 
 
 @app.post("/projects", response_model=ProjectResponse)
@@ -694,6 +701,16 @@ async def upload_project_file(
         )
     except UploadParseError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except UploadStorageError as exc:
+        logger.error(
+            "Upload storage failure for project %s during %s at %s: %s",
+            project_id,
+            exc.operation or "unknown",
+            exc.path or "unknown",
+            exc.cause or exc,
+            exc_info=True,
+        )
+        raise HTTPException(503, exc.public_message) from exc
 
     _log_uploaded_file_event(
         state,

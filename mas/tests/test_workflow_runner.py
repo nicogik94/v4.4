@@ -17,6 +17,7 @@ import api
 import report_freshness
 from llm_client import LLMResponse
 from orchestrator import (
+    WORKFLOW_PHASE_SEQUENCE,
     _build_report_evidence_locator_register,
     _phase_has_output,
     _sanitize_report_context,
@@ -1505,6 +1506,20 @@ class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
         with patch("api.store.load", new=AsyncMock(return_value=state)):
             response = await api.run_full_workflow(state.project_id, BackgroundTasks())
         self.assertEqual(response["status"], "already_complete")
+
+    def test_workflow_phase_sequence_preserves_v44_order(self):
+        self.assertEqual(
+            WORKFLOW_PHASE_SEQUENCE,
+            ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"),
+        )
+
+    async def test_run_rejects_when_workflow_is_process_local_running(self):
+        state = make_completed_state("running-project-run")
+        api.running.add(state.project_id)
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with self.assertRaises(HTTPException) as ctx:
+                await api.run_full_workflow(state.project_id, BackgroundTasks())
+        self.assertEqual(ctx.exception.status_code, 409)
 
     async def test_manual_phase_rejects_when_workflow_is_running(self):
         state = make_completed_state("running-project")
