@@ -28,6 +28,10 @@ class _FakeAcquire:
         self.query = query
         return "SELECT 1"
 
+    async def fetchval(self, query: str):
+        self.query = query
+        return 0
+
 
 class _FakePool:
     def acquire(self):
@@ -125,7 +129,32 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         jobs = result["checks"]["jobs"]
         self.assertEqual(jobs["status"], "degraded")
         self.assertTrue(jobs["process_local"])
+        self.assertEqual(jobs["execution_mode"], "fastapi_background_tasks")
         self.assertEqual(jobs["running_count"], 2)
+
+    async def test_run_state_posture_reports_durable_guard_when_postgres_available(self):
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({"DATABASE_URL": "postgres://user:secret@db/app"})):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=_FakePool())):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        run_state = result["checks"]["run_state"]
+        serialized = json.dumps(result)
+        self.assertEqual(run_state["status"], "ok")
+        self.assertTrue(run_state["durable_run_state_active"])
+        self.assertEqual(run_state["workflow_run_tracking"], "durable_postgres")
+        self.assertTrue(run_state["cross_process_run_guard_enabled"])
+        self.assertNotIn("secret", serialized)
+
+    async def test_run_state_posture_reports_process_local_fallback_without_postgres(self):
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({})):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=None)):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        run_state = result["checks"]["run_state"]
+        self.assertEqual(run_state["status"], "degraded")
+        self.assertFalse(run_state["durable_run_state_active"])
+        self.assertEqual(run_state["workflow_run_tracking"], "process_local")
+        self.assertFalse(run_state["cross_process_run_guard_enabled"])
 
     async def test_api_preflight_route_returns_operator_diagnostic(self):
         with patch("api.build_runtime_preflight", new=AsyncMock(return_value={"status": "ok", "version": APP_VERSION, "operator_only": True, "checks": {}})):

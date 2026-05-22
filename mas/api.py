@@ -80,6 +80,7 @@ from extensions.connectors import (
 )
 from ingestion import merge_imported_records
 from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
+from runtime import run_state as workflow_run_state
 from runtime.preflight import build_runtime_preflight
 from tools.scoring import (
     check_gate, compute_det_scores, invalidate_downstream, summarize_phase_output,
@@ -388,7 +389,7 @@ async def create_clarification_cycle(project_id: str):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     generated = generate_clarification_cycle(state)
     latest = latest_clarification_cycle(state)
@@ -407,7 +408,7 @@ async def answer_clarification(project_id: str, req: ClarificationAnswerRequest)
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     status = (req.status or "").strip().lower()
     try:
@@ -545,7 +546,7 @@ async def upsert_knowledge_source(project_id: str, req: KnowledgeSourceUpsertReq
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     ensure_knowledge_layer(state)
     source = upsert_source_entry(
@@ -593,7 +594,7 @@ async def sync_project_knowledge(project_id: str, req: KnowledgeSyncRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
     if not req.sources:
         raise HTTPException(400, "sources must contain at least one source sync payload")
 
@@ -634,7 +635,7 @@ async def sync_project_knowledge_source(project_id: str, source_id: str, req: Kn
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     try:
         job = sync_offline_source(
@@ -679,7 +680,7 @@ async def upload_project_file(
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     normalized_import_mode = (import_mode or "knowledge").strip().lower()
     if normalized_import_mode not in {"knowledge", "structured_import"}:
@@ -735,7 +736,7 @@ async def delete_project_file(project_id: str, file_id: str):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
     manifest = get_uploaded_file_manifest(state, file_id)
     if manifest is None:
         raise HTTPException(404, "Uploaded file not found")
@@ -759,14 +760,21 @@ async def run_full_workflow(project_id: str, background_tasks: BackgroundTasks):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    if project_id in running:
-        raise HTTPException(409, "Workflow already running")
+    await _ensure_project_not_running(project_id)
     if is_workflow_complete(state):
         return {"status": "already_complete", "project_id": project_id}
 
+    try:
+        acquisition = await workflow_run_state.create_workflow_run(project_id, code_version=APP_VERSION)
+    except workflow_run_state.WorkflowRunStateError as exc:
+        logger.error("Unable to acquire workflow run state for project %s", project_id, exc_info=True)
+        raise HTTPException(503, exc.public_message) from exc
+    if not acquisition.created:
+        raise HTTPException(409, "Workflow already running")
+
     running.add(project_id)
-    background_tasks.add_task(_run_workflow, project_id)
-    return {"status": "started", "project_id": project_id}
+    background_tasks.add_task(_run_workflow, project_id, acquisition.run.run_id)
+    return {"status": "started", "project_id": project_id, "run_id": acquisition.run.run_id}
 
 
 @app.post("/projects/{project_id}/phase")
@@ -774,8 +782,7 @@ async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    if project_id in running:
-        raise HTTPException(409, "Workflow already running")
+    await _ensure_project_not_running(project_id)
 
     with observability.trace_phase(project_id, req.phase, {"trigger": "manual"}):
         updated = await run_phase_node(state, req.phase)
@@ -792,7 +799,7 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     updates = req.model_dump(exclude_unset=True)
     if not updates:
@@ -846,7 +853,7 @@ async def patch_phase_output(project_id: str, phase: str, payload: Any = Body(..
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     validated, changed_field_paths = _validate_phase_payload(phase, payload)
     _apply_phase_output(state, phase, validated)
@@ -873,7 +880,7 @@ async def import_csv(project_id: str, req: CSVImportRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     connector = CONNECTOR_REGISTRY.get("csv")
     if connector is None:
@@ -1378,8 +1385,15 @@ async def get_policy_audit(project_id: str):
     }
 
 
-def _ensure_project_not_running(project_id: str) -> None:
+async def _ensure_project_not_running(project_id: str) -> None:
     if project_id in running:
+        raise HTTPException(409, "Workflow already running")
+    try:
+        active = await workflow_run_state.has_active_project_run(project_id)
+    except workflow_run_state.WorkflowRunStateError as exc:
+        logger.error("Unable to check workflow run state for project %s", project_id, exc_info=True)
+        raise HTTPException(503, exc.public_message) from exc
+    if active:
         raise HTTPException(409, "Workflow already running")
 
 
@@ -1639,18 +1653,65 @@ def _log_knowledge_event(state: ProjectState, event_type: str, details: dict[str
     )
 
 
-async def _run_workflow(project_id: str):
+async def _safe_mark_workflow_run(mark_func, *args, **kwargs) -> None:
+    try:
+        await mark_func(*args, **kwargs)
+    except Exception:
+        logger.error("Unable to update workflow run state", exc_info=True)
+
+
+async def _run_workflow(project_id: str, run_id: str | None = None):
+    current_phase = ""
     try:
         state = await store.load(project_id)
         if not state:
             logger.error(f"Project {project_id} vanished before run")
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_failed,
+                    run_id,
+                    error="Project vanished before workflow execution started.",
+                )
             return
+        current_phase = state.current_phase or ""
+        if run_id:
+            await _safe_mark_workflow_run(
+                workflow_run_state.mark_run_running,
+                run_id,
+                current_phase=current_phase,
+            )
+
+        async def persist_workflow_state(updated_state: ProjectState) -> None:
+            nonlocal current_phase
+            current_phase = updated_state.current_phase or current_phase
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_phase,
+                    run_id,
+                    current_phase,
+                )
+            await store.save(updated_state)
+
         with observability.trace_phase(project_id, "full_workflow", {"trigger": "api"}):
-            final_state = await run_workflow_sequence(state, persist_state=store.save)
+            final_state = await run_workflow_sequence(state, persist_state=persist_workflow_state)
         await store.save(final_state)
+        current_phase = final_state.current_phase or current_phase
         if is_workflow_complete(final_state):
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_succeeded,
+                    run_id,
+                    current_phase=current_phase,
+                )
             logger.info(f"✅ Workflow complete: {project_id}")
         else:
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_failed,
+                    run_id,
+                    error=f"Workflow stopped before completion at phase {current_phase}.",
+                    current_phase=current_phase,
+                )
             logger.warning(
                 f"Workflow stopped before completion: {project_id} "
                 f"(current_phase={final_state.current_phase}, "
@@ -1658,6 +1719,13 @@ async def _run_workflow(project_id: str):
             )
     except Exception as e:
         logger.error(f"❌ Workflow failed: {e}", exc_info=True)
+        if run_id:
+            await _safe_mark_workflow_run(
+                workflow_run_state.mark_run_failed,
+                run_id,
+                error=e,
+                current_phase=current_phase,
+            )
     finally:
         running.discard(project_id)
 

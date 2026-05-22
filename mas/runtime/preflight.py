@@ -6,17 +6,22 @@ from typing import Iterable
 
 from config import APP_VERSION
 from knowledge.files import check_upload_store_writable
+from runtime import run_state
 import store
 
 
 async def build_runtime_preflight(*, running_project_ids: Iterable[str] = ()) -> dict:
     """Return machine-readable runtime diagnostics without exposing secrets."""
+    running_ids = tuple(running_project_ids or ())
     checks = {
         "version": _check_version(),
         "upload_store": _check_upload_store(),
         "database": await _check_database(),
         "redis": await _check_redis(),
-        "jobs": _check_jobs(running_project_ids),
+        "run_state": await run_state.get_run_state_posture(
+            local_running_count=len(running_ids)
+        ),
+        "jobs": _check_jobs(running_ids),
     }
     return {
         "status": _overall_status(checks),
@@ -125,11 +130,12 @@ def _check_jobs(running_project_ids: Iterable[str]) -> dict:
     return {
         "status": status,
         "process_local": True,
+        "execution_mode": "fastapi_background_tasks",
         "running_count": running_count,
         "message": (
             "One or more workflows are tracked by this API process only."
             if running_count
-            else "Workflow run tracking is process-local; no workflows are currently marked running."
+            else "Workflow execution still runs inside this API process; no workflows are currently marked running locally."
         ),
     }
 
