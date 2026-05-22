@@ -790,16 +790,32 @@ def normalize_export_text(text: str, audience: str = "client") -> str:
     source = _renumber_repeated_ordered_markers(_join_standalone_list_markers(str(text or "")))
     output: list[str] = []
     in_code_block = False
-    for line in source.splitlines():
+    lines = source.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         stripped = line.strip()
         if stripped.startswith("```"):
             in_code_block = not in_code_block
             output.append(line)
+            index += 1
             continue
         if in_code_block or _looks_like_json_line(stripped):
             output.append(line)
+            index += 1
+            continue
+        if _looks_like_markdown_table_line(line):
+            table_lines: list[str] = []
+            while index < len(lines) and _looks_like_markdown_table_line(lines[index]):
+                table_lines.append(lines[index])
+                index += 1
+            if _is_protected_export_table_block(table_lines):
+                output.extend(table_lines)
+            else:
+                output.extend(_normalize_export_line(table_line, mode) for table_line in table_lines)
             continue
         output.append(_normalize_export_line(line, mode))
+        index += 1
     return "\n".join(output)
 
 
@@ -1589,6 +1605,8 @@ def _is_provisional_planning_gate(line: str) -> bool:
 
 
 def _cleanup_client_replacement_artifacts(value: str) -> str:
+    protected, fragments = _protect_export_fragments(str(value or ""))
+    value = protected
     phrases = [
         "internal confidence diagnostic",
         "evidence quality diagnostic",
@@ -1616,7 +1634,7 @@ def _cleanup_client_replacement_artifacts(value: str) -> str:
     value = re.sub(r"[ \t]{2,}", " ", value)
     value = re.sub(r"\s+([,.;:])", r"\1", value)
     value = re.sub(r"([,.;:])(?=\S)", r"\1 ", value)
-    return value
+    return _restore_export_fragments(value, fragments)
 
 
 def _normalize_export_line(line: str, audience: str) -> str:
@@ -1788,7 +1806,35 @@ def _normalize_client_export_text(value: str) -> str:
     text = re.sub(r"\bstructural prior(?:\s+structural prior)+\b", "structural prior", text, flags=re.I)
     text = re.sub(r"\bstructural prior\.\s*\d+\b", "structural prior", text, flags=re.I)
     text = re.sub(r"\brisk priority score\s+\d+(?:\.\d+)?\b", "risk priority score", text, flags=re.I)
+    text = _normalize_client_legal_review_effort_placeholder(text)
     return text
+
+
+def _normalize_client_legal_review_effort_placeholder(value: str) -> str:
+    text = str(value or "")
+    if not re.search(r"\boperator-defined effort estimate\s+or\s+less\b", text, re.I):
+        return text
+    if _line_has_protected_export_reference(text):
+        return text
+
+    effort_pattern = re.compile(r"\boperator-defined effort estimate\s+or\s+less\b", re.I)
+    context_pattern = re.compile(
+        r"\b(?:legal(?:ly)?(?:[-\s]+review(?:ed)?)?|legal[-\s]+review|"
+        r"approval\s+step|SLA|claim[-\s]+safety)\b",
+        re.I,
+    )
+    sentence_pattern = re.compile(
+        r"([^.!?\n]*\boperator-defined effort estimate\s+or\s+less\b[^.!?\n]*)([.!?]?)",
+        re.I,
+    )
+
+    def replace_sentence(match: re.Match[str]) -> str:
+        sentence = match.group(1)
+        if context_pattern.search(sentence):
+            sentence = effort_pattern.sub("24 hours or less", sentence)
+        return sentence + match.group(2)
+
+    return sentence_pattern.sub(replace_sentence, text)
 
 
 def _normalize_operator_export_text(value: str) -> str:
@@ -1905,10 +1951,52 @@ def _join_standalone_list_markers(text: str) -> str:
     return "\n".join(output)
 
 
+def _looks_like_markdown_table_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    return stripped.startswith("|") and "|" in stripped[1:]
+
+
+def _is_protected_export_table_block(lines: list[str]) -> bool:
+    text = "\n".join(str(line or "") for line in lines)
+    if not text.strip():
+        return False
+    protected_patterns = [
+        r"\b(?:source\s+excerpt|source\s+text|raw\s+source|quoted\s+source|source\s+quote|what\s+it\s+says)\b",
+        r"\b(?:citation\s+marker|evidence\s+marker|evidence\s+ids?|evidence\s+locator|"
+        r"locator\s+availability|locators?|provenance|source\s+ref|source_id|source\s+phase|"
+        r"storage_ref|file_id|knowledge_id)\b",
+        r"\b(?:machine_archive|machine\s+archive|project_state\.json|phase_outputs\.json|"
+        r"decision_objects\.json|clarifications\.json|evidence_locator_register\.json|"
+        r"uploaded_file_manifest\.json|export_manifest\.json)\b",
+        r"\[Evidence:\s*[A-Za-z0-9_.:-]+",
+        r"\[#\d+\]",
+        r"\b(?:ev|evidence|knowledge|source|file)[-_][A-Za-z0-9_.:-]+\b",
+        r"https?://|file://|upload:[^\s|)>\]]+|storage_ref\s*[:=]|upload_store[\\/]",
+        r"\b[A-Za-z]:[\\/]|\\\\",
+        r"\{[^{}\n]*\"?[A-Za-z0-9_.-]+\"?\s*:[^{}\n]*\}|\"[A-Za-z0-9_.-]+\"\s*:",
+        r"`[^`]+`",
+    ]
+    return any(re.search(pattern, text, re.I) for pattern in protected_patterns)
+
+
+def _line_has_protected_export_reference(value: str) -> bool:
+    text = str(value or "")
+    return bool(
+        re.search(
+            r"\[Evidence:\s*[A-Za-z0-9_.:-]+|\[#\d+\]|"
+            r"\b(?:ev|evidence|knowledge|source|file)[-_][A-Za-z0-9_.:-]+\b|"
+            r"\b(?:evidence_id|knowledge_id|file_id|source_id|storage_ref)\b\s*[:=]",
+            text,
+            re.I,
+        )
+    )
+
+
 def _protect_export_fragments(value: str) -> tuple[str, list[str]]:
     fragments: list[str] = []
     pattern = re.compile(
         r"https?://[^\s)>\]]+|file://[^\s)>\]]+|upload:[^\s|)>\]]+|"
+        r"storage:[^\s|)>\]]+|upload_store[\\/][^\n|)>\]]+|"
         r"\b[A-Za-z]:[\\/][^\n|)>\]]+|\\\\[^\n|)>\]]+"
     )
 

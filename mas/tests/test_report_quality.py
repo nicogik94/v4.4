@@ -744,6 +744,42 @@ Proceed if DQ >55.
         ):
             self.assertNotIn(forbidden, normalized)
 
+    def test_normalize_export_text_cleans_legal_review_effort_placeholder_only_in_context(self):
+        text = (
+            "Require a legal-review SLA of operator-defined effort estimate or less before claims ship.\n"
+            "Use a legally reviewed approval step of operator-defined effort estimate or less for claim-safety.\n"
+            "Planning effort remains operator-defined effort estimate or less for unrelated implementation work.\n"
+            "| Area | Requirement |\n"
+            "|---|---|\n"
+            "| Legal | Require a legal-review SLA of operator-defined effort estimate or less before launch. |"
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        self.assertIn("legal-review SLA of 24 hours or less", normalized)
+        self.assertIn("legally reviewed approval step of 24 hours or less", normalized)
+        self.assertIn("Planning effort remains operator-defined effort estimate or less", normalized)
+        self.assertIn("| Legal | Require a legal-review SLA of 24 hours or less before launch. |", normalized)
+
+    def test_normalize_export_text_preserves_protected_tables_for_legal_effort_cleanup(self):
+        text = (
+            "| Source excerpt | Text | Locator |\n"
+            "|---|---|---|\n"
+            "| ev-growth | Require a legal-review SLA of operator-defined effort estimate or less. | upload:file-1:gtm-plan.pdf#page=2 |\n"
+            "\n"
+            "| Area | Requirement |\n"
+            "|---|---|\n"
+            "| Legal | Require a legal-review SLA of operator-defined effort estimate or less before launch. |"
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        self.assertIn(
+            "| ev-growth | Require a legal-review SLA of operator-defined effort estimate or less. | upload:file-1:gtm-plan.pdf#page=2 |",
+            normalized,
+        )
+        self.assertIn("| Legal | Require a legal-review SLA of 24 hours or less before launch. |", normalized)
+
     def test_normalize_export_text_repairs_standalone_bullets_and_reduced_sprint0_list(self):
         text = """-
 billing/product metric reconciliation
@@ -778,6 +814,8 @@ funnel and channel-mix review
             "```\n"
             '{"phrase":"more than provisional threshold"}\n'
             "[Evidence: ev1 | chunk=1]\n"
+            "Require a legal-review SLA of operator-defined effort estimate or less [Evidence: ev2 | chunk=1]\n"
+            "C:\\data\\legal-review\\operator-defined effort estimate or less\\file.txt\n"
             'less than provisional threshold "very disappointed"'
         )
 
@@ -791,6 +829,11 @@ funnel and channel-mix review
         self.assertIn('{"phrase":"target threshold: >provisional threshold"}', normalized)
         self.assertIn('{"phrase":"more than provisional threshold"}', normalized)
         self.assertIn("[Evidence: ev1 | chunk=1]", normalized)
+        self.assertIn(
+            "Require a legal-review SLA of operator-defined effort estimate or less [Evidence: ev2 | chunk=1]",
+            normalized,
+        )
+        self.assertIn("C:\\data\\legal-review\\operator-defined effort estimate or less\\file.txt", normalized)
         self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
 
     def test_suppress_client_raw_evidence_ids_removes_orphan_marker_fragments(self):

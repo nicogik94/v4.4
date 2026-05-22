@@ -640,42 +640,63 @@ def _state_contains_starter_price(state: ProjectState) -> bool:
 
 
 def _normalize_client_evidence_count_language(markdown: str, state: ProjectState, quality) -> str:
-    projection = evidence_maturity_projection(state, quality)
-    if projection.maturity == "Validated":
-        return markdown
-    replacement = (
-        "Direct project evidence: Partial — supplied evidence exists, but several "
-        "decision-critical evidence channels remain incomplete or unavailable."
-    )
+    replacements = {
+        "partial": (
+            "Direct project evidence: Partial — supplied evidence exists, but several "
+            "decision-critical evidence channels remain incomplete or unavailable."
+        ),
+        "moderate": (
+            "Direct project evidence: Moderate — supplied project documents provide "
+            "planning-level evidence, but validation gaps remain."
+        ),
+    }
     number_token = (
-        r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        r"(?:\d+|n|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
         r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)"
     )
+    count_pattern = re.compile(
+        rf"\bDirect project evidence:\s*(Partial|Moderate)\s*[—-]\s*{number_token}\s+"
+        r"(?:(?:parsed|supplied|project|direct|evidence|source)\s+)*"
+        r"(?:documents?|files?)\s*(?:supplied)?\b(?:\s*\([^)\n|]*\))?(?:[^\n|]*?)(?=\s*(?:\||$))",
+        re.I,
+    )
+
+    def normalize_line(line: str) -> str:
+        return count_pattern.sub(lambda match: replacements[match.group(1).lower()], line)
+
     lines: list[str] = []
     in_code_block = False
-    for line in str(markdown or "").splitlines():
+    source_lines = str(markdown or "").splitlines()
+    index = 0
+    while index < len(source_lines):
+        line = source_lines[index]
         stripped = line.strip()
         if stripped.startswith("```"):
             in_code_block = not in_code_block
             lines.append(line)
+            index += 1
             continue
         if (
             in_code_block
             or _looks_like_json_line(stripped)
             or stripped.startswith(">")
-            or stripped.startswith("|")
             or _line_has_quoted_confirmed(line)
         ):
             lines.append(line)
+            index += 1
             continue
-        value = re.sub(
-            rf"\bDirect project evidence:\s*Partial\s*[—-]\s*{number_token}\s+"
-            r"(?:parsed\s+)?(?:evidence|source)\s+files?\s+supplied\b[^\n]*",
-            replacement,
-            line,
-            flags=re.I,
-        )
-        lines.append(value)
+        if _looks_like_markdown_table_line(line):
+            table_lines: list[str] = []
+            while index < len(source_lines) and _looks_like_markdown_table_line(source_lines[index]):
+                table_lines.append(source_lines[index])
+                index += 1
+            if _is_protected_client_cleanup_table_block(table_lines):
+                lines.extend(table_lines)
+            else:
+                lines.extend(normalize_line(table_line) for table_line in table_lines)
+            continue
+        lines.append(normalize_line(line))
+        index += 1
     return "\n".join(lines)
 
 
@@ -783,6 +804,34 @@ def _line_looks_like_future_confirmation_gate(line: str) -> bool:
         re.search(r"\b(if|when|once|before|after)\b[^\n.]{0,160}\bconfirm(?:s|ed)?\b", value, re.I)
         and re.search(r"\b(gate|threshold|proceed|stop|extend|kill|sprint\s*0|decision)\b", value, re.I)
     )
+
+
+def _looks_like_markdown_table_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    return stripped.startswith("|") and "|" in stripped[1:]
+
+
+def _is_protected_client_cleanup_table_block(lines: list[str]) -> bool:
+    text = "\n".join(str(line or "") for line in lines)
+    if not text.strip():
+        return False
+    protected_patterns = [
+        r"\b(?:source\s+excerpt|source\s+text|raw\s+source|quoted\s+source|source\s+quote|what\s+it\s+says)\b",
+        r"\b(?:citation\s+marker|evidence\s+marker|evidence\s+ids?|evidence\s+locator|"
+        r"locator\s+availability|locators?|provenance|source\s+ref|source_id|source\s+phase|"
+        r"storage_ref|file_id|knowledge_id)\b",
+        r"\b(?:machine_archive|machine\s+archive|project_state\.json|phase_outputs\.json|"
+        r"decision_objects\.json|clarifications\.json|evidence_locator_register\.json|"
+        r"uploaded_file_manifest\.json|export_manifest\.json)\b",
+        r"\[Evidence:\s*[A-Za-z0-9_.:-]+",
+        r"\[#\d+\]",
+        r"\b(?:ev|evidence|knowledge|source|file)[-_][A-Za-z0-9_.:-]+\b",
+        r"https?://|file://|upload:[^\s|)>\]]+|storage_ref\s*[:=]|upload_store[\\/]",
+        r"\b[A-Za-z]:[\\/]|\\\\",
+        r"\{[^{}\n]*\"?[A-Za-z0-9_.-]+\"?\s*:[^{}\n]*\}|\"[A-Za-z0-9_.-]+\"\s*:",
+        r"`[^`]+`",
+    ]
+    return any(re.search(pattern, text, re.I) for pattern in protected_patterns)
 
 
 def _looks_like_json_line(value: str) -> bool:

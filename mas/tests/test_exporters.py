@@ -1277,6 +1277,91 @@ Starter tier at provisional planning estimate.
         self.assertIn('"confirmed by customer interview"', markdown)
         self.assertIn('"confirm that setup is difficult"', markdown)
 
+    def test_client_markdown_cleanup_handles_moderate_document_count_and_narrative_tables(self):
+        state = ProjectState(
+            project_id="moderate-client-count-cleanup",
+            project_name="Moderate client count cleanup",
+            brief="Improve growth performance with supplied planning documents.",
+            report="""# Executive Summary
+Direct project evidence: Moderate — three supplied documents (GTM plan, market research, web proposal, social calendar)
+
+# Why This Is Recommended
+| Area | Client-facing summary |
+|---|---|
+| Evidence | Direct project evidence: Moderate — four supplied files (GTM plan, market research, web proposal, social calendar) |
+| Legal | Require a legal-review SLA of operator-defined effort estimate or less before campaign claims ship. |
+""",
+            knowledge_layer=KnowledgeLayerState(
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="gtm-plan.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    ),
+                    UploadedFileManifest(
+                        file_id="file-2",
+                        filename="market-research.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    ),
+                    UploadedFileManifest(
+                        file_id="file-3",
+                        filename="web-proposal.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    ),
+                    UploadedFileManifest(
+                        file_id="file-4",
+                        filename="social-calendar.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    ),
+                ]
+            ),
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        expected = (
+            "Direct project evidence: Moderate — supplied project documents provide "
+            "planning-level evidence, but validation gaps remain."
+        )
+        self.assertIn(expected, markdown)
+        self.assertNotIn("three supplied documents", markdown)
+        self.assertNotIn("four supplied files", markdown)
+        self.assertIn("| Evidence | " + expected + " |", markdown)
+        self.assertIn("| Legal | Require a legal-review SLA of 24 hours or less before campaign claims ship. |", markdown)
+        self.assertNotIn("operator-defined effort estimate or less", markdown)
+
+    def test_client_count_cleanup_preserves_protected_source_excerpt_tables(self):
+        state = ProjectState(
+            project_id="protected-source-table",
+            project_name="Protected source table",
+            brief="Improve growth performance with supplied planning documents.",
+            report="""# Executive Summary
+Use the supplied evidence for planning.
+
+# Why This Is Recommended
+| Evidence ID | Source excerpt | Locator |
+|---|---|---|
+| ev-growth | Direct project evidence: Moderate — three supplied documents (GTM plan, market research, web proposal, social calendar) | upload:file-1:gtm-plan.pdf#page=2 |
+""",
+            knowledge_layer=KnowledgeLayerState(
+                uploaded_files=[
+                    UploadedFileManifest(
+                        file_id="file-1",
+                        filename="gtm-plan.md",
+                        parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                    ),
+                ]
+            ),
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        self.assertIn(
+            "Direct project evidence: Moderate — three supplied documents (GTM plan, market research, web proposal, social calendar)",
+            markdown,
+        )
+        self.assertIn("upload:file-1:gtm-plan.pdf#page=2", markdown)
+
     def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):
         minimal = make_sparse_growth_state("risk-minimal")
         limited = make_sparse_growth_state("risk-limited")
