@@ -17,7 +17,7 @@ import api  # noqa: E402
 from config import UPLOAD_LAYER  # noqa: E402
 from extensions.connectors import CSVColumnMapping  # noqa: E402
 from knowledge.file_parsers import UploadParseError, parse_upload_bytes  # noqa: E402
-from knowledge.files import delete_uploaded_file, ingest_uploaded_file  # noqa: E402
+from knowledge.files import UploadStorageError, delete_uploaded_file, ingest_uploaded_file  # noqa: E402
 from knowledge.retrieval import evaluate_phase_retrieval  # noqa: E402
 from overview import build_operator_overview  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
@@ -190,6 +190,23 @@ class TestUploadIngestion(unittest.TestCase):
             self.assertEqual(len(state.imported_signals), 0)
             self.assertEqual(len(state.knowledge_layer.uploaded_files), 0)
 
+    def test_storage_mkdir_failure_raises_controlled_error_without_manifest(self):
+        state = make_state("upload-storage-failure")
+
+        with patch("knowledge.files.Path.mkdir", side_effect=OSError(5, "Input/output error")):
+            with self.assertRaises(UploadStorageError) as ctx:
+                ingest_uploaded_file(
+                    state,
+                    filename="brief.txt",
+                    media_type="text/plain",
+                    content=b"Fresh context for the project.",
+                    actor="operator",
+                )
+
+        self.assertEqual(str(ctx.exception), UploadStorageError.public_message)
+        self.assertNotIn("Input/output error", str(ctx.exception))
+        self.assertEqual(len(state.knowledge_layer.uploaded_files), 0)
+
 
 class TestUploadApiAndOverview(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -224,6 +241,35 @@ class TestUploadApiAndOverview(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(overview.files[0].filename, "context.md")
         self.assertEqual(dict(state.phase_status), before_status)
         save_mock.assert_awaited()
+
+    async def test_upload_route_returns_controlled_503_for_storage_failure(self):
+        state = make_state("upload-api-storage-failure")
+        upload = _make_upload("context.md", b"# Market note\n\nPricing pressure is rising.", "text/markdown")
+        storage_error = UploadStorageError(
+            path=r"C:\private\upload_store\upload-api-storage-failure",
+            operation="mkdir",
+            cause=OSError(5, "Input/output error"),
+        )
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with patch("api.ingest_uploaded_file", side_effect=storage_error):
+                with self.assertRaises(api.HTTPException) as ctx:
+                    await api.upload_project_file(
+                        state.project_id,
+                        file=upload,
+                        actor="operator",
+                        role="context",
+                        import_mode="knowledge",
+                        sheet_name="",
+                        mapping_json="",
+                    )
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        detail = str(ctx.exception.detail)
+        self.assertIn("Upload storage is unavailable", detail)
+        self.assertNotIn("Traceback", detail)
+        self.assertNotIn("Input/output error", detail)
+        self.assertNotIn("C:\\", detail)
 
 
 def _contains_bytes(value) -> bool:
