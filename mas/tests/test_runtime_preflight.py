@@ -15,6 +15,7 @@ import api  # noqa: E402
 from config import APP_VERSION, UPLOAD_LAYER  # noqa: E402
 from knowledge.files import UploadStoreHealth  # noqa: E402
 from runtime import preflight  # noqa: E402
+from runtime import run_state as workflow_run_state  # noqa: E402
 
 
 class _FakeAcquire:
@@ -38,6 +39,57 @@ class _FakePool:
         return _FakeAcquire()
 
 
+class _SchemaAwareAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _SchemaAwarePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _SchemaAwareAcquire(self.conn)
+
+
+class _SchemaAwareConn:
+    def __init__(self, *, fail_schema: bool = False):
+        self.fail_schema = fail_schema
+        self.table_ready = False
+        self.schema_statements = []
+        self.count_queries = 0
+
+    async def execute(self, query: str):
+        normalized = " ".join(query.split()).lower()
+        if "select 1" in normalized:
+            return "SELECT 1"
+        if self.fail_schema and "workflow_runs" in normalized:
+            raise RuntimeError('relation "workflow_runs" does not exist password=secret /app/private/path')
+        if "create table if not exists workflow_runs" in normalized:
+            self.table_ready = True
+        if "workflow_runs" in normalized and (
+            "create table" in normalized
+            or "create unique index" in normalized
+            or "create index" in normalized
+        ):
+            self.schema_statements.append(normalized)
+        return "OK"
+
+    async def fetchval(self, query: str):
+        normalized = " ".join(query.split()).lower()
+        if "from workflow_runs" in normalized:
+            self.count_queries += 1
+            if not self.table_ready:
+                raise RuntimeError('relation "workflow_runs" does not exist password=secret')
+        return 0
+
+
 def _env(mapping: dict[str, str]):
     return lambda name, default="": mapping.get(name, default)
 
@@ -55,6 +107,14 @@ def _upload_ok():
 
 
 class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        workflow_run_state._schema_ready_for_pool.clear()
+        workflow_run_state.clear_memory_run_state()
+
+    async def asyncTearDown(self):
+        workflow_run_state._schema_ready_for_pool.clear()
+        workflow_run_state.clear_memory_run_state()
+
     async def test_upload_store_writable_success_is_reported(self):
         with tempfile.TemporaryDirectory() as tempdir, patch.object(UPLOAD_LAYER, "storage_dir", tempdir):
             result = await preflight.build_runtime_preflight(running_project_ids=[])
@@ -144,6 +204,55 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_state["workflow_run_tracking"], "durable_postgres")
         self.assertTrue(run_state["cross_process_run_guard_enabled"])
         self.assertNotIn("secret", serialized)
+
+    async def test_existing_database_without_workflow_runs_is_ensured_for_preflight(self):
+        conn = _SchemaAwareConn()
+        pool = _SchemaAwarePool(conn)
+
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({"DATABASE_URL": "postgres://user:secret@db/app"})):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=pool)):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        run_state = result["checks"]["run_state"]
+        self.assertEqual(run_state["status"], "ok")
+        self.assertTrue(run_state["durable_run_state_active"])
+        self.assertTrue(conn.table_ready)
+        self.assertTrue(any("create table if not exists workflow_runs" in sql for sql in conn.schema_statements))
+        self.assertEqual(conn.count_queries, 1)
+
+    async def test_run_state_schema_ensure_is_idempotent_for_same_pool(self):
+        conn = _SchemaAwareConn()
+        pool = _SchemaAwarePool(conn)
+
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({"DATABASE_URL": "postgres://user:secret@db/app"})):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=pool)):
+                first = await preflight.build_runtime_preflight(running_project_ids=[])
+                first_schema_count = len(conn.schema_statements)
+                second = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        self.assertEqual(first["checks"]["run_state"]["status"], "ok")
+        self.assertEqual(second["checks"]["run_state"]["status"], "ok")
+        self.assertGreaterEqual(first_schema_count, 3)
+        self.assertEqual(len(conn.schema_statements), first_schema_count)
+        self.assertEqual(conn.count_queries, 2)
+
+    async def test_preflight_does_not_report_durable_run_state_active_when_schema_ensure_fails(self):
+        conn = _SchemaAwareConn(fail_schema=True)
+        pool = _SchemaAwarePool(conn)
+
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({"DATABASE_URL": "postgres://user:secret@db/app"})):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=pool)):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        run_state = result["checks"]["run_state"]
+        serialized = json.dumps(result)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(run_state["status"], "fail")
+        self.assertFalse(run_state["durable_run_state_active"])
+        self.assertFalse(run_state["cross_process_run_guard_enabled"])
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("/app/private/path", serialized)
+        self.assertNotIn('relation "workflow_runs"', serialized)
 
     async def test_run_state_posture_reports_process_local_fallback_without_postgres(self):
         with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({})):
