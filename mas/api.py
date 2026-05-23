@@ -287,6 +287,48 @@ async def runtime_preflight():
     return await build_runtime_preflight(running_project_ids=running)
 
 
+@app.get("/runtime/release-readiness")
+async def runtime_release_readiness():
+    preflight = await build_runtime_preflight(running_project_ids=running)
+    return _build_release_readiness(preflight)
+
+
+def _build_release_readiness(preflight: dict[str, Any]) -> dict[str, Any]:
+    status = str(preflight.get("status") or "fail")
+    gate = {
+        "ok": "pass",
+        "degraded": "warn",
+        "fail": "block",
+    }.get(status, "block")
+    checks = preflight.get("checks") if isinstance(preflight.get("checks"), dict) else {}
+    return {
+        "status": status,
+        "release_gate": gate,
+        "blockers": _release_readiness_items(checks, "fail"),
+        "warnings": _release_readiness_items(checks, "degraded"),
+        "version": preflight.get("version") or APP_VERSION or "unknown",
+        "operator_only": True,
+    }
+
+
+def _release_readiness_items(checks: dict[str, Any], target_status: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for name, check in checks.items():
+        if not isinstance(check, dict):
+            continue
+        if str(check.get("status") or "") != target_status:
+            continue
+        items.append(
+            {
+                "check": str(name),
+                "message": workflow_run_state.sanitize_error_summary(
+                    str(check.get("message") or f"{name} reported {target_status}.")
+                ),
+            }
+        )
+    return items
+
+
 @app.post("/projects", response_model=ProjectResponse)
 async def create_project(req: CreateProjectRequest):
     state = ProjectState(

@@ -63,6 +63,18 @@ does not claim v5 is fully shipped.
 - partial: worker execution still depends on the API process draining queued
   jobs. No separate worker service or worker lifecycle supervisor is included.
 
+## Tranche 5 Changes
+
+- implemented: `GET /runtime/release-readiness` summarizes the existing
+  preflight aggregation into `release_gate: pass | warn | block`.
+- implemented: release-readiness reuses the same `/runtime/preflight`
+  aggregation path and does not run separate dependency probes.
+- implemented: release checklist and migration/rollback guidance are documented
+  in `v5-RUNTIME-RELEASE-CHECKLIST.md` and `v5-RUNTIME-MIGRATION.md`.
+- implemented: release-readiness and preflight responses remain operator-local
+  diagnostics and are documented as unsafe for public exposure without auth and
+  network hardening.
+
 ## What Is Durable Now
 
 - implemented: queued/running/succeeded/failed workflow-run status is durable
@@ -123,6 +135,7 @@ $base = "http://localhost:$appPort"
 
 curl.exe "$base/health"
 curl.exe "$base/runtime/preflight"
+curl.exe "$base/runtime/release-readiness"
 
 $body = @{
   name = "v5 durable run smoke"
@@ -147,6 +160,7 @@ do {
 } until ($state.phase_status.report -eq "completed" -or $state.phase_status.report -eq "failed")
 
 curl.exe "$base/runtime/preflight"
+curl.exe "$base/runtime/release-readiness"
 ```
 
 The second run request should return a controlled conflict while the first run
@@ -206,8 +220,18 @@ Common causes:
   retry scheduling policy.
 - missing: cancellation semantics. No cancellation API or `cancelled` run status
   is implemented in this tranche.
+- missing: public network hardening. Runtime diagnostic endpoints are
+  operator-local only and are unsafe for public exposure without auth and
+  network controls.
 
-## Tranche 5 Plan
+## Release Documentation
+
+- `v5-RUNTIME-RELEASE-CHECKLIST.md`: final operator checklist, smoke commands,
+  rollback notes, and do-not-overclaim guidance.
+- `v5-RUNTIME-MIGRATION.md`: additive runtime schema ensure behavior,
+  inspection commands, and rollback caveats.
+
+## Next Tranche Plan
 
 - planned: package a separate worker process/container that drains durable jobs
   without depending on API request background tasks.
