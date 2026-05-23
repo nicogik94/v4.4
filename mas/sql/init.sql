@@ -43,6 +43,33 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_active_heartbeat
 ON workflow_runs(status, heartbeat_at)
 WHERE status IN ('queued', 'running');
 
+-- ═══ Workflow Jobs (v5 durable worker queue) ═══
+
+CREATE TABLE IF NOT EXISTS workflow_jobs (
+    job_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id UUID NOT NULL,
+    project_id TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'queued',  -- queued, running, succeeded, failed
+    attempt_count INT NOT NULL DEFAULT 0,
+    max_attempts INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    error_summary TEXT NOT NULL DEFAULT ''
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_jobs_active_run
+ON workflow_jobs(run_id)
+WHERE status IN ('queued', 'running');
+
+CREATE INDEX IF NOT EXISTS idx_workflow_jobs_available
+ON workflow_jobs(status, available_at, created_at)
+WHERE status = 'queued';
+
+CREATE INDEX IF NOT EXISTS idx_workflow_jobs_project_created
+ON workflow_jobs(project_id, created_at DESC);
+
 -- ═══ Phase Outputs ═══
 
 CREATE TABLE IF NOT EXISTS phase_outputs (

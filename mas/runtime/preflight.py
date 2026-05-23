@@ -7,6 +7,7 @@ from typing import Iterable
 from config import APP_VERSION
 from knowledge.files import check_upload_store_writable
 from runtime import run_state
+from runtime import work_queue
 import store
 
 
@@ -22,6 +23,7 @@ async def build_runtime_preflight(*, running_project_ids: Iterable[str] = ()) ->
             local_running_count=len(running_ids),
             local_running_project_ids=running_ids,
         ),
+        "workflow_queue": await work_queue.get_queue_posture(),
         "jobs": _check_jobs(running_ids),
     }
     return {
@@ -131,12 +133,12 @@ def _check_jobs(running_project_ids: Iterable[str]) -> dict:
     return {
         "status": status,
         "process_local": True,
-        "execution_mode": "fastapi_background_tasks",
+        "execution_mode": "durable_queue_api_process_drain",
         "running_count": running_count,
         "message": (
-            "One or more workflows are tracked by this API process only."
+            "One or more workflows are currently draining inside this API process."
             if running_count
-            else "Workflow execution still runs inside this API process; no workflows are currently marked running locally."
+            else "Workflow jobs are durable when Postgres is active, but draining still runs inside this API process."
         ),
     }
 

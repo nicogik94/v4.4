@@ -48,12 +48,31 @@ does not claim v5 is fully shipped.
 - partial: recovery is a safety cleanup for abandoned active rows, not a retry
   system or worker recovery engine.
 
+## Tranche 4 Changes
+
+- implemented: workflow start now enqueues a durable Postgres-backed
+  `workflow_jobs` row when Postgres is available.
+- implemented: queued jobs track `job_id`, `run_id`, `project_id`, status,
+  attempt metadata, timestamps, and sanitized error summary.
+- implemented: the API process can claim queued jobs atomically and drain them
+  through the existing v4.4 sequential workflow runner.
+- implemented: if local API background-drain scheduling fails after enqueue,
+  the job remains queued and visible in `/runtime/preflight`.
+- implemented: retry metadata is persisted with default `max_attempts = 1`;
+  automatic workflow retries are disabled in this tranche.
+- partial: worker execution still depends on the API process draining queued
+  jobs. No separate worker service or worker lifecycle supervisor is included.
+
 ## What Is Durable Now
 
 - implemented: queued/running/succeeded/failed workflow-run status is durable
   in Postgres when `DATABASE_URL` is configured and reachable.
+- implemented: queued/running/succeeded/failed workflow-job status is durable
+  in Postgres when `DATABASE_URL` is configured and reachable.
 - implemented: active-run conflict prevention is backed by a Postgres partial
   unique index on active statuses.
+- implemented: a workflow job can be queued before the local API process starts
+  draining it, so a local drain scheduling failure does not discard the job.
 - implemented: `current_phase` is updated during the existing sequential
   workflow run, and active runs update `heartbeat_at` during progress.
 - implemented: the v4.4 workflow sequence remains unchanged:
@@ -77,7 +96,8 @@ Use the host port shown by `docker compose ps`, for example a mapping like
 `0.0.0.0:8001->8000/tcp` means `<host_port>` is `8001`.
 
 The preflight route is an operator-only/local diagnostic. It is not auth,
-multi-tenant isolation, public-safe security hardening, or a durable queue.
+multi-tenant isolation, public-safe security hardening, or public access
+control.
 
 The preflight response now separates:
 
@@ -86,7 +106,10 @@ The preflight response now separates:
 - `run_state`: whether durable Postgres run state and the cross-process guard
   are active, whether abandoned-run recovery is available, stale active-run
   count, last recovery check status, recovered count, and stale threshold.
-- `jobs`: local FastAPI background-task execution posture.
+- `workflow_queue`: whether the durable Postgres job queue is active, worker
+  claim/drain code is callable, queued/running/failed job counts, retry policy,
+  and API-process drain dependency.
+- `jobs`: local API-process drain posture.
 
 ## Workflow Smoke
 
@@ -122,11 +145,14 @@ do {
   $state.current_phase
   $state.phase_status
 } until ($state.phase_status.report -eq "completed" -or $state.phase_status.report -eq "failed")
+
+curl.exe "$base/runtime/preflight"
 ```
 
 The second run request should return a controlled conflict while the first run
-is active. A full workflow run requires the same provider credentials that v4.4
-already required.
+is active. After completion, `/runtime/preflight` should show no queued jobs for
+the completed run and no running jobs if the local drain is idle. A full
+workflow run requires the same provider credentials that v4.4 already required.
 
 To smoke stale recovery against a local Postgres-backed run, age an active row
 past the threshold and call preflight:
@@ -168,21 +194,25 @@ Common causes:
 
 ## Current Runtime Limits
 
-- partial: FastAPI `BackgroundTasks` still execute workflow runs in the API
-  process.
+- partial: durable workflow jobs are stored in Postgres, but FastAPI
+  `BackgroundTasks` still trigger the local API-process queue drain.
 - partial: Postgres state persistence is available when `DATABASE_URL` is
   configured and reachable; otherwise the store falls back to process memory.
 - scaffolded: Redis is available in Docker and reported by preflight when
-  configured, but Redis is not yet a durable worker or lock layer.
-- missing: durable external worker queue, retry state, and worker lifecycle
-  management.
+  configured, but Redis is not a workflow queue or lock layer.
+- partial: retry metadata exists with `max_attempts = 1`; automatic retries are
+  disabled.
+- missing: separate worker process/container, worker lifecycle management, and
+  retry scheduling policy.
 - missing: cancellation semantics. No cancellation API or `cancelled` run status
   is implemented in this tranche.
 
-## Tranche 4 Plan
+## Tranche 5 Plan
 
-- planned: move workflow execution to a durable Redis/Postgres-backed queue.
-- planned: add retry policy and explicit worker lifecycle.
+- planned: package a separate worker process/container that drains durable jobs
+  without depending on API request background tasks.
+- planned: add explicit worker lifecycle, recovery for abandoned running jobs,
+  and a conservative retry scheduler.
 - planned: add operator authentication/authorization before exposing
   diagnostics outside a local environment.
 - planned: document deployment-specific secrets and storage policies.
@@ -195,7 +225,7 @@ This tranche does not implement or claim:
 - enterprise readiness,
 - multi-tenancy,
 - authentication,
-- durable workflow workers,
-- durable retry/recovery beyond stale active-run cleanup,
+- external worker platform readiness,
+- automatic durable retry/recovery beyond stale active-run cleanup,
 - semantic claim defensibility,
 - new reasoning features or template packs.
