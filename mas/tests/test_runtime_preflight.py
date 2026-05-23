@@ -29,9 +29,13 @@ class _FakeAcquire:
         self.query = query
         return "SELECT 1"
 
-    async def fetchval(self, query: str):
+    async def fetchval(self, query: str, *args):
         self.query = query
         return 0
+
+    async def fetch(self, query: str, *args):
+        self.query = query
+        return []
 
 
 class _FakePool:
@@ -75,19 +79,26 @@ class _SchemaAwareConn:
             self.table_ready = True
         if "workflow_runs" in normalized and (
             "create table" in normalized
+            or "alter table" in normalized
             or "create unique index" in normalized
             or "create index" in normalized
         ):
             self.schema_statements.append(normalized)
         return "OK"
 
-    async def fetchval(self, query: str):
+    async def fetchval(self, query: str, *args):
         normalized = " ".join(query.split()).lower()
         if "from workflow_runs" in normalized:
             self.count_queries += 1
             if not self.table_ready:
                 raise RuntimeError('relation "workflow_runs" does not exist password=secret')
         return 0
+
+    async def fetch(self, query: str, *args):
+        normalized = " ".join(query.split()).lower()
+        if self.fail_schema and "workflow_runs" in normalized:
+            raise RuntimeError('relation "workflow_runs" does not exist password=secret /app/private/path')
+        return []
 
 
 def _env(mapping: dict[str, str]):
@@ -203,6 +214,10 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(run_state["durable_run_state_active"])
         self.assertEqual(run_state["workflow_run_tracking"], "durable_postgres")
         self.assertTrue(run_state["cross_process_run_guard_enabled"])
+        self.assertTrue(run_state["stale_recovery_available"])
+        self.assertEqual(run_state["last_recovery_check_status"], "ok")
+        self.assertEqual(run_state["stale_active_run_count"], 0)
+        self.assertEqual(run_state["stale_after_seconds"], 3600)
         self.assertNotIn("secret", serialized)
 
     async def test_existing_database_without_workflow_runs_is_ensured_for_preflight(self):
@@ -218,7 +233,8 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(run_state["durable_run_state_active"])
         self.assertTrue(conn.table_ready)
         self.assertTrue(any("create table if not exists workflow_runs" in sql for sql in conn.schema_statements))
-        self.assertEqual(conn.count_queries, 1)
+        self.assertTrue(any("alter table workflow_runs add column if not exists heartbeat_at" in sql for sql in conn.schema_statements))
+        self.assertGreaterEqual(conn.count_queries, 2)
 
     async def test_run_state_schema_ensure_is_idempotent_for_same_pool(self):
         conn = _SchemaAwareConn()
@@ -232,9 +248,9 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first["checks"]["run_state"]["status"], "ok")
         self.assertEqual(second["checks"]["run_state"]["status"], "ok")
-        self.assertGreaterEqual(first_schema_count, 3)
+        self.assertGreaterEqual(first_schema_count, 5)
         self.assertEqual(len(conn.schema_statements), first_schema_count)
-        self.assertEqual(conn.count_queries, 2)
+        self.assertGreaterEqual(conn.count_queries, 4)
 
     async def test_preflight_does_not_report_durable_run_state_active_when_schema_ensure_fails(self):
         conn = _SchemaAwareConn(fail_schema=True)
@@ -250,9 +266,28 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_state["status"], "fail")
         self.assertFalse(run_state["durable_run_state_active"])
         self.assertFalse(run_state["cross_process_run_guard_enabled"])
+        self.assertFalse(run_state["stale_recovery_available"])
+        self.assertEqual(run_state["last_recovery_check_status"], "fail")
         self.assertNotIn("secret", serialized)
         self.assertNotIn("/app/private/path", serialized)
         self.assertNotIn('relation "workflow_runs"', serialized)
+
+    def test_workflow_run_stale_timeout_parsing_is_defensively_clamped(self):
+        cases = {
+            None: 3600,
+            "": 3600,
+            "not-a-number": 3600,
+            "0": 3600,
+            "-5": 3600,
+            "1": 300,
+            "299": 300,
+            "300": 300,
+            "900": 900,
+            1200: 1200,
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(workflow_run_state._normalize_stale_after_seconds(raw), expected)
 
     async def test_run_state_posture_reports_process_local_fallback_without_postgres(self):
         with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({})):
@@ -264,6 +299,8 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(run_state["durable_run_state_active"])
         self.assertEqual(run_state["workflow_run_tracking"], "process_local")
         self.assertFalse(run_state["cross_process_run_guard_enabled"])
+        self.assertFalse(run_state["stale_recovery_available"])
+        self.assertEqual(run_state["last_recovery_check_status"], "degraded")
 
     async def test_api_preflight_route_returns_operator_diagnostic(self):
         with patch("api.build_runtime_preflight", new=AsyncMock(return_value={"status": "ok", "version": APP_VERSION, "operator_only": True, "checks": {}})):

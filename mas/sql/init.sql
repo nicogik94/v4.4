@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
+    heartbeat_at TIMESTAMPTZ,
     error_summary TEXT NOT NULL DEFAULT '',
     code_version VARCHAR(50) NOT NULL DEFAULT ''
 );
@@ -37,6 +38,10 @@ WHERE status IN ('queued', 'running');
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_project_created
 ON workflow_runs(project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_active_heartbeat
+ON workflow_runs(status, heartbeat_at)
+WHERE status IN ('queued', 'running');
 
 -- ═══ Phase Outputs ═══
 

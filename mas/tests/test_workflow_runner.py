@@ -1518,12 +1518,44 @@ class _RunStateConn:
     def __init__(self):
         self.rows = {}
         self.active_by_project = {}
+        self.heartbeat_counter = 0
 
     async def execute(self, query, *args):
         return "OK"
 
     async def fetchval(self, query, *args):
+        normalized = " ".join(query.split()).upper()
+        if "COALESCE(HEARTBEAT_AT" in normalized:
+            excluded = self._excluded_projects(args)
+            return sum(
+                1
+                for row in self.rows.values()
+                if self._is_active_stale(row) and row["project_id"] not in excluded
+            )
+        if "FROM WORKFLOW_RUNS" in normalized:
+            return sum(1 for row in self.rows.values() if row["status"] in workflow_run_state.ACTIVE_RUN_STATUSES)
         return len(self.active_by_project)
+
+    async def fetch(self, query, *args):
+        normalized = " ".join(query.split()).upper()
+        if "WITH STALE AS" in normalized and "UPDATE WORKFLOW_RUNS" in normalized:
+            limit = int(args[1])
+            excluded = self._excluded_projects(args)
+            recovered = []
+            for row in sorted(self.rows.values(), key=lambda item: item.get("heartbeat_at") or ""):
+                if len(recovered) >= limit:
+                    break
+                if row["project_id"] in excluded:
+                    continue
+                if self._is_active_stale(row):
+                    row["status"] = "failed"
+                    row["finished_at"] = "2026-05-22T00:02:00+00:00"
+                    row["heartbeat_at"] = self._next_heartbeat()
+                    row["error_summary"] = args[3]
+                    self.active_by_project.pop(row["project_id"], None)
+                    recovered.append({"run_id": row["run_id"]})
+            return recovered
+        return []
 
     async def fetchrow(self, query, *args):
         normalized = " ".join(query.split()).upper()
@@ -1539,6 +1571,7 @@ class _RunStateConn:
                 "created_at": "2026-05-22T00:00:00+00:00",
                 "started_at": None,
                 "finished_at": None,
+                "heartbeat_at": self._next_heartbeat(),
                 "error_summary": "",
                 "code_version": version,
             }
@@ -1551,8 +1584,20 @@ class _RunStateConn:
             return self.rows.get(run_id) if run_id else None
         if normalized.startswith("SELECT") and "WHERE RUN_ID" in normalized:
             return self.rows.get(args[0])
+        if normalized.startswith("UPDATE WORKFLOW_RUNS") and "WHERE PROJECT_ID" in normalized:
+            project_id, threshold, summary = args
+            run_id = self.active_by_project.get(project_id)
+            row = self.rows.get(run_id) if run_id else None
+            if row and self._is_active_stale(row):
+                row["status"] = "failed"
+                row["finished_at"] = "2026-05-22T00:02:00+00:00"
+                row["heartbeat_at"] = self._next_heartbeat()
+                row["error_summary"] = summary
+                self.active_by_project.pop(project_id, None)
+                return {"run_id": row["run_id"]}
+            return None
         if normalized.startswith("UPDATE WORKFLOW_RUNS"):
-            run_id, status, current_phase, set_started, set_finished, error_summary = args
+            run_id, status, current_phase, set_started, set_finished, error_summary, touch_heartbeat = args
             row = self.rows.get(run_id)
             if not row:
                 return None
@@ -1566,17 +1611,39 @@ class _RunStateConn:
                 row["finished_at"] = "2026-05-22T00:02:00+00:00"
             if error_summary is not None:
                 row["error_summary"] = error_summary
+            if touch_heartbeat:
+                row["heartbeat_at"] = self._next_heartbeat()
             if row["status"] in workflow_run_state.TERMINAL_RUN_STATUSES:
                 self.active_by_project.pop(row["project_id"], None)
             return row
         return None
 
+    def mark_stale(self, run_id):
+        self.rows[run_id]["heartbeat_at"] = "stale"
+
+    def _is_active_stale(self, row):
+        return row["status"] in workflow_run_state.ACTIVE_RUN_STATUSES and row.get("heartbeat_at") == "stale"
+
+    def _next_heartbeat(self):
+        self.heartbeat_counter += 1
+        return f"2026-05-22T00:{self.heartbeat_counter:02d}:00+00:00"
+
+    def _excluded_projects(self, args):
+        for arg in args:
+            if isinstance(arg, (list, tuple, set)):
+                return {str(item) for item in arg}
+        return set()
+
 
 class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        api.running.clear()
+        workflow_run_state._schema_ready_for_pool.clear()
         workflow_run_state.clear_memory_run_state()
 
     async def asyncTearDown(self):
+        api.running.clear()
+        workflow_run_state._schema_ready_for_pool.clear()
         workflow_run_state.clear_memory_run_state()
 
     async def test_postgres_run_state_creation_and_active_guard(self):
@@ -1595,6 +1662,112 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate.run.run_id, first.run.run_id)
         self.assertEqual(running_record.status, "running")
         self.assertEqual(running_record.current_phase, "classify")
+
+    async def test_stale_queued_run_is_detected_and_marked_failed(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run("stale-queued", code_version="4.4.0")
+            pool.conn.mark_stale(acquisition.run.run_id)
+
+            stale_count = await workflow_run_state.count_stale_active_runs()
+            recovery = await workflow_run_state.recover_stale_active_runs()
+            record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+
+        self.assertEqual(stale_count, 1)
+        self.assertEqual(recovery.status, "ok")
+        self.assertEqual(recovery.recovered_count, 1)
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(record.error_summary, workflow_run_state.ABANDONED_RUN_ERROR_SUMMARY)
+        self.assertNotIn("Traceback", record.error_summary)
+        self.assertNotIn("C:\\", record.error_summary)
+
+    async def test_stale_running_run_is_detected_and_marked_failed(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run("stale-running", code_version="4.4.0")
+            await workflow_run_state.mark_run_running(acquisition.run.run_id, current_phase="audit")
+            pool.conn.mark_stale(acquisition.run.run_id)
+
+            recovery = await workflow_run_state.recover_stale_active_runs()
+            record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+
+        self.assertEqual(recovery.recovered_count, 1)
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(record.current_phase, "audit")
+        self.assertEqual(record.error_summary, workflow_run_state.ABANDONED_RUN_ERROR_SUMMARY)
+
+    async def test_fresh_active_run_is_not_marked_stale(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run("fresh-active", code_version="4.4.0")
+
+            stale_count = await workflow_run_state.count_stale_active_runs()
+            recovery = await workflow_run_state.recover_stale_active_runs()
+            record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+
+        self.assertEqual(stale_count, 0)
+        self.assertEqual(recovery.recovered_count, 0)
+        self.assertEqual(record.status, "queued")
+
+    async def test_locally_running_project_is_excluded_from_stale_recovery(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run("locally-running", code_version="4.4.0")
+            pool.conn.mark_stale(acquisition.run.run_id)
+
+            stale_count = await workflow_run_state.count_stale_active_runs(
+                exclude_project_ids=["locally-running"]
+            )
+            recovery = await workflow_run_state.recover_stale_active_runs(
+                exclude_project_ids=["locally-running"]
+            )
+            record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+
+        self.assertEqual(stale_count, 0)
+        self.assertEqual(recovery.recovered_count, 0)
+        self.assertEqual(record.status, "queued")
+
+    async def test_phase_progress_updates_run_heartbeat(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run("heartbeat-project", code_version="4.4.0")
+            initial = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+            updated = await workflow_run_state.mark_run_phase(acquisition.run.run_id, "strategy")
+
+        self.assertNotEqual(updated.heartbeat_at, initial.heartbeat_at)
+        self.assertEqual(updated.current_phase, "strategy")
+
+    async def test_stale_project_run_is_recovered_before_new_workflow_start(self):
+        pool = _RunStatePool()
+        state = ProjectState(project_id="stale-before-start", project_name="Recovery", brief="Run after stale")
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            stale = await workflow_run_state.create_workflow_run(state.project_id, code_version="4.4.0")
+            pool.conn.mark_stale(stale.run.run_id)
+            with patch("api.store.load", new=AsyncMock(return_value=state)):
+                response = await api.run_full_workflow(state.project_id, BackgroundTasks())
+            stale_record = await workflow_run_state.get_workflow_run(stale.run.run_id)
+            active = await workflow_run_state.get_active_project_run(state.project_id)
+
+        self.assertEqual(response["status"], "started")
+        self.assertIn("run_id", response)
+        self.assertNotEqual(response["run_id"], stale.run.run_id)
+        self.assertEqual(stale_record.status, "failed")
+        self.assertEqual(stale_record.error_summary, workflow_run_state.ABANDONED_RUN_ERROR_SUMMARY)
+        self.assertEqual(active.run_id, response["run_id"])
+
+    async def test_fresh_durable_duplicate_run_still_conflicts(self):
+        pool = _RunStatePool()
+        state = ProjectState(project_id="fresh-duplicate", project_name="Duplicate", brief="Run once")
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            with patch("api.store.load", new=AsyncMock(return_value=state)):
+                first = await api.run_full_workflow(state.project_id, BackgroundTasks())
+            api.running.clear()
+            with patch("api.store.load", new=AsyncMock(return_value=state)):
+                with self.assertRaises(HTTPException) as ctx:
+                    await api.run_full_workflow(state.project_id, BackgroundTasks())
+
+        self.assertEqual(first["status"], "started")
+        self.assertEqual(ctx.exception.status_code, 409)
 
 
 class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):

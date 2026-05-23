@@ -19,7 +19,8 @@ async def build_runtime_preflight(*, running_project_ids: Iterable[str] = ()) ->
         "database": await _check_database(),
         "redis": await _check_redis(),
         "run_state": await run_state.get_run_state_posture(
-            local_running_count=len(running_ids)
+            local_running_count=len(running_ids),
+            local_running_project_ids=running_ids,
         ),
         "jobs": _check_jobs(running_ids),
     }

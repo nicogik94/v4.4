@@ -31,6 +31,23 @@ does not claim v5 is fully shipped.
 - partial: if Postgres is unavailable, run tracking falls back to process memory
   and the cross-process guard is not active.
 
+## Tranche 3 Changes
+
+- implemented: active workflow runs now maintain a `heartbeat_at` progress
+  timestamp in Postgres.
+- implemented: `/runtime/preflight` runs a bounded abandoned-run recovery check
+  and reports the recovery posture.
+- implemented: workflow start attempts run project-scoped stale recovery before
+  applying the durable duplicate active-run guard.
+- implemented: queued/running runs that exceed the stale threshold are marked
+  `failed` with the operator-safe summary:
+  `Workflow run marked failed because it appeared abandoned after runtime restart or timeout.`
+- implemented: `WORKFLOW_RUN_STALE_AFTER_SECONDS` configures the stale
+  threshold. Missing, invalid, zero, or negative values fall back to `3600`.
+  Positive values below `300` are clamped to `300`.
+- partial: recovery is a safety cleanup for abandoned active rows, not a retry
+  system or worker recovery engine.
+
 ## What Is Durable Now
 
 - implemented: queued/running/succeeded/failed workflow-run status is durable
@@ -38,7 +55,7 @@ does not claim v5 is fully shipped.
 - implemented: active-run conflict prevention is backed by a Postgres partial
   unique index on active statuses.
 - implemented: `current_phase` is updated during the existing sequential
-  workflow run.
+  workflow run, and active runs update `heartbeat_at` during progress.
 - implemented: the v4.4 workflow sequence remains unchanged:
   `classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor ->
   report`.
@@ -67,7 +84,8 @@ The preflight response now separates:
 - `database`: database connectivity.
 - `redis`: Redis connectivity only; Redis is not a worker queue in this tranche.
 - `run_state`: whether durable Postgres run state and the cross-process guard
-  are active.
+  are active, whether abandoned-run recovery is available, stale active-run
+  count, last recovery check status, recovered count, and stale threshold.
 - `jobs`: local FastAPI background-task execution posture.
 
 ## Workflow Smoke
@@ -110,6 +128,22 @@ The second run request should return a controlled conflict while the first run
 is active. A full workflow run requires the same provider credentials that v4.4
 already required.
 
+To smoke stale recovery against a local Postgres-backed run, age an active row
+past the threshold and call preflight:
+
+```powershell
+docker compose ps
+$appPort = (docker compose port app 8000).Split(":")[-1]
+$base = "http://localhost:$appPort"
+
+docker compose exec -T db psql -U workflow -d workflow_v4 -c "UPDATE workflow_runs SET heartbeat_at = NOW() - INTERVAL '2 hours' WHERE run_id = '<run_id>' AND status IN ('queued','running');"
+curl.exe "$base/runtime/preflight"
+docker compose exec -T db psql -U workflow -d workflow_v4 -c "SELECT run_id,status,error_summary FROM workflow_runs WHERE run_id = '<run_id>';"
+```
+
+Expected result: the stale row is marked `failed`, `active_run_count` drops, and
+the error summary uses the standard abandoned-run recovery message.
+
 ## Upload Storage Diagnosis
 
 `UPLOAD_STORAGE_DIR` controls the upload storage root. If unset, the runtime
@@ -140,16 +174,15 @@ Common causes:
   configured and reachable; otherwise the store falls back to process memory.
 - scaffolded: Redis is available in Docker and reported by preflight when
   configured, but Redis is not yet a durable worker or lock layer.
-- missing: durable worker queue, interrupted-run recovery, retry state, and
-  worker lifecycle management.
+- missing: durable external worker queue, retry state, and worker lifecycle
+  management.
 - missing: cancellation semantics. No cancellation API or `cancelled` run status
   is implemented in this tranche.
 
-## Tranche 3 Plan
+## Tranche 4 Plan
 
 - planned: move workflow execution to a durable Redis/Postgres-backed queue.
-- planned: add recovery for interrupted or abandoned active runs.
-- planned: add explicit worker lifecycle and retry policy.
+- planned: add retry policy and explicit worker lifecycle.
 - planned: add operator authentication/authorization before exposing
   diagnostics outside a local environment.
 - planned: document deployment-specific secrets and storage policies.
@@ -163,6 +196,6 @@ This tranche does not implement or claim:
 - multi-tenancy,
 - authentication,
 - durable workflow workers,
-- durable retry/recovery,
+- durable retry/recovery beyond stale active-run cleanup,
 - semantic claim defensibility,
 - new reasoning features or template packs.
