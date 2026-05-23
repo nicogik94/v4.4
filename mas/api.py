@@ -81,6 +81,7 @@ from extensions.connectors import (
 from ingestion import merge_imported_records
 from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
 from runtime import run_state as workflow_run_state
+from runtime import work_queue as workflow_queue
 from runtime.preflight import build_runtime_preflight
 from tools.scoring import (
     check_gate, compute_det_scores, invalidate_downstream, summarize_phase_output,
@@ -777,6 +778,23 @@ async def run_full_workflow(project_id: str, background_tasks: BackgroundTasks):
         raise HTTPException(503, exc.public_message) from exc
     if not acquisition.created:
         raise HTTPException(409, "Workflow already running")
+
+    if acquisition.durable:
+        try:
+            await workflow_queue.enqueue_workflow_job(acquisition.run.run_id, project_id)
+        except workflow_queue.WorkflowQueueError as exc:
+            logger.error("Unable to enqueue workflow job for project %s", project_id, exc_info=True)
+            await _safe_mark_workflow_run(
+                workflow_run_state.mark_run_failed,
+                acquisition.run.run_id,
+                error=workflow_queue.QUEUE_ENQUEUE_ERROR_SUMMARY,
+            )
+            raise HTTPException(503, exc.public_message) from exc
+        try:
+            background_tasks.add_task(_drain_workflow_queue)
+        except Exception:
+            logger.error("Unable to schedule local workflow queue drain for project %s", project_id, exc_info=True)
+        return {"status": "started", "project_id": project_id, "run_id": acquisition.run.run_id}
 
     running.add(project_id)
     background_tasks.add_task(_run_workflow, project_id, acquisition.run.run_id)
@@ -1664,6 +1682,62 @@ async def _safe_mark_workflow_run(mark_func, *args, **kwargs) -> None:
         await mark_func(*args, **kwargs)
     except Exception:
         logger.error("Unable to update workflow run state", exc_info=True)
+
+
+async def _safe_mark_workflow_job(mark_func, *args, **kwargs) -> None:
+    try:
+        await mark_func(*args, **kwargs)
+    except Exception:
+        logger.error("Unable to update workflow queue job state", exc_info=True)
+
+
+async def _drain_workflow_queue(max_jobs: int = 1):
+    for _ in range(max(1, int(max_jobs or 1))):
+        try:
+            job = await workflow_queue.claim_next_workflow_job()
+        except workflow_queue.WorkflowQueueError:
+            logger.error("Unable to claim workflow queue job", exc_info=True)
+            return
+        if job is None:
+            return
+        await _execute_workflow_job(job)
+
+
+async def _execute_workflow_job(job: workflow_queue.WorkflowJobRecord):
+    running.add(job.project_id)
+    try:
+        await _run_workflow(job.project_id, job.run_id)
+        record = await workflow_run_state.get_workflow_run(job.run_id)
+        if record and record.status == "succeeded":
+            await _safe_mark_workflow_job(workflow_queue.mark_job_succeeded, job.job_id)
+            return
+        if record and record.status == "failed":
+            await _safe_mark_workflow_job(
+                workflow_queue.mark_job_failed,
+                job.job_id,
+                error=record.error_summary or "Workflow run failed.",
+            )
+            return
+        await _safe_mark_workflow_run(
+            workflow_run_state.mark_run_failed,
+            job.run_id,
+            error="Workflow job finished without a terminal run state.",
+        )
+        await _safe_mark_workflow_job(
+            workflow_queue.mark_job_failed,
+            job.job_id,
+            error="Workflow job finished without a terminal run state.",
+        )
+    except Exception as exc:
+        logger.error("Workflow queue job failed unexpectedly", exc_info=True)
+        await _safe_mark_workflow_run(
+            workflow_run_state.mark_run_failed,
+            job.run_id,
+            error=exc,
+        )
+        await _safe_mark_workflow_job(workflow_queue.mark_job_failed, job.job_id, error=exc)
+    finally:
+        running.discard(job.project_id)
 
 
 async def _run_workflow(project_id: str, run_id: str | None = None):

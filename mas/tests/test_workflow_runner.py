@@ -17,6 +17,7 @@ import api
 import report_freshness
 from llm_client import LLMResponse
 from runtime import run_state as workflow_run_state
+from runtime import work_queue as workflow_queue
 from orchestrator import (
     WORKFLOW_PHASE_SEQUENCE,
     _build_report_evidence_locator_register,
@@ -1518,7 +1519,10 @@ class _RunStateConn:
     def __init__(self):
         self.rows = {}
         self.active_by_project = {}
+        self.jobs = {}
+        self.active_jobs_by_run = {}
         self.heartbeat_counter = 0
+        self.job_counter = 0
 
     async def execute(self, query, *args):
         return "OK"
@@ -1538,6 +1542,11 @@ class _RunStateConn:
 
     async def fetch(self, query, *args):
         normalized = " ".join(query.split()).upper()
+        if "FROM WORKFLOW_JOBS" in normalized and "GROUP BY STATUS" in normalized:
+            counts = {}
+            for row in self.jobs.values():
+                counts[row["status"]] = counts.get(row["status"], 0) + 1
+            return [{"status": status, "count": count} for status, count in counts.items()]
         if "WITH STALE AS" in normalized and "UPDATE WORKFLOW_RUNS" in normalized:
             limit = int(args[1])
             excluded = self._excluded_projects(args)
@@ -1559,6 +1568,59 @@ class _RunStateConn:
 
     async def fetchrow(self, query, *args):
         normalized = " ".join(query.split()).upper()
+        if normalized.startswith("INSERT INTO WORKFLOW_JOBS"):
+            job_id, run_id, project_id, attempts = args
+            if run_id in self.active_jobs_by_run:
+                return None
+            row = {
+                "job_id": job_id,
+                "run_id": run_id,
+                "project_id": project_id,
+                "status": "queued",
+                "attempt_count": 0,
+                "max_attempts": attempts,
+                "created_at": "2026-05-22T00:00:00+00:00",
+                "available_at": "2026-05-22T00:00:00+00:00",
+                "started_at": None,
+                "finished_at": None,
+                "error_summary": "",
+            }
+            self.jobs[job_id] = row
+            self.active_jobs_by_run[run_id] = job_id
+            return row
+        if normalized.startswith("WITH NEXT_JOB") and "UPDATE WORKFLOW_JOBS" in normalized:
+            for row in sorted(self.jobs.values(), key=lambda item: (item["available_at"], item["created_at"])):
+                run = self.rows.get(row["run_id"])
+                if (
+                    row["status"] == "queued"
+                    and row["attempt_count"] < row["max_attempts"]
+                    and run
+                    and run["status"] in workflow_run_state.ACTIVE_RUN_STATUSES
+                ):
+                    row["status"] = "running"
+                    row["started_at"] = "2026-05-22T00:01:00+00:00"
+                    row["attempt_count"] += 1
+                    row["error_summary"] = ""
+                    return row
+            return None
+        if normalized.startswith("SELECT") and "FROM WORKFLOW_JOBS" in normalized and "WHERE JOB_ID" in normalized:
+            return self.jobs.get(args[0])
+        if normalized.startswith("SELECT") and "FROM WORKFLOW_JOBS" in normalized and "WHERE RUN_ID" in normalized:
+            run_id = args[0]
+            job_id = self.active_jobs_by_run.get(run_id)
+            return self.jobs.get(job_id) if job_id else None
+        if normalized.startswith("UPDATE WORKFLOW_JOBS"):
+            job_id, status, set_finished, error_summary = args
+            row = self.jobs.get(job_id)
+            if not row:
+                return None
+            row["status"] = status
+            if set_finished:
+                row["finished_at"] = "2026-05-22T00:02:00+00:00"
+            row["error_summary"] = error_summary
+            if status in workflow_queue.TERMINAL_JOB_STATUSES:
+                self.active_jobs_by_run.pop(row["run_id"], None)
+            return row
         if normalized.startswith("INSERT INTO WORKFLOW_RUNS"):
             run_id, project_id, version = args
             if project_id in self.active_by_project:
@@ -1639,11 +1701,13 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         api.running.clear()
         workflow_run_state._schema_ready_for_pool.clear()
+        workflow_queue.clear_schema_cache()
         workflow_run_state.clear_memory_run_state()
 
     async def asyncTearDown(self):
         api.running.clear()
         workflow_run_state._schema_ready_for_pool.clear()
+        workflow_queue.clear_schema_cache()
         workflow_run_state.clear_memory_run_state()
 
     async def test_postgres_run_state_creation_and_active_guard(self):
@@ -1737,6 +1801,82 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(updated.heartbeat_at, initial.heartbeat_at)
         self.assertEqual(updated.current_phase, "strategy")
 
+    async def test_workflow_queue_enqueue_and_claim_is_durable(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run("queue-project", code_version="4.4.0")
+            enqueue = await workflow_queue.enqueue_workflow_job(acquisition.run.run_id, acquisition.run.project_id)
+            duplicate = await workflow_queue.enqueue_workflow_job(acquisition.run.run_id, acquisition.run.project_id)
+            claimed = await workflow_queue.claim_next_workflow_job()
+            second_claim = await workflow_queue.claim_next_workflow_job()
+
+        self.assertTrue(enqueue.created)
+        self.assertTrue(enqueue.durable)
+        self.assertFalse(duplicate.created)
+        self.assertEqual(duplicate.job.job_id, enqueue.job.job_id)
+        self.assertEqual(claimed.job_id, enqueue.job.job_id)
+        self.assertEqual(claimed.status, "running")
+        self.assertEqual(claimed.attempt_count, 1)
+        self.assertEqual(claimed.max_attempts, workflow_queue.DEFAULT_MAX_WORKFLOW_JOB_ATTEMPTS)
+        self.assertIsNone(second_claim)
+
+    async def test_workflow_queue_terminal_transitions_are_sanitized(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run("queue-failure", code_version="4.4.0")
+            enqueue = await workflow_queue.enqueue_workflow_job(acquisition.run.run_id, acquisition.run.project_id)
+            failed = await workflow_queue.mark_job_failed(
+                enqueue.job.job_id,
+                error=r"Traceback (most recent call last): C:\private\secret.py password=abc123",
+            )
+
+            second_run = await workflow_run_state.create_workflow_run("queue-success", code_version="4.4.0")
+            second_job = await workflow_queue.enqueue_workflow_job(second_run.run.run_id, second_run.run.project_id)
+            succeeded = await workflow_queue.mark_job_succeeded(second_job.job.job_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertNotIn("Traceback", failed.error_summary)
+        self.assertNotIn("C:\\", failed.error_summary)
+        self.assertNotIn("abc123", failed.error_summary)
+        self.assertEqual(succeeded.status, "succeeded")
+        self.assertEqual(succeeded.error_summary, "")
+
+    async def test_queue_drain_marks_job_and_run_succeeded(self):
+        pool = _RunStatePool()
+        state = make_completed_state("queue-drain-success")
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run(state.project_id, code_version="4.4.0")
+            enqueue = await workflow_queue.enqueue_workflow_job(acquisition.run.run_id, state.project_id)
+            with patch("api.store.load", new=AsyncMock(return_value=state)):
+                with patch("api.store.save", new=AsyncMock()):
+                    await api._drain_workflow_queue()
+            job = await workflow_queue.get_workflow_job(enqueue.job.job_id)
+            run = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+            active = await workflow_run_state.has_active_project_run(state.project_id)
+
+        self.assertEqual(job.status, "succeeded")
+        self.assertEqual(run.status, "succeeded")
+        self.assertFalse(active)
+
+    async def test_queue_drain_marks_job_and_run_failed_with_sanitized_summary(self):
+        pool = _RunStatePool()
+        state = ProjectState(project_id="queue-drain-failure", project_name="Failure", brief="Run fails")
+        error = RuntimeError(r"Traceback (most recent call last): C:\private\workflow.py token=abc123")
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            acquisition = await workflow_run_state.create_workflow_run(state.project_id, code_version="4.4.0")
+            enqueue = await workflow_queue.enqueue_workflow_job(acquisition.run.run_id, state.project_id)
+            with patch("api.store.load", new=AsyncMock(return_value=state)):
+                with patch("api.run_workflow_sequence", new=AsyncMock(side_effect=error)):
+                    await api._drain_workflow_queue()
+            job = await workflow_queue.get_workflow_job(enqueue.job.job_id)
+            run = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(run.status, "failed")
+        self.assertNotIn("Traceback", job.error_summary)
+        self.assertNotIn("C:\\", job.error_summary)
+        self.assertNotIn("abc123", job.error_summary)
+
     async def test_stale_project_run_is_recovered_before_new_workflow_start(self):
         pool = _RunStatePool()
         state = ProjectState(project_id="stale-before-start", project_name="Recovery", brief="Run after stale")
@@ -1754,6 +1894,38 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale_record.status, "failed")
         self.assertEqual(stale_record.error_summary, workflow_run_state.ABANDONED_RUN_ERROR_SUMMARY)
         self.assertEqual(active.run_id, response["run_id"])
+
+    async def test_run_endpoint_enqueues_durable_job(self):
+        pool = _RunStatePool()
+        state = ProjectState(project_id="endpoint-enqueue", project_name="Queue", brief="Run once")
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            with patch("api.store.load", new=AsyncMock(return_value=state)):
+                response = await api.run_full_workflow(state.project_id, BackgroundTasks())
+            counts = await workflow_queue.count_workflow_jobs()
+
+        self.assertEqual(response["status"], "started")
+        self.assertIn("run_id", response)
+        self.assertEqual(counts["queued"], 1)
+        self.assertEqual(counts["running"], 0)
+
+    async def test_run_endpoint_leaves_job_queued_when_local_drain_schedule_fails(self):
+        class FailingBackgroundTasks:
+            def add_task(self, *args, **kwargs):
+                raise RuntimeError(r"scheduler failed at C:\private\worker.py password=abc123")
+
+        pool = _RunStatePool()
+        state = ProjectState(project_id="schedule-failure", project_name="Queue", brief="Run once")
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            with patch("api.store.load", new=AsyncMock(return_value=state)):
+                response = await api.run_full_workflow(state.project_id, FailingBackgroundTasks())
+            counts = await workflow_queue.count_workflow_jobs()
+            active = await workflow_run_state.get_active_project_run(state.project_id)
+
+        self.assertEqual(response["status"], "started")
+        self.assertIn("run_id", response)
+        self.assertEqual(counts["queued"], 1)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.status, "queued")
 
     async def test_fresh_durable_duplicate_run_still_conflicts(self):
         pool = _RunStatePool()
@@ -1773,6 +1945,7 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
 class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         api.running.clear()
+        workflow_queue.clear_schema_cache()
         workflow_run_state.clear_memory_run_state()
         self.run_state_pool_patch = patch(
             "runtime.run_state.store._get_pool",
@@ -1783,6 +1956,7 @@ class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.run_state_pool_patch.stop()
         api.running.clear()
+        workflow_queue.clear_schema_cache()
         workflow_run_state.clear_memory_run_state()
 
     async def test_run_returns_already_complete_for_finished_project(self):
