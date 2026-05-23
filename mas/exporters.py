@@ -1,4 +1,4 @@
-"""Project dossier exporters for DOCX and PDF downloads."""
+"""Project dossier exporters for DOCX, PDF, ZIP, and XLSX downloads."""
 from __future__ import annotations
 
 import json
@@ -53,6 +53,7 @@ from report_quality import (
 )
 import report_freshness
 from hypothesis_coverage import assess_hypothesis_variable_coverage
+from monitoring_templates import monitoring_template_xlsx_bytes
 from state import ProjectState
 
 
@@ -319,13 +320,16 @@ EMPTY_AUDIT = "No audit findings are available yet."
 EXPORT_PROFILE_FORMATS = {
     "report": {"pdf", "docx"},
     "client_dossier": {"pdf", "docx"},
+    "client_monitoring_template": {"xlsx"},
     "operator_dossier": {"pdf", "docx"},
+    "operator_monitoring_template": {"xlsx"},
     "machine_archive": {"zip"},
 }
 
 PROFILE_MEDIA_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "zip": "application/zip",
 }
 
@@ -376,6 +380,9 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
     if profile_name == "machine_archive":
         archive_payload = build_machine_archive_payload(state)
         return _zip_archive_bytes(archive_payload), PROFILE_MEDIA_TYPES[fmt], filename
+    if profile_name in {"client_monitoring_template", "operator_monitoring_template"}:
+        audience = "operator" if profile_name.startswith("operator") else "client"
+        return monitoring_template_xlsx_bytes(state, audience=audience), PROFILE_MEDIA_TYPES[fmt], filename
 
     current_version = report_freshness.current_code_version()
     if profile_name == "report":
