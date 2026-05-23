@@ -842,18 +842,32 @@ funnel and channel-mix review
             "suggests the growth metrics snapshot shows meaningful deceleration. "
             "[Evidence: knowledge_y | chunk=2] provides evidence interpretation context indicating the severity of the trend.\n"
             "The analytics audit suggests instrumentation is degraded [Evidence: knowledge_z | chunk=3].\n"
-            "```text\n[Evidence: knowledge_code | chunk=4] suggests preserved in code.\n```"
+            "Visible prose references knowledge_visible and source_ref=upload:file-1:metrics.md#chunk=2.\n"
+            "| Visible table | knowledge_table |\n"
+            "|---|---|\n"
+            "| Metric | knowledge_cell upload:file-2:table.md#chunk=1 |\n"
+            "```text\n[Evidence: knowledge_code | chunk=4] suggests cleaned in client-visible code.\n```\n"
+            "```json\n{\"machine_archive\":\"knowledge_machine\"}\n```\n"
+            "Operator-only source excerpt: [Evidence: knowledge_operator | chunk=9] remains traceable."
         )
 
         cleaned = suppress_client_raw_evidence_ids(text)
 
         self.assertIn('The team asked "in what order?"', cleaned)
         self.assertIn("The analytics audit suggests instrumentation is degraded.", cleaned)
-        self.assertIn("[Evidence: knowledge_code | chunk=4] suggests preserved in code.", cleaned)
+        self.assertIn('{"machine_archive":"knowledge_machine"}', cleaned)
+        self.assertIn("[Evidence: knowledge_operator | chunk=9] remains traceable.", cleaned)
         self.assertNotIn("suggests the growth metrics snapshot", cleaned)
         self.assertNotIn("provides evidence interpretation context", cleaned)
         self.assertNotIn("[Evidence: knowledge_x", cleaned)
         self.assertNotIn("[Evidence: knowledge_y", cleaned)
+        self.assertNotIn("[Evidence: knowledge_code", cleaned)
+        self.assertNotIn("knowledge_visible", cleaned)
+        self.assertNotIn("knowledge_table", cleaned)
+        self.assertNotIn("knowledge_cell", cleaned)
+        self.assertNotIn("source_ref=", cleaned)
+        self.assertNotIn("upload:file-1", cleaned)
+        self.assertNotIn("upload:file-2", cleaned)
 
 
 if __name__ == "__main__":

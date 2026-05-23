@@ -67,8 +67,10 @@ heuristic matches, internal category keys, and debug traces.
 - no automatic business-truth validation,
 - no guarantee that the LLM generated a complete hypothesis set,
 - no replacement for domain expert review,
-- no monitoring-template exports in this tranche,
 - no client-facing raw variable coverage debug output.
+
+Tranche 7 monitoring templates and Tranche 8 quality gates are documented in
+`v5-MONITORING-TEMPLATES.md` and `v5-QUALITY-EVALS.md`.
 
 Human review remains required before acting on recommendations, especially
 where legal, financial, medical, safety, compliance, or public claims are
