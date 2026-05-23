@@ -242,6 +242,32 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(queue["api_process_background_draining"])
         self.assertNotIn("secret", serialized)
 
+    async def test_preflight_contains_release_posture_fields_without_sensitive_values(self):
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({"DATABASE_URL": "postgres://user:secret@db/app", "REDIS_URL": "redis://:secret@redis:6379/0"})):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=_FakePool())):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        self.assertTrue(result["operator_only"])
+        self.assertEqual(result["version"], APP_VERSION)
+        checks = result["checks"]
+        for name in ("version", "upload_store", "database", "redis", "run_state", "workflow_queue", "jobs"):
+            self.assertIn(name, checks)
+            self.assertIn("status", checks[name])
+        self.assertIn("durable_run_state_active", checks["run_state"])
+        self.assertIn("cross_process_run_guard_enabled", checks["run_state"])
+        self.assertIn("stale_recovery_available", checks["run_state"])
+        self.assertIn("active_run_count", checks["run_state"])
+        self.assertIn("stale_active_run_count", checks["run_state"])
+        self.assertIn("durable_queue_active", checks["workflow_queue"])
+        self.assertIn("queued_job_count", checks["workflow_queue"])
+        self.assertIn("running_job_count", checks["workflow_queue"])
+        self.assertIn("failed_job_count", checks["workflow_queue"])
+        self.assertIn("api_process_background_draining", checks["workflow_queue"])
+
+        serialized = json.dumps(result)
+        for forbidden in ("secret", "postgres://", "redis://", "Traceback", "/app/private/path", r"C:\private"):
+            self.assertNotIn(forbidden, serialized)
+
     async def test_existing_database_without_workflow_runs_is_ensured_for_preflight(self):
         conn = _SchemaAwareConn()
         pool = _SchemaAwarePool(conn)
@@ -355,6 +381,70 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["operator_only"])
+
+    async def test_release_readiness_reuses_preflight_once(self):
+        preflight_result = {
+            "status": "ok",
+            "version": APP_VERSION,
+            "operator_only": True,
+            "checks": {
+                "redis": {"status": "not_configured", "message": "Redis is optional."},
+                "run_state": {"status": "ok", "message": "Run state is durable."},
+            },
+        }
+        mocked = AsyncMock(return_value=preflight_result)
+        with patch("api.build_runtime_preflight", new=mocked):
+            result = await api.runtime_release_readiness()
+
+        mocked.assert_awaited_once_with(running_project_ids=api.running)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["release_gate"], "pass")
+        self.assertTrue(result["operator_only"])
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["warnings"], [])
+
+    async def test_release_readiness_reports_warn_and_block_without_leaking_details(self):
+        degraded = {
+            "status": "degraded",
+            "version": APP_VERSION,
+            "operator_only": True,
+            "checks": {
+                "database": {
+                    "status": "degraded",
+                    "message": "DATABASE_URL is not configured; password=secret C:\\private\\db",
+                },
+                "redis": {"status": "not_configured", "message": "Redis is optional."},
+            },
+        }
+        with patch("api.build_runtime_preflight", new=AsyncMock(return_value=degraded)):
+            warning = await api.runtime_release_readiness()
+
+        self.assertEqual(warning["release_gate"], "warn")
+        self.assertEqual(warning["warnings"][0]["check"], "database")
+        warning_json = json.dumps(warning)
+        self.assertNotIn("secret", warning_json)
+        self.assertNotIn(r"C:\private", warning_json)
+
+        failed = {
+            "status": "fail",
+            "version": APP_VERSION,
+            "operator_only": True,
+            "checks": {
+                "workflow_queue": {
+                    "status": "fail",
+                    "message": 'Traceback (most recent call last): relation "workflow_jobs" password=secret /app/private/path',
+                }
+            },
+        }
+        with patch("api.build_runtime_preflight", new=AsyncMock(return_value=failed)):
+            blocked = await api.runtime_release_readiness()
+
+        self.assertEqual(blocked["release_gate"], "block")
+        self.assertEqual(blocked["blockers"][0]["check"], "workflow_queue")
+        blocked_json = json.dumps(blocked)
+        self.assertNotIn("Traceback", blocked_json)
+        self.assertNotIn("secret", blocked_json)
+        self.assertNotIn("/app/private/path", blocked_json)
 
     async def test_health_remains_lightweight_and_backward_compatible(self):
         with patch("api.store._get_pool", new=AsyncMock(return_value=object())):
