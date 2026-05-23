@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from docx import Document
 from fastapi import HTTPException
+from openpyxl import load_workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,12 @@ from exporters import (  # noqa: E402
     build_operator_dossier_markdown,
     export_project_profile_bytes,
     sanitize_for_export,
+)
+from monitoring_templates import (  # noqa: E402
+    CLIENT_MONITORING_TEMPLATE_HEADERS,
+    OPERATOR_MONITORING_TEMPLATE_HEADERS,
+    SHEET_NAME,
+    monitoring_template_cell_rows,
 )
 from state import (  # noqa: E402
     AuditOutput,
@@ -74,6 +81,15 @@ def _docx_text(payload: bytes) -> str:
 
 def _docx_table_count(payload: bytes) -> int:
     return len(Document(BytesIO(payload)).tables)
+
+
+def _xlsx_rows(payload: bytes) -> tuple[tuple[str, ...], ...]:
+    workbook = load_workbook(BytesIO(payload), data_only=False)
+    worksheet = workbook[SHEET_NAME]
+    rows = []
+    for row in worksheet.iter_rows(values_only=True):
+        rows.append(tuple("" if value is None else str(value) for value in row))
+    return tuple(rows)
 
 
 def _attach_report_generation_metadata(
@@ -355,8 +371,10 @@ class TestProfileExporterHelpers(unittest.TestCase):
             ("report", "pdf"): "application/pdf",
             ("client_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ("client_dossier", "pdf"): "application/pdf",
+            ("client_monitoring_template", "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ("operator_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ("operator_dossier", "pdf"): "application/pdf",
+            ("operator_monitoring_template", "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ("machine_archive", "zip"): "application/zip",
         }
 
@@ -371,6 +389,135 @@ class TestProfileExporterHelpers(unittest.TestCase):
                 if fmt == "zip":
                     with zipfile.ZipFile(BytesIO(payload)) as archive:
                         self.assertNotIn("raw_project_state.json", archive.namelist())
+                if fmt == "xlsx":
+                    self.assertEqual(_xlsx_rows(payload)[0], (
+                        tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS)
+                        if profile.startswith("operator")
+                        else tuple(CLIENT_MONITORING_TEMPLATE_HEADERS)
+                    ))
+
+    def test_monitoring_template_profiles_export_xlsx_with_stable_headers(self):
+        state = make_export_state("monitor-template")
+        state.report = """# Executive Summary
+Proceed with the pilot.
+
+# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source |
+|---|---|---|---|---|---|---|---|
+| Activation quality | at least 12 qualified pilots | fewer than 6 qualified pilots | stop if data access is unavailable | Product Lead | Weekly | pause rollout | Market note |
+
+# Monitoring and Kill Criteria
+This section is narrative only and should not replace Decision Gates.
+"""
+
+        payload, media_type, filename = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("monitor-template-client_monitoring_template-", filename)
+        self.assertTrue(filename.endswith(".xlsx"))
+        self.assertEqual(rows[0], tuple(CLIENT_MONITORING_TEMPLATE_HEADERS))
+        self.assertEqual(rows[1][0], "Activation quality")
+        self.assertEqual(rows[1][7], "stop if data access is unavailable")
+        self.assertEqual(rows[1][8], "pause rollout")
+        self.assertGreaterEqual(len(rows), 2)
+
+    def test_monitoring_template_uses_safe_placeholders_for_missing_values(self):
+        state = ProjectState(project_id="monitor-placeholders", project_name="Monitor placeholders", brief="Brief")
+
+        payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+        combined = "\n".join("\t".join(row) for row in rows)
+
+        self.assertIn("Operator to define", combined)
+        self.assertIn("Evidence source unavailable", combined)
+        self.assertIn("Threshold not yet confirmed", combined)
+        self.assertIn("Validation required", combined)
+
+    def test_monitoring_template_ambiguous_decision_gate_uses_placeholder(self):
+        state = make_export_state("ambiguous-gates")
+        state.report = """# Decision Gates
+| Topic | Comment |
+|---|---|
+| Pilot | Needs discussion |
+
+# Evidence Used
+| Evidence | What it suggests |
+|---|---|
+| ev-market | Should remain unrelated to gate parsing |
+"""
+
+        payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+
+        self.assertEqual(rows[1][0], "Decision Gate")
+        self.assertEqual(rows[1][7], "Threshold not yet confirmed")
+        self.assertIn("not parsed into a clear gate table", "\n".join(rows[1]))
+        self.assertNotIn("ev-market", rows[1])
+
+    def test_monitoring_template_client_redacts_internal_ids_refs_and_formula_cells(self):
+        state = make_export_state("client-monitor-safe")
+        state.report = r"""# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source | Notes |
+|---|---|---|---|---|---|---|---|---|
+| =Activation | +good | @warning | -stop if BF 12 or RPN 90 worsens | @Owner | Weekly | =HYPERLINK("http://bad") | upload:file-1:metrics.csv#row=2 | ev-market knowledge_alpha storage_ref=C:\Users\nicoc\secret.xlsx operator trace |
+"""
+        state.monitor = MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                daily=[MonitorScheduleItem(metric="=CTR", owner="+Owner", source="source_ref=upload:file-2:private.csv#row=1")]
+            ),
+            circuit_breakers=[MonitorCircuitBreaker(strategy_ref="S1", trip="-stop now", reset="@reset")],
+            canaries=[MonitorCanary(signal="@canary", direction="up", window="7d", meaning="+lift")],
+        )
+
+        payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+        combined = "\n".join("\t".join(row) for row in rows)
+
+        self.assertIn("'=Activation", combined)
+        self.assertIn("'+good", combined)
+        self.assertIn("'@warning", combined)
+        self.assertIn("'-stop if internal diagnostic redacted", combined)
+        self.assertIn("Uploaded project document", combined)
+        for forbidden in (
+            "ev-market",
+            "knowledge_alpha",
+            "upload:",
+            "storage_ref",
+            "source_ref",
+            r"C:\Users\nicoc",
+            "BF 12",
+            "RPN 90",
+            "operator trace",
+        ):
+            self.assertNotIn(forbidden, combined)
+
+    def test_monitoring_template_operator_retains_allowed_trace_after_redaction(self):
+        state = make_export_state("operator-monitor-trace")
+        state.report = r"""# Decision Gates
+| Signal to watch | Stop/change-course threshold | Action if triggered | Evidence source |
+|---|---|---|---|
+| Pipeline quality | stop if below target [Evidence: ev-market] | Escalate | upload:file-1:metrics.csv#row=2 C:\Users\nicoc\secret.xlsx |
+"""
+
+        payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+        header = rows[0]
+        data = rows[1]
+
+        self.assertEqual(header, tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
+        self.assertIn("ev-market", data[header.index("Evidence IDs")])
+        self.assertIn("upload:file-1:metrics.csv#row=2", data[header.index("Internal source refs")])
+        self.assertNotIn(r"C:\Users\nicoc", "\n".join(data))
+
+    def test_monitoring_template_cell_content_is_deterministic(self):
+        state = make_export_state("deterministic-monitor")
+
+        first = _xlsx_rows(export_project_profile_bytes(state, "client_monitoring_template", "xlsx")[0])
+        second = _xlsx_rows(export_project_profile_bytes(state, "client_monitoring_template", "xlsx")[0])
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, monitoring_template_cell_rows(state, audience="client"))
 
     def test_report_profile_includes_versioned_freshness_warning_when_stale(self):
         state = make_export_state("stale-report-profile")
@@ -1576,6 +1723,8 @@ Stop if >2 critical assumptions remain unknown.
             self.assertIn("status", manifest["report_freshness"])
             self.assertIn("is_fresh", manifest["report_freshness"])
             self.assertIn("project_state.json", manifest["included_files"])
+            self.assertNotIn("client_monitoring_template", manifest["included_files"])
+            self.assertNotIn("operator_monitoring_template", manifest["included_files"])
 
             uploads = json.loads(archive.read("uploaded_file_manifest.json").decode("utf-8"))
             self.assertEqual(uploads[0]["file_id"], "file-1")
@@ -1583,6 +1732,24 @@ Stop if >2 critical assumptions remain unknown.
             self.assertEqual(uploads[0]["content_type"], "application/pdf")
             self.assertEqual(uploads[0]["size_bytes"], 321)
             self.assertEqual(uploads[0]["storage_ref"], "[REDACTED]")
+
+    def test_monitoring_template_profiles_do_not_mutate_machine_archive_report(self):
+        state = make_export_state("archive-monitor-invariance")
+        original_report = state.report
+
+        export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        payload, _, _ = export_project_profile_bytes(state, "machine_archive", "zip")
+
+        self.assertEqual(state.report, original_report)
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            report_md = archive.read("report.md").decode("utf-8")
+            manifest = json.loads(archive.read("export_manifest.json").decode("utf-8"))
+            self.assertEqual(report_md, original_report)
+            self.assertNotIn("client_monitoring_template", report_md)
+            self.assertNotIn("operator_monitoring_template", report_md)
+            self.assertNotIn("client_monitoring_template", manifest["included_files"])
+            self.assertNotIn("operator_monitoring_template", manifest["included_files"])
 
     def test_invalid_profile_and_format_combinations_raise(self):
         state = make_export_state("invalid-profile")
@@ -1593,6 +1760,8 @@ Stop if >2 critical assumptions remain unknown.
             export_project_profile_bytes(state, "client_dossier", "zip")
         with self.assertRaises(ValueError):
             export_project_profile_bytes(state, "machine_archive", "pdf")
+        with self.assertRaises(ValueError):
+            export_project_profile_bytes(state, "client_monitoring_template", "pdf")
         with self.assertRaises(ValueError):
             export_project_profile_bytes(state, "report", "exe")
 
