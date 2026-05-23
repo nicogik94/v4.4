@@ -316,6 +316,11 @@ EMPTY_EVIDENCE = "No imported evidence is available yet."
 EMPTY_TRACE = "No decision trace is available yet."
 EMPTY_CLARIFICATIONS = "No clarification answers have been submitted yet."
 EMPTY_AUDIT = "No audit findings are available yet."
+MONITORING_TEMPLATE_OPERATOR_NOTE = (
+    "Monitoring template exports are available via "
+    "profile=client_monitoring_template&format=xlsx and "
+    "profile=operator_monitoring_template&format=xlsx."
+)
 
 EXPORT_PROFILE_FORMATS = {
     "report": {"pdf", "docx"},
@@ -699,7 +704,10 @@ def _normalize_client_evidence_count_language(markdown: str, state: ProjectState
                 table_lines.append(source_lines[index])
                 index += 1
             if _is_protected_client_cleanup_table_block(table_lines):
-                lines.extend(table_lines)
+                if count_pattern.search("\n".join(table_lines)):
+                    lines.extend(normalize_line(table_line) for table_line in table_lines)
+                else:
+                    lines.extend(table_lines)
             else:
                 lines.extend(normalize_line(table_line) for table_line in table_lines)
             continue
@@ -1379,7 +1387,10 @@ def operator_sqi_summary(state: ProjectState) -> str:
 
 
 def operator_monitoring_summary(state: ProjectState) -> str:
-    return summarize_monitoring(state) if state.monitor else EMPTY_MONITORING
+    summary = summarize_monitoring(state) if state.monitor else EMPTY_MONITORING
+    if MONITORING_TEMPLATE_OPERATOR_NOTE in summary:
+        return summary
+    return "\n\n".join([summary, f"Operator note: {MONITORING_TEMPLATE_OPERATOR_NOTE}"])
 
 
 def operator_workspace_summary(state: ProjectState) -> str:

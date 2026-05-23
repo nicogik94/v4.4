@@ -35,12 +35,14 @@ from clarifications import (  # noqa: E402
     ClarificationStatus,
 )
 from exporters import (  # noqa: E402
+    MONITORING_TEMPLATE_OPERATOR_NOTE,
     _safe_report_markdown,
     build_client_dossier_markdown,
     build_export_manifest,
     build_machine_archive_payload,
     build_operator_dossier_markdown,
     export_project_profile_bytes,
+    operator_monitoring_summary,
     sanitize_for_export,
 )
 from monitoring_templates import (  # noqa: E402
@@ -518,6 +520,72 @@ This section is narrative only and should not replace Decision Gates.
 
         self.assertEqual(first, second)
         self.assertEqual(first, monitoring_template_cell_rows(state, audience="client"))
+
+    def test_client_quality_gate_cleans_raw_ids_sources_and_unsupported_certainty(self):
+        state = ProjectState(
+            project_id="client-quality-gate",
+            project_name="Client quality gate",
+            brief="Evaluate a growth pilot with partial evidence.",
+            report=r"""# Executive Summary
+Direct project evidence: Moderate — three supplied documents (GTM plan, market research, web proposal, social calendar)
+BF=12.0 says the confirmed causal hypothesis is retention. RPN 90 remains high.
+
+# The Decision
+Decide whether to scale.
+
+# Recommended Path
+Proceed only after validation.
+
+# Why This Is Recommended
+knowledge_alpha suggests the pilot is promising.
+source_ref=upload:file-1:metrics.md#chunk=2 provides evidence interpretation context.
+target threshold <provisional threshold.
+
+# Evidence Used
+| Evidence | What it suggests | Source |
+|---|---|---|
+| knowledge_table | knowledge_cell confirms traction | upload:file-2:gtm.md#page=1 |
+
+# Monitoring and Kill Criteria
+Stop if knowledge_monitor deteriorates.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        for forbidden in (
+            "knowledge_alpha",
+            "knowledge_table",
+            "knowledge_cell",
+            "knowledge_monitor",
+            "source_ref=",
+            "upload:file",
+            r"C:\Users",
+            "BF=12.0",
+            "RPN 90",
+            "owner_decision_authority",
+            "variable_coverage",
+            "provisional threshold",
+            "three supplied documents",
+            "confirmed causal hypothesis",
+            "confirms traction",
+            "provides evidence interpretation context",
+        ):
+            self.assertNotIn(forbidden, markdown)
+        self.assertIn("project evidence", markdown)
+        self.assertIn("Evidence maturity: Hypothesis-only", markdown)
+
+    def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
+        state = make_export_state("operator-monitor-note")
+
+        first = build_operator_dossier_markdown(state)
+        second = build_operator_dossier_markdown(state)
+        self.assertEqual(first.count(MONITORING_TEMPLATE_OPERATOR_NOTE), 1)
+        self.assertEqual(second.count(MONITORING_TEMPLATE_OPERATOR_NOTE), 1)
+
+        state.monitor.commitment_rationale = MONITORING_TEMPLATE_OPERATOR_NOTE
+        summary = operator_monitoring_summary(state)
+        self.assertEqual(summary.count(MONITORING_TEMPLATE_OPERATOR_NOTE), 1)
 
     def test_report_profile_includes_versioned_freshness_warning_when_stale(self):
         state = make_export_state("stale-report-profile")
@@ -1487,7 +1555,7 @@ Direct project evidence: Moderate — three supplied documents (GTM plan, market
         self.assertIn("| Legal | Require a legal-review SLA of 24 hours or less before campaign claims ship. |", markdown)
         self.assertNotIn("operator-defined effort estimate or less", markdown)
 
-    def test_client_count_cleanup_preserves_protected_source_excerpt_tables(self):
+    def test_client_count_cleanup_cleans_client_visible_source_excerpt_tables(self):
         state = ProjectState(
             project_id="protected-source-table",
             project_name="Protected source table",
@@ -1514,10 +1582,11 @@ Use the supplied evidence for planning.
         markdown = build_client_dossier_markdown(state)
 
         self.assertIn(
-            "Direct project evidence: Moderate — three supplied documents (GTM plan, market research, web proposal, social calendar)",
+            "Direct project evidence: Moderate — supplied project documents provide planning-level evidence, but validation gaps remain.",
             markdown,
         )
-        self.assertIn("upload:file-1:gtm-plan.pdf#page=2", markdown)
+        self.assertNotIn("three supplied documents", markdown)
+        self.assertNotIn("upload:file-1:gtm-plan.pdf#page=2", markdown)
 
     def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):
         minimal = make_sparse_growth_state("risk-minimal")
@@ -1736,16 +1805,25 @@ Stop if >2 critical assumptions remain unknown.
     def test_monitoring_template_profiles_do_not_mutate_machine_archive_report(self):
         state = make_export_state("archive-monitor-invariance")
         original_report = state.report
+        before_payload = build_machine_archive_payload(state)
+        before_report = before_payload["report.md"]
+        before_zip_payload, _, _ = export_project_profile_bytes(state, "machine_archive", "zip")
+        with zipfile.ZipFile(BytesIO(before_zip_payload)) as archive:
+            before_zip_report = archive.read("report.md").decode("utf-8")
 
+        build_client_dossier_markdown(state)
+        build_operator_dossier_markdown(state)
         export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
         export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        after_payload = build_machine_archive_payload(state)
         payload, _, _ = export_project_profile_bytes(state, "machine_archive", "zip")
 
         self.assertEqual(state.report, original_report)
+        self.assertEqual(after_payload["report.md"], before_report)
         with zipfile.ZipFile(BytesIO(payload)) as archive:
             report_md = archive.read("report.md").decode("utf-8")
             manifest = json.loads(archive.read("export_manifest.json").decode("utf-8"))
-            self.assertEqual(report_md, original_report)
+            self.assertEqual(report_md, before_zip_report)
             self.assertNotIn("client_monitoring_template", report_md)
             self.assertNotIn("operator_monitoring_template", report_md)
             self.assertNotIn("client_monitoring_template", manifest["included_files"])

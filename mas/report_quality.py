@@ -829,21 +829,74 @@ def suppress_client_raw_evidence_ids(text: str) -> str:
             in_code_block = not in_code_block
             lines.append(line)
             continue
-        if in_code_block or _looks_like_json_line(stripped):
+        if _explicit_operator_or_machine_context(line) and (
+            in_code_block
+            or _looks_like_json_line(stripped)
+            or _explicit_protected_client_context_line(line)
+        ):
             lines.append(line)
             continue
-        value = _remove_marker_orphan_fragments(line)
-        value = re.sub(
-            r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
-            "",
-            value,
-            flags=re.I,
-        )
-        value = re.sub(r"\s*\[#\d+\]", "", value)
-        value = re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
-        value = _remove_subjectless_evidence_fragments(value)
-        lines.append(value)
+        lines.append(_suppress_client_raw_evidence_line(line))
     return "\n".join(lines)
+
+
+def _suppress_client_raw_evidence_line(line: str) -> str:
+    had_raw_evidence_token = bool(
+        re.search(
+            r"\[Evidence:\s*|\bknowledge[_-][A-Za-z0-9_.:-]+\b|\b(?:ev|evidence|src)[-_][A-Za-z0-9_.:-]+\b|"
+            r"\bupload:[^\s|,)>\]]+|\bstorage_ref\s*[:=]|\bsource_ref\s*[:=]",
+            str(line or ""),
+            re.I,
+        )
+    )
+    value = _remove_marker_orphan_fragments(line)
+    value = re.sub(
+        r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
+        "",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\s*\[#\d+\]", "", value)
+    value = re.sub(r"\b(?:ev|evidence|src)[-_][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+    value = re.sub(r"\bknowledge[_-][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+    value = re.sub(r"\bupload:[^\s|,)>\]]+", "uploaded project document", value, flags=re.I)
+    value = re.sub(r"\bstorage_ref\s*[:=]\s*[^\s|,)>\]]+", "evidence source unavailable", value, flags=re.I)
+    value = re.sub(r"\bsource_ref\s*[:=]\s*[^\s|,)>\]]+", "evidence source unavailable", value, flags=re.I)
+    value = re.sub(
+        r"\b(?:evidence source unavailable|uploaded project document|project evidence)"
+        r"(?:\s+(?:uploaded project document|project document|source))*\s+"
+        r"provides evidence interpretation context\b[^.?!]*(?:[.?!]|$)",
+        "Evidence source unavailable.",
+        value,
+        flags=re.I,
+    )
+    if had_raw_evidence_token:
+        value = re.sub(r"\bconfirms\b", "supports", value, flags=re.I)
+        value = re.sub(r"\bis confirmed\b", "requires validation", value, flags=re.I)
+        value = re.sub(r"\bwas confirmed\b", "requires validation", value, flags=re.I)
+    value = _remove_subjectless_evidence_fragments(value)
+    return value
+
+
+def _explicit_operator_or_machine_context(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:operator[-\s]?only|operator\s+diagnostic|operator\s+trace|machine[_\s-]?archive|"
+            r"project_state\.json|phase_outputs\.json|decision_objects\.json|export_manifest\.json)\b",
+            str(line or ""),
+            re.I,
+        )
+    )
+
+
+def _explicit_protected_client_context_line(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:source\s+excerpt|source\s+text|raw\s+source|quoted\s+source|machine[_\s-]?archive)\b",
+            str(line or ""),
+            re.I,
+        )
+    )
 
 
 def _remove_marker_orphan_fragments(line: str) -> str:

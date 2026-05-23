@@ -17,6 +17,7 @@ import api
 import report_freshness
 from hypothesis_coverage import assess_hypothesis_variable_coverage
 from llm_client import LLMResponse
+from monitoring_templates import build_monitoring_template_rows
 from runtime import run_state as workflow_run_state
 from runtime import work_queue as workflow_queue
 from orchestrator import (
@@ -354,6 +355,15 @@ class TestHypothesisVariableCoverage(unittest.TestCase):
         self.assertIn("Do not add any other keys to hypothesis objects.", prompt)
         self.assertNotIn("variable_coverage", prompt)
         self.assertNotIn("owner_decision_authority", prompt)
+
+    def test_monitoring_template_rows_do_not_mutate_project_state(self):
+        state = make_completed_state("monitor-template-no-mutation")
+        before = state.model_dump(mode="json")
+
+        rows = build_monitoring_template_rows(state)
+
+        self.assertTrue(rows)
+        self.assertEqual(state.model_dump(mode="json"), before)
 
 
 REPORT_EVIDENCE_MARKER_RE = re.compile(r"\[Evidence: [^\]\n]+ \| [^\]\n]+\]")
