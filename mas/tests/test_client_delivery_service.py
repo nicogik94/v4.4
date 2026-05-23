@@ -27,6 +27,23 @@ def test_service_returns_expected_shape(tmp_path):
         assert Path(output).exists()
 
 
+def test_manifest_uses_display_filenames_but_service_outputs_remain_paths(tmp_path):
+    result = generate_client_delivery_package(fake_state(), tmp_path)
+    manifest = _manifest(result["outputs"]["manifest_json"])
+
+    assert all(Path(output).exists() for output in result["outputs"].values())
+    assert set(manifest["files"].values()) == {
+        "strategic_decision_board_memo.docx",
+        "decision_execution_tracker.xlsx",
+        "delivery_manifest.json",
+    }
+    for display_path in manifest["files"].values():
+        assert not Path(display_path).is_absolute()
+        assert not re.search(r"[A-Za-z]:[\\/]", display_path)
+        assert "\\" not in display_path
+        assert "/" not in display_path
+
+
 def test_service_writes_latest_and_run_id(tmp_path):
     generate_client_delivery_package(fake_state(), tmp_path)
 

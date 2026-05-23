@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,7 +18,12 @@ from client_delivery.service import generate_client_delivery_package  # noqa: E4
 
 def main() -> None:
     state_path = REPO_ROOT / "examples" / "sunforest_redacted_state.json"
-    output_dir = REPO_ROOT / "exports" / "example_sunforest" / "client_delivery"
+    output_dir = Path(
+        os.environ.get(
+            "CLIENT_DELIVERY_OUTPUT_DIR",
+            REPO_ROOT / "exports" / "example_sunforest" / "client_delivery",
+        )
+    )
     state = json.loads(state_path.read_text(encoding="utf-8"))
     result = generate_client_delivery_package(state, output_dir)
     print(json.dumps(result, indent=2, sort_keys=True))
