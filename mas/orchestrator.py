@@ -5,6 +5,7 @@ Handles phase transitions, convergence gates, re-entry routing, and downstream i
 """
 import json
 import logging
+import re
 from datetime import date, datetime
 from typing import Awaitable, Callable, Literal
 
@@ -14,8 +15,23 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from state import ProjectState, PhaseStatus
 from config import PHASE_ORDER, GATE_CONFIGS, FRAMEWORKS_BY_PHASE
 from llm_client import call_llm, parse_json, LLMResponse
+from cdp.citation_format import (
+    EVIDENCE_CITATION_MARKER_FORMAT,
+    EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE,
+    derive_knowledge_item_locator,
+)
 from decision_objects import ensure_decision_objects
 from knowledge.retrieval import evaluate_phase_retrieval
+import report_freshness
+from report_quality import (
+    PROVISIONAL_CLARIFICATION_CAVEAT,
+    SPARSE_CONFIDENCE_RULE,
+    SPARSE_EVIDENCE_CAVEAT,
+    SPARSE_PRECISION_RULE,
+    TELEMETRY_PRIVACY_CAVEAT,
+    WAVE2_GRADUATION_MATRIX,
+    assess_report_quality_context,
+)
 from tools.scoring import (
     check_gate, evaluate_reentry_triggers, invalidate_downstream,
     compute_det_scores, compute_brier_score, summarize_phase_output
@@ -32,6 +48,174 @@ ARCHITECTURE: 5-layer VSM (Operations>Coordination via Decision Dossier>Control/
 CONVERGENCE: BF>10, H_norm<0.15, D_KL<0.01, EVSI/ENBS>0, OBF sequential, Futility<15%, Real-options, Thompson BETA.INV, Graduation>0.95/Drop<0.05, Brier, ECE, Portfolio ρ<0.5, MECE 5 tests.
 
 Be specific, quantitative, actionable."""
+
+REPORT_CITATION_DISCIPLINE = """MANDATORY REPORT CITATION DISCIPLINE:
+- Final report project-evidence citations must use concrete markers copied from PROJECT EVIDENCE LOCATORS.
+- Use the literal pipe character `|`. Do not escape it as `\\|`.
+- Valid example: [Evidence: ev-market-note | chunk=2]
+- Invalid: [Evidence: ev-market-note \\| chunk=2]
+- Never output placeholder evidence markers.
+- Do not output [Evidence: ...] or angle-bracket templates in the final report.
+- Invalid: [Evidence: ...]
+- Invalid: [Evidence: <evidence_id> | <locator>]
+- Invalid: [Evidence: evidence_id | locator]
+- Invalid: [Evidence: ev-market-note | ...]
+- Invalid: [Evidence: ... | ...]
+- Each citation marker must contain exactly one evidence ID and one locator. For multiple evidence items, use separate adjacent markers; do not put semicolons or multiple Evidence tokens inside one marker.
+- Every evidence marker in the final report must copy a real evidence_id and locator from PROJECT EVIDENCE LOCATORS.
+- Do not invent evidence IDs, source names, metrics, pages, rows, chunks, customers, or provenance.
+- Framework markers such as [#24] are methodology references, not project evidence citations.
+- Do not cite the act of recommending; cite the empirical evidence behind the recommendation.
+- Do not cite pure reasoning, causal interpretation, or framework logic as empirical evidence.
+- In load-bearing sections such as Executive Summary, Recommended Path, Why This Is Recommended, Evidence Used, Key Risks, Assumptions and Open Questions, and Monitoring and Kill Criteria: if a section contains an empirical claim supported by supplied project evidence, include at least one concrete evidence marker copied from PROJECT EVIDENCE LOCATORS in that section.
+- If no concrete locator is available or no supplied evidence supports the claim, label the claim as [Inference], [Hypothesis], [Unknown], or write citation unavailable.
+- Evidence markers identify source material; they do not by themselves prove the recommendation or semantic support for a claim.
+- Do not claim that citation or locator resolvability proves semantic support.
+- Never fabricate a marker to satisfy the citation rule.
+
+EVIDENCE CITATION CHECK BEFORE FINAL OUTPUT:
+Use this checklist internally. Do not render it as a separate buyer-facing report section.
+- Every empirical load-bearing claim either has a concrete evidence marker copied from PROJECT EVIDENCE LOCATORS or is labeled [Inference], [Hypothesis], [Unknown], or citation unavailable.
+- No framework marker is used as project evidence.
+- No evidence ID or locator is invented."""
+
+
+def _clean_report_locator_value(value, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _add_report_locator_entry(
+    entries: dict[str, dict[str, str]],
+    *,
+    evidence_id,
+    locator="",
+    source_ref="",
+    source_id="",
+    title="",
+    external_uri="",
+) -> None:
+    clean_id = _clean_report_locator_value(evidence_id, limit=180)
+    if not clean_id:
+        return
+    incoming = {
+        "evidence_id": clean_id,
+        "locator": _clean_report_locator_value(locator, limit=220),
+        "source_ref": _clean_report_locator_value(source_ref, limit=220),
+        "source_id": _clean_report_locator_value(source_id, limit=160),
+        "title": _clean_report_locator_value(title, limit=120),
+        "external_uri": _clean_report_locator_value(external_uri, limit=220),
+    }
+    existing = entries.setdefault(
+        clean_id,
+        {
+            "evidence_id": clean_id,
+            "locator": "",
+            "source_ref": "",
+            "source_id": "",
+            "title": "",
+            "external_uri": "",
+        },
+    )
+    for key, value in incoming.items():
+        if key == "evidence_id":
+            continue
+        if value and not existing.get(key):
+            existing[key] = value
+
+
+def _build_report_evidence_locator_register(state: ProjectState, max_entries: int = 40) -> str:
+    """Build bounded evidence locator metadata for the report prompt without mutating state."""
+    entries: dict[str, dict[str, str]] = {}
+
+    for item in list(getattr(getattr(state, "knowledge_layer", None), "items", []) or []):
+        provenance = getattr(item, "provenance", None)
+        _add_report_locator_entry(
+            entries,
+            evidence_id=getattr(item, "evidence_id", "") or getattr(item, "item_id", ""),
+            locator=derive_knowledge_item_locator(item),
+            source_ref=getattr(item, "source_ref", "") or getattr(provenance, "source_ref", ""),
+            source_id=getattr(item, "source_id", ""),
+            title=getattr(item, "title", ""),
+            external_uri=getattr(provenance, "external_uri", ""),
+        )
+
+    for evidence in list(getattr(state, "imported_evidence", []) or []):
+        provenance = getattr(evidence, "provenance", None)
+        _add_report_locator_entry(
+            entries,
+            evidence_id=getattr(evidence, "evidence_id", ""),
+            source_ref=getattr(provenance, "source_ref", ""),
+            title=getattr(evidence, "title", ""),
+            external_uri=getattr(provenance, "external_uri", ""),
+        )
+
+    decision_objects = getattr(state, "decision_objects", None)
+    for evidence in list(getattr(decision_objects, "evidences", []) or []):
+        provenance = getattr(evidence, "provenance", None)
+        _add_report_locator_entry(
+            entries,
+            evidence_id=getattr(evidence, "evidence_id", ""),
+            source_ref=getattr(provenance, "source_ref", ""),
+            title=getattr(evidence, "title", ""),
+            external_uri=getattr(provenance, "external_uri", ""),
+        )
+
+    for hypothesis in list(getattr(state, "hypotheses", []) or []):
+        for evidence_id in list(getattr(hypothesis, "evidence_ids", []) or []):
+            _add_report_locator_entry(entries, evidence_id=evidence_id)
+
+    # Filter to entries with a concrete locator. Entries without one (derived
+    # decision_objects.evidences, imported_evidence with no anchor, bare
+    # hypothesis evidence_ids) would otherwise tempt the model into citing
+    # analytical conclusions as `[Evidence: <id> | locator unavailable]` --
+    # the discipline already says such claims must be labeled [Inference],
+    # [Hypothesis], [Unknown], or "citation unavailable" instead.
+    entries = {
+        evidence_id: entry
+        for evidence_id, entry in entries.items()
+        if entry.get("locator")
+        and entry["locator"] != EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE
+    }
+
+    lines = [
+        "PROJECT EVIDENCE LOCATORS:",
+        "Use only the concrete evidence IDs and locators listed below for final-report evidence markers.",
+    ]
+    if not entries:
+        lines.append("No project evidence locators supplied. Claims without supplied locators must be labeled [Inference], [Hypothesis], or [Unknown], or citation unavailable.")
+        return "\n".join(lines)
+
+    ordered = sorted(
+        entries.values(),
+        key=lambda entry: (
+            entry.get("evidence_id", ""),
+            entry.get("locator", ""),
+            entry.get("source_ref", ""),
+            entry.get("source_id", ""),
+        ),
+    )
+    truncated = len(ordered) > max_entries
+    for entry in ordered[:max_entries]:
+        locator = entry.get("locator") or EVIDENCE_CITATION_MARKER_LOCATOR_UNAVAILABLE
+        metadata = []
+        for key in ("source_ref", "source_id", "title", "external_uri"):
+            value = entry.get(key, "")
+            if value:
+                metadata.append(f"{key}={value}")
+        suffix = f" {' '.join(metadata)}" if metadata else ""
+        marker = EVIDENCE_CITATION_MARKER_FORMAT.format(
+            evidence_id=entry["evidence_id"],
+            locator=locator,
+        )
+        lines.append(f"- {marker}{suffix}")
+    if truncated:
+        lines.append(f"Locator register truncated to first {max_entries} entries sorted by evidence_id.")
+    return "\n".join(lines)
 
 
 def build_system_prompt(phase: str, json_mode: bool = True, calibration_hint: str = "") -> str:
@@ -67,8 +251,15 @@ PROJECT:
 
 def build_hypotheses_prompt(state: ProjectState) -> str:
     ctx = summarize_phase_output("classify", state)
+    sparse_note = (
+        "\nSPARSE EVIDENCE NOTE: No supporting data has been supplied. "
+        "Generate falsifiable hypotheses grounded in the brief and classify output. "
+        "Label each justification as [Hypothesis] or [Unknown] where evidence is absent. "
+        "Do NOT invent evidence IDs, metric values, or source names. "
+        "Focus on diagnostic paths and explicitly note missing evidence as confirm/reject thresholds."
+    ) if not state.data else ""
     return f"""PHASE 1: Generate 8-12 hypotheses using HDD[#21]+BAYES_LITE[#4]. Check MECE, portfolio ρ, EVOI[#25].
-
+{sparse_note}
 EXAMPLE:
 {{"id":"H1","text":"We believe X. We will know by Y.","justification":"Why this hypothesis matters and what evidence suggests it is plausible.","signal":"measurable","alpha":6,"beta":4,"confirm":"threshold","reject":"threshold","evoi":"high","portfolio_cluster":"speed","status":"OPEN"}}
 
@@ -230,28 +421,109 @@ PROJECT:
 
 
 def build_report_prompt(state: ProjectState) -> str:
-    ctx_classify = summarize_phase_output("classify", state)
-    ctx_hyps = summarize_phase_output("hypotheses", state)
-    ctx_gauntlet = summarize_phase_output("gauntlet", state)
-    ctx_audit = summarize_phase_output("audit", state)
-    ctx_strategy = summarize_phase_output("strategy", state)
-    ctx_monitor = summarize_phase_output("monitor", state)
-    obs_text = "\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations"
+    ctx_classify = _sanitize_report_context(summarize_phase_output("classify", state))
+    ctx_hyps = _sanitize_report_context(summarize_phase_output("hypotheses", state))
+    ctx_gauntlet = _sanitize_report_context(summarize_phase_output("gauntlet", state))
+    ctx_audit = _sanitize_report_context(summarize_phase_output("audit", state))
+    ctx_strategy = _sanitize_report_context(summarize_phase_output("strategy", state))
+    ctx_monitor = _sanitize_report_context(summarize_phase_output("monitor", state))
+    evidence_locator_register = _build_report_evidence_locator_register(state)
+    quality_context = assess_report_quality_context(state)
+    report_quality_rules = _report_quality_prompt_block(quality_context)
+    factual_safety_rules = _report_factual_safety_rules(quality_context)
+    research_depth_rules = _report_research_depth_rules(quality_context)
+    evidence_maturity_rule = _report_evidence_maturity_rule(quality_context)
+    sprint0_rule = _report_sprint0_rule(quality_context)
+    obs_text = _sanitize_report_context("\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations")
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
-    return f"""PHASE 5: Final report. Use Causal Inference[#24], Swiss Cheese[#10], HRO[#29], Red Team[#28], Ablation[#23].
+    return f"""PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers.
 
-Include:
-# EXECUTIVE SUMMARY
-# FINAL VERDICTS (table)
-# STRATEGY RESULTS
-# CAUSAL VERIFICATION [#24]
-# DEFENSE AUDIT — Swiss Cheese [#10]
-# HRO DEBRIEF [#29]
-# RED TEAM [#28]
-# ABLATION [#23]
-# AGENT CARDS
-# META-LEARNER INPUT (Brier, calibration)
-# NEXT STEPS
+{evidence_locator_register}
+
+{REPORT_CITATION_DISCIPLINE}
+
+Report writing rules:
+- Write for a non-technical business audience. Use plain English first and technical language second.
+- Define technical terms immediately if they must appear. Avoid unexplained acronyms in the main body.
+- Prefer short paragraphs. Keep main-body sections concise: 3-6 bullets or one compact table unless more detail is necessary.
+- Use tables for options, evidence, risks, roadmap, next steps, and monitoring.
+- Do not use Markdown blockquote markers for report layout. Do not use Markdown horizontal rules.
+- For thresholds, write comparison words such as "more than", "less than", or "at least"; do not use raw comparison symbols.
+- Separate recommendation strength from evidence strength.
+- Clearly label assumptions, inferences, hypotheses, unknowns, and unavailable citations.
+- Evidence markers identify source material; they do not by themselves prove the recommendation.
+- Explain what cited evidence suggests before relying on it.
+- Do not imply cited evidence semantically proves a claim unless the report text explains what the evidence actually suggests.
+- Do not claim that citation or locator resolvability proves semantic support.
+- Preserve canonical evidence markers from PROJECT EVIDENCE LOCATORS. Do not fabricate evidence markers.
+- If evidence is unavailable, use [Inference], [Hypothesis], [Unknown], or citation unavailable.
+- Do not invent owners, dates, metrics, thresholds, budgets, customer facts, evidence, or commitments.
+- Use role-based owner placeholders from REPORT QUALITY CONTEXT instead of repeated owner TBDs. Named owners require operator confirmation.
+- Use TBD — requires operator confirmation only where no reasonable role can be inferred, or where date, metric, threshold, budget, customer fact, or commitment is unknown.
+- If ProjectState clarification_cycles or clarification_answers are present in report context, include them only as assumptions, open questions, unavailable context, or operator-provided context.
+- Unanswered clarification questions remain unresolved questions.
+- Clarification answers and questions are not empirical evidence, must not be cited with project evidence markers, and must not be placed in the Evidence Used table as cited facts.
+
+REPORT QUALITY CONTEXT:
+{report_quality_rules}
+
+Factual-safety rules:
+{factual_safety_rules}
+
+Research-depth and claim-labeling rules:
+{research_depth_rules}
+
+Report structure:
+Use these exact Markdown headings in this exact order:
+# Executive Summary
+# The Decision
+# Recommended Path
+# Why This Is Recommended
+# Options Considered
+# Evidence Used
+# Key Risks
+# Assumptions and Open Questions
+# Roadmap
+# Next Steps
+# Monitoring and Kill Criteria
+# Appendix: Technical Analysis
+
+Executive Summary:
+- Add ## At a Glance immediately under Executive Summary. At a glance must be a normal two-column Markdown table, not a blockquote. Use header cells Field and Detail, then rows for Decision, Recommendation, Confidence level, Biggest risk, Next action.
+- Immediately after At a Glance, include the hypothesis-driven diagnostic memo caveat from the Research-depth rules.
+
+Options Considered:
+- Use a table with: option, upside, downside, best use case, verdict.
+
+Evidence Used:
+- Use a table with: evidence, what it suggests, evidence strength, caveat, citation marker if available.
+- Evidence strength labels must be one of: strong, moderate, weak, unavailable, inference only.
+- After the evidence table, add ## Evidence Maturity. {evidence_maturity_rule}
+- After Evidence Maturity, add ## Sprint 0 Evidence Pack Required. Include a compact table with: evidence item, why it is needed, decision it validates, owner role, expected output.
+- {sprint0_rule}
+
+Key Risks:
+- Use a table with: risk, why it matters, early warning signal, mitigation, owner/role if known.
+
+Assumptions and Open Questions:
+- Use a table with: unresolved assumption or question, why it matters, how to resolve it, owner/role if known, status.
+- Status must be one of: assumption, open question, unknown, operator-provided, unavailable.
+
+Roadmap:
+- Include a 7/30/60/90-day roadmap table with: timeframe, objective, actions, owner/role, success signal, risk/stop-change-course threshold.
+- If a timeframe cannot be responsibly specified, state what information is needed to specify it.
+- If owner, metric, success signal, or threshold is unknown, use: TBD — requires operator confirmation.
+
+Next Steps:
+- Include 5-7 concrete next actions in a table with: action, owner/role, deadline or timeframe, dependency, expected output.
+- If the report cannot responsibly identify 5 concrete next actions, include fewer and explain what information is needed to complete the list.
+
+Monitoring and Kill Criteria:
+- Use plain English. Prefer "stop/change-course threshold" over unexplained "kill criterion."
+- Use a table with: signal to watch, good sign, warning sign, stop/change-course threshold, review cadence.
+
+Appendix: Technical Analysis:
+- Move framework-heavy content here: FMEA, HAZOP, SQI, Causal Inference, HRO, Red Team, Ablation, framework references, and technical scoring notes.
 
 {ctx_classify}
 {ctx_hyps}
@@ -262,6 +534,131 @@ Include:
 MONITORING: {obs_text}
 TIMER: {timer_text}
 PROJECT: {state.brief[:400]}"""
+
+
+def _report_quality_prompt_block(context) -> str:
+    lines = [
+        f"- Decision domain: {context.decision_domain}.",
+        "- Owner roles to use: " + ", ".join(context.owner_roles) + ".",
+        "- Sprint 0 evidence categories: " + ", ".join(context.evidence_categories) + ".",
+        "- Use only the active domain's owner roles and Sprint 0 evidence categories unless the original operator input explicitly asks for another domain.",
+        "- For generic growth decisions, use growth/revenue/product analytics roles and evidence; do not default to unrelated web-publishing owner roles or evidence categories.",
+        "- For productization/product strategy decisions, use product telemetry, session/rework logs, report validation, user interviews, pilot sessions, export usage/share data, implementation complexity, privacy review, and template schema / field registry validation; do not use web-publishing platform terminology unless the original operator input explicitly asks for it.",
+        f"- {SPARSE_PRECISION_RULE}",
+        "- Treat clarification answers as operator context only, not empirical evidence.",
+        "- Generate or surface 5-8 decision-critical follow-up questions when clarification answers are absent or unresolved.",
+        f"- If recommending logs, event tracking, session replay, transcripts, recordings, dashboard telemetry, product analytics, usage instrumentation, regeneration-event logging, or rework flags: {TELEMETRY_PRIVACY_CAVEAT}",
+    ]
+    if context.sparse_evidence:
+        lines.append(f"- {SPARSE_EVIDENCE_CAVEAT}")
+        if context.sparse_reasons:
+            lines.append("- Sparse evidence reasons: " + "; ".join(context.sparse_reasons))
+    elif context.evidence_warning:
+        lines.append("- Evidence warning: one or more evidence channels are missing; separate evidence strength from recommendation strength.")
+    if context.provisional_report:
+        lines.append(f"- {PROVISIONAL_CLARIFICATION_CAVEAT}")
+    if context.sparse_evidence:
+        lines.append(f"- {SPARSE_CONFIDENCE_RULE}")
+    if context.decision_domain == "productization":
+        lines.append("- Include a Wave 2 Graduation Matrix with Proceed, Extend Wave 1, Split the workstream, and Stop or defer rules. Use existing/operator-set thresholds or qualitative threshold placeholders; do not invent new numeric thresholds.")
+        lines.append(WAVE2_GRADUATION_MATRIX)
+    return "\n".join(lines)
+
+
+def _report_factual_safety_rules(context) -> str:
+    if context.decision_domain == "seo_content_editorial":
+        return "\n".join([
+            "- Search Console and GA4 data thresholds are system-defined; verify whether the relevant reports are available and sufficiently populated. Do not claim a fixed numeric monthly-active-user threshold.",
+            "- Do not imply GA4 directly exposes a Hispanic demographic dimension unless the supplied project input explicitly says that validated field is available. If audience validation is needed, write: target audience proxy, such as age/gender plus geo/language or first-party audience data, depending on available GA4/GSC fields.",
+            "- Use INP for responsiveness. Do not pair the retired FID metric with INP.",
+            "- Core Web Vitals and page experience align with Google Search ranking systems and should be treated as a diagnostic and UX priority, not a deterministic ranking lever.",
+            "- Prioritize Article and BreadcrumbList structured data. Consider FAQPage only where the page type and Google's current eligibility rules apply.",
+            "- Structured data can make pages eligible for search features; do not promise or guarantee rich results.",
+        ])
+    return "\n".join([
+        "- Do not use unrelated web/search/content evidence categories unless the supplied brief explicitly involves that work.",
+        "- If upstream generated phase text uses unrelated web/search/content wording but the original operator input does not, do not repeat it; replace it with the active domain evidence categories.",
+        "- For generic growth decisions, use cohort retention, CAC/LTV, pipeline conversion, win/loss, product usage/activation, churn, expansion/NRR, pricing/packaging, sales velocity, marketing channel efficiency, and customer success evidence.",
+        "- For productization/product strategy decisions, use product telemetry, pilot-session data, user feedback, export validation, implementation complexity, privacy/data governance, and template schema / field registry validation evidence categories.",
+        "- For productization/product strategy decisions, replace unsupported web-publishing platform wording with reusable template schema, field registry, or product instrumentation validation unless the original operator input explicitly involves that work.",
+        "- Do not make precise impact, savings, probability, percentage, or budget claims unless concrete project evidence supports them.",
+        "- If evidence is sparse, prefer diagnostic recommendations and Sprint 0 evidence collection over confident implementation prescriptions.",
+    ])
+
+
+def _report_research_depth_rules(context) -> str:
+    if context.decision_domain == "seo_content_editorial":
+        domain_claims = "Search Console, GA4, crawl, CrUX/PageSpeed, keyword, or editorial workflow validation"
+        caveat = "This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a completed evidence-backed SEO audit. Sprint 0 evidence collection is required before committing to full implementation."
+    else:
+        domain_claims = ", ".join(context.evidence_categories)
+        caveat = "This report is a hypothesis-driven diagnostic memo based on structural analysis and supplied context. It is not yet a measured audit. Sprint 0 evidence collection is required before committing to full implementation."
+    if context.sparse_evidence:
+        confidence = SPARSE_CONFIDENCE_RULE
+    elif context.decision_domain == "seo_content_editorial":
+        confidence = "Moderate confidence in the intervention sequence; low-to-moderate confidence in the size of impact until Search Console, GA4, crawl, and editorial evidence are reviewed; high confidence that Sprint 0 diagnostics are necessary before implementation."
+    else:
+        confidence = "Moderate confidence in the diagnostic sequence; low-to-moderate confidence in the size of impact until direct project evidence is reviewed; high confidence that Sprint 0 evidence collection is necessary before implementation."
+    lines = [
+        f"- {caveat}",
+        "- Claims based only on structural pattern matching must be labeled [Inference].",
+        f"- Claims requiring {domain_claims} must be labeled [Hypothesis] or [Unknown] until validated.",
+        "- Recommendations may be action-oriented, but full implementation should be gated by Sprint 0 validation of core assumptions.",
+        "- Avoid saying an action will produce a measured impact without validation. Prefer \"expected to improve,\" \"the hypothesis is,\" or \"Sprint 0 will validate.\"",
+        f"- Include this confidence explanation once: {confidence}",
+    ]
+    if context.sparse_evidence:
+        lines.append(f"- {SPARSE_EVIDENCE_CAVEAT}")
+    if context.provisional_report:
+        lines.append(f"- {PROVISIONAL_CLARIFICATION_CAVEAT}")
+    return "\n".join(lines)
+
+
+def _report_evidence_maturity_rule(context) -> str:
+    categories = ["analytical model", "direct project evidence", *context.evidence_categories]
+    return "Use current evidence level bullets for: " + ", ".join(categories) + "."
+
+
+def _report_sprint0_rule(context) -> str:
+    if context.decision_domain == "seo_content_editorial":
+        return "The Sprint 0 Evidence Pack must cover: GSC 12-month URL/query export; GA4 audience/acquisition check; CrUX or PageSpeed field data; site crawl export from Screaming Frog, Sitebulb, or equivalent; URL inventory with publish/update dates; keyword research sample; editorial workflow/process confirmation; CMS/schema/canonical capability check; peer/competitor topic-gap sample if available."
+    return "The Sprint 0 Evidence Pack must cover: " + "; ".join(context.evidence_categories) + "."
+
+
+def _sanitize_report_context(text: str) -> str:
+    """Keep unsafe upstream wording out of final-report prompt context.
+
+    This does not rewrite phase outputs. It only prevents outdated or
+    over-specific phrasing from being repeated by the report phase.
+    """
+    value = str(text or "")
+    replacements = {
+        "500 MAU threshold": "system-defined GA4 data threshold to verify",
+        "18–34 female Hispanic segment visible in GA4": "target audience proxy availability to verify in GA4/GSC fields",
+        "18-34 female Hispanic segment visible in GA4": "target audience proxy availability to verify in GA4/GSC fields",
+        "18–34 female Hispanic segment": "target audience proxy using available age/gender plus geo/language or first-party audience fields",
+        "18-34 female Hispanic segment": "target audience proxy using available age/gender plus geo/language or first-party audience fields",
+        "GA4 Hispanic segment": "GA4 audience proxy, if available",
+        "Google Signals threshold for Hispanic segment": "system-defined GA4 data threshold for available audience fields",
+        "FID/INP": "INP",
+        "direct ranking signal": "ranking-system-aligned diagnostic signal",
+        "direct ranking lever": "ranking-system-aligned diagnostic and UX priority",
+        "confirmed ranking factors": "page-experience signals aligned with Google Search ranking systems",
+        "Article/BreadcrumbList/FAQPage schema": "Article and BreadcrumbList structured data, with FAQPage only where eligible",
+        "Article, BreadcrumbList, and FAQPage structured data": "Article and BreadcrumbList structured data, with FAQPage only where eligible",
+        "FAQPage for rich-result capture": "FAQPage only where page type and current eligibility rules apply",
+        "Implement FAQPage schema": "Consider FAQPage only where page type and current eligibility rules apply",
+        "guaranteed rich results": "eligibility for search features",
+    }
+    for unsafe, safe in replacements.items():
+        value = value.replace(unsafe, safe)
+    value = re.sub(
+        r"\bCore Web Vitals are a direct ranking signal\b",
+        "Core Web Vitals and page experience align with Google Search ranking systems and should be treated as diagnostic and UX priorities",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return value
 
 
 def _phase_retrieval_context(state: ProjectState, phase: str) -> tuple[str, list[dict]]:
@@ -348,9 +745,9 @@ def _normalized_phase_status(status) -> PhaseStatus:
 
 def _phase_has_output(state: ProjectState, phase: str) -> bool:
     if phase == "audit":
-        return state.audit is not None or bool(state.audit_raw)
+        return state.audit is not None
     if phase == "strategy":
-        return state.strategy is not None or bool(state.strategy_raw)
+        return state.strategy is not None
     if phase == "report":
         return bool(state.report)
     value = getattr(state, phase, None)
@@ -386,6 +783,198 @@ def _parsed_json_matches_phase(phase: str, parsed) -> bool:
     if phase in ("gauntlet", "audit", "strategy", "monitor", "sqi"):
         return isinstance(parsed, dict)
     return True
+
+
+def _repair_strategy_payload(text: str) -> dict | None:
+    """Recover required strategy fields from a truncated top-level JSON object.
+
+    Strategy responses can exceed the provider token cap after producing the
+    fields needed by the deterministic gate. If the top-level object truncates
+    later, parse_json may otherwise extract the first nested array and lose the
+    completed strategy content. This repair is intentionally narrow: it only
+    returns a payload when the required top-level strategy fields are complete.
+    """
+    repaired = {}
+    for key in ("preliminary_verdicts", "executive_strategy", "strategies"):
+        value = _extract_top_level_json_value(text, key)
+        if value in (None, "", []):
+            return None
+        repaired[key] = value
+    for key in (
+        "implementation_sequence",
+        "success_metrics",
+        "monitoring_plan",
+        "review_date",
+        "confidence",
+        "reentry_check",
+    ):
+        value = _extract_top_level_json_value(text, key)
+        if value is not None:
+            repaired[key] = value
+    return repaired
+
+
+def normalize_strategy_payload(payload):
+    """Normalize known flexible strategy fields before strict validation."""
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    reentry_check = normalized.get("reentry_check")
+    if reentry_check is None:
+        normalized["reentry_check"] = ""
+    elif isinstance(reentry_check, str):
+        normalized["reentry_check"] = reentry_check
+    elif isinstance(reentry_check, (dict, list)):
+        normalized["reentry_check"] = json.dumps(
+            reentry_check,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+    return normalized
+
+
+def _repair_audit_payload(text: str) -> dict | None:
+    """Recover required audit fields from a truncated top-level JSON object."""
+    repaired = {}
+    for key in ("fmea", "top_findings"):
+        value = _extract_top_level_json_value(text, key)
+        if value in (None, "", []):
+            return None
+        repaired[key] = value
+    for key in (
+        "data_based",
+        "hazop",
+        "stpa",
+        "fta",
+        "swiss_cheese",
+        "h_norm_estimate",
+        "observation_needs",
+    ):
+        value = _extract_top_level_json_value(text, key)
+        if value is not None:
+            repaired[key] = value
+    return repaired
+
+
+def _repair_monitor_payload(text: str) -> dict | None:
+    """Recover required monitor fields from a truncated top-level JSON object."""
+    repaired = {}
+    for key in ("ooda_schedule", "circuit_breakers", "canaries"):
+        value = _extract_top_level_json_value(text, key)
+        if value in (None, "", []):
+            return None
+        repaired[key] = value
+    for key in (
+        "chaos_drills",
+        "hro_principles_active",
+        "reentry_watch",
+        "commitment_score",
+        "commitment_rationale",
+    ):
+        value = _extract_top_level_json_value(text, key)
+        if value is not None:
+            repaired[key] = value
+    return repaired
+
+
+def _extract_top_level_json_value(text: str, key: str):
+    needle = f'"{key}"'
+    start = 0
+    while True:
+        key_index = text.find(needle, start)
+        if key_index == -1:
+            return None
+        if _json_container_depth_before(text, key_index) == (1, 0):
+            colon = text.find(":", key_index + len(needle))
+            if colon == -1:
+                return None
+            value_start = colon + 1
+            while value_start < len(text) and text[value_start].isspace():
+                value_start += 1
+            span = _json_value_span(text, value_start)
+            if span is None:
+                return None
+            try:
+                return json.loads(text[value_start:span])
+            except (json.JSONDecodeError, ValueError, TypeError):
+                return None
+        start = key_index + len(needle)
+
+
+def _json_container_depth_before(text: str, stop: int) -> tuple[int, int]:
+    object_depth = 0
+    array_depth = 0
+    in_string = False
+    escape = False
+    for ch in text[:stop]:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            object_depth += 1
+        elif ch == "}":
+            object_depth = max(0, object_depth - 1)
+        elif ch == "[":
+            array_depth += 1
+        elif ch == "]":
+            array_depth = max(0, array_depth - 1)
+    return object_depth, array_depth
+
+
+def _json_value_span(text: str, start: int) -> int | None:
+    if start >= len(text):
+        return None
+    first = text[start]
+    if first == '"':
+        escape = False
+        for idx in range(start + 1, len(text)):
+            ch = text[idx]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                return idx + 1
+        return None
+    if first in "{[":
+        close = "}" if first == "{" else "]"
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == first:
+                depth += 1
+            elif ch == close:
+                depth -= 1
+                if depth == 0:
+                    return idx + 1
+        return None
+    match = re.match(r"(true|false|null|-?\d+(?:\.\d+)?)", text[start:])
+    return start + len(match.group(0)) if match else None
 
 
 def _phase_json_retry_instruction(phase: str) -> str:
@@ -527,8 +1116,48 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
     system = build_system_prompt(phase, json_mode=is_json, calibration_hint=calibration_hint)
 
+    async def _pre_attempt_governance(_config):
+        attempt_decision = policy_gate(state, phase, reversibility)
+        if attempt_decision.allowed:
+            return None
+        return {
+            "reason": attempt_decision.reason,
+            "category": attempt_decision.breach_category or "policy",
+        }
+
+    def _log_llm_route(response: LLMResponse) -> None:
+        log_policy_event(state, "llm_route", {
+            "phase": phase,
+            "task_profile": getattr(response, "task_profile", ""),
+            "selected_provider": getattr(response, "selected_provider", ""),
+            "selected_model": getattr(response, "selected_model", ""),
+            "selection_reason": getattr(response, "selection_reason", ""),
+            "final_provider": getattr(response, "provider_used", ""),
+            "final_model": getattr(response, "model_used", ""),
+            "attempt_count": getattr(response, "attempt_count", 0) or 0,
+            "fallback_used": bool(getattr(response, "fallback_used", False)),
+            "fallback_reason": getattr(response, "fallback_reason", ""),
+            "failed_provider": getattr(response, "failed_provider", ""),
+            "failed_model": getattr(response, "failed_model", ""),
+            "failed_error_type": getattr(response, "failed_error_type", ""),
+            "fallback_provider": getattr(response, "fallback_provider", ""),
+            "fallback_model": getattr(response, "fallback_model", ""),
+            "error_type": getattr(response, "error_type", ""),
+            "input_tokens": getattr(response, "input_tokens", 0) or 0,
+            "output_tokens": getattr(response, "output_tokens", 0) or 0,
+            "cache_hit": bool(getattr(response, "cache_hit", False)),
+            "latency_ms": getattr(response, "latency_ms", 0) or 0,
+        })
+
     # Call LLM
-    response: LLMResponse = await call_llm(phase, system, prompt, project_id=state.project_id)
+    response: LLMResponse = await call_llm(
+        phase,
+        system,
+        prompt,
+        project_id=state.project_id,
+        before_attempt=_pre_attempt_governance,
+    )
+    _log_llm_route(response)
 
     # v4.3: record budget consumption regardless of success
     try:
@@ -548,6 +1177,24 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
     if is_json:
         parsed = parse_json(response.text)
         shape_ok = _parsed_json_matches_phase(phase, parsed)
+        if phase == "audit" and not shape_ok:
+            repaired = _repair_audit_payload(response.text)
+            if repaired is not None:
+                logger.warning("Phase audit: repaired truncated JSON object from completed top-level fields")
+                parsed = repaired
+                shape_ok = True
+        elif phase == "strategy" and not shape_ok:
+            repaired = _repair_strategy_payload(response.text)
+            if repaired is not None:
+                logger.warning("Phase strategy: repaired truncated JSON object from completed top-level fields")
+                parsed = repaired
+                shape_ok = True
+        elif phase == "monitor" and not shape_ok:
+            repaired = _repair_monitor_payload(response.text)
+            if repaired is not None:
+                logger.warning("Phase monitor: repaired truncated JSON object from completed top-level fields")
+                parsed = repaired
+                shape_ok = True
         if parsed is None or not shape_ok:
             if parsed is None:
                 logger.warning(
@@ -567,7 +1214,9 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                          "text before or after. "
                          + _phase_json_retry_instruction(phase),
                 project_id=state.project_id,
+                before_attempt=_pre_attempt_governance,
             )
+            _log_llm_route(retry_response)
             try:
                 rt_tokens = getattr(retry_response, "total_tokens", 0) or 0
                 rt_cost = getattr(retry_response, "cost_usd", 0.0) or 0.0
@@ -578,6 +1227,33 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
             if retry_response.ok:
                 parsed = parse_json(retry_response.text)
                 shape_ok = _parsed_json_matches_phase(phase, parsed)
+                if phase == "audit" and not shape_ok:
+                    repaired = _repair_audit_payload(retry_response.text)
+                    if repaired is not None:
+                        logger.warning(
+                            "Phase audit: repaired truncated retry JSON object "
+                            "from completed top-level fields"
+                        )
+                        parsed = repaired
+                        shape_ok = True
+                elif phase == "strategy" and not shape_ok:
+                    repaired = _repair_strategy_payload(retry_response.text)
+                    if repaired is not None:
+                        logger.warning(
+                            "Phase strategy: repaired truncated retry JSON object "
+                            "from completed top-level fields"
+                        )
+                        parsed = repaired
+                        shape_ok = True
+                elif phase == "monitor" and not shape_ok:
+                    repaired = _repair_monitor_payload(retry_response.text)
+                    if repaired is not None:
+                        logger.warning(
+                            "Phase monitor: repaired truncated retry JSON object "
+                            "from completed top-level fields"
+                        )
+                        parsed = repaired
+                        shape_ok = True
                 if parsed is None:
                     logger.error(
                         f"Phase {phase}: JSON parse failed on retry too. "
@@ -593,11 +1269,14 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
         if parsed is not None and _parsed_json_matches_phase(phase, parsed):
             _store_phase_output(state, phase, parsed)
-            structured_field = getattr(state, phase, None)
-            if structured_field is None and phase in ("classify", "hypotheses", "gauntlet", "monitor", "sqi"):
+            if phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "sqi") and not _phase_has_output(state, phase):
+                if phase == "audit":
+                    state.audit_raw = response.text
+                elif phase == "strategy":
+                    state.strategy_raw = response.text
                 logger.error(
                     f"Phase {phase}: parse succeeded but _store_phase_output "
-                    f"did not populate state.{phase}. Marking phase FAILED."
+                    f"did not populate valid structured output. Marking phase FAILED."
                 )
                 state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
@@ -610,14 +1289,20 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         else:
             if phase == "audit":
                 state.audit_raw = response.text
-                state.phase_status[phase] = PhaseStatus.COMPLETED
+                state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
-                logger.warning(f"Phase {phase}: stored raw text as fallback")
+                logger.error(
+                    f"Phase {phase}: stored raw diagnostic output after parse/schema "
+                    "failure; raw output is not accepted as structured completion."
+                )
             elif phase == "strategy":
                 state.strategy_raw = response.text
-                state.phase_status[phase] = PhaseStatus.COMPLETED
+                state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
-                logger.warning(f"Phase {phase}: stored raw text as fallback")
+                logger.error(
+                    f"Phase {phase}: stored raw diagnostic output after parse/schema "
+                    "failure; raw output is not accepted as structured completion."
+                )
             else:
                 state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
@@ -627,6 +1312,11 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 )
     else:
         state.report = response.text
+        log_policy_event(
+            state,
+            "report_generated",
+            report_freshness.build_report_generation_metadata(state.report),
+        )
         state.phase_status[phase] = PhaseStatus.COMPLETED
         state.phase_confidence[phase] = 1.0
 
@@ -703,14 +1393,34 @@ async def run_workflow_sequence(
             gate = check_gate(state, phase)
             state.phase_confidence[phase] = gate["confidence"]
             if not gate["passed"]:
-                logger.error(
-                    f"Gate blocked workflow after {phase}: blocking={gate['blocking']} "
+                # Distinguish structural failures (missing output / required fields)
+                # from quality-threshold shortfalls (BF, DQ, hypothesis count).
+                # Structural failures abort the workflow; quality shortfalls are
+                # recorded as warnings and the runner force-proceeds — matching the
+                # LangGraph behaviour where gate failure triggers retry→force_proceed
+                # rather than a permanent FAILED status.  Sparse/low-evidence
+                # projects legitimately score below BF and DQ thresholds; blocking
+                # them permanently prevents any useful downstream output.
+                structural = [
+                    r for r in gate["blocking"]
+                    if r.startswith("Missing required")
+                    or r.endswith("has no output yet")
+                    or r.endswith("output is empty")
+                ]
+                if structural:
+                    logger.error(
+                        f"Gate structurally blocked workflow after {phase}: "
+                        f"blocking={structural} confidence={gate['confidence']}"
+                    )
+                    state.phase_status[phase] = PhaseStatus.FAILED
+                    if persist_state:
+                        await persist_state(state)
+                    return state
+                logger.warning(
+                    f"Gate quality-threshold shortfall after {phase} "
+                    f"(force-proceeding): blocking={gate['blocking']} "
                     f"confidence={gate['confidence']}"
                 )
-                state.phase_status[phase] = PhaseStatus.FAILED
-                if persist_state:
-                    await persist_state(state)
-                return state
 
     return state
 
@@ -727,18 +1437,52 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             if isinstance(data, list):
                 if len(data) == 1 and isinstance(data[0], dict):
                     data = data[0]
+            # Coerce explicit null on numeric/list fields to defaults so sparse
+            # LLM output (e.g. "bf": null, "dq": null) doesn't fail Pydantic.
+            if isinstance(data, dict):
+                if data.get("bf") is None:
+                    data = {**data, "bf": 0.0}
+                if data.get("dq") is None:
+                    data = {**data, "dq": [0.0, 0.0, 0.0, 0.0]}
             state.classify = ClassifyOutput(**data)
         elif phase == "hypotheses":
-            if isinstance(data, list):
-                state.hypotheses = [Hypothesis(**h) for h in data]
-            elif isinstance(data, dict) and "hypotheses" in data:
-                state.hypotheses = [Hypothesis(**h) for h in data["hypotheses"]]
+            items = data if isinstance(data, list) else data.get("hypotheses", [])
+            # Fields the LLM may emit as null instead of omitting when evidence is
+            # absent (sparse briefs). Coerce null → default rather than failing the
+            # entire list on a single malformed item.
+            _NULL_COERCE = frozenset(
+                ("justification", "signal", "confirm", "reject",
+                 "evoi", "portfolio_cluster", "status")
+            )
+            valid_hyps: list[Hypothesis] = []
+            for idx, h in enumerate(items):
+                if not isinstance(h, dict):
+                    logger.warning(
+                        f"Phase hypotheses: item {idx} is not a dict "
+                        f"(type={type(h).__name__}); skipping."
+                    )
+                    continue
+                sanitized = {
+                    k: ("" if (v is None and k in _NULL_COERCE) else v)
+                    for k, v in h.items()
+                }
+                try:
+                    valid_hyps.append(Hypothesis(**sanitized))
+                except Exception as item_exc:
+                    logger.warning(
+                        f"Phase hypotheses: item {idx} failed validation "
+                        f"({item_exc!r}); skipping. Preview: {repr(h)[:200]}"
+                    )
+            if valid_hyps:
+                state.hypotheses = valid_hyps
         elif phase == "gauntlet":
             state.gauntlet = GauntletOutput(**data)
         elif phase == "audit":
             state.audit = AuditOutput(**data)
+            state.audit_raw = None
         elif phase == "strategy":
-            state.strategy = StrategyOutput(**data)
+            state.strategy = StrategyOutput(**normalize_strategy_payload(data))
+            state.strategy_raw = None
         elif phase == "monitor":
             state.monitor = MonitorOutput(**data)
         elif phase == "sqi":

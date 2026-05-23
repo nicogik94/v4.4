@@ -2,6 +2,9 @@
 
 from .freshness import build_knowledge_health, refresh_knowledge_items
 from .files import (
+    UploadStorageError,
+    UploadStoreHealth,
+    check_upload_store_writable,
     delete_project_uploads,
     delete_uploaded_file,
     describe_uploaded_file,
@@ -39,7 +42,10 @@ __all__ = [
     "build_phase_retrieval_impact",
     "build_prompt_facing_retrieval_impact",
     "ProjectedKnowledgeItem",
+    "UploadStorageError",
+    "UploadStoreHealth",
     "build_knowledge_health",
+    "check_upload_store_writable",
     "build_project_retrieval_summary",
     "delete_project_uploads",
     "delete_uploaded_file",

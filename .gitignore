@@ -1,0 +1,43 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+mas/.venv/
+mas/.venv312/
+
+# Tooling and cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.codex_deps/
+
+# Local environment files
+.env
+.env.*
+mas/.env
+
+# Logs and temp files
+*.log
+*.tmp
+tmp-*.log
+tmp-*.err.log
+tmp_*.json
+
+# Local databases / runtime artifacts
+*.sqlite3
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Node/build noise if ever present
+node_modules/
+dist/
+build/

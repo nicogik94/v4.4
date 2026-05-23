@@ -18,6 +18,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ValidationError
 
+from clarifications import (
+    ClarificationAnswer,
+    ClarificationCycle,
+    ClarificationStatus,
+    generate_clarification_cycle,
+    latest_clarification_cycle,
+    mark_clarification_unavailable,
+    open_clarification_questions,
+    record_clarification_answer,
+    same_gap_set,
+    supersede_open_questions,
+)
 from connectors import CONNECTOR_REGISTRY
 from explainability import (
     ExplainabilityReport,
@@ -28,6 +40,7 @@ from explainability import (
     build_project_trace,
 )
 from knowledge import (
+    UploadStorageError,
     delete_project_uploads,
     PhaseKnowledgeRetrievalView,
     ProjectKnowledgeRetrievalSummary,
@@ -67,6 +80,9 @@ from extensions.connectors import (
 )
 from ingestion import merge_imported_records
 from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
+from runtime import run_state as workflow_run_state
+from runtime import work_queue as workflow_queue
+from runtime.preflight import build_runtime_preflight
 from tools.scoring import (
     check_gate, compute_det_scores, invalidate_downstream, summarize_phase_output,
 )
@@ -75,13 +91,16 @@ from exporters import (
     build_export_filename,
     export_project_docx_bytes,
     export_project_pdf_bytes,
+    export_project_profile_bytes,
 )
+from config import APP_VERSION
 import store
 import observability
 
 logger = logging.getLogger("v4-api")
 
 running: set[str] = set()
+auto_refresh_jobs: set[str] = set()
 
 
 @asynccontextmanager
@@ -99,7 +118,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="v4 Universal Project Workflow",
     description="Multi-agent decision engine with 30 frameworks",
-    version="4.4.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -243,6 +262,12 @@ class ResetBreakersRequest(BaseModel):
     rationale: str = ""
 
 
+class ClarificationAnswerRequest(BaseModel):
+    question_id: str
+    answer_text: str = ""
+    status: str = "answered"
+
+
 EDITABLE_PHASES = {"classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "report"}
 
 
@@ -251,10 +276,57 @@ async def health():
     pool = await store._get_pool()
     return {
         "status": "ok",
-        "version": "4.4.0",
+        "version": APP_VERSION,
         "persistence": "postgres" if pool else "memory",
         "tracing": "langfuse" if observability.enabled() else "off",
     }
+
+
+@app.get("/runtime/preflight")
+async def runtime_preflight():
+    return await build_runtime_preflight(running_project_ids=running)
+
+
+@app.get("/runtime/release-readiness")
+async def runtime_release_readiness():
+    preflight = await build_runtime_preflight(running_project_ids=running)
+    return _build_release_readiness(preflight)
+
+
+def _build_release_readiness(preflight: dict[str, Any]) -> dict[str, Any]:
+    status = str(preflight.get("status") or "fail")
+    gate = {
+        "ok": "pass",
+        "degraded": "warn",
+        "fail": "block",
+    }.get(status, "block")
+    checks = preflight.get("checks") if isinstance(preflight.get("checks"), dict) else {}
+    return {
+        "status": status,
+        "release_gate": gate,
+        "blockers": _release_readiness_items(checks, "fail"),
+        "warnings": _release_readiness_items(checks, "degraded"),
+        "version": preflight.get("version") or APP_VERSION or "unknown",
+        "operator_only": True,
+    }
+
+
+def _release_readiness_items(checks: dict[str, Any], target_status: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for name, check in checks.items():
+        if not isinstance(check, dict):
+            continue
+        if str(check.get("status") or "") != target_status:
+            continue
+        items.append(
+            {
+                "check": str(name),
+                "message": workflow_run_state.sanitize_error_summary(
+                    str(check.get("message") or f"{name} reported {target_status}.")
+                ),
+            }
+        )
+    return items
 
 
 @app.post("/projects", response_model=ProjectResponse)
@@ -286,6 +358,22 @@ async def create_project(req: CreateProjectRequest):
             logger.debug(f"policy log skipped at create ({e})")
     ensure_decision_objects(state, trigger="api.create_project")
     await store.save(state)
+    try:
+        import decision_events
+
+        await decision_events.append(
+            state.project_id,
+            "project.created",
+            actor_type="operator",
+            actor_id=req.risk_set_by or "operator",
+            payload={
+                "project_name": state.project_name,
+                "project_type": getattr(req, "project_type", ""),
+                "risk_classification": state.risk_classification,
+            },
+        )
+    except Exception as e:
+        logger.debug(f"decision event append skipped at create ({e})")
     return _to_response(state)
 
 
@@ -329,6 +417,57 @@ async def get_overview(project_id: str):
     if not state:
         raise HTTPException(404, "Project not found")
     return build_operator_overview(state)
+
+
+@app.get("/projects/{project_id}/clarifications")
+async def get_clarifications(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return _clarification_response(state)
+
+
+@app.post("/projects/{project_id}/clarifications/cycles")
+async def create_clarification_cycle(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    await _ensure_project_not_running(project_id)
+
+    generated = generate_clarification_cycle(state)
+    latest = latest_clarification_cycle(state)
+    if same_gap_set(latest, generated):
+        cycle = latest
+    else:
+        supersede_open_questions(state)
+        state.clarification_cycles.append(generated)
+        cycle = generated
+    await store.save(state)
+    return _clarification_response(state, cycle=cycle)
+
+
+@app.post("/projects/{project_id}/clarifications/answers")
+async def answer_clarification(project_id: str, req: ClarificationAnswerRequest):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    await _ensure_project_not_running(project_id)
+
+    status = (req.status or "").strip().lower()
+    try:
+        if status == ClarificationStatus.ANSWERED.value:
+            answer = record_clarification_answer(state, req.question_id, req.answer_text)
+        elif status == ClarificationStatus.UNAVAILABLE.value:
+            answer = mark_clarification_unavailable(state, req.question_id)
+        else:
+            raise HTTPException(400, "status must be answered or unavailable")
+    except KeyError as exc:
+        raise HTTPException(404, "Clarification question not found") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    await store.save(state)
+    return _clarification_response(state, answer=answer)
 
 
 @app.get("/projects/{project_id}/files")
@@ -450,7 +589,7 @@ async def upsert_knowledge_source(project_id: str, req: KnowledgeSourceUpsertReq
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     ensure_knowledge_layer(state)
     source = upsert_source_entry(
@@ -498,7 +637,7 @@ async def sync_project_knowledge(project_id: str, req: KnowledgeSyncRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
     if not req.sources:
         raise HTTPException(400, "sources must contain at least one source sync payload")
 
@@ -539,7 +678,7 @@ async def sync_project_knowledge_source(project_id: str, source_id: str, req: Kn
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     try:
         job = sync_offline_source(
@@ -584,7 +723,7 @@ async def upload_project_file(
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     normalized_import_mode = (import_mode or "knowledge").strip().lower()
     if normalized_import_mode not in {"knowledge", "structured_import"}:
@@ -606,6 +745,16 @@ async def upload_project_file(
         )
     except UploadParseError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except UploadStorageError as exc:
+        logger.error(
+            "Upload storage failure for project %s during %s at %s: %s",
+            project_id,
+            exc.operation or "unknown",
+            exc.path or "unknown",
+            exc.cause or exc,
+            exc_info=True,
+        )
+        raise HTTPException(503, exc.public_message) from exc
 
     _log_uploaded_file_event(
         state,
@@ -630,7 +779,7 @@ async def delete_project_file(project_id: str, file_id: str):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
     manifest = get_uploaded_file_manifest(state, file_id)
     if manifest is None:
         raise HTTPException(404, "Uploaded file not found")
@@ -656,12 +805,42 @@ async def run_full_workflow(project_id: str, background_tasks: BackgroundTasks):
         raise HTTPException(404, "Project not found")
     if project_id in running:
         raise HTTPException(409, "Workflow already running")
+    recovery = await workflow_run_state.recover_stale_project_run(project_id)
+    if recovery.status == "fail":
+        logger.error("Unable to recover stale workflow run state for project %s", project_id)
+        raise HTTPException(503, workflow_run_state.WorkflowRunStateError.public_message)
+    await _ensure_project_not_running(project_id)
     if is_workflow_complete(state):
         return {"status": "already_complete", "project_id": project_id}
 
+    try:
+        acquisition = await workflow_run_state.create_workflow_run(project_id, code_version=APP_VERSION)
+    except workflow_run_state.WorkflowRunStateError as exc:
+        logger.error("Unable to acquire workflow run state for project %s", project_id, exc_info=True)
+        raise HTTPException(503, exc.public_message) from exc
+    if not acquisition.created:
+        raise HTTPException(409, "Workflow already running")
+
+    if acquisition.durable:
+        try:
+            await workflow_queue.enqueue_workflow_job(acquisition.run.run_id, project_id)
+        except workflow_queue.WorkflowQueueError as exc:
+            logger.error("Unable to enqueue workflow job for project %s", project_id, exc_info=True)
+            await _safe_mark_workflow_run(
+                workflow_run_state.mark_run_failed,
+                acquisition.run.run_id,
+                error=workflow_queue.QUEUE_ENQUEUE_ERROR_SUMMARY,
+            )
+            raise HTTPException(503, exc.public_message) from exc
+        try:
+            background_tasks.add_task(_drain_workflow_queue)
+        except Exception:
+            logger.error("Unable to schedule local workflow queue drain for project %s", project_id, exc_info=True)
+        return {"status": "started", "project_id": project_id, "run_id": acquisition.run.run_id}
+
     running.add(project_id)
-    background_tasks.add_task(_run_workflow, project_id)
-    return {"status": "started", "project_id": project_id}
+    background_tasks.add_task(_run_workflow, project_id, acquisition.run.run_id)
+    return {"status": "started", "project_id": project_id, "run_id": acquisition.run.run_id}
 
 
 @app.post("/projects/{project_id}/phase")
@@ -669,8 +848,7 @@ async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    if project_id in running:
-        raise HTTPException(409, "Workflow already running")
+    await _ensure_project_not_running(project_id)
 
     with observability.trace_phase(project_id, req.phase, {"trigger": "manual"}):
         updated = await run_phase_node(state, req.phase)
@@ -687,7 +865,7 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     updates = req.model_dump(exclude_unset=True)
     if not updates:
@@ -741,7 +919,7 @@ async def patch_phase_output(project_id: str, phase: str, payload: Any = Body(..
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     validated, changed_field_paths = _validate_phase_payload(phase, payload)
     _apply_phase_output(state, phase, validated)
@@ -768,7 +946,7 @@ async def import_csv(project_id: str, req: CSVImportRequest):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
-    _ensure_project_not_running(project_id)
+    await _ensure_project_not_running(project_id)
 
     connector = CONNECTOR_REGISTRY.get("csv")
     if connector is None:
@@ -868,6 +1046,26 @@ async def export_project(project_id: str, fmt: str):
     )
 
 
+@app.get("/projects/{project_id}/export")
+async def export_project_profile(project_id: str, profile: str = "report", format: str | None = None):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    if not format:
+        raise HTTPException(400, "format is required")
+
+    try:
+        payload, media_type, filename = export_project_profile_bytes(state, profile, format)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/projects")
 async def list_projects():
     states = await store.list_all()
@@ -917,6 +1115,26 @@ async def record_outcome(project_id: str, outcome: OutcomeRecord):
             outcome.predicted_probability, outcome.realized,
             outcome.realized_value, outcome.notes, outcome.recorded_by,
         )
+    try:
+        import decision_events
+
+        await decision_events.append(
+            project_id,
+            "outcome.recorded",
+            actor_type="operator",
+            actor_id=outcome.recorded_by,
+            phase=outcome.phase,
+            payload={
+                "hypothesis_id": outcome.hypothesis_id,
+                "phase": outcome.phase,
+                "predicted_probability": outcome.predicted_probability,
+                "realized": outcome.realized,
+                "realized_value": outcome.realized_value,
+                "notes": outcome.notes,
+            },
+        )
+    except Exception as e:
+        logger.debug(f"decision event append skipped for outcome ({e})")
     return {"status": "recorded", "project_id": project_id, "hypothesis_id": outcome.hypothesis_id}
 
 
@@ -1233,8 +1451,15 @@ async def get_policy_audit(project_id: str):
     }
 
 
-def _ensure_project_not_running(project_id: str) -> None:
+async def _ensure_project_not_running(project_id: str) -> None:
     if project_id in running:
+        raise HTTPException(409, "Workflow already running")
+    try:
+        active = await workflow_run_state.has_active_project_run(project_id)
+    except workflow_run_state.WorkflowRunStateError as exc:
+        logger.error("Unable to check workflow run state for project %s", project_id, exc_info=True)
+        raise HTTPException(503, exc.public_message) from exc
+    if active:
         raise HTTPException(409, "Workflow already running")
 
 
@@ -1494,18 +1719,121 @@ def _log_knowledge_event(state: ProjectState, event_type: str, details: dict[str
     )
 
 
-async def _run_workflow(project_id: str):
+async def _safe_mark_workflow_run(mark_func, *args, **kwargs) -> None:
+    try:
+        await mark_func(*args, **kwargs)
+    except Exception:
+        logger.error("Unable to update workflow run state", exc_info=True)
+
+
+async def _safe_mark_workflow_job(mark_func, *args, **kwargs) -> None:
+    try:
+        await mark_func(*args, **kwargs)
+    except Exception:
+        logger.error("Unable to update workflow queue job state", exc_info=True)
+
+
+async def _drain_workflow_queue(max_jobs: int = 1):
+    for _ in range(max(1, int(max_jobs or 1))):
+        try:
+            job = await workflow_queue.claim_next_workflow_job()
+        except workflow_queue.WorkflowQueueError:
+            logger.error("Unable to claim workflow queue job", exc_info=True)
+            return
+        if job is None:
+            return
+        await _execute_workflow_job(job)
+
+
+async def _execute_workflow_job(job: workflow_queue.WorkflowJobRecord):
+    running.add(job.project_id)
+    try:
+        await _run_workflow(job.project_id, job.run_id)
+        record = await workflow_run_state.get_workflow_run(job.run_id)
+        if record and record.status == "succeeded":
+            await _safe_mark_workflow_job(workflow_queue.mark_job_succeeded, job.job_id)
+            return
+        if record and record.status == "failed":
+            await _safe_mark_workflow_job(
+                workflow_queue.mark_job_failed,
+                job.job_id,
+                error=record.error_summary or "Workflow run failed.",
+            )
+            return
+        await _safe_mark_workflow_run(
+            workflow_run_state.mark_run_failed,
+            job.run_id,
+            error="Workflow job finished without a terminal run state.",
+        )
+        await _safe_mark_workflow_job(
+            workflow_queue.mark_job_failed,
+            job.job_id,
+            error="Workflow job finished without a terminal run state.",
+        )
+    except Exception as exc:
+        logger.error("Workflow queue job failed unexpectedly", exc_info=True)
+        await _safe_mark_workflow_run(
+            workflow_run_state.mark_run_failed,
+            job.run_id,
+            error=exc,
+        )
+        await _safe_mark_workflow_job(workflow_queue.mark_job_failed, job.job_id, error=exc)
+    finally:
+        running.discard(job.project_id)
+
+
+async def _run_workflow(project_id: str, run_id: str | None = None):
+    current_phase = ""
     try:
         state = await store.load(project_id)
         if not state:
             logger.error(f"Project {project_id} vanished before run")
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_failed,
+                    run_id,
+                    error="Project vanished before workflow execution started.",
+                )
             return
+        current_phase = state.current_phase or ""
+        if run_id:
+            await _safe_mark_workflow_run(
+                workflow_run_state.mark_run_running,
+                run_id,
+                current_phase=current_phase,
+            )
+
+        async def persist_workflow_state(updated_state: ProjectState) -> None:
+            nonlocal current_phase
+            current_phase = updated_state.current_phase or current_phase
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_phase,
+                    run_id,
+                    current_phase,
+                )
+            await store.save(updated_state)
+
         with observability.trace_phase(project_id, "full_workflow", {"trigger": "api"}):
-            final_state = await run_workflow_sequence(state, persist_state=store.save)
+            final_state = await run_workflow_sequence(state, persist_state=persist_workflow_state)
         await store.save(final_state)
+        current_phase = final_state.current_phase or current_phase
         if is_workflow_complete(final_state):
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_succeeded,
+                    run_id,
+                    current_phase=current_phase,
+                )
             logger.info(f"✅ Workflow complete: {project_id}")
         else:
+            if run_id:
+                await _safe_mark_workflow_run(
+                    workflow_run_state.mark_run_failed,
+                    run_id,
+                    error=f"Workflow stopped before completion at phase {current_phase}.",
+                    current_phase=current_phase,
+                )
             logger.warning(
                 f"Workflow stopped before completion: {project_id} "
                 f"(current_phase={final_state.current_phase}, "
@@ -1513,6 +1841,13 @@ async def _run_workflow(project_id: str):
             )
     except Exception as e:
         logger.error(f"❌ Workflow failed: {e}", exc_info=True)
+        if run_id:
+            await _safe_mark_workflow_run(
+                workflow_run_state.mark_run_failed,
+                run_id,
+                error=e,
+                current_phase=current_phase,
+            )
     finally:
         running.discard(project_id)
 
@@ -1531,3 +1866,42 @@ def _to_response(s: ProjectState) -> ProjectResponse:
         brier_score=s.brier_score,
         reentry_count=len(s.reentry_triggers_fired),
     )
+
+
+def _clarification_response(
+    state: ProjectState,
+    *,
+    cycle: ClarificationCycle | None = None,
+    answer: ClarificationAnswer | None = None,
+) -> dict[str, Any]:
+    latest = latest_clarification_cycle(state)
+    all_questions = [
+        question
+        for existing_cycle in state.clarification_cycles
+        for question in existing_cycle.questions
+    ]
+    status_counts = {
+        status.value: sum(
+            1
+            for question in all_questions
+            if (question.status.value if hasattr(question.status, "value") else str(question.status)) == status.value
+        )
+        for status in ClarificationStatus
+    }
+    payload: dict[str, Any] = {
+        "project_id": state.project_id,
+        "cycles": [existing_cycle.model_dump(mode="json") for existing_cycle in state.clarification_cycles],
+        "latest_cycle": latest.model_dump(mode="json") if latest else None,
+        "open_questions": [
+            question.model_dump(mode="json")
+            for question in open_clarification_questions(state)
+        ],
+        "answers": [existing_answer.model_dump(mode="json") for existing_answer in state.clarification_answers],
+        "status_counts": status_counts,
+        "summary": latest.summary if latest else "No clarification cycle generated yet.",
+    }
+    if cycle is not None:
+        payload["cycle"] = cycle.model_dump(mode="json")
+    if answer is not None:
+        payload["answer"] = answer.model_dump(mode="json")
+    return payload

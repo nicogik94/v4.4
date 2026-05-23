@@ -18,7 +18,8 @@ from state import KnowledgeItemStatus, SourceRegistryEntry  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
 
 
-def make_synced_state(project_id: str = "knowledge-retrieval"):
+def make_synced_state(project_id: str = "knowledge-retrieval", base_time: datetime | None = None):
+    base_time = base_time or datetime.now().replace(microsecond=0)
     state = make_state(project_id)
     ensure_knowledge_layer(state)
     upsert_source_entry(
@@ -42,7 +43,7 @@ def make_synced_state(project_id: str = "knowledge-retrieval"):
                 "source_ref": "fixture://current/1",
                 "title": "Recent current-awareness note",
                 "summary": "Recent change in demand signal for the current project.",
-                "observed_at": datetime(2026, 4, 12, 10, 0, 0).isoformat(),
+                "observed_at": (base_time - timedelta(hours=2)).isoformat(),
                 "structured_payload": {
                     "region": "mx",
                     "score": 0.82,
@@ -51,16 +52,17 @@ def make_synced_state(project_id: str = "knowledge-retrieval"):
             }
         ],
         actor="operator",
-        requested_at=datetime(2026, 4, 12, 12, 0, 0),
+        requested_at=base_time,
     )
     return state
 
 
 class TestKnowledgeRetrievalEligibility(unittest.TestCase):
     def test_fresh_internal_item_is_eligible_for_strategy(self):
-        state = make_synced_state("retrieval-eligible")
+        fixed_now = datetime(2026, 4, 12, 12, 0, 0)
+        state = make_synced_state("retrieval-eligible", base_time=fixed_now)
 
-        view = evaluate_phase_retrieval(state, "strategy", now=datetime(2026, 4, 12, 12, 0, 0))
+        view = evaluate_phase_retrieval(state, "strategy", now=fixed_now)
 
         self.assertEqual(len(view.eligible_items), 1)
         self.assertEqual(len(view.blocked_items), 0)
@@ -71,7 +73,8 @@ class TestKnowledgeRetrievalEligibility(unittest.TestCase):
         self.assertFalse(any(fact.key == "nested" for fact in eligible.projection.facts))
 
     def test_stale_expired_and_quarantined_items_are_blocked(self):
-        state = make_synced_state("retrieval-freshness")
+        fixed_now = datetime(2026, 4, 12, 12, 0, 0)
+        state = make_synced_state("retrieval-freshness", base_time=fixed_now)
         base = state.knowledge_layer.items[0]
         stale_item = base.model_copy(update={
             "item_id": "stale-item",
@@ -92,7 +95,7 @@ class TestKnowledgeRetrievalEligibility(unittest.TestCase):
         })
         state.knowledge_layer.items.extend([stale_item, expired_item, quarantined_item])
 
-        view = evaluate_phase_retrieval(state, "strategy", now=datetime(2026, 4, 12, 12, 0, 0))
+        view = evaluate_phase_retrieval(state, "strategy", now=fixed_now)
 
         blocked = {item.item_id: item.blocked_reasons for item in view.blocked_items}
         self.assertIn("freshness_stale", blocked["stale-item"])
@@ -100,7 +103,8 @@ class TestKnowledgeRetrievalEligibility(unittest.TestCase):
         self.assertIn("freshness_quarantined", blocked["quarantined-item"])
 
     def test_trust_tier_and_sensitivity_rules_block_items(self):
-        state = make_synced_state("retrieval-trust-sensitivity")
+        fixed_now = datetime(2026, 4, 12, 12, 0, 0)
+        state = make_synced_state("retrieval-trust-sensitivity", base_time=fixed_now)
         low_trust = state.knowledge_layer.items[0].model_copy(update={
             "item_id": "low-trust",
             "source_ref": "fixture://low/1",
@@ -113,14 +117,15 @@ class TestKnowledgeRetrievalEligibility(unittest.TestCase):
         })
         state.knowledge_layer.items.extend([low_trust, restricted])
 
-        view = evaluate_phase_retrieval(state, "strategy", now=datetime(2026, 4, 12, 12, 0, 0))
+        view = evaluate_phase_retrieval(state, "strategy", now=fixed_now)
 
         blocked = {item.item_id: item.blocked_reasons for item in view.blocked_items}
         self.assertIn("trust_tier_below_minimum", blocked["low-trust"])
         self.assertIn("sensitivity_disallowed", blocked["restricted"])
 
     def test_project_summary_reports_eligible_and_blocked_counts(self):
-        state = make_synced_state("retrieval-summary")
+        fixed_now = datetime(2026, 4, 12, 12, 0, 0)
+        state = make_synced_state("retrieval-summary", base_time=fixed_now)
         blocked_item = state.knowledge_layer.items[0].model_copy(update={
             "item_id": "blocked",
             "source_ref": "fixture://blocked/1",
@@ -128,7 +133,7 @@ class TestKnowledgeRetrievalEligibility(unittest.TestCase):
         })
         state.knowledge_layer.items.append(blocked_item)
 
-        summary = build_project_retrieval_summary(state, now=datetime(2026, 4, 12, 12, 0, 0))
+        summary = build_project_retrieval_summary(state, now=fixed_now)
 
         self.assertEqual(summary.project_id, state.project_id)
         self.assertEqual(len(summary.phases), 8)

@@ -8,6 +8,8 @@ from typing import Optional, Any
 from datetime import datetime
 from enum import Enum
 
+from clarifications import ClarificationAnswer, ClarificationCycle
+
 
 class PhaseStatus(str, Enum):
     PENDING = "pending"
@@ -217,8 +219,10 @@ class SourceRegistryEntry(BaseModel):
 
 class KnowledgeItem(BaseModel):
     item_id: str = ""
+    evidence_id: str = ""
     source_id: str = ""
     source_ref: str = ""
+    locator: str = ""
     title: str = ""
     summary: str = ""
     structured_payload: dict[str, Any] = Field(default_factory=dict)
@@ -576,6 +580,8 @@ class ProjectState(BaseModel):
     imported_evidence: list[Evidence] = Field(default_factory=list)
     imported_signals: list[Signal] = Field(default_factory=list)
     knowledge_layer: Optional[KnowledgeLayerState] = None
+    clarification_cycles: list[ClarificationCycle] = Field(default_factory=list)
+    clarification_answers: list[ClarificationAnswer] = Field(default_factory=list)
 
     # Phase tracking
     current_phase: str = "classify"

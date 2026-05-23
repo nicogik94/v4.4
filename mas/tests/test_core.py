@@ -269,7 +269,9 @@ class TestReentryTriggers:
             v.verdict = Verdict.LIKELY_REJECTED
         triggers = evaluate_reentry_triggers(strategy_state)
         r5 = [t for t in triggers if t.get("condition") == "all_hypotheses_futile"]
+        r6 = [t for t in triggers if t.get("condition") == "majority_futile"]
         assert len(r5) == 1
+        assert len(r6) == 1
 
     def test_r6_fires_when_majority_rejected(self, strategy_state):
         strategy_state.strategy.preliminary_verdicts[0].verdict = Verdict.LIKELY_REJECTED

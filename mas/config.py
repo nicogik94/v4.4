@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 
+APP_VERSION = "4.4.0"
+
 # ═══ LLM Provider Configuration ═══
 
 class Provider(str, Enum):
@@ -30,6 +32,7 @@ class RuntimeLayerConfig:
     cache_ttl_seconds: int = 300
     phase_model_overrides: dict[str, str] = field(default_factory=dict)
     complexity_model_overrides: dict[str, str] = field(default_factory=dict)
+    task_profile_model_candidates: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -104,6 +107,48 @@ FALLBACK_CHAIN = {
     Provider.OPENAI: [
         "gpt-5",                 # primary fallback (family alias)
         "gpt-5-mini",            # degraded
+    ],
+}
+
+TASK_PROFILE_BY_PHASE: dict[str, str] = {
+    "classify": "fast_classification",
+    "hypotheses": "deep_reasoning",
+    "gauntlet": "deep_reasoning",
+    "audit": "deep_reasoning",
+    "strategy": "deep_reasoning",
+    "sqi": "strict_structured_output",
+    "monitor": "monitoring_ops",
+    "report": "report_synthesis",
+}
+
+# Candidate aliases are resolved by runtime/provider_gateway.py.  "phase_default"
+# always means the MODEL_ROUTING entry for the active phase, preserving the
+# current default path while making task-profile fallbacks explicit and testable.
+TASK_PROFILE_MODEL_CANDIDATES: dict[str, list[str]] = {
+    "fast_classification": [
+        "phase_default",
+        "anthropic:claude-sonnet-4-6",
+        "openai:gpt-5-mini",
+    ],
+    "deep_reasoning": [
+        "phase_default",
+        "anthropic:claude-sonnet-4-6",
+        "openai:gpt-5",
+    ],
+    "strict_structured_output": [
+        "phase_default",
+        "anthropic:claude-haiku-4-5-20251001",
+        "openai:gpt-5-mini",
+    ],
+    "report_synthesis": [
+        "phase_default",
+        "anthropic:claude-opus-4-6",
+        "openai:gpt-5",
+    ],
+    "monitoring_ops": [
+        "phase_default",
+        "anthropic:claude-haiku-4-5-20251001",
+        "openai:gpt-5-mini",
     ],
 }
 
@@ -255,6 +300,25 @@ def _env_json_map(name: str) -> dict[str, str]:
     return {str(key): str(value) for key, value in payload.items()}
 
 
+def _env_json_candidate_map(name: str) -> dict[str, list[str]]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    candidates: dict[str, list[str]] = {}
+    for key, value in payload.items():
+        if isinstance(value, list):
+            candidates[str(key)] = [str(item) for item in value]
+        elif isinstance(value, str):
+            candidates[str(key)] = [value]
+    return candidates
+
+
 RUNTIME_LAYER = RuntimeLayerConfig(
     default_provider=Provider(os.getenv("DEFAULT_PROVIDER", Provider.ANTHROPIC.value)),
     routing_strategy=os.getenv("ROUTING_STRATEGY", "phase"),
@@ -262,6 +326,7 @@ RUNTIME_LAYER = RuntimeLayerConfig(
     cache_ttl_seconds=int(os.getenv("SEMANTIC_CACHE_TTL_SECONDS", "300")),
     phase_model_overrides=_env_json_map("PHASE_MODEL_OVERRIDES"),
     complexity_model_overrides=_env_json_map("COMPLEXITY_MODEL_OVERRIDES"),
+    task_profile_model_candidates=_env_json_candidate_map("TASK_PROFILE_MODEL_CANDIDATES"),
 )
 
 SCENARIO_SHADOW = ScenarioShadowConfig(

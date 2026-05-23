@@ -17,8 +17,8 @@
   --ink: #0B1426;
   --ink-2: #1E293B;
   --ink-3: #475569;
-  --mute: #64748B;
-  --mute-2: #94A3B8;
+  --mute: #718096;
+  --mute-2: #A0AEC0;
 
   /* lines */
   --line: #E4E8EF;
@@ -26,7 +26,7 @@
   --line-strong: #CBD5E1;
 
   /* semantic */
-  --accent: #2563EB;        /* info/decision */
+  --accent: #3B82F6;        /* info/decision */
   --accent-bg: #EFF4FF;
   --accent-ink: #1E40AF;
   --action: #D97706;        /* run/execute */
@@ -49,11 +49,11 @@
   /* typography */
   --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --fs-xs: 11px;
-  --fs-sm: 12px;
-  --fs-base: 13.5px;
-  --fs-md: 14px;
-  --fs-lg: 16px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
   --fs-xl: 19px;
   --fs-2xl: 24px;
 
@@ -69,16 +69,16 @@
   --sp-12: 48px;
 
   /* radii */
-  --r-sm: 4px;
-  --r-md: 6px;
-  --r-lg: 8px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
   --r-xl: 12px;
   --r-pill: 999px;
 
   /* shadows */
   --shadow-xs: 0 1px 1px rgba(11, 20, 38, 0.03);
-  --shadow-sm: 0 1px 2px rgba(11, 20, 38, 0.05), 0 1px 1px rgba(11, 20, 38, 0.03);
-  --shadow-md: 0 4px 10px rgba(11, 20, 38, 0.06), 0 1px 2px rgba(11, 20, 38, 0.04);
+  --shadow-sm: 0 2px 4px rgba(11, 20, 38, 0.04), 0 1px 2px rgba(11, 20, 38, 0.02);
+  --shadow-md: 0 6px 12px rgba(11, 20, 38, 0.05), 0 2px 4px rgba(11, 20, 38, 0.03);
   --shadow-lg: 0 10px 30px rgba(11, 20, 38, 0.10), 0 2px 6px rgba(11, 20, 38, 0.05);
 
   /* layout */
@@ -849,6 +849,55 @@ a:hover { text-decoration: underline; }
   padding: var(--sp-3) var(--sp-4);
 }
 .ins-cta button { width: 100%; }
+.export-profile-control {
+  border-top: 1px solid var(--line);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.export-profile-row {
+  display: grid;
+  grid-template-columns: 1fr 88px;
+  gap: var(--sp-2);
+}
+.export-profile-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.export-profile-field label {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.export-profile-field select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink);
+  padding: 6px 8px;
+  font-size: var(--fs-sm);
+}
+.export-profile-help,
+.export-profile-note {
+  font-size: 11px;
+  color: var(--mute);
+  line-height: 1.4;
+}
+.export-profile-warning {
+  display: none;
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  background: var(--warn-bg);
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 8px;
+}
+.export-profile-warning.visible { display: block; }
 
 /* Dashboard Tranche 1 — Bayesian advisory tab (read-only, advisory-only). */
 .bay-banner {
@@ -3437,40 +3486,130 @@ a:hover { text-decoration: underline; }
    API client — thin wrappers over fetch with consistent error handling
    ═══════════════════════════════════════════════════════════════════════ */
 const $ = (id) => document.getElementById(id);
-const apiUrl = () => $('api-url').value.replace(/\/$/, '');
+
+// --- Runtime Override & Backend Config ---
+// The project default differs from the current local runtime.
+// The current local runtime targets http://localhost:8001 via Docker host port mapping.
+// This is reconciled via the override mechanism (query param > localStorage > default).
+// When loaded from file:// without an override, the connection status will intentionally show "unavailable" (default http://localhost:8000 is not reachable).
+const resolveApiBase = () => {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has('api')) {
+    const apiVal = urlParams.get('api');
+    if (!apiVal) {
+      localStorage.removeItem("v4ApiBase");
+      window.history.replaceState(null, '', window.location.pathname);
+    } else {
+      localStorage.setItem("v4ApiBase", apiVal);
+      return { url: apiVal, source: 'query-param' };
+    }
+  }
+  const lsVal = localStorage.getItem("v4ApiBase");
+  if (lsVal) return { url: lsVal, source: 'localStorage' };
+  
+  const defUrl = (window.location.protocol === 'file:') ? 'http://localhost:8000' : window.location.origin;
+  return { url: defUrl, source: 'default' };
+};
+
+const apiConfig = resolveApiBase();
+const API_BASE = apiConfig.url.replace(/\/$/, '');
+const apiUrl = () => API_BASE;
+
+let currentConnState = 'connecting';
+let healthPassing = false;
+
+function updateConnStatus(stateStr) {
+  currentConnState = stateStr;
+  const stateEl = $('conn-state');
+  const urlEl = $('conn-url');
+  const srcEl = $('conn-source');
+  const resetEl = $('conn-reset');
+  if (stateEl) {
+    let color = 'var(--text)';
+    if (stateStr === 'connected') color = 'var(--good)';
+    if (stateStr === 'unavailable') color = 'var(--bad)';
+    if (stateStr === 'partial') color = 'var(--warn)';
+    stateEl.innerHTML = `<strong style="color: ${color}">${stateStr}</strong>`;
+  }
+  if (urlEl) urlEl.textContent = API_BASE;
+  if (srcEl) srcEl.textContent = `(${apiConfig.source})`;
+  if (resetEl) {
+    resetEl.style.display = apiConfig.source !== 'default' ? 'inline' : 'none';
+    resetEl.onclick = (e) => {
+      e.preventDefault();
+      localStorage.removeItem("v4ApiBase");
+      window.location.href = window.location.pathname;
+    };
+  }
+}
+updateConnStatus('connecting');
+
+async function handleApiError(path, r) {
+  console.error(`Endpoint failed: ${path} → ${r.status}`);
+  if (healthPassing) updateConnStatus('partial');
+  else updateConnStatus('unavailable');
+  throw new Error(`${path} → ${r.status}: ${await r.text().catch(() => '')}`);
+}
+
+async function handleNetworkError(path, e) {
+  console.error(`Endpoint network error: ${path}`, e);
+  if (healthPassing) updateConnStatus('partial');
+  else updateConnStatus('unavailable');
+  throw e;
+}
 
 async function apiGet(path) {
-  const r = await fetch(apiUrl() + path);
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path);
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiPost(path, body) {
-  const r = await fetch(apiUrl() + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiPatch(path, body) {
-  const r = await fetch(apiUrl() + path, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiFormPost(path, formData) {
-  const r = await fetch(apiUrl() + path, { method: 'POST', body: formData });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, { method: 'POST', body: formData });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 async function apiDelete(path) {
-  const r = await fetch(apiUrl() + path, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`${path} → ${r.status}: ${await r.text()}`);
-  return r.json();
+  try {
+    const r = await fetch(apiUrl() + path, { method: 'DELETE' });
+    if (!r.ok) return handleApiError(path, r);
+    return await r.json();
+  } catch (e) {
+    return handleNetworkError(path, e);
+  }
 }
 
 const UPLOAD_ACCEPT_KNOWLEDGE = [
@@ -3511,12 +3650,12 @@ function classifyOperatorError(error, context = 'generic') {
   const status = parsed.status;
   let title = 'Unexpected server error';
 
-  if (status === 503) title = 'DB not configured';
+  if (status === 503) title = 'Database unavailable';
   else if (context === 'base-project' && status === 404) title = 'Project not found';
   else if (context === 'invalid-selection' && status === 404) title = 'Invalid selection';
-  else if (context === 'selected-project-data' && status === 404) title = 'No data yet';
-  else if (context === 'capability' && (status === 404 || status === 405)) title = 'Backend gap';
-  else if (status === 404) title = 'No data yet';
+  else if (context === 'selected-project-data' && status === 404) title = 'No data available yet';
+  else if (context === 'capability' && (status === 404 || status === 405)) title = 'Unavailable in this build';
+  else if (status === 404) title = 'No data available yet';
   else if (status && status >= 500) title = 'Unexpected server error';
 
   return { status, title, detail: parsed.detail };
@@ -3564,7 +3703,7 @@ const state = {
 };
 
 const TAB_LABELS = {
-  decide: 'Decide',
+  decide: 'Decisions',
   evidence: 'Evidence',
   outcomes: 'Outcomes',
   bayesian: 'Bayesian',
@@ -3572,6 +3711,30 @@ const TAB_LABELS = {
   report: 'Report',
   audit: 'Audit',
 };
+
+const EXPORT_PROFILES = {
+  report: {
+    label: 'Report',
+    formats: ['pdf', 'docx'],
+    help: 'Final report only.',
+  },
+  client_dossier: {
+    label: 'Client dossier',
+    formats: ['pdf', 'docx'],
+    help: 'Stakeholder-ready export.',
+  },
+  operator_dossier: {
+    label: 'Operator dossier',
+    formats: ['pdf', 'docx'],
+    help: 'Internal review export with phase summaries.',
+  },
+  machine_archive: {
+    label: 'Machine archive',
+    formats: ['zip'],
+    help: 'Internal ZIP archive for backup/debug.',
+  },
+};
+const EXPORT_FORMAT_LABELS = { pdf: 'PDF', docx: 'DOCX', zip: 'ZIP' };
 
 const EVENT_NAMESPACES = ['project', 'phase', 'policy', 'outcome'];
 function eventNamespace(eventType) {
@@ -3640,17 +3803,29 @@ window.addEventListener('hashchange', onHashChange);
    Health (header pills)
    ═══════════════════════════════════════════════════════════════════════ */
 async function loadHealth() {
+  updateConnStatus('connecting');
   try {
-    const h = await apiGet('/health');
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 5000);
+    const r = await fetch(apiUrl() + '/health', { signal: controller.signal });
+    clearTimeout(id);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const h = await r.json();
+    healthPassing = true;
+    updateConnStatus('connected');
     $('health-pills').innerHTML = [
       `<span class="pill ok"><span class="dot"></span>API ${escapeHtml(h.version || 'ok')}</span>`,
       `<span class="pill ${h.persistence === 'postgres' ? 'ok' : 'warn'}"><span class="dot"></span>${escapeHtml(h.persistence || '—')}</span>`,
       `<span class="pill ${h.tracing === 'langfuse' ? 'ok' : ''}"><span class="dot"></span>tracing: ${escapeHtml(h.tracing || 'off')}</span>`,
     ].join('');
   } catch (e) {
+    console.error(`Health check failed`, e);
+    healthPassing = false;
+    updateConnStatus('unavailable');
     $('health-pills').innerHTML = `<span class="pill err"><span class="dot"></span>API unreachable</span>`;
   }
 }
+setInterval(loadHealth, 30000);
 
 /* ═══════════════════════════════════════════════════════════════════════
    Projects (left rail list)
@@ -3698,7 +3873,7 @@ function renderProjects() {
     list.innerHTML = `
       <div style="padding: var(--sp-5); text-align: center; color: var(--mute); font-size: var(--fs-sm);">
         <div style="margin-bottom: 8px; font-size: 24px;">∅</div>
-        No projects yet
+        No projects available
         <div style="margin-top: 4px; font-size: 11px;">Click <strong>+ New</strong> to start</div>
       </div>`;
     return;
@@ -3734,21 +3909,14 @@ function renderProjects() {
    Learning Engine summary (sidebar rail)
    ═══════════════════════════════════════════════════════════════════════ */
 async function loadLearningEngine() {
-  // Try /meta-learning/summary first; fall back to priors + deltas
   try {
-    const summary = await apiGet('/meta-learning/summary');
-    state.learningEngine = summary;
-    renderLearningEngine(summary);
-  } catch (e) {
-    try {
-      const [priors, deltas] = await Promise.all([
-        apiGet('/calibration/priors').catch(() => null),
-        apiGet('/calibration/deltas').catch(() => null),
-      ]);
-      renderLearningEngineFallback(priors, deltas);
-    } catch {
-      renderLearningEngineFallback(null, null);
-    }
+    const [priors, deltas] = await Promise.all([
+      apiGet('/calibration/priors').catch(() => null),
+      apiGet('/calibration/deltas').catch(() => null),
+    ]);
+    renderLearningEngineFallback(priors, deltas);
+  } catch {
+    renderLearningEngineFallback(null, null);
   }
 }
 
@@ -3799,7 +3967,7 @@ async function loadProject(pid) {
       auditRes,
       filesRes,
       knowledgeRes,
-      bayesianRes,
+      clarificationsRes,
       overviewRes,
     ] = await Promise.all([
       apiGet(`/projects/${pid}/state`),
@@ -3808,7 +3976,7 @@ async function loadProject(pid) {
       optionalGet(`/projects/${pid}/policy-audit`),
       optionalGet(`/projects/${pid}/files`),
       optionalGet(`/projects/${pid}/knowledge`),
-      optionalGet(`/projects/${pid}/bayesian-advisory`),
+      optionalGet(`/projects/${pid}/clarifications`),
       optionalGet(`/projects/${pid}/overview`),
     ]);
     state.project = {
@@ -3823,8 +3991,10 @@ async function loadProject(pid) {
       filesError: filesRes.error,
       knowledge: knowledgeRes.data,
       knowledgeError: knowledgeRes.error,
-      bayesian: bayesianRes.data,
-      bayesianError: bayesianRes.error,
+      clarifications: clarificationsRes.data,
+      clarificationsError: clarificationsRes.error,
+      bayesian: null,
+      bayesianError: null,
       overview: overviewRes.data,
       overviewError: overviewRes.error,
       report: null,
@@ -3845,15 +4015,6 @@ async function loadReport(pid) {
   }
 }
 
-async function loadBayesian(pid) {
-  if (!state.project) return;
-  try {
-    state.project.bayesian = await apiGet(`/projects/${pid}/bayesian-advisory`);
-  } catch (e) {
-    state.project.bayesian = null;
-  }
-}
-
 /* ───────────────────────────────────────────────────────────────────────
    Calibration loader (Tranche 2)
    Lazy — only fetched when the Calibration tab is visited.
@@ -3861,17 +4022,11 @@ async function loadBayesian(pid) {
    ─────────────────────────────────────────────────────────────────────── */
 async function loadCalibration(pid) {
   if (!state.project) return;
-  const [projectCalibRes, priorsRes, metaLearningRes, byTemplateRes, frameworkRes] = await Promise.all([
+  const [projectCalibRes, priorsRes, frameworkRes] = await Promise.all([
     apiGet(`/projects/${pid}/calibration`)
       .then(data => ({ data, error: null }))
       .catch(error => ({ data: null, error })),
     apiGet('/calibration/priors')
-      .then(data => ({ data, error: null }))
-      .catch(error => ({ data: null, error })),
-    apiGet('/meta-learning/summary')
-      .then(data => ({ data, error: null }))
-      .catch(error => ({ data: null, error })),
-    apiGet('/calibration/deltas/by-template')
       .then(data => ({ data, error: null }))
       .catch(error => ({ data: null, error })),
     apiGet('/calibration/framework-performance?days=30')
@@ -3883,10 +4038,10 @@ async function loadCalibration(pid) {
     projectCalibError: projectCalibRes.error,
     priors: priorsRes.data,
     priorsError: priorsRes.error,
-    metaLearning: metaLearningRes.data,
-    metaLearningError: metaLearningRes.error,
-    byTemplateDeltas: byTemplateRes.data,
-    byTemplateDeltasError: byTemplateRes.error,
+    metaLearning: null,
+    metaLearningError: null,
+    byTemplateDeltas: null,
+    byTemplateDeltasError: null,
     frameworkPerf: frameworkRes.data,
     frameworkPerfError: frameworkRes.error,
   };
@@ -3894,25 +4049,10 @@ async function loadCalibration(pid) {
 
 async function loadDecisionPlane(pid) {
   try {
-    const [events, approvalsPayload, policyPayload] = await Promise.all([
-      apiGet(`/projects/${pid}/events?limit=500`).catch(() => ({ events: [] })),
-      apiGet(`/projects/${pid}/approvals`).catch(() => ({ approvals: [] })),
-      apiGet(`/projects/${pid}/policy-decisions`).catch(() => ({ policy_decisions: [] })),
-    ]);
-    state.dp.events = Array.isArray(events) ? events : (events?.events || []);
-    state.dp.approvals = Array.isArray(approvalsPayload)
-      ? approvalsPayload
-      : (approvalsPayload?.approvals || []);
-    state.dp.policyDecisions = Array.isArray(policyPayload)
-      ? policyPayload
-      : (policyPayload?.policy_decisions || []);
-
-    // If we have cursors, refresh the diff.
-    if (state.dp.cursorFrom && state.dp.cursorTo) {
-      try {
-        state.dp.diff = await apiGet(`/projects/${pid}/diff?from_event_id=${encodeURIComponent(state.dp.cursorFrom)}&to_event_id=${encodeURIComponent(state.dp.cursorTo)}`);
-      } catch (e) { state.dp.diff = null; }
-    }
+    state.dp.events = [];
+    state.dp.approvals = [];
+    state.dp.policyDecisions = [];
+    state.dp.diff = null;
 
     if (state.activeTab === 'decide' || state.activeTab === 'audit') renderMain();
   } catch (e) {
@@ -3932,7 +4072,7 @@ function renderMain() {
         <div class="empty-state">
           <div class="empty-icon">◐</div>
           <h2>Select a project to begin</h2>
-          <p>Every project runs through a structured decision workflow. Start from Portfolio signals, then open a project for outcomes, evidence, calibration, and report readiness.</p>
+          <p>Start from Portfolio signals on the left, then open a project to review outcomes, evidence, and report readiness.</p>
           <button class="btn btn-accent btn-lg" id="btn-new-project-big" aria-label="Create a new project">+ Create project</button>
         </div>
       </div>`;
@@ -4178,7 +4318,7 @@ function renderHero(proj, workspace, audit) {
             ${killActive ? '▶ Killed' : '▶ Run'}
           </button>
           <button class="btn btn-danger" id="btn-kill" aria-label="Fire kill switch" ${killActive ? 'disabled' : ''}>
-            ${killActive ? '■ Already killed' : '■ Kill switch'}
+            ${killActive ? '■ Already killed' : '■ Emergency Stop'}
           </button>
         </div>
       </div>
@@ -4317,7 +4457,7 @@ function renderBudget(b) {
 }
 
 function renderTabs() {
-  const tabs = ['decide', 'evidence', 'outcomes', 'bayesian', 'calibration', 'report', 'audit'];
+  const tabs = ['decide', 'evidence', 'outcomes', 'calibration', 'report', 'audit'];
   const bayesianCount = Array.isArray(state.project?.bayesian?.scenarios) ? state.project.bayesian.scenarios.length : 0;
   const calib = state.project?.calibration?.projectCalib;
   const calibN = (calib && typeof calib.n_resolved === 'number') ? calib.n_resolved : 0;
@@ -4329,7 +4469,6 @@ function renderTabs() {
     decide: state.dp.events.length ? String(state.dp.events.length) : '',
     evidence: evCount ? String(evCount) : '',
     outcomes: outcomeN ? String(outcomeN) : '',
-    bayesian: bayesianCount ? String(bayesianCount) : '',
     calibration: calibN ? String(calibN) : '',
     report: '',
     audit: state.project?.audit?.audit_log?.length ? String(state.project.audit.audit_log.length) : '',
@@ -4448,6 +4587,83 @@ function renderSQICard(sqi) {
   `;
 }
 
+function renderClarificationPanel(clarifications) {
+  const pid = state.selectedProjectId || '';
+  const latest = clarifications?.latest_cycle || null;
+  const openQuestions = Array.isArray(clarifications?.open_questions) ? clarifications.open_questions : [];
+  const counts = clarifications?.status_counts || {};
+  const answered = Number(counts.answered || 0);
+  const unavailable = Number(counts.unavailable || 0);
+  const meta = latest
+    ? `${openQuestions.length} open | ${answered} answered | ${unavailable} unavailable`
+    : 'not generated';
+
+  const generateButton = pid
+    ? `<button class="btn btn-secondary" onclick="generateClarificationCycle('${escapeHtml(pid)}')">Generate questions</button>`
+    : '';
+
+  if (!latest) {
+    return `
+      <section class="dp-panel" aria-label="Follow-up questions">
+        <div class="dp-panel-head">
+          <h4>Follow-up questions</h4>
+          <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+        </div>
+        <div class="dp-detail-empty">
+          No deterministic missing-information cycle has been generated for this project.
+          <div style="margin-top: 10px;">${generateButton}</div>
+        </div>
+      </section>
+    `;
+  }
+
+  if (!openQuestions.length) {
+    return `
+      <section class="dp-panel" aria-label="Follow-up questions">
+        <div class="dp-panel-head">
+          <h4>Follow-up questions</h4>
+          <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+        </div>
+        <div class="dp-detail-empty">
+          No deterministic missing-information questions right now.
+          <div style="margin-top: 10px;">${generateButton}</div>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="dp-panel" aria-label="Follow-up questions">
+      <div class="dp-panel-head">
+        <h4>Follow-up questions</h4>
+        <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+      </div>
+      <div style="display: grid; gap: 10px;">
+        ${openQuestions.map(q => {
+          const questionId = String(q.question_id || '');
+          const inputId = `clar-answer-${questionId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+          return `
+            <div class="dp-detail-card">
+              <div class="dp-stats" style="margin-bottom: 8px;">
+                <span>${escapeHtml(q.priority || '')}</span>
+                <span>${escapeHtml(q.affected_phase || '')}</span>
+                <span>${escapeHtml(q.source_gap || '')}</span>
+              </div>
+              <div style="font-weight: 700; color: var(--ink-1); margin-bottom: 6px;">${escapeHtml(q.text || '')}</div>
+              <div class="meta" style="line-height: 1.45; margin-bottom: 8px;">Why it matters: ${escapeHtml(q.why_it_matters || '')}</div>
+              <textarea id="${escapeHtml(inputId)}" rows="3" placeholder="Operator answer" style="width: 100%; resize: vertical; margin-bottom: 8px;"></textarea>
+              <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="btn btn-primary" onclick="submitClarificationAnswer('${escapeHtml(pid)}', '${escapeHtml(questionId)}', '${escapeHtml(inputId)}')">Answer</button>
+                <button class="btn btn-secondary" onclick="markClarificationUnavailable('${escapeHtml(pid)}', '${escapeHtml(questionId)}')">Mark unavailable</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </section>
+  `;
+}
+
 function renderDecide() {
   const events = state.dp.events;
   const filter = state.dp.filter;
@@ -4461,6 +4677,7 @@ function renderDecide() {
   return `
     <div class="dp">
       ${renderSQICard(state.project?.fullState?.sqi)}
+      ${renderClarificationPanel(state.project?.clarifications)}
       <div class="dp-top">
         <div>
           <div class="dp-title">Decision plane</div>
@@ -4486,9 +4703,7 @@ function renderDecide() {
             <span class="meta">${filtered.length} of ${events.length}</span>
           </div>
           <div class="dp-timeline" id="dp-timeline">
-            ${filtered.length === 0
-              ? `<div class="dp-tl-empty">No events yet. Run the project or wait for the first phase to complete.</div>`
-              : filtered.map(renderTimelineRow).join('')}
+            <div class="dp-tl-empty">/projects/{id}/events: not available in this build</div>
           </div>
         </div>
         <div class="dp-panel">
@@ -4497,31 +4712,6 @@ function renderDecide() {
             <span class="meta">${state.dp.selectedEventId ? 'pinned' : 'click a row to inspect'}</span>
           </div>
           ${renderDetailPanel()}
-        </div>
-      </div>
-
-      <div class="dp-diff">
-        <div class="dp-diff-head">
-          <div>
-            <h4 style="font-size: var(--fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--ink-3); margin-bottom: 6px;">State diff</h4>
-            <div style="display: flex; gap: var(--sp-4); flex-wrap: wrap;">
-              <div class="dp-cursor">
-                <span class="cursor-label">From</span>
-                <span class="cursor-value ${state.dp.cursorFrom ? '' : 'empty'}">${state.dp.cursorFrom ? escapeHtml(state.dp.cursorFrom.slice(0, 8)) + '…' : '(not set)'}</span>
-              </div>
-              <div class="dp-cursor">
-                <span class="cursor-label">To</span>
-                <span class="cursor-value ${state.dp.cursorTo ? '' : 'empty'}">${state.dp.cursorTo ? escapeHtml(state.dp.cursorTo.slice(0, 8)) + '…' : '(not set)'}</span>
-              </div>
-            </div>
-          </div>
-          <div style="display: flex; gap: var(--sp-2);">
-            <button class="btn btn-secondary btn-sm" id="dp-diff-clear">Clear</button>
-            <button class="btn btn-accent btn-sm" id="dp-diff-run" ${(!state.dp.cursorFrom || !state.dp.cursorTo) ? 'disabled' : ''}>Compute diff</button>
-          </div>
-        </div>
-        <div class="dp-diff-body" id="dp-diff-body">
-          ${renderDiff()}
         </div>
       </div>
 
@@ -4667,55 +4857,11 @@ function renderDiff() {
 }
 
 function renderApprovals() {
-  const rows = state.dp.approvals;
-  if (rows.length === 0) {
-    return `<div class="dp-tl-empty">No approvals recorded yet.</div>`;
-  }
-  return `
-    <div class="dp-table-wrap">
-      <table class="dp-table">
-        <thead><tr>
-          <th>Action</th><th>Decision</th><th>By</th><th>At</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map(r => `
-            <tr>
-              <td>${escapeHtml(r.action || '—')}</td>
-              <td><span class="risk-badge risk-${r.decision === 'granted' ? 'minimal_risk' : (r.decision === 'revoked' ? 'high_risk' : 'limited_risk')}">${escapeHtml(r.decision || '—')}</span></td>
-              <td>${escapeHtml(r.approved_by || '—')}</td>
-              <td class="mono">${escapeHtml(r.decided_at ? new Date(r.decided_at).toLocaleString() : '—')}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return `<div class="dp-tl-empty">Approvals unavailable in this build.</div>`;
 }
 
 function renderPolicyDecisions() {
-  const rows = state.dp.policyDecisions;
-  if (rows.length === 0) {
-    return `<div class="dp-tl-empty">No policy decisions recorded yet.</div>`;
-  }
-  return `
-    <div class="dp-table-wrap">
-      <table class="dp-table">
-        <thead><tr>
-          <th>Type</th><th>By</th><th>Rationale</th><th>At</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map(r => `
-            <tr>
-              <td>${escapeHtml(r.decision_type || '—')}</td>
-              <td>${escapeHtml(r.decided_by || '—')}</td>
-              <td title="${escapeHtml(r.rationale || '')}">${escapeHtml((r.rationale || '—').slice(0, 40))}${(r.rationale || '').length > 40 ? '…' : ''}</td>
-              <td class="mono">${escapeHtml(r.decided_at ? new Date(r.decided_at).toLocaleString() : '—')}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
+  return `<div class="dp-tl-empty">Policy decisions unavailable in this build.</div>`;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -5240,111 +5386,6 @@ function renderEvUploadPanel() {
   `;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   Bayesian advisory tab — read-only, advisory-only drill-in
-   Data source: /projects/{id}/bayesian-advisory (fetched by loadProject).
-   This view MUST NOT imply it changes orchestration or runtime behavior.
-   ═══════════════════════════════════════════════════════════════════════ */
-function renderBayesianTab() {
-  const bay = state.project?.bayesian;
-  const scenarios = Array.isArray(bay?.scenarios) ? bay.scenarios : [];
-  const note = (bay && typeof bay.note === 'string' && bay.note) ? bay.note : 'Advisory only. Derived from hypothesis priors + recorded evidence. Does not control orchestration, gates, template selection, or phase routing.';
-
-  const banner = `
-    <div class="bay-banner" role="note" aria-label="Bayesian advisory scope notice">
-      <span class="bay-banner-icon" aria-hidden="true">⚠</span>
-      <div>
-        <div class="bay-banner-title">Advisory only — does not affect orchestration, routing, or gate decisions</div>
-        <div class="bay-banner-sub">${escapeHtml(note)}</div>
-      </div>
-    </div>
-  `;
-
-  if (!bay) {
-    return `
-      ${banner}
-      <div class="view-stub">
-        <div class="stub-tag">Bayesian advisory</div>
-        <h3>Advisory view unavailable</h3>
-        <p>Could not load the advisory posteriors. The endpoint returned no data for this project.</p>
-      </div>
-    `;
-  }
-  if (scenarios.length === 0) {
-    return `
-      ${banner}
-      <div class="view-stub">
-        <div class="stub-tag">Bayesian advisory</div>
-        <h3>No advisory posteriors yet</h3>
-        <p>Advisory posteriors derive from hypothesis priors and linked evidence. Run the workflow through <strong>hypotheses</strong> or later to populate this view.</p>
-      </div>
-    `;
-  }
-
-  // Compact per-hypothesis bar (posterior mean) + uncertainty note.
-  const renderRow = (r) => {
-    const mean = r.posterior_mean != null ? Number(r.posterior_mean) : null;
-    const pct = mean != null ? Math.max(0, Math.min(100, mean * 100)) : 0;
-    const meanTxt = mean != null ? mean.toFixed(2) : '—';
-    const variance = r.posterior_variance != null ? Number(r.posterior_variance).toFixed(3) : '—';
-    const ev = r.evidence_count != null ? Number(r.evidence_count) : 0;
-    const oc = r.outcome_count != null ? Number(r.outcome_count) : 0;
-    const refs = Array.isArray(r.evidence_refs) ? r.evidence_refs : [];
-    const refsShort = refs.slice(0, 4).map(x => escapeHtml(String(x))).join(', ') + (refs.length > 4 ? ` +${refs.length - 4}` : '');
-    const toneCls = mean == null ? '' : (mean >= 0.66 ? 'hi' : (mean <= 0.33 ? 'lo' : 'mid'));
-    return `
-      <div class="bay-row">
-        <div class="bay-row-head">
-          <div class="bay-row-hid mono" title="${escapeHtml(r.hypothesis_id || '')}">${escapeHtml(r.hypothesis_id || '—')}</div>
-          <div class="bay-row-mean mono">μ=${escapeHtml(meanTxt)}</div>
-        </div>
-        ${r.label ? `<div class="bay-row-label">${escapeHtml(r.label)}</div>` : ''}
-        <div class="bay-bar"><div class="bay-bar-fill ${toneCls}" style="width:${pct}%"></div></div>
-        <div class="bay-row-meta">
-          <span>variance: <b class="mono">${escapeHtml(variance)}</b></span>
-          <span class="sep">·</span>
-          <span>evidence: <b class="mono">${escapeHtml(String(ev))}</b></span>
-          <span class="sep">·</span>
-          <span>outcomes: <b class="mono">${escapeHtml(String(oc))}</b></span>
-          ${r.uncertainty_note ? `<span class="sep">·</span><span class="bay-row-note">${escapeHtml(r.uncertainty_note)}</span>` : ''}
-        </div>
-        ${refs.length ? `<div class="bay-row-refs">linked evidence: ${refsShort}</div>` : ''}
-      </div>
-    `;
-  };
-
-  const renderScenario = (sc) => {
-    const rows = Array.isArray(sc.rows) ? sc.rows : [];
-    const agg = sc.aggregate_posterior_mean != null ? Number(sc.aggregate_posterior_mean).toFixed(2) : '—';
-    const linked = Array.isArray(sc.linked_hypothesis_ids) ? sc.linked_hypothesis_ids.length : rows.length;
-    return `
-      <section class="bay-scenario">
-        <header class="bay-scenario-head">
-          <div>
-            <div class="bay-scenario-sub">group</div>
-            <h3>${escapeHtml(sc.scenario_label || 'unlabeled')}</h3>
-          </div>
-          <div class="bay-scenario-stats">
-            <div class="bay-stat"><div class="k">aggregate μ</div><div class="v mono">${escapeHtml(agg)}</div></div>
-            <div class="bay-stat"><div class="k">hypotheses</div><div class="v mono">${escapeHtml(String(linked))}</div></div>
-            <div class="bay-stat"><div class="k">advisory</div><div class="v">read-only</div></div>
-          </div>
-        </header>
-        <div class="bay-scenario-body">
-          ${rows.length ? rows.map(renderRow).join('') : '<div class="bay-empty">No hypothesis rows in this group.</div>'}
-        </div>
-      </section>
-    `;
-  };
-
-  return `
-    ${banner}
-    <div class="bay">
-      ${scenarios.map(renderScenario).join('')}
-    </div>
-  `;
-}
-
 function renderOutcomesTab() {
   const fs = state.project?.fullState || {};
   const ws = state.project?.workspace || {};
@@ -5737,103 +5778,11 @@ function renderPriorsPanel(priors) {
 }
 
 function renderTemplateBuckets(metaLearning, byTemplateDeltas) {
-  // Per-template calibration is the authoritative view. A cross-template
-  // rollup is intentionally suppressed unless the backend flags it compatible.
-  const buckets = Array.isArray(metaLearning?.buckets) ? metaLearning.buckets : [];
-  const suppressed = metaLearning?.prior_rollup_suppressed !== false; // default true
-  const reason = metaLearning?.prior_rollup_reason || 'Cross-template rollup suppressed — metric semantics are not guaranteed comparable across templates.';
-  const deltaBuckets = byTemplateDeltas?.buckets || null;
-
-  if (!metaLearning && !deltaBuckets) {
-    return `
-      <section class="calib-section">
-        <header class="calib-section-head"><h3>Template-segmented calibration</h3><span class="meta">no data</span></header>
-        <div class="calib-section-body">
-          <p class="calib-empty">Meta-learning summary not available. Calibration is segmented by template (strategic_audit, automation_roi, ai_readiness) once outcomes are recorded.</p>
-        </div>
-      </section>
-    `;
-  }
-
-  const rollupLine = suppressed
-    ? `<div class="calib-rollup suppressed"><strong>Cross-template rollup: suppressed.</strong> ${escapeHtml(reason)}</div>`
-    : (metaLearning?.rollup
-        ? `<div class="calib-rollup"><strong>Cross-template rollup:</strong> n=${fmtInt(metaLearning.rollup.n_outcomes || 0)} · Brier=${Number(metaLearning.rollup.overall_brier || 0).toFixed(3)} · ECE=${Number(metaLearning.rollup.overall_ece || 0).toFixed(3)}</div>`
-        : '');
-
-  const bucketCards = buckets.map(b => {
-    const phases = Array.isArray(b.phases) ? b.phases : [];
-    const n = b.n_outcomes != null ? fmtInt(b.n_outcomes) : '—';
-    const br = b.overall_brier != null ? Number(b.overall_brier).toFixed(3) : '—';
-    const ec = b.overall_ece != null ? Number(b.overall_ece).toFixed(3) : '—';
-    return `
-      <div class="calib-bucket">
-        <div class="calib-bucket-head">
-          <div class="calib-bucket-name">${escapeHtml(b.project_type || '—')}</div>
-          <div class="calib-bucket-stats"><span>n=<b class="mono">${escapeHtml(n)}</b></span><span class="sep">·</span><span>Brier=<b class="mono">${escapeHtml(br)}</b></span><span class="sep">·</span><span>ECE=<b class="mono">${escapeHtml(ec)}</b></span></div>
-        </div>
-        ${phases.length ? `
-          <div class="calib-bucket-table">
-            <table class="calib-table dense">
-              <thead><tr><th>Phase</th><th class="num">n</th><th class="num">Brier</th><th class="num">ECE</th><th class="num">μ pred</th><th class="num">μ real</th></tr></thead>
-              <tbody>
-                ${phases.map(p => `
-                  <tr>
-                    <td>${escapeHtml(p.phase || '—')}</td>
-                    <td class="num mono">${escapeHtml(p.n_outcomes != null ? fmtInt(p.n_outcomes) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.brier != null ? Number(p.brier).toFixed(3) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.ece != null ? Number(p.ece).toFixed(3) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.mean_predicted != null ? Number(p.mean_predicted).toFixed(2) : '—')}</td>
-                    <td class="num mono">${escapeHtml(p.mean_realized != null ? Number(p.mean_realized).toFixed(2) : '—')}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        ` : `<div class="calib-bucket-empty">No per-phase rows yet.</div>`}
-      </div>
-    `;
-  }).join('');
-
-  const deltaSection = deltaBuckets
-    ? `
-      <details class="calib-details">
-        <summary>Recent project deltas, per template</summary>
-        ${Object.entries(deltaBuckets).map(([ptype, rows]) => {
-          const rs = Array.isArray(rows) ? rows : [];
-          return `
-            <div class="calib-subbucket">
-              <div class="calib-subbucket-name">${escapeHtml(ptype || '—')} <span class="meta">${rs.length} row${rs.length === 1 ? '' : 's'}</span></div>
-              ${rs.length ? `
-                <table class="calib-table dense">
-                  <thead><tr><th>Project</th><th class="num">n</th><th class="num">Brier</th><th class="num">Δ</th><th>Completed</th></tr></thead>
-                  <tbody>
-                    ${rs.slice(0, 20).map(r => `
-                      <tr>
-                        <td title="${escapeHtml(r.project_id || '')}">${escapeHtml((r.name || r.project_id || '—').slice(0, 40))}</td>
-                        <td class="num mono">${escapeHtml(r.n_resolved != null ? fmtInt(r.n_resolved) : '—')}</td>
-                        <td class="num mono">${escapeHtml(r.mean_brier != null ? Number(r.mean_brier).toFixed(3) : '—')}</td>
-                        <td class="num mono">${escapeHtml(r.calibration_delta != null ? Number(r.calibration_delta).toFixed(2) : '—')}</td>
-                        <td class="mono">${escapeHtml(r.completed_at ? new Date(r.completed_at).toLocaleDateString() : '—')}</td>
-                      </tr>
-                    `).join('')}
-                  </tbody>
-                </table>
-              ` : `<div class="calib-bucket-empty">No deltas for this template.</div>`}
-            </div>
-          `;
-        }).join('')}
-      </details>
-    `
-    : '';
-
   return `
     <section class="calib-section">
-      <header class="calib-section-head"><h3>Template-segmented calibration</h3><span class="meta">${buckets.length} bucket${buckets.length === 1 ? '' : 's'}</span></header>
+      <header class="calib-section-head"><h3>Template-segmented calibration</h3></header>
       <div class="calib-section-body">
-        ${rollupLine}
-        ${buckets.length ? `<div class="calib-buckets">${bucketCards}</div>` : `<p class="calib-empty">No per-template buckets yet. Calibration is segmented by template once outcomes are recorded.</p>`}
-        ${deltaSection}
+        <p class="calib-empty">/meta-learning/summary and /calibration/deltas/by-template: not available in this build</p>
       </div>
     </section>
   `;
@@ -6410,7 +6359,7 @@ function renderInspectorEvidence() {
   const summary = knowledge?.summary || {};
 
   return `
-    ${renderBayesianInspectorSection()}
+    
     <div class="ins-section">
       <div class="ins-section-head"><h5>Uploaded files</h5><span class="meta">${fmtInt(files.length)}</span></div>
       <div class="ins-section-body dense">
@@ -6454,6 +6403,34 @@ function renderInspectorEvidence() {
 }
 
 /* ── Report tab inspector ───────────────────────────────────────────── */
+function renderExportProfileControl(reportExists) {
+  const profileOptions = Object.entries(EXPORT_PROFILES).map(([value, config]) => (
+    `<option value="${escapeHtml(value)}">${escapeHtml(config.label)}</option>`
+  )).join('');
+  const initialFormats = EXPORT_PROFILES.report.formats.map(fmt => (
+    `<option value="${escapeHtml(fmt)}">${escapeHtml(EXPORT_FORMAT_LABELS[fmt] || fmt.toUpperCase())}</option>`
+  )).join('');
+
+  return `
+    <div class="export-profile-control" data-export-profile-control>
+      <div class="export-profile-row">
+        <div class="export-profile-field">
+          <label for="export-profile-select">Profile</label>
+          <select id="export-profile-select">${profileOptions}</select>
+        </div>
+        <div class="export-profile-field">
+          <label for="export-format-select">Format</label>
+          <select id="export-format-select">${initialFormats}</select>
+        </div>
+      </div>
+      <div class="export-profile-help" id="export-profile-help">${escapeHtml(EXPORT_PROFILES.report.help)}</div>
+      <div class="export-profile-warning" id="export-profile-warning">Internal use only.<br>Contains sanitized project archive files.</div>
+      ${reportExists ? '' : `<div class="export-profile-note">Export may be incomplete until the report phase runs.</div>`}
+      <button class="btn btn-accent btn-sm" id="export-profile-submit" type="button">Export selected profile</button>
+    </div>
+  `;
+}
+
 function renderInspectorReport() {
   const fs = state.project.fullState;
   const dq = fs?.dq || {};
@@ -6502,6 +6479,7 @@ function renderInspectorReport() {
         <button class="btn btn-secondary btn-sm" data-export="docx" ${reportExists ? '' : 'disabled'}>Download DOCX</button>
         <button class="btn btn-secondary btn-sm" data-export="pdf" ${reportExists ? '' : 'disabled'}>Download PDF</button>
         <button class="btn btn-ghost btn-sm" data-reload-report>Refresh report</button>
+        ${renderExportProfileControl(reportExists)}
       </div>
     </div>
   `;
@@ -6569,48 +6547,6 @@ function renderInspectorAudit() {
   `;
 }
 
-/* ── Bayesian advisory panel (Evidence + Decide contextual) ─────────── */
-function renderBayesianInspectorSection() {
-  const bay = state.project.bayesian;
-  const scenarios = Array.isArray(bay?.scenarios) ? bay.scenarios : [];
-  if (!bay || scenarios.length === 0) {
-    return `
-      <div class="ins-section">
-        <div class="ins-section-head"><h5>Bayesian advisory</h5><span class="meta">advisory only</span></div>
-        <div class="ins-section-body"><div class="ins-empty" style="padding: 0;">No advisory posteriors yet. They derive from hypothesis priors + evidence links; run the project to populate.</div></div>
-      </div>`;
-  }
-  return `
-    <div class="ins-section">
-      <div class="ins-section-head"><h5>Bayesian advisory</h5><span class="meta">${scenarios.length} scenario${scenarios.length === 1 ? '' : 's'}</span></div>
-      <div class="ins-bayes-advisory">Advisory only — does not control orchestration or gates</div>
-      <div class="ins-section-body dense">
-        ${scenarios.map(sc => {
-          const agg = sc.aggregate_posterior_mean != null ? Number(sc.aggregate_posterior_mean).toFixed(2) : '—';
-          return `
-            <div class="ins-bayes-scenario">
-              <div class="ins-bayes-scenario-head">
-                <h6>${escapeHtml(sc.scenario_label || 'unlabeled')}</h6>
-                <span class="agg">μ=${escapeHtml(agg)}</span>
-              </div>
-              <div class="ins-bayes-rows">
-                ${(sc.rows || []).slice(0, 6).map(r => {
-                  const mean = r.posterior_mean != null ? Number(r.posterior_mean).toFixed(2) : '—';
-                  return `<div class="ins-bayes-row">
-                    <div class="hid" title="${escapeHtml(r.label || r.hypothesis_id || '')}">${escapeHtml(r.hypothesis_id || '—')}</div>
-                    <div class="mean">${escapeHtml(mean)}</div>
-                    <div class="note" title="${escapeHtml(r.uncertainty_note || '')}">${escapeHtml(r.evidence_count != null ? `n=${r.evidence_count}` : '')}</div>
-                  </div>`;
-                }).join('')}
-                ${(sc.rows || []).length > 6 ? `<div class="note" style="text-align: right;">+${sc.rows.length - 6} more…</div>` : ''}
-              </div>
-            </div>`;
-        }).join('')}
-      </div>
-    </div>
-  `;
-}
-
 /* ── Inspector wiring ───────────────────────────────────────────────── */
 function wireInspector() {
   // Decide: click an event row in the Recent events list
@@ -6623,6 +6559,18 @@ function wireInspector() {
   // Report: inspector export buttons
   document.querySelectorAll('#inspector button[data-export]').forEach(b => {
     b.addEventListener('click', () => downloadExport(state.selectedProjectId, b.dataset.export));
+  });
+  const profileSelect = $('export-profile-select');
+  if (profileSelect) {
+    syncExportProfileFormatOptions();
+    profileSelect.addEventListener('change', syncExportProfileFormatOptions);
+  }
+  $('export-profile-submit')?.addEventListener('click', () => {
+    exportProjectProfile(
+      state.selectedProjectId,
+      $('export-profile-select')?.value,
+      $('export-format-select')?.value
+    );
   });
   document.querySelectorAll('#inspector button[data-reload-report]').forEach(b => {
     b.addEventListener('click', async () => {
@@ -6906,22 +6854,54 @@ function wireDecisionPlane() {
     });
   });
   // Diff controls
-  $('dp-diff-clear')?.addEventListener('click', () => {
-    state.dp.cursorFrom = null;
-    state.dp.cursorTo = null;
-    state.dp.diff = null;
-    renderMain();
-  });
-  $('dp-diff-run')?.addEventListener('click', async () => {
-    const { cursorFrom, cursorTo } = state.dp;
-    if (!cursorFrom || !cursorTo) return;
-    try {
-      state.dp.diff = await apiGet(`/projects/${state.selectedProjectId}/diff?from_event_id=${encodeURIComponent(cursorFrom)}&to_event_id=${encodeURIComponent(cursorTo)}`);
-      renderMain();
-    } catch (e) {
-      toast('Diff failed: ' + e.message, 'err');
     }
-  });
+
+async function generateClarificationCycle(pid) {
+  if (!pid) return;
+  try {
+    await apiPost(`/projects/${pid}/clarifications/cycles`, {});
+    await loadProject(pid);
+    renderMain();
+    toast('Follow-up questions updated.', 'ok');
+  } catch (e) {
+    toast('Follow-up question update failed: ' + e.message, 'err');
+  }
+}
+
+async function submitClarificationAnswer(pid, questionId, inputId) {
+  if (!pid || !questionId) return;
+  const answerText = ($(inputId)?.value || '').trim();
+  if (!answerText) {
+    toast('Answer text is required.', 'err');
+    return;
+  }
+  try {
+    await apiPost(`/projects/${pid}/clarifications/answers`, {
+      question_id: questionId,
+      answer_text: answerText,
+      status: 'answered',
+    });
+    await loadProject(pid);
+    renderMain();
+    toast('Answer saved.', 'ok');
+  } catch (e) {
+    toast('Answer save failed: ' + e.message, 'err');
+  }
+}
+
+async function markClarificationUnavailable(pid, questionId) {
+  if (!pid || !questionId) return;
+  try {
+    await apiPost(`/projects/${pid}/clarifications/answers`, {
+      question_id: questionId,
+      status: 'unavailable',
+    });
+    await loadProject(pid);
+    renderMain();
+    toast('Marked unavailable.', 'ok');
+  } catch (e) {
+    toast('Mark unavailable failed: ' + e.message, 'err');
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -6981,6 +6961,54 @@ function downloadExport(pid, fmt) {
   if (!pid) return;
   const link = document.createElement('a');
   link.href = `${apiUrl()}/projects/${pid}/export/${fmt}`;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function syncExportProfileFormatOptions() {
+  const profileSelect = $('export-profile-select');
+  const formatSelect = $('export-format-select');
+  if (!profileSelect || !formatSelect) return;
+
+  const profile = profileSelect.value || 'report';
+  const config = EXPORT_PROFILES[profile];
+  if (!config) {
+    toast('Invalid export profile.', 'err');
+    return;
+  }
+
+  const previousFormat = formatSelect.value;
+  formatSelect.innerHTML = config.formats.map(fmt => (
+    `<option value="${escapeHtml(fmt)}">${escapeHtml(EXPORT_FORMAT_LABELS[fmt] || fmt.toUpperCase())}</option>`
+  )).join('');
+  formatSelect.value = config.formats.includes(previousFormat) ? previousFormat : config.formats[0];
+
+  const help = $('export-profile-help');
+  if (help) help.textContent = config.help;
+  const warning = $('export-profile-warning');
+  if (warning) warning.classList.toggle('visible', profile === 'machine_archive');
+}
+
+function exportProjectProfile(pid, profile, format) {
+  if (!pid) {
+    toast('Select a project before exporting.', 'err');
+    return;
+  }
+  const config = EXPORT_PROFILES[profile];
+  if (!config) {
+    toast('Invalid export profile.', 'err');
+    return;
+  }
+  if (!format || !config.formats.includes(format)) {
+    toast('Invalid export format for this profile.', 'err');
+    return;
+  }
+
+  const link = document.createElement('a');
+  link.href = `${apiUrl()}/projects/${encodeURIComponent(pid)}/export?profile=${encodeURIComponent(profile)}&format=${encodeURIComponent(format)}`;
   link.target = '_blank';
   link.rel = 'noopener';
   document.body.appendChild(link);

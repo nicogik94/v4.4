@@ -1,0 +1,247 @@
+"""Report generation freshness helpers.
+
+The report itself stays a plain ProjectState.report string.  Freshness metadata
+is recorded as policy audit log events and compared against the raw saved report
+content at export time.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import os
+from pathlib import Path
+import re
+import subprocess
+from typing import Any
+
+from config import APP_VERSION
+
+
+UNKNOWN_CODE_VERSION = "unknown"
+CODE_VERSION_ENV_VARS = ("V4_CODE_VERSION", "GIT_COMMIT", "COMMIT_SHA", "SOURCE_VERSION")
+SAFE_CODE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+GENERIC_FRESHNESS_WARNING = (
+    "Freshness check: report generation metadata is missing or incomplete. "
+    "Regenerate from the current branch before client delivery."
+)
+
+UNVERIFIED_VERSION_WARNING = (
+    "Freshness check: report hash matches the stored report, but code-version "
+    "metadata is unverified. Regenerate from the current branch before client delivery."
+)
+
+VERSIONED_FRESHNESS_WARNING = (
+    "Freshness check: report was generated with code version {old_version}; "
+    "current code version is {current_version}. Regenerate from the current "
+    "branch before client delivery."
+)
+
+CONTENT_MISMATCH_WARNING = (
+    "Freshness check: stored report-generation metadata does not match the "
+    "current report content hash. Regenerate from the current branch before "
+    "client delivery."
+)
+
+
+@dataclass(frozen=True)
+class ReportFreshness:
+    status: str
+    current_code_version: str
+    report_sha256: str = ""
+    generated_code_version: str = ""
+    generated_at: str = ""
+    metadata_found: bool = False
+    matching_report_hash: bool = False
+    is_fresh: bool = False
+    warning: str = ""
+
+
+def current_code_version() -> str:
+    for name in CODE_VERSION_ENV_VARS:
+        version = _sanitize_code_version(os.getenv(name))
+        if version:
+            return version
+
+    app_version = _sanitize_code_version(APP_VERSION)
+    if app_version:
+        return app_version
+
+    repo_root = _detect_repo_root()
+    if repo_root is None:
+        return UNKNOWN_CODE_VERSION
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=str(repo_root),
+        )
+        return _sanitize_code_version(result.stdout) or UNKNOWN_CODE_VERSION
+    except Exception:
+        return UNKNOWN_CODE_VERSION
+
+
+def report_sha256(report: str | None) -> str:
+    return hashlib.sha256((report or "").encode("utf-8")).hexdigest()
+
+
+def build_report_generation_metadata(
+    report: str | None,
+    *,
+    code_version: str | None = None,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    raw_report = report or ""
+    return {
+        "phase": "report",
+        "generated_at": generated_at or _utc_now(),
+        "code_version": code_version or current_code_version(),
+        "report_sha256": report_sha256(raw_report),
+        "report_length": len(raw_report),
+    }
+
+
+def assess_report_freshness(
+    state: Any,
+    *,
+    current_version: str | None = None,
+) -> ReportFreshness:
+    raw_report = getattr(state, "report", None) or ""
+    version = current_version or current_code_version()
+    if not raw_report:
+        return ReportFreshness(status="no_report", current_code_version=version)
+
+    raw_hash = report_sha256(raw_report)
+    latest_metadata = None
+    matching_metadata = None
+    for details in _iter_report_generation_details(state):
+        latest_metadata = latest_metadata or details
+        if details.get("report_sha256") == raw_hash:
+            matching_metadata = details
+            break
+
+    metadata = matching_metadata or latest_metadata
+    old_version = str((metadata or {}).get("code_version") or "")
+    generated_at = str((metadata or {}).get("generated_at") or "")
+
+    if matching_metadata and _known(old_version) and _known(version) and old_version == version:
+        return ReportFreshness(
+            status="fresh",
+            current_code_version=version,
+            report_sha256=raw_hash,
+            generated_code_version=old_version,
+            generated_at=generated_at,
+            metadata_found=True,
+            matching_report_hash=True,
+            is_fresh=True,
+        )
+
+    if matching_metadata and _known(old_version) and _known(version) and old_version != version:
+        warning = VERSIONED_FRESHNESS_WARNING.format(
+            old_version=old_version,
+            current_version=version,
+        )
+        return ReportFreshness(
+            status="stale",
+            current_code_version=version,
+            report_sha256=raw_hash,
+            generated_code_version=old_version,
+            generated_at=generated_at,
+            metadata_found=True,
+            matching_report_hash=True,
+            warning=warning,
+        )
+
+    if matching_metadata:
+        return ReportFreshness(
+            status="unproven",
+            current_code_version=version,
+            report_sha256=raw_hash,
+            generated_code_version=old_version,
+            generated_at=generated_at,
+            metadata_found=True,
+            matching_report_hash=True,
+            warning=UNVERIFIED_VERSION_WARNING,
+        )
+
+    if latest_metadata:
+        return ReportFreshness(
+            status="content_mismatch",
+            current_code_version=version,
+            report_sha256=raw_hash,
+            generated_code_version=old_version,
+            generated_at=generated_at,
+            metadata_found=True,
+            matching_report_hash=False,
+            warning=CONTENT_MISMATCH_WARNING,
+        )
+
+    return ReportFreshness(
+        status="unproven",
+        current_code_version=version,
+        report_sha256=raw_hash,
+        generated_code_version=old_version,
+        generated_at=generated_at,
+        metadata_found=bool(metadata),
+        matching_report_hash=bool(matching_metadata),
+        warning=GENERIC_FRESHNESS_WARNING,
+    )
+
+
+def report_freshness_manifest(state: Any, *, current_version: str | None = None) -> dict[str, Any]:
+    freshness = assess_report_freshness(state, current_version=current_version)
+    return {
+        "status": freshness.status,
+        "is_fresh": freshness.is_fresh,
+        "metadata_found": freshness.metadata_found,
+        "matching_report_hash": freshness.matching_report_hash,
+        "generated_code_version": freshness.generated_code_version,
+        "current_code_version": freshness.current_code_version,
+        "generated_at": freshness.generated_at,
+        "report_sha256": freshness.report_sha256,
+        "warning": freshness.warning,
+    }
+
+
+def _iter_report_generation_details(state: Any):
+    for event in reversed(list(getattr(state, "policy_audit_log", []) or [])):
+        if not isinstance(event, dict):
+            continue
+        if event.get("event_type") != "report_generated":
+            continue
+        details = event.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        if details.get("phase", "report") != "report":
+            continue
+        yield details
+
+
+def _known(version: str | None) -> bool:
+    return bool(version) and version != UNKNOWN_CODE_VERSION
+
+
+def _sanitize_code_version(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not SAFE_CODE_VERSION_RE.fullmatch(text):
+        return ""
+    return text
+
+
+def _detect_repo_root() -> Path | None:
+    start = Path(__file__).resolve()
+    for candidate in (start.parent, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
