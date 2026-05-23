@@ -760,6 +760,12 @@ async def run_full_workflow(project_id: str, background_tasks: BackgroundTasks):
     state = await store.load(project_id)
     if not state:
         raise HTTPException(404, "Project not found")
+    if project_id in running:
+        raise HTTPException(409, "Workflow already running")
+    recovery = await workflow_run_state.recover_stale_project_run(project_id)
+    if recovery.status == "fail":
+        logger.error("Unable to recover stale workflow run state for project %s", project_id)
+        raise HTTPException(503, workflow_run_state.WorkflowRunStateError.public_message)
     await _ensure_project_not_running(project_id)
     if is_workflow_complete(state):
         return {"status": "already_complete", "project_id": project_id}
