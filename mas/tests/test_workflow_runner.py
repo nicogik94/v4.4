@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 import api
 import report_freshness
+from hypothesis_coverage import assess_hypothesis_variable_coverage
 from llm_client import LLMResponse
 from runtime import run_state as workflow_run_state
 from runtime import work_queue as workflow_queue
@@ -23,6 +24,7 @@ from orchestrator import (
     _build_report_evidence_locator_register,
     _phase_has_output,
     _sanitize_report_context,
+    build_hypotheses_prompt,
     build_monitor_prompt,
     build_report_prompt,
     get_first_unfinished_phase,
@@ -203,6 +205,155 @@ def make_completed_state(project_id: str = "workflow-complete") -> ProjectState:
         state.phase_status[phase] = PhaseStatus.COMPLETED
         state.phase_confidence[phase] = 1.0
     return state
+
+
+class TestHypothesisVariableCoverage(unittest.TestCase):
+    def test_variable_coverage_detects_covered_categories(self):
+        state = ProjectState(
+            project_id="coverage-growth",
+            project_name="Growth coverage",
+            brief=(
+                "Decide whether to expand a B2B pilot. The decision depends on "
+                "segment demand, acquisition channel quality, pricing, D30 retention, "
+                "measurement reliability, and implementation capacity."
+            ),
+            data="Sparse evidence only; validate before scaling.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Segment demand from mid-market buyers is the main driver.",
+                justification="Validate customer segment demand with interviews before scaling.",
+                signal="qualified segment pipeline",
+                confirm=">=20 qualified buyers within 6 weeks",
+                reject="<5 qualified buyers within 6 weeks",
+                portfolio_cluster="demand",
+            ),
+            Hypothesis(
+                id="H2",
+                text="Paid acquisition channel quality can produce efficient pipeline.",
+                justification="CAC and attribution must be measured before paid activation.",
+                signal="channel CAC and conversion attribution",
+                confirm="CAC payback within 90 days",
+                reject="CAC payback above target by D90",
+                portfolio_cluster="channel pricing",
+            ),
+            Hypothesis(
+                id="H3",
+                text="Retention and implementation capacity constrain expansion.",
+                justification="Owner sign-off and support capacity determine rollout feasibility.",
+                signal="D30 retention, support load, accountable owner approval",
+                confirm="D30 retention >= 40% and owner approves rollout",
+                reject="D30 retention < 25% or support SLA fails",
+                portfolio_cluster="retention operations",
+            ),
+        ]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+
+        for label in (
+            "Demand / user segment",
+            "Channel / acquisition",
+            "Retention / repeat usage",
+            "Monetization / pricing",
+            "Operational capacity",
+            "Data quality / measurement",
+            "Owner / decision authority",
+            "Time horizon / cadence",
+            "Evidence required to validate",
+        ):
+            self.assertIn(label, coverage.covered_categories)
+        self.assertNotIn("Channel / acquisition", coverage.missing_critical_categories)
+        self.assertNotIn("Monetization / pricing", coverage.missing_critical_categories)
+
+    def test_missing_critical_categories_are_advisory_and_do_not_mutate_hypotheses(self):
+        state = ProjectState(
+            project_id="coverage-advisory",
+            project_name="Activation coverage",
+            brief="Improve onboarding activation for trial users.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Onboarding friction reduces activation.",
+                justification="[Hypothesis] Sparse brief only.",
+                signal="activation rate",
+                confirm="activation improves",
+                reject="activation remains flat",
+                portfolio_cluster="activation",
+            )
+        ]
+        before = [hypothesis.model_dump(mode="json") for hypothesis in state.hypotheses]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+        after = [hypothesis.model_dump(mode="json") for hypothesis in state.hypotheses]
+
+        self.assertEqual(after, before)
+        self.assertIn("Owner / decision authority", coverage.missing_critical_categories)
+        self.assertIn("Time horizon / cadence", coverage.missing_critical_categories)
+        self.assertTrue(any(need.category == "Owner / decision authority" for need in coverage.evidence_needs))
+        self.assertEqual(state.phase_status["hypotheses"], PhaseStatus.PENDING)
+
+    def test_narrow_non_growth_project_does_not_force_pricing_channel_or_retention(self):
+        state = ProjectState(
+            project_id="coverage-narrow",
+            project_name="Claim safety",
+            brief="Decide whether a legal-review SLA reduces claim-safety approval risk.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Legal review SLA reduces claim-safety approval risk.",
+                justification="Compliance approval is the decision-critical constraint.",
+                signal="approval cycle time measured by compliance owner",
+                confirm="legal approval within 24 hours for 4 weeks",
+                reject="approval exceeds SLA for two weeks",
+                portfolio_cluster="claim-safety compliance",
+            )
+        ]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+
+        for label in ("Monetization / pricing", "Channel / acquisition", "Retention / repeat usage"):
+            self.assertNotIn(label, coverage.missing_critical_categories)
+            self.assertIn(label, coverage.not_relevant_categories)
+        self.assertIn("Legal / compliance / claim-safety", coverage.covered_categories)
+
+    def test_sparse_evidence_creates_validation_needs_not_measured_claims(self):
+        state = ProjectState(
+            project_id="coverage-sparse",
+            project_name="Sparse",
+            brief="Evidence is unknown; evaluate whether onboarding changes matter.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Onboarding changes may improve activation.",
+                justification="[Unknown] No direct evidence supplied.",
+                signal="activation metric",
+                confirm="activation threshold improves within 30 days",
+                reject="activation remains below threshold within 30 days",
+                portfolio_cluster="activation",
+            )
+        ]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+
+        self.assertIn("Evidence required to validate", coverage.covered_categories)
+        combined = " ".join(coverage.assumptions_needing_validation)
+        self.assertNotIn("measured", combined.lower())
+        self.assertNotIn("confirmed", combined.lower())
+
+    def test_hypothesis_prompt_preserves_existing_json_schema(self):
+        prompt = build_hypotheses_prompt(ProjectState(project_id="prompt-schema", project_name="Prompt", brief="Improve activation."))
+
+        self.assertIn(
+            "Each hypothesis object must include: id, text, justification, signal, alpha, beta, confirm, reject, evoi, portfolio_cluster, status.",
+            prompt,
+        )
+        self.assertIn("Do not add any other keys to hypothesis objects.", prompt)
+        self.assertNotIn("variable_coverage", prompt)
+        self.assertNotIn("owner_decision_authority", prompt)
 
 
 REPORT_EVIDENCE_MARKER_RE = re.compile(r"\[Evidence: [^\]\n]+ \| [^\]\n]+\]")

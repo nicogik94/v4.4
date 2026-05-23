@@ -52,6 +52,7 @@ from report_quality import (
     threshold_section_classification,
 )
 import report_freshness
+from hypothesis_coverage import assess_hypothesis_variable_coverage
 from state import ProjectState
 
 
@@ -1213,7 +1214,30 @@ def operator_hypotheses_table(state: ProjectState) -> str:
             hypothesis.portfolio_cluster,
             ", ".join(hypothesis.evidence_ids or []),
         ])
-    return _markdown_table(rows) if len(rows) > 1 else EMPTY_HYPOTHESES
+    if len(rows) <= 1:
+        return EMPTY_HYPOTHESES
+    coverage = _operator_variable_coverage_summary(state)
+    return "\n\n".join(part for part in (_markdown_table(rows), coverage) if part)
+
+
+def _operator_variable_coverage_summary(state: ProjectState) -> str:
+    coverage = assess_hypothesis_variable_coverage(state)
+    if not coverage.has_hypotheses:
+        return ""
+    covered = ", ".join(coverage.covered_categories) or "None detected."
+    missing = ", ".join(coverage.missing_critical_categories) or "No decision-critical gaps flagged."
+    lines = [
+        "### Variable coverage summary",
+        f"Covered categories: {covered}",
+        f"Missing decision-critical categories: {missing}",
+    ]
+    if coverage.evidence_needs:
+        lines.append("Evidence needs:")
+        lines.extend(
+            f"- {need.category}: {need.evidence_need}"
+            for need in coverage.evidence_needs[:8]
+        )
+    return "\n".join(lines)
 
 
 def operator_gauntlet_summary(state: ProjectState) -> str:
@@ -1338,6 +1362,12 @@ def operator_sqi_summary(state: ProjectState) -> str:
         rows.append([f"Dimension: {dimension.name}", f"{_fmt_value(dimension.score)} ({dimension.grade}) - {dimension.finding}"])
     if state.sqi.improvement_actions:
         rows.append(["Improvement actions", "; ".join(state.sqi.improvement_actions)])
+    coverage = assess_hypothesis_variable_coverage(state)
+    if coverage.missing_critical_categories:
+        rows.append([
+            "Variable coverage limitation",
+            "Hypothesis set may under-cover: " + ", ".join(coverage.missing_critical_categories[:6]),
+        ])
     return _markdown_table(rows)
 
 
