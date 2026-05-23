@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 import api
 import report_freshness
 from llm_client import LLMResponse
+from runtime import run_state as workflow_run_state
 from orchestrator import (
     WORKFLOW_PHASE_SEQUENCE,
     _build_report_evidence_locator_register,
@@ -1494,18 +1495,129 @@ class TestSequentialRunner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.classify.bf, 0.0)
         self.assertEqual(state.classify.dq, [0.0, 0.0, 0.0, 0.0])
 
+class _RunStateAcquire:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _RunStatePool:
+    def __init__(self):
+        self.conn = _RunStateConn()
+
+    def acquire(self):
+        return _RunStateAcquire(self.conn)
+
+
+class _RunStateConn:
+    def __init__(self):
+        self.rows = {}
+        self.active_by_project = {}
+
+    async def execute(self, query, *args):
+        return "OK"
+
+    async def fetchval(self, query, *args):
+        return len(self.active_by_project)
+
+    async def fetchrow(self, query, *args):
+        normalized = " ".join(query.split()).upper()
+        if normalized.startswith("INSERT INTO WORKFLOW_RUNS"):
+            run_id, project_id, version = args
+            if project_id in self.active_by_project:
+                return None
+            row = {
+                "run_id": run_id,
+                "project_id": project_id,
+                "status": "queued",
+                "current_phase": "",
+                "created_at": "2026-05-22T00:00:00+00:00",
+                "started_at": None,
+                "finished_at": None,
+                "error_summary": "",
+                "code_version": version,
+            }
+            self.rows[run_id] = row
+            self.active_by_project[project_id] = run_id
+            return row
+        if normalized.startswith("SELECT") and "WHERE PROJECT_ID" in normalized:
+            project_id = args[0]
+            run_id = self.active_by_project.get(project_id)
+            return self.rows.get(run_id) if run_id else None
+        if normalized.startswith("SELECT") and "WHERE RUN_ID" in normalized:
+            return self.rows.get(args[0])
+        if normalized.startswith("UPDATE WORKFLOW_RUNS"):
+            run_id, status, current_phase, set_started, set_finished, error_summary = args
+            row = self.rows.get(run_id)
+            if not row:
+                return None
+            if status is not None:
+                row["status"] = status
+            if current_phase is not None:
+                row["current_phase"] = current_phase
+            if set_started and row["started_at"] is None:
+                row["started_at"] = "2026-05-22T00:01:00+00:00"
+            if set_finished:
+                row["finished_at"] = "2026-05-22T00:02:00+00:00"
+            if error_summary is not None:
+                row["error_summary"] = error_summary
+            if row["status"] in workflow_run_state.TERMINAL_RUN_STATUSES:
+                self.active_by_project.pop(row["project_id"], None)
+            return row
+        return None
+
+
+class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        workflow_run_state.clear_memory_run_state()
+
+    async def asyncTearDown(self):
+        workflow_run_state.clear_memory_run_state()
+
+    async def test_postgres_run_state_creation_and_active_guard(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            first = await workflow_run_state.create_workflow_run("durable-project", code_version="4.4.0")
+            duplicate = await workflow_run_state.create_workflow_run("durable-project", code_version="4.4.0")
+            await workflow_run_state.mark_run_running(first.run.run_id, current_phase="classify")
+            running_record = await workflow_run_state.get_workflow_run(first.run.run_id)
+
+        self.assertTrue(first.created)
+        self.assertTrue(first.durable)
+        self.assertEqual(first.run.status, "queued")
+        self.assertFalse(duplicate.created)
+        self.assertTrue(duplicate.durable)
+        self.assertEqual(duplicate.run.run_id, first.run.run_id)
+        self.assertEqual(running_record.status, "running")
+        self.assertEqual(running_record.current_phase, "classify")
+
+
 class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         api.running.clear()
+        workflow_run_state.clear_memory_run_state()
+        self.run_state_pool_patch = patch(
+            "runtime.run_state.store._get_pool",
+            new=AsyncMock(return_value=None),
+        )
+        self.run_state_pool_patch.start()
 
     async def asyncTearDown(self):
+        self.run_state_pool_patch.stop()
         api.running.clear()
+        workflow_run_state.clear_memory_run_state()
 
     async def test_run_returns_already_complete_for_finished_project(self):
         state = make_completed_state("already-complete")
         with patch("api.store.load", new=AsyncMock(return_value=state)):
             response = await api.run_full_workflow(state.project_id, BackgroundTasks())
         self.assertEqual(response["status"], "already_complete")
+        self.assertFalse(await workflow_run_state.has_active_project_run(state.project_id))
 
     def test_workflow_phase_sequence_preserves_v44_order(self):
         self.assertEqual(
@@ -1520,6 +1632,68 @@ class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as ctx:
                 await api.run_full_workflow(state.project_id, BackgroundTasks())
         self.assertEqual(ctx.exception.status_code, 409)
+
+    async def test_workflow_run_state_transitions_queued_running_succeeded(self):
+        acquisition = await workflow_run_state.create_workflow_run(
+            "run-state-project",
+            code_version="4.4.0",
+        )
+
+        self.assertTrue(acquisition.created)
+        self.assertEqual(acquisition.run.status, "queued")
+        self.assertTrue(await workflow_run_state.has_active_project_run("run-state-project"))
+
+        running_record = await workflow_run_state.mark_run_running(
+            acquisition.run.run_id,
+            current_phase="classify",
+        )
+        self.assertEqual(running_record.status, "running")
+        self.assertEqual(running_record.current_phase, "classify")
+
+        succeeded = await workflow_run_state.mark_run_succeeded(
+            acquisition.run.run_id,
+            current_phase="report",
+        )
+        self.assertEqual(succeeded.status, "succeeded")
+        self.assertEqual(succeeded.current_phase, "report")
+        self.assertIsNotNone(succeeded.finished_at)
+        self.assertFalse(await workflow_run_state.has_active_project_run("run-state-project"))
+
+    async def test_duplicate_active_run_is_blocked_after_local_running_set_is_lost(self):
+        state = ProjectState(project_id="durable-duplicate", project_name="Duplicate", brief="Run once")
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            first = await api.run_full_workflow(state.project_id, BackgroundTasks())
+
+        self.assertEqual(first["status"], "started")
+        self.assertIn("run_id", first)
+
+        api.running.clear()
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with self.assertRaises(HTTPException) as ctx:
+                await api.run_full_workflow(state.project_id, BackgroundTasks())
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail, "Workflow already running")
+
+    async def test_failed_background_run_persists_sanitized_error_summary(self):
+        state = ProjectState(project_id="failed-run-project", project_name="Failure", brief="Run fails")
+        acquisition = await workflow_run_state.create_workflow_run(state.project_id, code_version="4.4.0")
+        error = RuntimeError(
+            r"Traceback (most recent call last): C:\private\workspace\secret.py token=abc123"
+        )
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with patch("api.run_workflow_sequence", new=AsyncMock(side_effect=error)):
+                await api._run_workflow(state.project_id, acquisition.run.run_id)
+
+        record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+        self.assertEqual(record.status, "failed")
+        self.assertIn("Workflow failed", record.error_summary)
+        self.assertNotIn("Traceback", record.error_summary)
+        self.assertNotIn("C:\\", record.error_summary)
+        self.assertNotIn("abc123", record.error_summary)
+        self.assertFalse(await workflow_run_state.has_active_project_run(state.project_id))
 
     async def test_manual_phase_rejects_when_workflow_is_running(self):
         state = make_completed_state("running-project")
