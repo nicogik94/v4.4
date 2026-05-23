@@ -496,6 +496,10 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "defensibility score",
             "evidence validated",
             "claim proven",
+            "owner_decision_authority",
+            "variable_coverage",
+            "Variable coverage summary",
+            "Missing decision-critical categories",
         ):
             self.assertNotIn(forbidden, markdown)
 
@@ -511,6 +515,10 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "Technical appendix",
             "policy_gate_blocked=1",
             "Market note",
+            "Variable coverage summary",
+            "Missing decision-critical categories",
+            "Evidence needs:",
+            "Variable coverage limitation",
         ):
             self.assertIn(expected, markdown)
         for forbidden in (
@@ -520,6 +528,8 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "chain_of_thought",
             "ProjectState",
             r"C:\Users\nicoc",
+            "owner_decision_authority",
+            "coverage-debug",
         ):
             self.assertNotIn(forbidden, markdown)
 

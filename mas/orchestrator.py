@@ -265,7 +265,11 @@ EXAMPLE:
 
 Return JSON array of 8-12 hypotheses.
 Each hypothesis object must include: id, text, justification, signal, alpha, beta, confirm, reject, evoi, portfolio_cluster, status.
+Do not add any other keys to hypothesis objects.
 `justification` must be a short explanation grounded in the brief, classify output, or available data.
+Use only the existing fields to make each hypothesis explicit about the causal driver or decision variable being tested.
+Across the set, cover decision-relevant variables without forcing irrelevant ones: demand/user segment, channel/acquisition, activation/onboarding, retention/repeat usage, monetization/pricing, operational capacity, data quality/measurement, legal/compliance/claim-safety, competitive dynamics, implementation complexity, owner/decision authority, time horizon/cadence, and evidence required to validate.
+Where relevant, express assumptions, validation evidence, owner or approval dependency, timing/cadence, and what result would change the recommendation inside text, justification, signal, confirm, reject, or portfolio_cluster.
 {ctx}
 PROJECT: {state.brief[:1000]}
 {f"DATA: {state.data[:1000]}" if state.data else ""}"""
