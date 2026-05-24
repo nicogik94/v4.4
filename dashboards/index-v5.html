@@ -3314,7 +3314,7 @@ a:hover { text-decoration: underline; }
   <header class="app-header">
     <div class="brand">
       <div class="brand-mark">DE</div>
-      <div class="brand-title">Decision Engine <span class="badge-version">v5 alpha</span></div>
+      <div class="brand-title">Decision Engine <span class="badge-version">v5 controlled local demo</span></div>
     </div>
     <div class="command-bar" role="button" tabindex="0" title="Open command palette (⌘K)" aria-label="Open command palette">
       <input type="text" id="cmd-input" placeholder="Search projects, events, jump to a phase…" aria-label="Open command palette" readonly>
@@ -3369,7 +3369,7 @@ a:hover { text-decoration: underline; }
     <div class="empty-state">
       <div class="empty-icon">◐</div>
       <h2>Select a project to begin</h2>
-      <p>Every project runs through a structured decision workflow — classify, hypothesize, audit, strategize, and monitor. Pick one from the sidebar or start something new.</p>
+      <p>Every project runs through a structured decision workflow — classify, hypothesize, audit, strategize, and monitor. This controlled experimental dashboard is for local demos; the canonical dashboard remains index.html.</p>
       <button class="btn btn-accent btn-lg" id="btn-new-project-big">+ Create project</button>
     </div>
   </main>
@@ -3398,13 +3398,13 @@ a:hover { text-decoration: underline; }
         <input type="text" id="np-name" placeholder="e.g., Knoxville expansion analysis">
       </div>
       <div class="form-row">
-        <label>Workflow template <span class="required-star">*</span></label>
+        <label>Demo framing <span class="required-star">*</span></label>
         <select id="np-template">
-          <option value="strategic_audit">Strategic Decision Audit</option>
-          <option value="automation_roi">Process Automation ROI</option>
-          <option value="ai_readiness">AI Readiness Assessment</option>
+          <option value="strategic_audit">Strategic Decision Audit framing</option>
+          <option value="automation_roi">Automation ROI example framing</option>
+          <option value="ai_readiness">AI readiness example framing</option>
         </select>
-        <div class="hint">Picks the phase sequence and diagnostic track.</div>
+        <div class="hint">Demo label only; the backend workflow remains classify → hypotheses → gauntlet → audit → strategy → sqi → monitor → report and this does not create vertical runtime packs.</div>
       </div>
       <div class="form-row">
         <label>Brief — describe the decision <span class="required-star">*</span></label>
@@ -3492,27 +3492,29 @@ const $ = (id) => document.getElementById(id);
 // The current local runtime targets http://localhost:8001 via Docker host port mapping.
 // This is reconciled via the override mechanism (query param > localStorage > default).
 // When loaded from file:// without an override, the connection status will intentionally show "unavailable" (default http://localhost:8000 is not reachable).
+const API_BASE_STORAGE_KEY = "v4ApiBase";
+const normalizeApiBase = (value) => String(value || '').trim().replace(/\/$/, '');
+const defaultApiBase = () => (window.location.protocol === 'file:') ? 'http://localhost:8000' : window.location.origin;
 const resolveApiBase = () => {
   const urlParams = new URLSearchParams(window.location.search);
   if (urlParams.has('api')) {
-    const apiVal = urlParams.get('api');
+    const apiVal = normalizeApiBase(urlParams.get('api'));
     if (!apiVal) {
-      localStorage.removeItem("v4ApiBase");
+      localStorage.removeItem(API_BASE_STORAGE_KEY);
       window.history.replaceState(null, '', window.location.pathname);
     } else {
-      localStorage.setItem("v4ApiBase", apiVal);
+      localStorage.setItem(API_BASE_STORAGE_KEY, apiVal);
       return { url: apiVal, source: 'query-param' };
     }
   }
-  const lsVal = localStorage.getItem("v4ApiBase");
+  const lsVal = normalizeApiBase(localStorage.getItem(API_BASE_STORAGE_KEY));
   if (lsVal) return { url: lsVal, source: 'localStorage' };
   
-  const defUrl = (window.location.protocol === 'file:') ? 'http://localhost:8000' : window.location.origin;
-  return { url: defUrl, source: 'default' };
+  return { url: defaultApiBase(), source: 'default' };
 };
 
-const apiConfig = resolveApiBase();
-const API_BASE = apiConfig.url.replace(/\/$/, '');
+let apiConfig = resolveApiBase();
+let API_BASE = normalizeApiBase(apiConfig.url);
 const apiUrl = () => API_BASE;
 
 let currentConnState = 'connecting';
@@ -3537,11 +3539,28 @@ function updateConnStatus(stateStr) {
     resetEl.style.display = apiConfig.source !== 'default' ? 'inline' : 'none';
     resetEl.onclick = (e) => {
       e.preventDefault();
-      localStorage.removeItem("v4ApiBase");
+      localStorage.removeItem(API_BASE_STORAGE_KEY);
       window.location.href = window.location.pathname;
     };
   }
 }
+function applyApiBaseInput(refreshAfter = true) {
+  const input = $('api-url');
+  const next = normalizeApiBase(input?.value);
+  if (!next) {
+    if (input) input.value = API_BASE;
+    toast('API base URL is required.', 'err');
+    return;
+  }
+  API_BASE = next;
+  apiConfig = { url: next, source: 'manual' };
+  localStorage.setItem(API_BASE_STORAGE_KEY, next);
+  if (input) input.value = next;
+  healthPassing = false;
+  updateConnStatus('connecting');
+  if (refreshAfter) refresh();
+}
+if ($('api-url')) $('api-url').value = API_BASE;
 updateConnStatus('connecting');
 
 async function handleApiError(path, r) {
@@ -3733,8 +3752,18 @@ const EXPORT_PROFILES = {
     formats: ['zip'],
     help: 'Internal ZIP archive for backup/debug.',
   },
+  client_monitoring_template: {
+    label: 'Client monitoring template',
+    formats: ['xlsx'],
+    help: 'Client-safe monitoring workbook for post-review tracking.',
+  },
+  operator_monitoring_template: {
+    label: 'Operator monitoring template',
+    formats: ['xlsx'],
+    help: 'Operator workbook with trace fields for monitoring follow-up.',
+  },
 };
-const EXPORT_FORMAT_LABELS = { pdf: 'PDF', docx: 'DOCX', zip: 'ZIP' };
+const EXPORT_FORMAT_LABELS = { pdf: 'PDF', docx: 'DOCX', zip: 'ZIP', xlsx: 'XLSX' };
 
 const EVENT_NAMESPACES = ['project', 'phase', 'policy', 'outcome'];
 function eventNamespace(eventType) {
@@ -3802,27 +3831,56 @@ window.addEventListener('hashchange', onHashChange);
 /* ═══════════════════════════════════════════════════════════════════════
    Health (header pills)
    ═══════════════════════════════════════════════════════════════════════ */
-async function loadHealth() {
-  updateConnStatus('connecting');
+async function fetchRuntimeDiagnostic(path) {
   try {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), 5000);
-    const r = await fetch(apiUrl() + '/health', { signal: controller.signal });
+    const r = await fetch(apiUrl() + path, { signal: controller.signal });
     clearTimeout(id);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const h = await r.json();
+    return { ok: true, body: await r.json() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+function diagnosticPill(label, status) {
+  const normalized = String(status || 'unavailable').toLowerCase();
+  const cls = (normalized === 'ok' || normalized === 'pass') ? 'ok'
+    : (normalized === 'fail' || normalized === 'block') ? 'err'
+    : 'warn';
+  return `<span class="pill ${cls}"><span class="dot"></span>${escapeHtml(label)}: ${escapeHtml(status || 'unavailable')}</span>`;
+}
+async function loadHealth() {
+  updateConnStatus('connecting');
+  const [health, preflight, readiness] = await Promise.all([
+    fetchRuntimeDiagnostic('/health'),
+    fetchRuntimeDiagnostic('/runtime/preflight'),
+    fetchRuntimeDiagnostic('/runtime/release-readiness'),
+  ]);
+  if (health.ok) {
+    const h = health.body || {};
     healthPassing = true;
-    updateConnStatus('connected');
-    $('health-pills').innerHTML = [
+    const preflightStatus = preflight.ok ? (preflight.body?.status || 'ok') : 'unavailable';
+    const releaseGate = readiness.ok ? (readiness.body?.release_gate || readiness.body?.status || 'ok') : 'unavailable';
+    const conn = (!preflight.ok || !readiness.ok || preflightStatus === 'fail' || releaseGate === 'block') ? 'partial' : 'connected';
+    updateConnStatus(conn);
+    const pills = [
       `<span class="pill ok"><span class="dot"></span>API ${escapeHtml(h.version || 'ok')}</span>`,
       `<span class="pill ${h.persistence === 'postgres' ? 'ok' : 'warn'}"><span class="dot"></span>${escapeHtml(h.persistence || '—')}</span>`,
       `<span class="pill ${h.tracing === 'langfuse' ? 'ok' : ''}"><span class="dot"></span>tracing: ${escapeHtml(h.tracing || 'off')}</span>`,
-    ].join('');
-  } catch (e) {
-    console.error(`Health check failed`, e);
+      diagnosticPill('preflight', preflightStatus),
+      diagnosticPill('release', releaseGate),
+    ];
+    $('health-pills').innerHTML = pills.join('');
+  } else {
+    console.error(`Health check failed`, health.error);
     healthPassing = false;
     updateConnStatus('unavailable');
-    $('health-pills').innerHTML = `<span class="pill err"><span class="dot"></span>API unreachable</span>`;
+    $('health-pills').innerHTML = [
+      `<span class="pill err"><span class="dot"></span>API unreachable</span>`,
+      diagnosticPill('preflight', preflight.ok ? (preflight.body?.status || 'ok') : 'unavailable'),
+      diagnosticPill('release', readiness.ok ? (readiness.body?.release_gate || readiness.body?.status || 'ok') : 'unavailable'),
+    ].join('');
   }
 }
 setInterval(loadHealth, 30000);
@@ -7281,7 +7339,13 @@ function paletteExecute() {
    Event wiring
    ═══════════════════════════════════════════════════════════════════════ */
 $('btn-refresh').addEventListener('click', () => refresh());
-$('api-url').addEventListener('change', () => refresh());
+$('api-url').addEventListener('change', () => applyApiBaseInput());
+$('api-url').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    applyApiBaseInput();
+  }
+});
 $('btn-new-project').addEventListener('click', openNewProjectModal);
 $('btn-new-project-big')?.addEventListener('click', openNewProjectModal);
 $('np-cancel').addEventListener('click', closeNewProjectModal);

@@ -6,6 +6,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve()
 HTML_PATH = None
 HTML_V5_PATH = None
+DOC_V5_DASHBOARD_PATH = None
 for root in (_HERE.parents[1], _HERE.parents[2]):
     candidate = root / "dashboards" / "index.html"
     if candidate.exists():
@@ -13,12 +14,17 @@ for root in (_HERE.parents[1], _HERE.parents[2]):
     v5_candidate = root / "dashboards" / "index-v5.html"
     if v5_candidate.exists():
         HTML_V5_PATH = v5_candidate
-    if HTML_PATH is not None and HTML_V5_PATH is not None:
+    doc_candidate = root / "docs" / "v5-DASHBOARD-CANONICALIZATION.md"
+    if doc_candidate.exists():
+        DOC_V5_DASHBOARD_PATH = doc_candidate
+    if HTML_PATH is not None and HTML_V5_PATH is not None and DOC_V5_DASHBOARD_PATH is not None:
         break
 if HTML_PATH is None:
     HTML_PATH = _HERE.parents[1] / "dashboards" / "index.html"
 if HTML_V5_PATH is None:
     HTML_V5_PATH = _HERE.parents[1] / "dashboards" / "index-v5.html"
+if DOC_V5_DASHBOARD_PATH is None:
+    DOC_V5_DASHBOARD_PATH = _HERE.parents[1] / "docs" / "v5-DASHBOARD-CANONICALIZATION.md"
 
 
 class TestDashboardWorkspaceMarkup(unittest.TestCase):
@@ -211,10 +217,14 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("Client dossier", html)
         self.assertIn("Operator dossier", html)
         self.assertIn("Machine archive", html)
+        self.assertIn("Client monitoring template", html)
+        self.assertIn("Operator monitoring template", html)
         self.assertIn("Final report only.", html)
         self.assertIn("Stakeholder-ready export.", html)
         self.assertIn("Internal review export with phase summaries.", html)
         self.assertIn("Internal ZIP archive for backup/debug.", html)
+        self.assertIn("Client-safe monitoring workbook for post-review tracking.", html)
+        self.assertIn("Operator workbook with trace fields for monitoring follow-up.", html)
         self.assertIn("Internal use only.", html)
         self.assertIn("Contains sanitized project archive files.", html)
         self.assertIn("Export may be incomplete until the report phase runs.", html)
@@ -224,11 +234,68 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("client_dossier", html)
         self.assertIn("operator_dossier", html)
         self.assertIn("machine_archive", html)
+        self.assertIn("client_monitoring_template", html)
+        self.assertIn("operator_monitoring_template", html)
         self.assertIn("pdf", html)
         self.assertIn("docx", html)
         self.assertIn("zip", html)
+        self.assertIn("xlsx", html)
 
         self.assertIn("/export/${fmt}", html)
         self.assertIn("Download DOCX", html)
         self.assertIn("Download PDF", html)
         self.assertIn("downloadExport", html)
+
+    def test_v5_dashboard_canonicalization_readiness_markup_is_present(self):
+        if not HTML_V5_PATH.exists():
+            self.skipTest("dashboard v5 bundle is not mounted in this execution environment")
+        html = HTML_V5_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("v5 controlled local demo", html)
+        self.assertIn("controlled experimental dashboard", html)
+        self.assertIn("canonical dashboard remains index.html", html)
+        self.assertIn("Demo framing", html)
+        self.assertIn("does not create vertical runtime packs", html)
+        self.assertNotIn("Picks the phase sequence and diagnostic track.", html)
+
+        self.assertIn("applyApiBaseInput", html)
+        self.assertIn("normalizeApiBase", html)
+        self.assertIn("API_BASE_STORAGE_KEY", html)
+        self.assertIn("query-param", html)
+        self.assertIn("localStorage", html)
+        self.assertIn("apiUrl = () => API_BASE", html)
+        self.assertIn("http://localhost:8000", html)
+
+        self.assertIn("/health", html)
+        self.assertIn("/runtime/preflight", html)
+        self.assertIn("/runtime/release-readiness", html)
+        self.assertIn("diagnosticPill", html)
+
+        self.assertIn("/projects/${pid}/files", html)
+        self.assertIn("UPLOAD_ACCEPT_KNOWLEDGE", html)
+        self.assertIn("uploaded", html)
+        self.assertIn("parsed", html)
+        self.assertIn("rejected", html)
+
+        for phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"):
+            self.assertIn(phase, html)
+        self.assertIn(
+            "['classify', 'hypotheses', 'gauntlet', 'audit', 'strategy', 'sqi', 'monitor', 'report']",
+            html,
+        )
+
+    def test_v5_dashboard_canonicalization_doc_is_present(self):
+        if not DOC_V5_DASHBOARD_PATH.exists():
+            self.skipTest("v5 dashboard canonicalization doc is not mounted in this execution environment")
+        doc = DOC_V5_DASHBOARD_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("`dashboards/index.html` remains the canonical", doc)
+        self.assertIn("controlled experimental local demo dashboard", doc)
+        self.assertIn("Parity Checklist", doc)
+        self.assertIn("/runtime/preflight", doc)
+        self.assertIn("/runtime/release-readiness", doc)
+        self.assertIn("client monitoring XLSX", doc)
+        self.assertIn("operator monitoring XLSX", doc)
+        self.assertIn("docker compose port app 8000", doc)
+        self.assertIn("`http://localhost:8000` may work as a fallback", doc)
+        self.assertIn("Do not describe it as canonical", doc)
