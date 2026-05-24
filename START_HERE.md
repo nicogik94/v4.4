@@ -7,6 +7,8 @@ If you want to use the Decision Engine, you only need to know about **two things
 
 Everything else in this bundle is reference material. You don't have to read it to use the engine.
 
+For a v5 runtime foundation demo workflow, see [`docs/v5-DEMO-WORKFLOW.md`](docs/v5-DEMO-WORKFLOW.md).
+
 ---
 
 ## The 30-second tour
