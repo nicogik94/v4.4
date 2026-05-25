@@ -57,6 +57,7 @@ from state import (  # noqa: E402
     FileParseStatus,
     FileParseSummary,
     FMEAItem,
+    Hypothesis,
     KnowledgeItem,
     KnowledgeLayerState,
     MonitorCanary,
@@ -65,9 +66,11 @@ from state import (  # noqa: E402
     MonitorOutput,
     MonitorScheduleItem,
     PhaseStatus,
+    PreliminaryVerdict,
     ProjectState,
     StrategyOutput,
     UploadedFileManifest,
+    Verdict,
 )
 from tests.test_decision_objects import make_state  # noqa: E402
 
@@ -435,6 +438,106 @@ This section is narrative only and should not replace Decision Gates.
         self.assertIn("Evidence source unavailable", combined)
         self.assertIn("Threshold not yet confirmed", combined)
         self.assertIn("Validation required", combined)
+
+    def test_client_monitoring_template_uses_concrete_values_and_direction_fidelity(self):
+        state = ProjectState(
+            project_id="monitor-fidelity",
+            project_name="Monitor fidelity",
+            brief="Decide whether activation and lead-quality remediation are ready to scale.",
+        )
+        state.report = """# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source |
+|---|---|---|---|---|---|---|---|
+| Activation rate | >= 40% by Day 7 | below 30% by Day 10 | stop if under 30% within 14 days | Growth Lead | 7-day rolling | pause rollout | Product telemetry |
+
+# Monitoring and Kill Criteria
+Decision Gates remain the threshold source of truth.
+"""
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Lead quality controls activation-to-conversion lag.",
+                signal="Lead quality conversion",
+                confirm="lead quality improves 1.5pp within 14 days",
+                reject="time-to-value stays above 72 hours",
+                evidence_ids=["ev-market"],
+            )
+        ]
+        state.strategy = StrategyOutput(
+            preliminary_verdicts=[
+                PreliminaryVerdict(
+                    id="H1",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    evidence="ev-market",
+                    monitoring_plan="Track activation-to-conversion lag down 0.5pp by Day 10.",
+                )
+            ],
+            success_metrics=[
+                "Time-to-value down 24 hours",
+                "Activation-to-conversion lag down 1.5pp within 14 days",
+            ],
+            review_date="Day 10",
+        )
+        state.monitor = MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                weekly=[
+                    MonitorScheduleItem(
+                        metric="Activation rate",
+                        owner="Growth Lead",
+                        source="Product telemetry 40% by Day 7",
+                    )
+                ]
+            ),
+            canaries=[
+                MonitorCanary(
+                    signal="activation-to-conversion lag",
+                    direction="up",
+                    window="14-day rolling",
+                    meaning="lag should not increase",
+                )
+            ],
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="H1 lead-quality follow-up",
+                    trip="time-to-value above 72 hours",
+                    reset="below 48 hours for 7-day rolling",
+                )
+            ],
+        )
+
+        client_payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        client_rows = _xlsx_rows(client_payload)
+        client_combined = "\n".join("\t".join(row) for row in client_rows)
+
+        for weak_placeholder in ("Validation required", "Threshold not yet confirmed", "Operator to define"):
+            self.assertNotIn(weak_placeholder, client_combined)
+        for concrete in (
+            "72 hours",
+            "24 hours",
+            "48 hours",
+            "7-day rolling",
+            "14-day rolling",
+            "Day 7",
+            "Day 10",
+            "within 14 days",
+            "40%",
+            "30%",
+            "1.5pp",
+            "0.5pp",
+        ):
+            self.assertIn(concrete, client_combined)
+        self.assertNotRegex(client_combined, r"\bH(10|[1-9])\b")
+        self.assertIn("hypothesis 1", client_combined)
+        self.assertIn("Expected trend under remediation: down", client_combined)
+        self.assertIn("Expected trend under remediation: up", client_combined)
+        self.assertNotIn("Direction: up", client_combined)
+        self.assertNotIn("Signal direction: up", client_combined)
+
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        operator_combined = "\n".join("\t".join(row) for row in _xlsx_rows(operator_payload))
+        self.assertRegex(operator_combined, r"\bH1\b")
+        self.assertIn("72 hours", operator_combined)
+        self.assertIn("1.5pp", operator_combined)
 
     def test_monitoring_template_ambiguous_decision_gate_uses_placeholder(self):
         state = make_export_state("ambiguous-gates")

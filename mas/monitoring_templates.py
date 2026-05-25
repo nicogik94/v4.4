@@ -200,13 +200,23 @@ def _ooda_rows(state: Any, status: str) -> list[MonitoringTemplateRow]:
     ):
         for index, item in enumerate(items or []):
             source = _text(getattr(item, "source", ""))
+            metric = _text(getattr(item, "metric", ""))
+            row_context = " ".join([metric, source, cadence])
+            direction = _desired_direction(row_context)
+            concrete_values = _extract_concrete_monitoring_values(row_context)
             rows.append(
                 MonitoringTemplateRow(
-                    metric_signal=_clean_placeholder(getattr(item, "metric", ""), OPERATOR_TO_DEFINE),
+                    metric_signal=_clean_placeholder(metric, OPERATOR_TO_DEFINE),
                     decision_or_hypothesis="OODA monitoring checkpoint",
                     owner_role=_clean_placeholder(getattr(item, "owner", ""), OPERATOR_TO_DEFINE),
                     cadence=cadence,
                     source_evidence_source=_clean_placeholder(source, EVIDENCE_SOURCE_UNAVAILABLE),
+                    target_good_sign=_expected_trend_text(direction) if direction else VALIDATION_REQUIRED,
+                    warning_sign=_movement_against_direction_text(direction) if direction else VALIDATION_REQUIRED,
+                    stop_change_threshold=_concrete_threshold_or_placeholder(
+                        concrete_values,
+                        THRESHOLD_NOT_CONFIRMED,
+                    ),
                     action_if_triggered="Review metric trend and compare against Decision Gates.",
                     evidence_maturity_validation_status=status,
                     notes="OODA schedule item; implementation control, not a separate decision gate.",
@@ -257,15 +267,22 @@ def _canary_rows(state: Any, status: str) -> list[MonitoringTemplateRow]:
         direction = _text(getattr(item, "direction", ""))
         window = _text(getattr(item, "window", ""))
         meaning = _text(getattr(item, "meaning", ""))
+        inferred_direction = _desired_direction(" ".join([signal, meaning, direction]))
+        concrete_values = _extract_concrete_monitoring_values(" ".join([signal, direction, window, meaning]))
         rows.append(
             MonitoringTemplateRow(
                 metric_signal=_clean_placeholder(signal, OPERATOR_TO_DEFINE),
                 decision_or_hypothesis="Canary signal",
                 cadence=_clean_placeholder(window, OPERATOR_TO_DEFINE),
                 source_evidence_source=EVIDENCE_SOURCE_UNAVAILABLE,
-                target_good_sign=_clean_placeholder(meaning or f"Signal direction: {direction}", VALIDATION_REQUIRED),
-                warning_sign="No movement or movement against expected direction.",
-                stop_change_threshold=THRESHOLD_NOT_CONFIRMED,
+                target_good_sign=_clean_placeholder(
+                    _canary_target_text(signal=signal, direction=inferred_direction, meaning=meaning),
+                    VALIDATION_REQUIRED,
+                ),
+                warning_sign=_movement_against_direction_text(inferred_direction)
+                if inferred_direction
+                else "No movement or movement against expected direction.",
+                stop_change_threshold=_canary_threshold_text(window, inferred_direction, concrete_values),
                 action_if_triggered="Investigate canary and compare against Decision Gates.",
                 evidence_maturity_validation_status=status,
                 notes="Canary is an early-warning control; threshold requires operator confirmation.",
@@ -284,13 +301,21 @@ def _strategy_metric_rows(state: Any, status: str) -> list[MonitoringTemplateRow
     rows: list[MonitoringTemplateRow] = []
     review_date = _text(getattr(strategy, "review_date", ""))
     for index, metric in enumerate(getattr(strategy, "success_metrics", []) or []):
+        metric_text = _text(metric)
+        direction = _desired_direction(metric_text)
+        concrete_values = _extract_concrete_monitoring_values(" ".join([metric_text, review_date]))
         rows.append(
             MonitoringTemplateRow(
-                metric_signal=_clean_placeholder(metric, OPERATOR_TO_DEFINE),
+                metric_signal=_clean_placeholder(metric_text, OPERATOR_TO_DEFINE),
                 decision_or_hypothesis="Strategy success metric",
                 cadence=_clean_placeholder(review_date, OPERATOR_TO_DEFINE),
                 source_evidence_source="Strategy success metrics",
-                stop_change_threshold=THRESHOLD_NOT_CONFIRMED,
+                target_good_sign=_expected_trend_text(direction) if direction else VALIDATION_REQUIRED,
+                warning_sign=_movement_against_direction_text(direction) if direction else VALIDATION_REQUIRED,
+                stop_change_threshold=_concrete_threshold_or_placeholder(
+                    concrete_values,
+                    THRESHOLD_NOT_CONFIRMED,
+                ),
                 action_if_triggered="Review at the next decision checkpoint.",
                 evidence_maturity_validation_status=status,
                 notes="Success metric requires validation before it is treated as an approved gate.",
@@ -319,18 +344,26 @@ def _needs_monitoring_rows(state: Any, status: str) -> list[MonitoringTemplateRo
         hypothesis_id = _text(getattr(verdict, "id", ""))
         hypothesis = hypotheses.get(hypothesis_id)
         metric = _text(getattr(hypothesis, "signal", "")) or _text(getattr(verdict, "monitoring_plan", "")) or OPERATOR_TO_DEFINE
+        confirm = _text(getattr(hypothesis, "confirm", ""))
+        reject = _text(getattr(hypothesis, "reject", ""))
+        monitoring_plan = _text(getattr(verdict, "monitoring_plan", ""))
+        direction = _desired_direction(" ".join([metric, confirm, reject, monitoring_plan]))
+        concrete_values = _extract_concrete_monitoring_values(" ".join([metric, confirm, reject, monitoring_plan]))
         evidence_ids = tuple(_text(item) for item in getattr(hypothesis, "evidence_ids", []) or [] if _text(item))
         rows.append(
             MonitoringTemplateRow(
                 metric_signal=metric,
                 decision_or_hypothesis=hypothesis_id or "Hypothesis needing monitoring",
                 source_evidence_source="Strategy verdict",
-                target_good_sign=_clean_placeholder(getattr(hypothesis, "confirm", ""), VALIDATION_REQUIRED),
-                warning_sign=_clean_placeholder(getattr(hypothesis, "reject", ""), VALIDATION_REQUIRED),
-                stop_change_threshold=THRESHOLD_NOT_CONFIRMED,
+                target_good_sign=_clean_placeholder(confirm, _expected_trend_text(direction) if direction else VALIDATION_REQUIRED),
+                warning_sign=_clean_placeholder(reject, _movement_against_direction_text(direction) if direction else VALIDATION_REQUIRED),
+                stop_change_threshold=_concrete_threshold_or_placeholder(
+                    _extract_concrete_monitoring_values(reject) or concrete_values,
+                    THRESHOLD_NOT_CONFIRMED,
+                ),
                 action_if_triggered="Validate before changing the recommendation.",
                 evidence_maturity_validation_status=status,
-                notes=_clean_placeholder(getattr(verdict, "monitoring_plan", ""), "Hypothesis requires monitoring."),
+                notes=_clean_placeholder(monitoring_plan, "Hypothesis requires monitoring."),
                 row_source="strategy_preliminary_verdict",
                 hypothesis_ids=(hypothesis_id,) if hypothesis_id else (),
                 evidence_ids=evidence_ids,
@@ -368,7 +401,203 @@ def _render_row(row: MonitoringTemplateRow, headers: tuple[str, ...], *, audienc
         "Internal source refs": ", ".join(row.internal_source_refs),
         "Diagnostic notes": row.diagnostic_notes,
     }
+    if audience == "client":
+        values = _client_enhance_row_values(values, row)
     return [_spreadsheet_safe_cell(values.get(header, ""), audience=audience, header=header) for header in headers]
+
+
+def _client_enhance_row_values(values: dict[str, str], row: MonitoringTemplateRow) -> dict[str, str]:
+    enhanced = dict(values)
+    if row.row_source == "template_placeholder":
+        return enhanced
+
+    context = " ".join(
+        _text(item)
+        for item in (
+            row.metric_signal,
+            row.decision_or_hypothesis,
+            row.owner_role,
+            row.cadence,
+            row.source_evidence_source,
+            row.target_good_sign,
+            row.warning_sign,
+            row.stop_change_threshold,
+            row.action_if_triggered,
+            row.notes,
+        )
+    )
+    concrete_values = _extract_concrete_monitoring_values(context)
+    direction = _desired_direction(context)
+
+    enhanced["Metric / signal"] = _client_hypothesis_label(enhanced["Metric / signal"], row)
+    enhanced["Decision or hypothesis validated"] = _client_hypothesis_label(
+        enhanced["Decision or hypothesis validated"],
+        row,
+    )
+
+    if not concrete_values and not direction:
+        return enhanced
+
+    if concrete_values and enhanced["Owner / role"] == OPERATOR_TO_DEFINE:
+        enhanced["Owner / role"] = "Decision owner to confirm"
+    if concrete_values and enhanced["Cadence"] == OPERATOR_TO_DEFINE:
+        enhanced["Cadence"] = _first_cadence_value(concrete_values) or "Monitoring cadence to confirm"
+    if concrete_values and enhanced["Source / evidence source"] == EVIDENCE_SOURCE_UNAVAILABLE:
+        enhanced["Source / evidence source"] = "Monitoring source to confirm"
+    if enhanced["Target / good sign"] == VALIDATION_REQUIRED:
+        enhanced["Target / good sign"] = _expected_trend_text(direction) if direction else "Review against Decision Gates"
+    if enhanced["Warning sign"] == VALIDATION_REQUIRED:
+        enhanced["Warning sign"] = (
+            _movement_against_direction_text(direction)
+            if direction
+            else "Movement against the expected Decision Gate trend"
+        )
+    if concrete_values and enhanced["Stop/change-course threshold"] == THRESHOLD_NOT_CONFIRMED:
+        enhanced["Stop/change-course threshold"] = _concrete_threshold_or_placeholder(concrete_values, "")
+    if direction and "Expected trend under remediation" not in enhanced["Notes"]:
+        trend = _expected_trend_text(direction)
+        enhanced["Notes"] = "; ".join(part for part in (enhanced["Notes"], trend) if part)
+    return enhanced
+
+
+def _client_hypothesis_label(value: str, row: MonitoringTemplateRow) -> str:
+    text = _text(value)
+    if not row.hypothesis_ids and not re.search(r"\bH\d+\b", text, re.I):
+        return text
+    raw_ids = tuple(row.hypothesis_ids) or tuple(_extract_ids(text, prefix="H"))
+    if not raw_ids:
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        return f"hypothesis {match.group(1)}"
+
+    readable = re.sub(r"\bH(\d+)\b", repl, text, flags=re.I)
+    if re.fullmatch(r"hypothesis\s+\d+", readable, re.I):
+        label_source = _text(row.metric_signal)
+        label_source = re.sub(r"\bH\d+\b", "", label_source, flags=re.I).strip(" -:;")
+        if label_source and _normalize_label(label_source) != _normalize_label(text):
+            readable = f"{readable} - {_short_hypothesis_topic(label_source)}"
+    return readable
+
+
+def _short_hypothesis_topic(value: str) -> str:
+    text = _text(value)
+    text = re.sub(r"\b(?:increase|decrease|improve|reduce|watch|track|monitor|validate)\b", "", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" -:;")
+    return text[:80].strip() or "monitoring signal"
+
+
+def _desired_direction(value: str) -> str:
+    text = _normalize_label(value)
+    if not text:
+        return ""
+    inverse_terms = (
+        "time to value",
+        "time value",
+        "lag",
+        "latency",
+        "delay",
+        "cycle time",
+        "response time",
+        "resolution time",
+        "churn",
+        "failure rate",
+        "error rate",
+        "drop off",
+        "dropoff",
+        "cost",
+        "cac",
+        "risk",
+        "defect",
+        "friction",
+    )
+    positive_terms = (
+        "activation",
+        "conversion",
+        "qualified",
+        "retention",
+        "revenue",
+        "arr",
+        "pipeline",
+        "win rate",
+        "adoption",
+        "completion",
+        "satisfaction",
+        "quality",
+        "coverage",
+    )
+    if any(term in text for term in inverse_terms):
+        return "down"
+    if any(term in text for term in positive_terms):
+        return "up"
+    if re.search(r"\b(?:down|decrease|reduce|lower|below|under|fewer|less)\b", text, re.I):
+        return "down"
+    if re.search(r"\b(?:up|increase|improve|raise|above|over|more|higher)\b", text, re.I):
+        return "up"
+    return ""
+
+
+def _expected_trend_text(direction: str) -> str:
+    if direction in {"up", "down"}:
+        return f"Expected trend under remediation: {direction}"
+    return "Expected trend should be reviewed against the Decision Gates."
+
+
+def _movement_against_direction_text(direction: str) -> str:
+    if direction == "up":
+        return "Flat or down against expected remediation trend"
+    if direction == "down":
+        return "Flat or up against expected remediation trend"
+    return "Movement against the expected Decision Gate trend"
+
+
+def _extract_concrete_monitoring_values(value: str) -> tuple[str, ...]:
+    text = _text(value)
+    patterns = [
+        r"\bwithin\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
+        r"\bDay\s+\d+\b",
+        r"\b\d+(?:\.\d+)?[- ]day\s+rolling\b",
+        r"\b\d+(?:\.\d+)?[- ]week\s+rolling\b",
+        r"\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
+        r"\b\d+(?:\.\d+)?\s*pp\b",
+        r"\b\d+(?:\.\d+)?\s*%\b",
+    ]
+    values: list[str] = []
+    for pattern in patterns:
+        values.extend(match.group(0) for match in re.finditer(pattern, text, re.I))
+    return tuple(_unique(values))
+
+
+def _concrete_threshold_or_placeholder(values: tuple[str, ...], fallback: str) -> str:
+    if values:
+        return "; ".join(values[:3])
+    return fallback
+
+
+def _first_cadence_value(values: tuple[str, ...]) -> str:
+    for value in values:
+        if re.search(r"\b(?:rolling|Day\s+\d+|within\s+\d)", value, re.I):
+            return value
+    return ""
+
+
+def _canary_target_text(*, signal: str, direction: str, meaning: str) -> str:
+    if meaning and direction:
+        return f"{meaning}; {_expected_trend_text(direction)}"
+    if meaning:
+        return meaning
+    if direction:
+        return _expected_trend_text(direction)
+    if signal:
+        return "Expected trend should be reviewed against the Decision Gates."
+    return ""
+
+
+def _canary_threshold_text(window: str, direction: str, concrete_values: tuple[str, ...]) -> str:
+    if window:
+        trend = _movement_against_direction_text(direction) if direction else "Movement against expected trend"
+        return f"{trend} over {window}"
+    return _concrete_threshold_or_placeholder(concrete_values, THRESHOLD_NOT_CONFIRMED)
 
 
 def _spreadsheet_safe_cell(value: Any, *, audience: str, header: str) -> str:
