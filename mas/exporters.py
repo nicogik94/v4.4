@@ -419,7 +419,7 @@ def build_client_dossier_markdown(
     sections = _extract_report_sections(state.report or "")
     lines = [
         "# Client Dossier",
-        _project_metadata_line(state),
+        _client_project_metadata_line(state),
     ]
     warning = _report_freshness_warning(state, current_code_version=current_code_version)
     if warning:
@@ -607,10 +607,16 @@ def _finalize_export_markdown(
     value = _apply_pricing_placeholder_cleanup(str(markdown or ""), state)
     value = normalize_export_text(value, audience=mode)
     if mode == "client":
+        value = _redact_unsafe_string(value)
+        value = _remove_empty_client_citation_marker_columns(value)
+        value = suppress_client_raw_evidence_ids(value)
         value = _normalize_client_evidence_count_language(value, state, quality)
         value = _label_client_bf_trace_language(value)
         value = _soften_unvalidated_confirmed_language(value, state, quality)
         value = normalize_export_text(value, audience=mode)
+        value = _remove_empty_client_citation_marker_columns(value)
+        value = suppress_client_raw_evidence_ids(value)
+        value = _ensure_single_client_source_locator_note(value, quality)
     return value
 
 
@@ -621,7 +627,7 @@ def _apply_pricing_placeholder_cleanup(markdown: str, state: ProjectState) -> st
         else "Starter tier based on the supplied pricing notes."
     )
     return re.sub(
-        r"\bStarter tier at provisional planning estimate\b",
+        r"\bStarter tier at (?:provisional planning estimate|planning estimate to validate in Sprint 0)\b",
         replacement,
         str(markdown or ""),
         flags=re.I,
@@ -765,7 +771,6 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
             in_code_block
             or _looks_like_json_line(stripped)
             or stripped.startswith(">")
-            or stripped.startswith("|")
             or _line_has_quoted_confirmed(line)
             or _line_looks_like_operator_label(line)
             or _line_looks_like_future_confirmation_gate(line)
@@ -794,6 +799,36 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
         value = re.sub(
             r"\bconfirmed (driver|cause|bottleneck|friction|finding|growth lever|lever)\b",
             lambda match: f"{support_phrase} {match.group(1)}",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanically explained ([^.|]+)",
+            lambda match: f"best-supported working diagnosis for {match.group(1).strip()} pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanically explained\b",
+            "is a best-supported working diagnosis pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanically explains\b",
+            "is the best-supported working diagnosis for",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanical explanation\b",
+            "working diagnosis pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bconfirmed root cause\b",
+            "working diagnosis pending validation",
             value,
             flags=re.I,
         )
@@ -961,10 +996,10 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
             ]),
         ])
     if client and not quality.has_concrete_locators:
-        blocks.extend(["## Citation locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
-    if quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state)):
+        blocks.extend(["## Source locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
+    if not client and (quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state))):
         blocks.extend(["## Telemetry privacy note", TELEMETRY_PRIVACY_CAVEAT])
-    if _risk_classification_may_understate_generated_content(state):
+    if not client and _risk_classification_may_understate_generated_content(state):
         blocks.extend(["## Risk classification note", RISK_CLASSIFICATION_WARNING])
     warnings = threshold_consistency_warnings(state, quality)
     if client and warnings:
@@ -1913,8 +1948,6 @@ def _safe_report_markdown(state: ProjectState) -> str:
             quality.provisional_clarification_next_action,
         ])
         markdown = "\n\n".join([provisional_warning, markdown.strip()])
-    if _risk_classification_may_understate_generated_content(state) and RISK_CLASSIFICATION_WARNING not in markdown:
-        markdown = "\n\n".join([RISK_CLASSIFICATION_WARNING, markdown])
     if _requires_sparse_growth_decision_package(quality):
         markdown = _with_sparse_growth_decision_package(markdown)
     if requires_productization_wave_matrix(state, quality) and "Wave 2 Graduation Matrix" not in markdown:
@@ -2076,6 +2109,30 @@ def _collapse_markdown_blank_lines(value: str) -> str:
     return "\n".join(collapsed).strip()
 
 
+def _ensure_single_client_source_locator_note(markdown: str, quality) -> str:
+    source = str(markdown or "")
+    note_pattern = re.compile(
+        r"(?:\n{0,2}#{1,6}\s+(?:Citation|Source)\s+locator\s+note\s*\n+)?"
+        r"No concrete (?:citation|source) locators were available for this project; "
+        r"evidence should be validated in Sprint 0\.",
+        re.I,
+    )
+    cleaned = note_pattern.sub("\n", source)
+    cleaned = _collapse_markdown_blank_lines(cleaned)
+    if getattr(quality, "has_concrete_locators", False):
+        return cleaned
+
+    note_block = f"## Source locator note\n\n{NO_CONCRETE_LOCATORS_CLIENT_NOTE}"
+    lines = cleaned.splitlines()
+    insert_at = 0
+    if lines and lines[0].startswith("# "):
+        insert_at = 1
+        if len(lines) > 1 and lines[1].strip() and not lines[1].startswith("#"):
+            insert_at = 2
+    lines[insert_at:insert_at] = ["", note_block, ""]
+    return _collapse_markdown_blank_lines("\n".join(lines))
+
+
 def _client_safe_text(text: str, quality) -> str:
     value = client_simplify_text(text, sparse_evidence=quality.sparse_evidence or quality.evidence_warning)
     if quality.decision_domain == "growth":
@@ -2213,6 +2270,7 @@ def _is_empty_client_citation_cell(value: str) -> bool:
         "no concrete locator registered",
         "no concrete citation locator registered",
         "no concrete citation locators available",
+        "evidence source unavailable",
         "no locator",
         "no locators",
     } or bool(re.fullmatch(r"[-]+", text))
@@ -2235,6 +2293,17 @@ def _project_metadata_line(state: ProjectState) -> str:
             f"Project name: {_redact_unsafe_string(state.project_name or '')}",
             f"Generated: {_utc_now()}",
             f"Risk: {_redact_unsafe_string(state.risk_classification or '')}",
+        ]
+        if part.strip()
+    )
+
+
+def _client_project_metadata_line(state: ProjectState) -> str:
+    return " | ".join(
+        part
+        for part in [
+            f"Project name: {_redact_unsafe_string(state.project_name or '')}",
+            f"Generated: {_utc_now()}",
         ]
         if part.strip()
     )

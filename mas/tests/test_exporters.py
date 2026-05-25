@@ -538,13 +538,16 @@ Proceed only after validation.
 
 # Why This Is Recommended
 knowledge_alpha suggests the pilot is promising.
+evidence_alpha and source_ref=upload:file-9:source.md#chunk=7 mechanically explained the slowdown.
 source_ref=upload:file-1:metrics.md#chunk=2 provides evidence interpretation context.
 target threshold <provisional threshold.
+secret=supersecret C:\Users\operator\project.txt
 
 # Evidence Used
-| Evidence | What it suggests | Source |
+| Evidence | What it suggests | Citation |
 |---|---|---|
-| knowledge_table | knowledge_cell confirms traction | upload:file-2:gtm.md#page=1 |
+| knowledge_table | knowledge_cell confirms traction | No citation available |
+| evidence_table | mechanically explained demand | citation unavailable |
 
 # Monitoring and Kill Criteria
 Stop if knowledge_monitor deteriorates.
@@ -558,22 +561,112 @@ Stop if knowledge_monitor deteriorates.
             "knowledge_table",
             "knowledge_cell",
             "knowledge_monitor",
+            "evidence_alpha",
+            "evidence_table",
             "source_ref=",
             "upload:file",
             r"C:\Users",
+            "supersecret",
             "BF=12.0",
             "RPN 90",
             "owner_decision_authority",
             "variable_coverage",
             "provisional threshold",
+            "operator-defined",
+            "No citation available",
+            "Evidence source unavailable",
+            "Citation |",
             "three supplied documents",
             "confirmed causal hypothesis",
             "confirms traction",
+            "mechanically explained",
             "provides evidence interpretation context",
         ):
             self.assertNotIn(forbidden, markdown)
+        self.assertEqual(markdown.count("No concrete source locators were available for this project"), 1)
         self.assertIn("project evidence", markdown)
+        self.assertIn("working diagnosis", markdown)
         self.assertIn("Evidence maturity: Hypothesis-only", markdown)
+
+    def test_client_metadata_and_report_omit_internal_ids_and_operator_notes(self):
+        state = make_sparse_growth_state("d07ade65-f9d3-462d-b7c0-23bf6c505a6e")
+        state.project_name = "Mini Test — Activation Bottleneck Decision"
+        state.risk_classification = "minimal_risk"
+        state.report = (
+            "# Executive Summary\n"
+            "Recommend dashboard telemetry, product analytics, legal review, circuit breaker, and regeneration-event logging.\n"
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+
+        for markdown in (client_markdown, report_markdown):
+            self.assertNotIn("Telemetry privacy note", markdown)
+            self.assertNotIn("Risk classification may understate", markdown)
+            self.assertNotIn("minimal_risk", markdown)
+            self.assertNotRegex(
+                markdown,
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            )
+        self.assertIn("Project name: Mini Test", client_markdown)
+        self.assertIn("Generated:", client_markdown)
+        self.assertNotIn("Project ID:", client_markdown)
+        self.assertNotIn("Risk:", client_markdown)
+
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+        self.assertNotIn("Telemetry privacy note", report_text)
+        self.assertNotIn("Risk classification may understate", report_text)
+        self.assertNotIn("minimal_risk", report_text)
+        self.assertNotRegex(
+            report_text,
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        )
+
+    def test_client_exports_remove_citation_noise_but_preserve_concrete_timing_values(self):
+        state = ProjectState(
+            project_id="client-citation-timing",
+            project_name="Client citation timing",
+            brief="Decide whether to continue an activation pilot with sparse evidence.",
+            report="""# Executive Summary
+Use a legal-review SLA of 24 hours or less, a 72 hours escalation window, and a 48 hours support follow-up.
+
+# Evidence Used
+| Evidence | What it suggests | Citation |
+|---|---|---|
+| Activation note | Keep response inside 72 hours. | No citation available |
+| Cadence note | Compare 7-day rolling and 14-day rolling activation by Day 7 and Day 10. | Evidence source unavailable |
+
+# Monitoring and Kill Criteria
+Stop if activation falls below provisional threshold of 7-day rolling baseline.
+Resolve blockers within 14 days.
+""",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+
+        for markdown in (client_markdown, report_markdown):
+            for concrete in (
+                "24 hours or less",
+                "72 hours",
+                "48 hours",
+                "7-day rolling",
+                "14-day rolling",
+                "Day 7",
+                "Day 10",
+                "within 14 days",
+            ):
+                self.assertIn(concrete, markdown)
+            self.assertNotIn("No citation available", markdown)
+            self.assertNotIn("Evidence source unavailable", markdown)
+            self.assertNotIn("Citation |", markdown)
+            self.assertNotRegex(markdown, r"(?mi)^\s*Citation\s*:?\s*$")
+            self.assertNotIn("planning estimate to validate in Sprint 0", markdown)
+            self.assertNotIn("threshold to validate in Sprint 0", markdown)
+            self.assertNotIn("operator-defined", markdown)
+            self.assertNotIn("provisional threshold", markdown)
+        self.assertEqual(client_markdown.count("No concrete source locators were available for this project"), 1)
 
     def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
         state = make_export_state("operator-monitor-note")
@@ -834,7 +927,7 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
             "schema overlap score",
             "forecast accuracy check",
             "calibration check",
-            "No concrete citation locators were available for this project",
+            "No concrete source locators were available for this project",
         ):
             self.assertIn(expected, client_markdown)
         self.assertIn("FMEA", operator_markdown)
@@ -959,7 +1052,8 @@ The proposed planning gate is more than 20% activation.
         self.assertIn("structural prior", markdown)
         self.assertNotIn("model-generated prior", markdown)
         self.assertIn("high provisional failure risk", markdown)
-        self.assertIn("above the operator-defined threshold", markdown)
+        self.assertIn("above the threshold to validate in Sprint 0", markdown)
+        self.assertNotIn("operator-defined", markdown)
         self.assertNotIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
 
@@ -1487,18 +1581,18 @@ Starter tier at provisional planning estimate.
         self.assertNotIn("[Evidence: knowledge_z", markdown)
         self.assertIn("Support ticket volume supports an onboarding problem.", markdown)
         self.assertIn("structural BF estimate=12.0 (operator trace, not measured posterior)", markdown)
-        self.assertIn("target threshold below the operator-defined threshold.", markdown)
-        self.assertIn("exceeds the crux threshold by the operator-defined margin.", markdown)
-        self.assertIn("rises above the operator-defined share threshold of new ARR", markdown)
-        self.assertIn("target threshold: above the operator-defined threshold.", markdown)
-        self.assertIn("target threshold: below the operator-defined threshold.", markdown)
-        self.assertIn("crosses the operator-defined threshold.", markdown)
-        self.assertIn("operator-defined planning estimate.", markdown)
+        self.assertIn("target threshold below the threshold to validate in Sprint 0.", markdown)
+        self.assertIn("exceeds the crux threshold by the margin to validate in Sprint 0.", markdown)
+        self.assertIn("rises above the new ARR share threshold to validate in Sprint 0", markdown)
+        self.assertIn("target threshold: above the threshold to validate in Sprint 0.", markdown)
+        self.assertIn("target threshold: below the threshold to validate in Sprint 0.", markdown)
+        self.assertIn("crosses the threshold to validate in Sprint 0.", markdown)
         self.assertIn("If Sprint 0 data confirms that activation exceeds the gate, proceed.", markdown)
         self.assertNotIn("domain complexity confirmed", markdown)
         self.assertNotIn("provisional threshold", markdown)
         self.assertNotIn("provisional threshold threshold", markdown)
         self.assertNotIn("provisional planning estimateK", markdown)
+        self.assertNotIn("operator-defined", markdown)
         self.assertIn('"confirmed by customer interview"', markdown)
         self.assertIn('"confirm that setup is difficult"', markdown)
 
@@ -1593,8 +1687,10 @@ Use the supplied evidence for planning.
         limited = make_sparse_growth_state("risk-limited")
         limited.risk_classification = "limited_risk"
 
-        self.assertIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(minimal))
+        self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(minimal))
+        self.assertIn(RISK_CLASSIFICATION_WARNING, build_operator_dossier_markdown(minimal))
         self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(limited))
+        self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_operator_dossier_markdown(limited))
 
     def test_client_dossier_omits_empty_citation_marker_column_without_locators(self):
         state = ProjectState(
@@ -1615,9 +1711,10 @@ Run Sprint 0 first.
         client_markdown = build_client_dossier_markdown(state)
         operator_markdown = build_operator_dossier_markdown(state)
 
-        self.assertIn("No concrete citation locators were available for this project", client_markdown)
+        self.assertEqual(client_markdown.count("No concrete source locators were available for this project"), 1)
         self.assertIn("| Evidence | What it suggests |", client_markdown)
         self.assertNotIn("Citation Marker", client_markdown)
+        self.assertNotIn("No citation available", client_markdown)
         self.assertNotIn("citation unavailable", client_markdown)
         self.assertIn("Citation Marker", operator_markdown)
         self.assertIn("citation unavailable", operator_markdown)
@@ -1667,9 +1764,12 @@ Generated text says editorial evidence and CMS/schema capability.
         client_markdown = build_client_dossier_markdown(state)
         operator_markdown = build_operator_dossier_markdown(state)
 
-        for markdown in (client_markdown, operator_markdown):
-            self.assertIn("Log event metadata by default.", markdown)
-            self.assertIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", markdown)
+        self.assertNotIn("Telemetry privacy note", client_markdown)
+        self.assertNotIn("Log event metadata by default.", client_markdown)
+        self.assertNotIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", client_markdown)
+        self.assertIn("Telemetry privacy note", operator_markdown)
+        self.assertIn("Log event metadata by default.", operator_markdown)
+        self.assertIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", operator_markdown)
         self.assertNotIn("raw_provider_payload", client_markdown)
         self.assertNotIn("raw_prompt", client_markdown)
         self.assertNotIn("sk-test-secret", client_markdown)
@@ -1813,6 +1913,9 @@ Stop if >2 critical assumptions remain unknown.
 
         build_client_dossier_markdown(state)
         build_operator_dossier_markdown(state)
+        export_project_profile_bytes(state, "report", "docx")
+        export_project_profile_bytes(state, "client_dossier", "docx")
+        export_project_profile_bytes(state, "operator_dossier", "docx")
         export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
         export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
         after_payload = build_machine_archive_payload(state)

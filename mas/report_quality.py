@@ -127,7 +127,7 @@ CLIENT_BF_CONFIDENCE_CAVEAT = (
 )
 
 NO_CONCRETE_LOCATORS_CLIENT_NOTE = (
-    "No concrete citation locators were available for this project; evidence "
+    "No concrete source locators were available for this project; evidence "
     "should be validated in Sprint 0."
 )
 
@@ -816,7 +816,10 @@ def normalize_export_text(text: str, audience: str = "client") -> str:
             continue
         output.append(_normalize_export_line(line, mode))
         index += 1
-    return "\n".join(output)
+    value = "\n".join(output)
+    if mode == "client":
+        value = _remove_client_citation_placeholder_noise(value)
+    return value
 
 
 def suppress_client_raw_evidence_ids(text: str) -> str:
@@ -862,6 +865,12 @@ def _suppress_client_raw_evidence_line(line: str) -> str:
     value = re.sub(r"\bupload:[^\s|,)>\]]+", "uploaded project document", value, flags=re.I)
     value = re.sub(r"\bstorage_ref\s*[:=]\s*[^\s|,)>\]]+", "evidence source unavailable", value, flags=re.I)
     value = re.sub(r"\bsource_ref\s*[:=]\s*[^\s|,)>\]]+", "evidence source unavailable", value, flags=re.I)
+    value = re.sub(r"(?i)(api[_-]?key|token|password|secret|credential)\s*[:=]\s*[^,\s|;]+", r"\1=[REDACTED]", value)
+    value = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", value)
+    value = re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}\b", "[REDACTED]", value)
+    value = re.sub(r"(?i)\b[A-Z]:[\\/][^\s|]+", "local path redacted", value)
+    value = re.sub(r"\\\\[A-Za-z0-9_.-]+\\[^\s|]+", "local path redacted", value)
+    value = re.sub(r"file://[^\s|]+", "local path redacted", value, flags=re.I)
     value = re.sub(
         r"\b(?:evidence source unavailable|uploaded project document|project evidence)"
         r"(?:\s+(?:uploaded project document|project document|source))*\s+"
@@ -1644,7 +1653,7 @@ def _simplify_sparse_precision(value: str) -> str:
             simplified,
         )
         simplified = re.sub(
-            r"\b\d+(?:\.\d+)?\s*(?:person-hours?|hours?)\b",
+            r"\b\d+(?:\.\d+)?\s*person[- ]hours?\b",
             "provisional effort estimate",
             simplified,
             flags=re.I,
@@ -1691,6 +1700,8 @@ def _cleanup_client_replacement_artifacts(value: str) -> str:
 
 
 def _normalize_export_line(line: str, audience: str) -> str:
+    if _line_has_protected_export_reference(line) or re.search(r"https?://|file://|\b[A-Za-z]:[\\/]|\\\\", str(line or "")):
+        return str(line or "")
     protected, fragments = _protect_export_fragments(str(line or ""))
     value = _normalize_common_export_text(protected)
     if audience == "client":
@@ -1852,7 +1863,8 @@ def _normalize_client_export_text(value: str) -> str:
         (r"\bevidence quality diagnostic\b", "evidence quality signal"),
         (r"\bstructured risk priority\b", "risk priority score"),
         (r"\boperator-confirmed threshold required\b", "provisional threshold"),
-        (r"\bcitation unavailable\b", "No citation available"),
+        (r"\bcitation unavailable\b", ""),
+        (r"\bNo citation available\b", ""),
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.I)
@@ -1860,7 +1872,149 @@ def _normalize_client_export_text(value: str) -> str:
     text = re.sub(r"\bstructural prior\.\s*\d+\b", "structural prior", text, flags=re.I)
     text = re.sub(r"\brisk priority score\s+\d+(?:\.\d+)?\b", "risk priority score", text, flags=re.I)
     text = _normalize_client_legal_review_effort_placeholder(text)
+    text = _normalize_client_operator_placeholder_language(text)
     return text
+
+
+def _normalize_client_operator_placeholder_language(value: str) -> str:
+    text = str(value or "")
+    if _line_has_protected_export_reference(text) or re.search(r"https?://|file://|\b[A-Za-z]:[\\/]|\\\\", text):
+        return text
+    if _has_concrete_client_timing_value(text):
+        return _strip_client_operator_placeholder_labels(text)
+    replacements: list[tuple[str, str]] = [
+        (
+            r"\boperator-defined effort estimate\s+or\s+less\b",
+            "planning estimate to validate in Sprint 0",
+        ),
+        (r"\boperator-defined effort estimate\b", "planning estimate to validate in Sprint 0"),
+        (r"\boperator-defined planning estimate\b", "planning estimate to validate in Sprint 0"),
+        (
+            r"\boperator-defined share threshold of ([^.;,\n|]+)",
+            r"\1 share threshold to validate in Sprint 0",
+        ),
+        (
+            r"\boperator-defined threshold for ([^.;,\n|]+)",
+            r"threshold for \1 to validate in Sprint 0",
+        ),
+        (
+            r"\boperator-defined threshold week over week\b",
+            "week-over-week threshold to validate in Sprint 0",
+        ),
+        (r"\boperator-defined margin\b", "margin to validate in Sprint 0"),
+        (r"\boperator-defined threshold\b", "threshold to validate in Sprint 0"),
+        (r"\boperator-defined\b", "to validate in Sprint 0"),
+        (r"\bprovisional threshold\b", "threshold to validate in Sprint 0"),
+        (r"\bprovisional planning estimate\b", "planning estimate to validate in Sprint 0"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text
+
+
+def _has_concrete_client_timing_value(value: str) -> bool:
+    text = str(value or "")
+    patterns = [
+        r"\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
+        r"\b\d+(?:\.\d+)?[- ](?:hour|day|week|month)\b",
+        r"\b\d+(?:\.\d+)?[- ]day\s+rolling\b",
+        r"\bday\s+\d+\b",
+        r"\bwithin\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
+    ]
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def _strip_client_operator_placeholder_labels(value: str) -> str:
+    text = str(value or "")
+    replacements: list[tuple[str, str]] = [
+        (r"\btarget threshold:\s*>\s*provisional threshold\b", "target threshold: above the threshold"),
+        (r"\btarget threshold:\s*<\s*provisional threshold\b", "target threshold: below the threshold"),
+        (r"\btarget threshold\s*<\s*provisional threshold\b", "target threshold below the threshold"),
+        (r"\bexceeds crux threshold by provisional threshold\b", "exceeds the crux threshold by the margin"),
+        (r"\bless than provisional threshold\b", "below the threshold"),
+        (r"\bmore than provisional threshold\b", "above the threshold"),
+        (r"\boperator-defined share threshold of ([^.;,\n|]+)", r"\1 share threshold"),
+        (r"\boperator-defined threshold for ([^.;,\n|]+)", r"threshold for \1"),
+        (r"\boperator-defined threshold week over week\b", "week-over-week threshold"),
+        (r"\boperator-defined effort estimate\s+or\s+less\b", "planning estimate"),
+        (r"\boperator-defined effort estimate\b", "planning estimate"),
+        (r"\boperator-defined planning estimate\b", "planning estimate"),
+        (r"\boperator-defined margin\b", "margin"),
+        (r"\boperator-defined threshold\b", "threshold"),
+        (r"\bprovisional threshold\b", "threshold"),
+        (r"\bprovisional planning estimate\b", "planning estimate"),
+        (r"\boperator-defined\b", ""),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([,.;:])", r"\1", text)
+    return text.strip()
+
+
+def _remove_client_citation_placeholder_noise(value: str) -> str:
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(value or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if not stripped:
+            lines.append(line)
+            continue
+        if in_code_block or _looks_like_json_line(stripped) or _line_has_protected_export_reference(line):
+            lines.append(line)
+            continue
+        cleaned = _strip_client_citation_placeholder_text(line)
+        if not cleaned.strip():
+            continue
+        if _is_client_citation_placeholder_line(cleaned):
+            continue
+        lines.append(cleaned)
+    return "\n".join(lines)
+
+
+def _strip_client_citation_placeholder_text(value: str) -> str:
+    text = str(value or "")
+    if not re.search(
+        r"\b(?:Citation|No citation available|citation unavailable|Evidence source unavailable)\b",
+        text,
+        re.I,
+    ):
+        return text
+    text = re.sub(r"\b(?:No citation available|citation unavailable|Evidence source unavailable)\b\.?", "", text, flags=re.I)
+    text = re.sub(r"\bCitation\s*:\s*(?=$|[|])", "", text, flags=re.I)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([|,.;:])", r"\1", text)
+    return text.strip()
+
+
+def _is_client_citation_placeholder_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return False
+    normalized = _normalize_heading(stripped)
+    if normalized in {
+        "citation",
+        "citations",
+        "citation marker",
+        "citation markers",
+        "citation locator",
+        "citation locators",
+        "source locator",
+        "source locators",
+    }:
+        return True
+    if re.fullmatch(r"citation\s*:?", stripped, re.I):
+        return True
+    if _looks_like_markdown_table_line(stripped):
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        nonempty = [cell for cell in cells if cell]
+        if nonempty and all(_normalize_heading(cell).startswith("citation") for cell in nonempty):
+            return True
+    return False
 
 
 def _normalize_client_legal_review_effort_placeholder(value: str) -> str:

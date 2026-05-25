@@ -709,24 +709,23 @@ Proceed if DQ >55.
 
         normalized = normalize_export_text(text, audience="client")
 
-        self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
-        self.assertIn("above the operator-defined threshold week over week", normalized)
-        self.assertIn("operator-defined effort estimate", normalized)
+        self.assertIn('below the threshold for "very disappointed" to validate in Sprint 0', normalized)
+        self.assertIn("above the week-over-week threshold to validate in Sprint 0", normalized)
+        self.assertIn("planning estimate to validate in Sprint 0", normalized)
         self.assertIn("structural priors", normalized)
         self.assertIn("system blindness,next item", normalized)
         self.assertIn("reference-class priors", normalized)
         self.assertIn("structural priors", normalized)
         self.assertIn("diagnostic scores", normalized)
         self.assertIn("provisional risk estimates", normalized)
-        self.assertIn("target threshold below the operator-defined threshold", normalized)
-        self.assertIn("exceeds the crux threshold by the operator-defined margin", normalized)
-        self.assertIn("above the operator-defined threshold for activation", normalized)
-        self.assertIn("below the operator-defined threshold for retention", normalized)
-        self.assertIn("rises above the operator-defined share threshold of new ARR", normalized)
-        self.assertIn("target threshold: above the operator-defined threshold", normalized)
-        self.assertIn("target threshold: below the operator-defined threshold", normalized)
-        self.assertIn("crosses the operator-defined threshold", normalized)
-        self.assertIn("operator-defined planning estimate", normalized)
+        self.assertIn("target threshold below the threshold to validate in Sprint 0", normalized)
+        self.assertIn("exceeds the crux threshold by the margin to validate in Sprint 0", normalized)
+        self.assertIn("above the threshold for activation to validate in Sprint 0", normalized)
+        self.assertIn("below the threshold for retention to validate in Sprint 0", normalized)
+        self.assertIn("rises above the new ARR share threshold to validate in Sprint 0", normalized)
+        self.assertIn("target threshold: above the threshold to validate in Sprint 0", normalized)
+        self.assertIn("target threshold: below the threshold to validate in Sprint 0", normalized)
+        self.assertIn("crosses the threshold to validate in Sprint 0", normalized)
         for forbidden in (
             "less than provisional threshold",
             "more than provisional threshold",
@@ -741,6 +740,7 @@ Proceed if DQ >55.
             "provisional threshold of new ARR",
             "provisional threshold threshold",
             "provisional planning estimateK",
+            "operator-defined",
         ):
             self.assertNotIn(forbidden, normalized)
 
@@ -758,8 +758,48 @@ Proceed if DQ >55.
 
         self.assertIn("legal-review SLA of 24 hours or less", normalized)
         self.assertIn("legally reviewed approval step of 24 hours or less", normalized)
-        self.assertIn("Planning effort remains operator-defined effort estimate or less", normalized)
+        self.assertIn("Planning effort remains planning estimate to validate in Sprint 0", normalized)
         self.assertIn("| Legal | Require a legal-review SLA of 24 hours or less before launch. |", normalized)
+
+    def test_client_placeholder_cleanup_removes_citation_and_operator_placeholders(self):
+        text = (
+            "Citation: No citation available\n"
+            "No citation available\n"
+            "Citation Evidence source unavailable\n"
+            "Stop if target threshold <provisional threshold.\n"
+            "Use the operator-defined margin for the pilot.\n"
+            "Planning is operator-defined effort estimate or less.\n"
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        self.assertIn("threshold to validate in Sprint 0", normalized)
+        self.assertIn("margin to validate in Sprint 0", normalized)
+        self.assertIn("planning estimate to validate in Sprint 0", normalized)
+        self.assertNotIn("Citation Evidence source unavailable", normalized)
+        self.assertNotIn("Evidence source unavailable", normalized)
+        self.assertNotIn("No citation available", normalized)
+        self.assertNotRegex(normalized, r"(?mi)^\s*Citation\s*:?\s*$")
+        self.assertNotIn("operator-defined", normalized)
+        self.assertNotIn("provisional threshold", normalized)
+
+    def test_client_placeholder_cleanup_preserves_concrete_timing_thresholds(self):
+        text = (
+            "Escalate if cycle time rises above provisional threshold of 72 hours.\n"
+            "Use the operator-defined threshold for 7-day rolling activation.\n"
+            "Require a legal-review SLA of 24 hours or less before claims ship.\n"
+            "Reassess by Day 7, confirm Day 10 onboarding, and resolve within 14 days.\n"
+            "Compare 14-day rolling retention and follow up within 48 hours."
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        for concrete in ("72 hours", "7-day rolling", "24 hours or less", "Day 7", "Day 10", "within 14 days", "14-day rolling", "48 hours"):
+            self.assertIn(concrete, normalized)
+        self.assertNotIn("planning estimate to validate in Sprint 0", normalized)
+        self.assertNotIn("threshold to validate in Sprint 0", normalized)
+        self.assertNotIn("operator-defined", normalized)
+        self.assertNotIn("provisional threshold", normalized)
 
     def test_normalize_export_text_preserves_protected_tables_for_legal_effort_cleanup(self):
         text = (
@@ -834,7 +874,7 @@ funnel and channel-mix review
             normalized,
         )
         self.assertIn("C:\\data\\legal-review\\operator-defined effort estimate or less\\file.txt", normalized)
-        self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
+        self.assertIn('below the threshold for "very disappointed" to validate in Sprint 0', normalized)
 
     def test_suppress_client_raw_evidence_ids_removes_orphan_marker_fragments(self):
         text = (
@@ -843,6 +883,7 @@ funnel and channel-mix review
             "[Evidence: knowledge_y | chunk=2] provides evidence interpretation context indicating the severity of the trend.\n"
             "The analytics audit suggests instrumentation is degraded [Evidence: knowledge_z | chunk=3].\n"
             "Visible prose references knowledge_visible and source_ref=upload:file-1:metrics.md#chunk=2.\n"
+            "Visible prose leaks evidence_visible and secret=supersecret and C:\\Users\\operator\\project.txt.\n"
             "| Visible table | knowledge_table |\n"
             "|---|---|\n"
             "| Metric | knowledge_cell upload:file-2:table.md#chunk=1 |\n"
@@ -865,6 +906,9 @@ funnel and channel-mix review
         self.assertNotIn("knowledge_visible", cleaned)
         self.assertNotIn("knowledge_table", cleaned)
         self.assertNotIn("knowledge_cell", cleaned)
+        self.assertNotIn("evidence_visible", cleaned)
+        self.assertNotIn("supersecret", cleaned)
+        self.assertNotIn("C:\\Users", cleaned)
         self.assertNotIn("source_ref=", cleaned)
         self.assertNotIn("upload:file-1", cleaned)
         self.assertNotIn("upload:file-2", cleaned)
