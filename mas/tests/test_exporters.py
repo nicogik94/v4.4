@@ -1785,13 +1785,39 @@ Use the supplied evidence for planning.
         self.assertNotIn("three supplied documents", markdown)
         self.assertNotIn("upload:file-1:gtm-plan.pdf#page=2", markdown)
 
-    def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):
+    def test_risk_classification_warning_only_for_minimal_risk_with_structured_high_risk(self):
         minimal = make_sparse_growth_state("risk-minimal")
         limited = make_sparse_growth_state("risk-limited")
+        minimal.audit = AuditOutput(
+            fmea=[
+                FMEAItem(
+                    component="Growth spend",
+                    failure_mode="Scaling spend before measurement repair",
+                    rpn=240,
+                    action="Hold scale-up until Sprint 0 evidence exists.",
+                )
+            ]
+        )
         limited.risk_classification = "limited_risk"
+        limited.audit = AuditOutput(
+            fmea=[
+                FMEAItem(
+                    component="Growth spend",
+                    failure_mode="Scaling spend before measurement repair",
+                    rpn=240,
+                    action="Hold scale-up until Sprint 0 evidence exists.",
+                )
+            ]
+        )
 
         self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(minimal))
-        self.assertIn(RISK_CLASSIFICATION_WARNING, build_operator_dossier_markdown(minimal))
+        operator_markdown = build_operator_dossier_markdown(minimal)
+        self.assertIn(RISK_CLASSIFICATION_WARNING, operator_markdown)
+        self.assertIn("Risk classification note", operator_markdown)
+        self.assertIn("High/critical structured risk diagnostics", operator_markdown)
+        self.assertIn("audit.fmea", operator_markdown)
+        self.assertIn("Growth spend", operator_markdown)
+        self.assertIn("critical", operator_markdown)
         self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(limited))
         self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_operator_dossier_markdown(limited))
 

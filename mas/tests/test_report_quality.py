@@ -13,9 +13,11 @@ from report_quality import (  # noqa: E402
     EVIDENCE_CATEGORY_COVERAGE_WARNING,
     PROVISIONAL_CLARIFICATION_CAVEAT,
     PROVISIONAL_CLARIFICATION_NEXT_ACTION,
+    RISK_CLASSIFICATION_WARNING,
     SPARSE_CONFIDENCE_RULE,
     THRESHOLD_CONFLICT_UNKNOWN_WARNING,
     UNSUPPORTED_EVIDENCE_FILES_WARNING,
+    assess_risk_classification_gate,
     assess_report_quality_context,
     client_simplify_text,
     evidence_accounting_projection,
@@ -34,12 +36,19 @@ from clarifications import (  # noqa: E402
     ClarificationStatus,
 )
 from state import (  # noqa: E402
+    AuditOutput,
     ClassifyOutput,
+    DecisionObjects,
     FileParseStatus,
     FileParseSummary,
+    FMEAItem,
+    GauntletOutput,
+    GauntletResult,
     KnowledgeItem,
     KnowledgeLayerState,
     ProjectState,
+    Risk,
+    STPAItem,
     StrategyOutput,
     UploadedFileManifest,
 )
@@ -110,6 +119,113 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertIn("Moderate confidence in the need for Sprint 0 evidence collection", SPARSE_CONFIDENCE_RULE)
         self.assertIn("low confidence in any specific root cause", SPARSE_CONFIDENCE_RULE)
         self.assertNotIn("High confidence only that evidence collection is required", SPARSE_CONFIDENCE_RULE)
+
+    def test_risk_classification_gate_warns_for_minimal_with_structured_high_or_critical_risks(self):
+        state = ProjectState(project_id="risk-gate-high", project_name="Risk gate")
+        state.risk_classification = "minimal_risk"
+        state.decision_objects = DecisionObjects(
+            risks=[
+                Risk(
+                    risk_id="risk-critical",
+                    title="Legal exposure",
+                    summary="Launch may trigger compliance review.",
+                    severity="critical",
+                    source_phase="audit",
+                )
+            ]
+        )
+        state.audit = AuditOutput(
+            fmea=[FMEAItem(component="Billing", failure_mode="Chargeback exposure", rpn=140)],
+            stpa=[STPAItem(control_action="Launch automation", hazard="Unsafe escalation")],
+        )
+        state.gauntlet = GauntletOutput(
+            results=[GauntletResult(id="H1", risk_rank=1, crux="Escalation path may fail.")]
+        )
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertTrue(assessment.warning_applies)
+        self.assertEqual(assessment.warning_text, RISK_CLASSIFICATION_WARNING)
+        self.assertEqual(assessment.highest_generated_risk_severity, "critical")
+        self.assertEqual(assessment.high_or_critical_risk_count, 4)
+        self.assertIn("decision_objects.audit", assessment.source_counts)
+        self.assertIn("audit.fmea", assessment.source_counts)
+        self.assertIn("audit.stpa", assessment.source_counts)
+        self.assertIn("gauntlet", assessment.source_counts)
+        self.assertIn("Legal exposure", str(assessment.diagnostics))
+
+    def test_risk_classification_gate_ignores_low_and_medium_generated_risks(self):
+        state = ProjectState(project_id="risk-gate-medium", project_name="Risk gate")
+        state.risk_classification = "minimal_risk"
+        state.audit = AuditOutput(
+            fmea=[
+                FMEAItem(component="Ops", failure_mode="Minor handoff delay", rpn=59),
+                FMEAItem(component="Metrics", failure_mode="Partial lag", rpn=119),
+            ],
+        )
+        state.gauntlet = GauntletOutput(
+            results=[GauntletResult(id="H2", risk_rank=2, crux="Medium ranked uncertainty.")]
+        )
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertFalse(assessment.warning_applies)
+        self.assertEqual(assessment.warning_text, "")
+        self.assertEqual(assessment.highest_generated_risk_severity, "medium")
+        self.assertEqual(assessment.high_or_critical_risk_count, 0)
+
+    def test_risk_classification_gate_does_not_warn_for_non_low_classifications(self):
+        for classification in ("limited_risk", "high_risk", "prohibited"):
+            with self.subTest(classification=classification):
+                state = ProjectState(project_id=f"risk-gate-{classification}", project_name="Risk gate")
+                state.risk_classification = classification
+                state.audit = AuditOutput(
+                    fmea=[FMEAItem(component="Launch", failure_mode="Regulatory escalation", rpn=240)]
+                )
+
+                assessment = assess_risk_classification_gate(state)
+
+                self.assertFalse(assessment.warning_applies)
+                self.assertEqual(assessment.highest_generated_risk_severity, "critical")
+                self.assertEqual(assessment.high_or_critical_risk_count, 1)
+
+    def test_risk_classification_gate_treats_low_aliases_as_minimal(self):
+        for classification in ("low", "low_risk"):
+            with self.subTest(classification=classification):
+                state = ProjectState(project_id=f"risk-gate-{classification}", project_name="Risk gate")
+                state.risk_classification = classification
+                state.audit = AuditOutput(
+                    fmea=[FMEAItem(component="Launch", failure_mode="Severe rollback risk", rpn=120)]
+                )
+
+                assessment = assess_risk_classification_gate(state)
+
+                self.assertTrue(assessment.warning_applies)
+                self.assertEqual(assessment.normalized_classification, classification)
+
+    def test_risk_classification_gate_ignores_report_keyword_matches(self):
+        state = ProjectState(project_id="risk-gate-keywords", project_name="Risk gate")
+        state.risk_classification = "minimal_risk"
+        state.report = "This prose says high risk, critical risk, circuit breaker, legal, and escalate."
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertFalse(assessment.warning_applies)
+        self.assertEqual(assessment.high_or_critical_risk_count, 0)
+        self.assertEqual(assessment.highest_generated_risk_severity, "")
+
+    def test_risk_classification_gate_does_not_mutate_selected_classification(self):
+        state = ProjectState(project_id="risk-gate-readonly", project_name="Risk gate")
+        state.risk_classification = " low_risk "
+        state.audit = AuditOutput(
+            fmea=[FMEAItem(component="Launch", failure_mode="High severity issue", rpn=120)]
+        )
+        before = state.risk_classification
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertTrue(assessment.warning_applies)
+        self.assertEqual(state.risk_classification, before)
 
     def test_client_simplification_covers_residual_jargon(self):
         text = (

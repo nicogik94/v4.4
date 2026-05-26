@@ -121,7 +121,9 @@ SUBORDINATE_THRESHOLD_SECTION_NAMES = {
     "report appendix",
 }
 
-RISK_CLASSIFICATION_WARNING = "Risk classification may understate generated risk content."
+RISK_CLASSIFICATION_WARNING = (
+    "Risk classification may understate generated risk content. Review before client delivery."
+)
 CLIENT_BF_CONFIDENCE_CAVEAT = (
     "Current evidence does not meet the confidence threshold for selecting a specific growth lever."
 )
@@ -386,6 +388,29 @@ class EvidenceAccountingProjection:
 
 
 @dataclass(frozen=True)
+class RiskClassificationGateAssessment:
+    warning_applies: bool
+    warning_text: str = ""
+    selected_classification: str = ""
+    normalized_classification: str = ""
+    highest_generated_risk_severity: str = ""
+    high_or_critical_risk_count: int = 0
+    source_counts: dict[str, int] = field(default_factory=dict)
+    high_or_critical_risks: tuple[dict[str, str], ...] = field(default_factory=tuple)
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "selected_classification": self.selected_classification,
+            "normalized_classification": self.normalized_classification,
+            "highest_generated_risk_severity": self.highest_generated_risk_severity,
+            "high_or_critical_risk_count": self.high_or_critical_risk_count,
+            "source_counts": dict(self.source_counts),
+            "high_or_critical_risks": [dict(row) for row in self.high_or_critical_risks],
+        }
+
+
+@dataclass(frozen=True)
 class ThresholdSectionClassification:
     section_name: str
     classification: str
@@ -452,6 +477,176 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
         required_clarifications_open=required_clarifications_open,
         telemetry_privacy_required=requires_telemetry_privacy_caveat(text),
     )
+
+
+def assess_risk_classification_gate(state: Any) -> RiskClassificationGateAssessment:
+    """Warn when low operator classification conflicts with structured risks.
+
+    This is a read-only projection: it does not rebuild decision objects, mutate
+    risk classification, or inspect report prose.
+    """
+    selected = _risk_gate_text(_field_get(state, "risk_classification"))
+    normalized = _normalize_risk_classification(selected)
+    rows = _generated_structured_risk_rows(state)
+    highest = _highest_risk_severity(row.get("severity", "") for row in rows)
+    high_or_critical = tuple(
+        row for row in rows if _normalize_risk_severity(row.get("severity")) in {"high", "critical"}
+    )
+    source_counts: dict[str, int] = {}
+    for row in rows:
+        source = row.get("source", "") or "unknown"
+        source_counts[source] = source_counts.get(source, 0) + 1
+
+    warning_applies = normalized in {"minimal_risk", "low", "low_risk"} and bool(high_or_critical)
+    return RiskClassificationGateAssessment(
+        warning_applies=warning_applies,
+        warning_text=RISK_CLASSIFICATION_WARNING if warning_applies else "",
+        selected_classification=selected,
+        normalized_classification=normalized,
+        highest_generated_risk_severity=highest,
+        high_or_critical_risk_count=len(high_or_critical),
+        source_counts=source_counts,
+        high_or_critical_risks=high_or_critical[:20],
+    )
+
+
+def _generated_structured_risk_rows(state: Any) -> tuple[dict[str, str], ...]:
+    rows: list[dict[str, str]] = []
+    decision_objects = _field_get(state, "decision_objects")
+    for risk in _iter_maybe(_field_get(decision_objects, "risks")):
+        source_phase = _risk_gate_text(_field_get(risk, "source_phase"))
+        rows.append(
+            _risk_gate_row(
+                source=f"decision_objects.{source_phase}" if source_phase else "decision_objects",
+                severity=_field_get(risk, "severity"),
+                title=_field_get(risk, "title") or _field_get(risk, "risk_id") or "Decision-object risk",
+                summary=_field_get(risk, "summary"),
+            )
+        )
+
+    audit = _field_get(state, "audit")
+    for item in _iter_maybe(_field_get(audit, "fmea")):
+        component = _risk_gate_text(_field_get(item, "component"))
+        rows.append(
+            _risk_gate_row(
+                source="audit.fmea",
+                severity=_risk_severity_from_rpn(_intish(_field_get(item, "rpn"))),
+                title=f"FMEA: {component}" if component else "FMEA risk",
+                summary=(
+                    _field_get(item, "failure_mode")
+                    or _field_get(item, "effect")
+                    or _field_get(item, "action")
+                    or ""
+                ),
+            )
+        )
+    for item in _iter_maybe(_field_get(audit, "stpa")):
+        control_action = _risk_gate_text(_field_get(item, "control_action"))
+        rows.append(
+            _risk_gate_row(
+                source="audit.stpa",
+                severity="high",
+                title=f"STPA: {control_action}" if control_action else "STPA risk",
+                summary=_field_get(item, "hazard") or _field_get(item, "constraint") or "",
+            )
+        )
+
+    gauntlet = _field_get(state, "gauntlet")
+    for result in _iter_maybe(_field_get(gauntlet, "results")):
+        result_id = _risk_gate_text(_field_get(result, "id")) or "?"
+        rows.append(
+            _risk_gate_row(
+                source="gauntlet",
+                severity=_risk_severity_from_gauntlet(
+                    _intish(_field_get(result, "risk_rank")),
+                    _field_get(result, "top_fmea"),
+                ),
+                title=f"Gauntlet risk {result_id}",
+                summary=_field_get(result, "crux") or _field_get(result, "fta_cut_set") or "Gauntlet-identified risk",
+            )
+        )
+    return tuple(row for row in rows if row.get("severity"))
+
+
+def _risk_gate_row(*, source: str, severity: Any, title: Any, summary: Any) -> dict[str, str]:
+    return {
+        "source": _risk_gate_text(source, limit=80),
+        "severity": _normalize_risk_severity(severity),
+        "title": _risk_gate_text(title),
+        "summary": _risk_gate_text(summary),
+    }
+
+
+def _normalize_risk_classification(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return re.sub(r"[\s\-]+", "_", str(raw or "").strip().lower())
+
+
+def _normalize_risk_severity(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    normalized = re.sub(r"[\s\-]+", "_", str(raw or "").strip().lower())
+    if normalized in {"critical", "crit"}:
+        return "critical"
+    if normalized in {"high", "severe"}:
+        return "high"
+    if normalized in {"medium", "med", "moderate"}:
+        return "medium"
+    if normalized in {"low", "minimal"}:
+        return "low"
+    return normalized
+
+
+def _highest_risk_severity(values: Any) -> str:
+    ranked = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    highest = ""
+    highest_rank = 0
+    for value in values:
+        severity = _normalize_risk_severity(value)
+        rank = ranked.get(severity, 0)
+        if rank > highest_rank:
+            highest = severity
+            highest_rank = rank
+    return highest
+
+
+def _risk_severity_from_rpn(rpn: int) -> str:
+    if rpn >= 200:
+        return "critical"
+    if rpn >= 120:
+        return "high"
+    if rpn >= 60:
+        return "medium"
+    return "low"
+
+
+def _risk_severity_from_gauntlet(risk_rank: int, top_fmea: Any) -> str:
+    rpn = _intish(_field_get(top_fmea, "rpn"))
+    if rpn:
+        return _risk_severity_from_rpn(rpn)
+    if risk_rank <= 1:
+        return "high"
+    if risk_rank == 2:
+        return "medium"
+    return "low"
+
+
+def _intish(value: Any) -> int:
+    raw = getattr(value, "value", value)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return 0
+
+
+def _risk_gate_text(value: Any, limit: int = 180) -> str:
+    raw = getattr(value, "value", value)
+    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def has_required_clarifications_open(state: Any) -> bool:
