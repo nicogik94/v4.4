@@ -611,12 +611,14 @@ def _finalize_export_markdown(
         value = _redact_unsafe_string(value)
         value = _remove_empty_client_citation_marker_columns(value)
         value = suppress_client_raw_evidence_ids(value)
+        value = _finalize_client_visible_artifacts(value, state)
         value = _normalize_client_evidence_count_language(value, state, quality)
         value = _label_client_bf_trace_language(value)
         value = _soften_unvalidated_confirmed_language(value, state, quality)
         value = normalize_export_text(value, audience=mode)
         value = _remove_empty_client_citation_marker_columns(value)
         value = suppress_client_raw_evidence_ids(value)
+        value = _finalize_client_visible_artifacts(value, state)
         value = _ensure_single_client_source_locator_note(value, quality)
     return value
 
@@ -633,6 +635,394 @@ def _apply_pricing_placeholder_cleanup(markdown: str, state: ProjectState) -> st
         str(markdown or ""),
         flags=re.I,
     )
+
+
+def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> str:
+    value = _drop_client_operator_only_locator_lines(str(markdown or ""))
+    value = _remove_empty_client_citation_marker_columns(value)
+    value = _strip_client_citation_placeholder_noise(value)
+    value = _remove_standalone_client_citation_rows(value)
+    value = _suppress_client_internal_locator_tokens(value)
+    value = _remove_empty_client_citation_marker_columns(value)
+    value = _strip_client_citation_placeholder_noise(value)
+    value = _remove_standalone_client_citation_rows(value)
+    value = _replace_client_threshold_placeholders(value, state)
+    return _collapse_markdown_blank_lines(value)
+
+
+def _drop_client_operator_only_locator_lines(markdown: str) -> str:
+    lines: list[str] = []
+    raw_reference = re.compile(
+        r"\[Evidence:\s*|\bknowledge[_-][A-Za-z0-9_.:-]+\b|"
+        r"\b(?:ev|src)[-_][A-Za-z0-9_.:-]+\b|"
+        r"\bevidence[_-](?!based\b|backed\b|driven\b|quality\b|maturity\b|source\b|used\b)[A-Za-z0-9_.:-]+\b|"
+        r"\bupload:[^\s|,)>\]]+|\bstorage_ref\s*[:=]|\bsource_ref\s*[:=]",
+        re.I,
+    )
+    for line in str(markdown or "").splitlines():
+        if re.search(r"\boperator[-\s]?only\b", line, re.I) and raw_reference.search(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _strip_client_citation_placeholder_noise(markdown: str) -> str:
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(markdown or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if not stripped:
+            lines.append(line)
+            continue
+        if _looks_like_json_line(stripped):
+            lines.append(_strip_client_citation_placeholder_text(line))
+            continue
+        cleaned = _strip_client_citation_placeholder_text(line)
+        if _is_standalone_client_citation_placeholder_line(cleaned):
+            continue
+        if in_code_block and cleaned.strip():
+            lines.append(cleaned)
+            continue
+        if cleaned.strip():
+            lines.append(cleaned)
+    return "\n".join(lines)
+
+
+def _strip_client_citation_placeholder_text(value: str) -> str:
+    text = str(value or "")
+    if not re.search(
+        r"\b(?:Citation|No citation available|citation unavailable|Evidence source unavailable)\b",
+        text,
+        re.I,
+    ):
+        return text.rstrip()
+    text = re.sub(r"\b(?:No citation available|citation unavailable|Evidence source unavailable)\b\.?", "", text, flags=re.I)
+    text = re.sub(r"\bCitation\s*:\s*(?=$|[|,.;])", "", text, flags=re.I)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([|,.;:])", r"\1", text)
+    text = re.sub(r"\|\s+\|", "| |", text)
+    return text.rstrip()
+
+
+def _remove_standalone_client_citation_rows(markdown: str) -> str:
+    lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        if _is_client_citation_noise_table_line(line):
+            continue
+        if _is_standalone_client_citation_placeholder_line(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _is_client_citation_noise_table_line(value: str) -> bool:
+    cells = _split_markdown_table_row(value)
+    if not cells:
+        return False
+    nonempty = [cell for cell in cells if cell.strip()]
+    if not nonempty:
+        return True
+    if not any(
+        _is_client_citation_column_header(cell)
+        or _normalize_heading(cell) in {"citation unavailable", "no citation available"}
+        for cell in nonempty
+    ):
+        return False
+    return all(
+        _is_client_citation_column_header(cell)
+        or _is_empty_client_citation_cell(cell)
+        for cell in nonempty
+    )
+
+
+def _is_standalone_client_citation_placeholder_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return False
+    stripped = re.sub(r"^\s*(?:[-*•]|\d+\.)\s+", "", stripped)
+    stripped = stripped.strip("|*_` ")
+    if not stripped:
+        return False
+    if _is_client_citation_column_header(stripped.rstrip(":")):
+        return True
+    return bool(re.fullmatch(r"citation\s*:?", stripped, re.I))
+
+
+def _suppress_client_internal_locator_tokens(markdown: str) -> str:
+    lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        value = str(line or "")
+        value = re.sub(
+            r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\s*\[#\d+\]", "", value)
+        value = re.sub(r"\bknowledge[_-][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+        value = re.sub(r"\b(?:ev|src)[-_][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+        value = re.sub(
+            r"\bevidence[_-](?!based\b|backed\b|driven\b|quality\b|maturity\b|source\b|used\b)[A-Za-z0-9_.:-]+\b",
+            "project evidence",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\bupload:[^\s|,)>\]]+", "uploaded project document", value, flags=re.I)
+        value = re.sub(r"\bstorage_ref\s*[:=]\s*[^\s|,)>\]]+", "", value, flags=re.I)
+        value = re.sub(r"\bsource_ref\s*[:=]\s*[^\s|,)>\]]+", "", value, flags=re.I)
+        value = re.sub(
+            r"\bproject evidence\s+(?:provides evidence interpretation context|suggests|indicates)\b[^.?!]*(?:[.?!]|$)",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"[ \t]{2,}", " ", value)
+        value = re.sub(r"\s+([,.;:])", r"\1", value)
+        lines.append(value.rstrip())
+    return "\n".join(lines)
+
+
+def _replace_client_threshold_placeholders(markdown: str, state: ProjectState) -> str:
+    catalog = _client_threshold_catalog(state)
+    lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        lines.append(_replace_client_threshold_placeholders_in_line(line, catalog))
+    return "\n".join(lines)
+
+
+def _replace_client_threshold_placeholders_in_line(line: str, catalog: list[dict[str, Any]]) -> str:
+    value = str(line or "")
+    if not re.search(r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|\bexpand\s+to\s+threshold\b", value, re.I):
+        return value
+
+    def candidate_for(metric: str | None = None, *, prefer_positive: bool = False) -> dict[str, Any] | None:
+        preferred = tuple(filter(None, [metric]))
+        return _select_client_threshold_candidate(catalog, value, preferred=preferred, prefer_positive=prefer_positive)
+
+    def target_repl(_: re.Match[str]) -> str:
+        return "target " + _client_threshold_at_least_phrase(candidate_for(prefer_positive=True))
+
+    def comparator_repl(_: re.Match[str]) -> str:
+        return _client_threshold_at_least_phrase(candidate_for(prefer_positive=True))
+
+    value = re.sub(r"\btarget\s*(?:≥|>=)\s*threshold\b", target_repl, value, flags=re.I)
+    value = re.sub(r"(?<![\w-])(?:≥|>=)\s*threshold\b", comparator_repl, value, flags=re.I)
+    value = re.sub(
+        r"\bthreshold\s+activation\s+rate\b",
+        lambda _: _client_threshold_metric_phrase("activation rate", candidate_for("activation rate")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bthreshold\s+activation\b",
+        lambda _: _client_threshold_metric_phrase("activation", candidate_for("activation")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bthreshold\s+conversion\b",
+        lambda _: _client_threshold_metric_phrase("conversion", candidate_for("conversion")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bthreshold\s+baseline\b",
+        lambda _: _client_threshold_metric_phrase("baseline", candidate_for("baseline")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bexpand\s+to\s+threshold\b",
+        lambda _: _client_threshold_expand_phrase(candidate_for(prefer_positive=True)),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    return re.sub(r"\s+([,.;:])", r"\1", value)
+
+
+def _client_threshold_catalog(state: ProjectState) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for text in _client_threshold_source_texts(state):
+        candidate = _client_threshold_candidate(text)
+        if not candidate:
+            continue
+        key = str(candidate["phrase"]).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def _client_threshold_source_texts(state: ProjectState) -> list[str]:
+    parts: list[str] = []
+    strategy = getattr(state, "strategy", None)
+    if strategy:
+        parts.extend(str(item) for item in list(getattr(strategy, "success_metrics", []) or []))
+        parts.extend([
+            getattr(strategy, "monitoring_plan", ""),
+            getattr(strategy, "implementation_sequence", ""),
+            getattr(strategy, "reentry_check", ""),
+        ])
+        for verdict in list(getattr(strategy, "preliminary_verdicts", []) or []):
+            parts.extend([getattr(verdict, "evidence", ""), getattr(verdict, "monitoring_plan", "")])
+        for action in list(getattr(strategy, "strategies", []) or []):
+            parts.extend([
+                getattr(action, "action", ""),
+                getattr(action, "justification", ""),
+                getattr(action, "expected_impact", ""),
+                getattr(action, "risk_if_ignored", ""),
+            ])
+    monitor = getattr(state, "monitor", None)
+    if monitor:
+        for breaker in list(getattr(monitor, "circuit_breakers", []) or []):
+            parts.extend([getattr(breaker, "strategy_ref", ""), getattr(breaker, "trip", ""), getattr(breaker, "reset", "")])
+        for canary in list(getattr(monitor, "canaries", []) or []):
+            parts.extend([getattr(canary, "signal", ""), getattr(canary, "direction", ""), getattr(canary, "window", ""), getattr(canary, "meaning", "")])
+        schedule = getattr(monitor, "ooda_schedule", None)
+        if schedule:
+            for cadence in ("daily", "weekly", "monthly"):
+                for item in list(getattr(schedule, cadence, []) or []):
+                    parts.extend([getattr(item, "metric", ""), getattr(item, "source", "")])
+        parts.extend(str(item) for item in list(getattr(monitor, "reentry_watch", []) or []))
+    for hypothesis in list(getattr(state, "hypotheses", []) or []):
+        parts.extend([
+            getattr(hypothesis, "signal", ""),
+            getattr(hypothesis, "confirm", ""),
+            getattr(hypothesis, "reject", ""),
+        ])
+    parts.extend(str(line) for line in str(getattr(state, "report", "") or "").splitlines())
+    return [part for part in parts if str(part or "").strip()]
+
+
+def _client_threshold_candidate(text: str) -> dict[str, Any] | None:
+    phrase = _redact_unsafe_string(_strip_inline_markdown(str(text or ""))).strip()
+    if not phrase or not re.search(r"\d", phrase):
+        return None
+    if re.search(r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|\bexpand\s+to\s+threshold\b", phrase, re.I):
+        return None
+    value, direction = _extract_client_threshold_value(phrase)
+    if not value:
+        return None
+    return {
+        "phrase": phrase.rstrip(". "),
+        "value": value,
+        "direction": direction,
+        "keywords": _client_threshold_keywords(phrase),
+    }
+
+
+def _extract_client_threshold_value(text: str) -> tuple[str, str]:
+    patterns = [
+        (r"(?:≥|>=|at\s+least|greater\s+than|more\s+than|above|reaches?|exceeds?)\s*(\d+(?:\.\d+)?\s*(?:%|pp|hours?|hrs?|days?|weeks?|months?)?)", "positive", "at least"),
+        (r"(?:≤|<=|below|under|less\s+than|falls?\s+below)\s*(\d+(?:\.\d+)?\s*(?:%|pp|hours?|hrs?|days?|weeks?|months?)?)", "negative", "below"),
+        (r"\bdown\s+(\d+(?:\.\d+)?\s*(?:%|pp|hours?|hrs?|days?|weeks?|months?)?)", "negative", "down"),
+    ]
+    for pattern, direction, label in patterns:
+        match = re.search(pattern, text, re.I)
+        if not match:
+            continue
+        value = _client_threshold_value_with_tail(match.group(1).strip(), text[match.end():])
+        return f"{label} {value}", direction
+    rolling = re.search(r"\b\d+(?:\.\d+)?[- ]day\s+rolling(?:\s+baseline)?\b", text, re.I)
+    if rolling:
+        return rolling.group(0), "neutral"
+    day = re.search(r"\bby\s+Day\s+\d+\b", text, re.I)
+    if day:
+        return day.group(0), "neutral"
+    return "", "neutral"
+
+
+def _client_threshold_value_with_tail(value: str, tail: str) -> str:
+    tail_match = re.match(
+        r"\s*((?:by|within|for)\s+[^.;,\n|]{1,60})",
+        str(tail or ""),
+        re.I,
+    )
+    if tail_match:
+        return f"{value} {tail_match.group(1).strip()}"
+    return value
+
+
+def _client_threshold_keywords(text: str) -> set[str]:
+    normalized = str(text or "").lower()
+    keys: set[str] = set()
+    keyword_patterns = {
+        "activation rate": r"\bactivation\s+rate\b",
+        "activation": r"\bactivation\b",
+        "conversion": r"\bconversion\b",
+        "baseline": r"\bbaseline\b",
+        "retention": r"\bretention\b",
+        "churn": r"\bchurn\b",
+        "cac": r"\bcac\b",
+        "nrr": r"\bnrr\b",
+        "pipeline": r"\bpipeline\b",
+        "time-to-value": r"\btime[-\s]to[-\s]value\b",
+    }
+    for key, pattern in keyword_patterns.items():
+        if re.search(pattern, normalized, re.I):
+            keys.add(key)
+    return keys
+
+
+def _select_client_threshold_candidate(
+    catalog: list[dict[str, Any]],
+    line: str,
+    *,
+    preferred: tuple[str, ...] = (),
+    prefer_positive: bool = False,
+) -> dict[str, Any] | None:
+    def direction_ok(candidate: dict[str, Any]) -> bool:
+        return not prefer_positive or candidate.get("direction") == "positive"
+
+    if "baseline" in preferred:
+        for candidate in catalog:
+            keys = candidate.get("keywords", set())
+            if "baseline" in keys and re.search(r"\bbaseline\b", str(candidate.get("value", "")), re.I) and direction_ok(candidate):
+                return candidate
+    for candidate in catalog:
+        keys = candidate.get("keywords", set())
+        if preferred and any(key in keys for key in preferred) and direction_ok(candidate):
+            return candidate
+    line_keys = _client_threshold_keywords(line)
+    for candidate in catalog:
+        keys = candidate.get("keywords", set())
+        if line_keys.intersection(keys) and direction_ok(candidate):
+            return candidate
+    for candidate in catalog:
+        if direction_ok(candidate):
+            return candidate
+    return catalog[0] if catalog else None
+
+
+def _client_threshold_at_least_phrase(candidate: dict[str, Any] | None) -> str:
+    if not candidate:
+        return "at the validated gate"
+    value = str(candidate.get("value", "")).strip()
+    if not value:
+        return "at the validated gate"
+    if value.lower().startswith("at least "):
+        return value
+    return f"at the validation gate ({value})"
+
+
+def _client_threshold_metric_phrase(metric: str, candidate: dict[str, Any] | None) -> str:
+    label = metric.replace(" ", "-")
+    if candidate and candidate.get("value"):
+        return f"{label} validation gate ({candidate['value']})"
+    return f"{label} validation gate"
+
+
+def _client_threshold_expand_phrase(candidate: dict[str, Any] | None) -> str:
+    if candidate and candidate.get("phrase"):
+        return f"expand after the validation gate is met ({candidate['phrase']})"
+    return "expand after the validation gate is met"
 
 
 def _state_contains_starter_price(state: ProjectState) -> bool:
