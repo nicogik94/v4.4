@@ -35,6 +35,7 @@ from clarifications import (  # noqa: E402
     ClarificationStatus,
 )
 from exporters import (  # noqa: E402
+    CLIENT_DELIVERY_VALIDATION_BANNER,
     MONITORING_TEMPLATE_OPERATOR_NOTE,
     _safe_report_markdown,
     build_client_dossier_markdown,
@@ -778,14 +779,18 @@ Resolve blockers within 14 days.
             brief="Decide whether activation and conversion recovery are ready to scale.",
             report="""# Executive Summary
 Use the pilot target ≥threshold before scale-up.
+The The problem is measurement quality, not ambition.
 Internal locator knowledge_report and [Evidence: knowledge_report | chunk=4] should not ship.
 Operator-only source excerpt: [Evidence: knowledge_operator | chunk=9] remains traceable.
+Concrete values: 25%, 29%, 38%, 40%, 48h, <24h, >48h, 2pp, 3 days, 5%, 10%, 15%, 20%, 30%, 50%.
 
 # Evidence Used
 | Evidence | What it suggests | Citation |
 |---|---|---|
 | Activation note | Keep the pilot bounded. | citation unavailable |
 | Conversion note | Validate the onboarding funnel. | No citation available |
+| Leadership note | Treat this as directional. | [Inference] |
+| Measurement note | Data coverage is incomplete. | [Unknown] |
 
 | Citation |
 |---|
@@ -800,12 +805,19 @@ Track threshold activation rate weekly.
 Track threshold conversion from onboarding.
 Compare against threshold baseline.
 Do not expand to threshold until Sprint 0 validates the gate.
+Use threshold of new trials for expansion.
+Stop if the signal falls below threshold.
+Set target of threshold before rollout.
+Check the activation validation gate and baseline validation gate.
+Escalate above the threshold or below the threshold.
 """,
         )
         state.strategy = StrategyOutput(
             success_metrics=[
+                "New trial expansion reaches 20% of new trials.",
                 "Activation rate reaches at least 65%.",
                 "Activation-to-conversion lag down 1.5pp within 14 days.",
+                "Conversion guardrail is below 25%.",
             ],
             monitoring_plan="Use the activation baseline only after 7-day rolling telemetry is stable.",
         )
@@ -833,6 +845,9 @@ Do not expand to threshold until Sprint 0 validates the gate.
         report_text = _docx_text(report_payload)
 
         for output in (client_markdown, report_markdown, report_text):
+            self.assertEqual(output.count(CLIENT_DELIVERY_VALIDATION_BANNER), 1)
+            self.assertEqual(output.splitlines()[0], CLIENT_DELIVERY_VALIDATION_BANNER)
+            self.assertEqual(output.count("No concrete source locators were available for this project"), 1)
             for forbidden in (
                 "citation unavailable",
                 "No citation available",
@@ -847,12 +862,26 @@ Do not expand to threshold until Sprint 0 validates the gate.
                 "threshold conversion",
                 "threshold baseline",
                 "expand to threshold",
+                "The The",
+                "threshold of new trials",
+                "falls below threshold",
+                "target of threshold",
+                "activation validation gate",
+                "baseline validation gate",
+                "above the threshold",
+                "below the threshold",
             ):
                 self.assertNotIn(forbidden, output)
             self.assertNotRegex(output, r"(?mi)^\s*Citation\s*:?\s*$")
+            self.assertIn("The problem is measurement quality", output)
+            self.assertIn("[Inference]", output)
+            self.assertIn("[Unknown]", output)
             self.assertIn("65%", output)
             self.assertIn("1.5pp within 14 days", output)
             self.assertIn("7-day rolling baseline", output)
+            self.assertIn("20% of new trials", output)
+            for concrete in ("25%", "29%", "38%", "40%", "48h", "<24h", ">48h", "2pp", "3 days", "5%", "10%", "15%", "20%", "30%", "50%"):
+                self.assertIn(concrete, output)
 
     def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
         state = make_export_state("operator-monitor-note")
@@ -1238,7 +1267,8 @@ The proposed planning gate is more than 20% activation.
         self.assertIn("structural prior", markdown)
         self.assertNotIn("model-generated prior", markdown)
         self.assertIn("high provisional failure risk", markdown)
-        self.assertIn("above the threshold to validate in Sprint 0", markdown)
+        self.assertIn("above 15% churn", markdown)
+        self.assertNotIn("above the threshold", markdown)
         self.assertNotIn("operator-defined", markdown)
         self.assertNotIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
@@ -1767,12 +1797,14 @@ Starter tier at provisional planning estimate.
         self.assertNotIn("[Evidence: knowledge_z", markdown)
         self.assertIn("Support ticket volume supports an onboarding problem.", markdown)
         self.assertIn("structural BF estimate=12.0 (operator trace, not measured posterior)", markdown)
-        self.assertIn("target threshold below the threshold to validate in Sprint 0.", markdown)
-        self.assertIn("exceeds the crux threshold by the margin to validate in Sprint 0.", markdown)
+        self.assertIn("target threshold below the validated gate.", markdown)
+        self.assertIn("exceeds the crux threshold by the validation margin.", markdown)
         self.assertIn("rises above the new ARR share threshold to validate in Sprint 0", markdown)
-        self.assertIn("target threshold: above the threshold to validate in Sprint 0.", markdown)
-        self.assertIn("target threshold: below the threshold to validate in Sprint 0.", markdown)
+        self.assertIn("target threshold: above the validated gate.", markdown)
+        self.assertIn("target threshold: below the validated gate.", markdown)
         self.assertIn("crosses the threshold to validate in Sprint 0.", markdown)
+        self.assertNotIn("above the threshold", markdown)
+        self.assertNotIn("below the threshold", markdown)
         self.assertIn("If Sprint 0 data confirms that activation exceeds the gate, proceed.", markdown)
         self.assertNotIn("domain complexity confirmed", markdown)
         self.assertNotIn("provisional threshold", markdown)

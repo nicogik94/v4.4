@@ -232,6 +232,9 @@ HUMAN_REVIEW_NOTE = (
     "It should not replace expert judgment where legal, financial, medical, "
     "safety, or compliance stakes are involved."
 )
+CLIENT_DELIVERY_VALIDATION_BANNER = (
+    "Validate before client delivery. This is a hypothesis-driven diagnostic memo, not a measured audit."
+)
 
 SPARSE_GROWTH_DECISION_GATES = """| Gate | Proceed | Extend | Stop / Escalate |
 |---|---|---|---|
@@ -620,6 +623,7 @@ def _finalize_export_markdown(
         value = suppress_client_raw_evidence_ids(value)
         value = _finalize_client_visible_artifacts(value, state)
         value = _ensure_single_client_source_locator_note(value, quality)
+        value = _ensure_client_delivery_validation_banner(value)
     return value
 
 
@@ -639,15 +643,39 @@ def _apply_pricing_placeholder_cleanup(markdown: str, state: ProjectState) -> st
 
 def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> str:
     value = _drop_client_operator_only_locator_lines(str(markdown or ""))
+    value = _fix_client_generated_duplicate_words(value)
     value = _remove_empty_client_citation_marker_columns(value)
     value = _strip_client_citation_placeholder_noise(value)
     value = _remove_standalone_client_citation_rows(value)
+    value = _rename_client_citation_table_headers(value)
     value = _suppress_client_internal_locator_tokens(value)
+    value = _fix_client_generated_duplicate_words(value)
     value = _remove_empty_client_citation_marker_columns(value)
     value = _strip_client_citation_placeholder_noise(value)
     value = _remove_standalone_client_citation_rows(value)
+    value = _rename_client_citation_table_headers(value)
     value = _replace_client_threshold_placeholders(value, state)
     return _collapse_markdown_blank_lines(value)
+
+
+def _ensure_client_delivery_validation_banner(markdown: str) -> str:
+    source = str(markdown or "")
+    banner_pattern = re.compile(
+        r"(?:\*\*)?\s*Validate before client delivery\.\s+"
+        r"This is a hypothesis-driven diagnostic memo, not a measured audit\.\s*(?:\*\*)?",
+        re.I,
+    )
+    cleaned = banner_pattern.sub("", source)
+    cleaned = _collapse_markdown_blank_lines(cleaned)
+    if not cleaned:
+        return CLIENT_DELIVERY_VALIDATION_BANNER
+    return _collapse_markdown_blank_lines("\n\n".join([CLIENT_DELIVERY_VALIDATION_BANNER, cleaned]))
+
+
+def _fix_client_generated_duplicate_words(markdown: str) -> str:
+    value = str(markdown or "")
+    value = re.sub(r"\bThe\s+The\s+problem\b", "The problem", value, flags=re.I)
+    return value
 
 
 def _drop_client_operator_only_locator_lines(markdown: str) -> str:
@@ -709,14 +737,68 @@ def _strip_client_citation_placeholder_text(value: str) -> str:
 
 
 def _remove_standalone_client_citation_rows(markdown: str) -> str:
-    lines: list[str] = []
-    for line in str(markdown or "").splitlines():
-        if _is_client_citation_noise_table_line(line):
+    source_lines = str(markdown or "").splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(source_lines):
+        line = source_lines[index]
+        if _looks_like_markdown_table_line(line):
+            block: list[str] = []
+            while index < len(source_lines) and _looks_like_markdown_table_line(source_lines[index]):
+                block.append(source_lines[index])
+                index += 1
+            cleaned = [row for row in block if not _is_client_citation_noise_table_line(row)]
+            if _client_table_block_has_meaningful_rows(cleaned):
+                output.extend(cleaned)
             continue
-        if _is_standalone_client_citation_placeholder_line(line):
+        if not _is_standalone_client_citation_placeholder_line(line):
+            output.append(line)
+        index += 1
+    return "\n".join(output)
+
+
+def _client_table_block_has_meaningful_rows(block: list[str]) -> bool:
+    for row in block:
+        cells = _split_markdown_table_row(row)
+        if not cells:
             continue
-        lines.append(line)
-    return "\n".join(lines)
+        if _is_client_markdown_separator_cells(cells):
+            continue
+        if any(cell.strip() for cell in cells):
+            return True
+    return False
+
+
+def _rename_client_citation_table_headers(markdown: str) -> str:
+    source_lines = str(markdown or "").splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(source_lines):
+        line = source_lines[index]
+        if not _looks_like_markdown_table_line(line):
+            output.append(line)
+            index += 1
+            continue
+        block: list[str] = []
+        while index < len(source_lines) and _looks_like_markdown_table_line(source_lines[index]):
+            block.append(source_lines[index])
+            index += 1
+        if len(block) < 2:
+            output.extend(block)
+            continue
+        rows = [_split_markdown_table_row(row) for row in block]
+        if not rows or not rows[0] or not _is_client_markdown_separator_cells(rows[1]):
+            output.extend(block)
+            continue
+        header = [
+            "Citation status" if _is_client_citation_column_header(cell) else cell
+            for cell in rows[0]
+        ]
+        output.append(_format_markdown_table_row(header))
+        output.append(_format_markdown_table_row(["---"] * len(header)))
+        for row in rows[2:]:
+            output.append(_format_markdown_table_row(row))
+    return "\n".join(output)
 
 
 def _is_client_citation_noise_table_line(value: str) -> bool:
@@ -796,7 +878,15 @@ def _replace_client_threshold_placeholders(markdown: str, state: ProjectState) -
 
 def _replace_client_threshold_placeholders_in_line(line: str, catalog: list[dict[str, Any]]) -> str:
     value = str(line or "")
-    if not re.search(r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|\bexpand\s+to\s+threshold\b", value, re.I):
+    if not re.search(
+        r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|"
+        r"\bexpand\s+to\s+threshold\b|\bthreshold\s+of\s+[^.;,\n|]+|"
+        r"\bfalls\s+below\s+threshold\b|\btarget\s+of\s+threshold\b|"
+        r"\b(?:activation|baseline)\s+validation\s+gate\b|"
+        r"\b(?:above|below)\s+the\s+threshold\b|\bmargin\s+to validate in Sprint 0\b",
+        value,
+        re.I,
+    ):
         return value
 
     def candidate_for(metric: str | None = None, *, prefer_positive: bool = False) -> dict[str, Any] | None:
@@ -809,8 +899,27 @@ def _replace_client_threshold_placeholders_in_line(line: str, catalog: list[dict
     def comparator_repl(_: re.Match[str]) -> str:
         return _client_threshold_at_least_phrase(candidate_for(prefer_positive=True))
 
+    def threshold_of_repl(match: re.Match[str]) -> str:
+        metric = match.group(1).strip()
+        return _client_threshold_of_phrase(metric, candidate_for(metric))
+
+    def falls_below_repl(_: re.Match[str]) -> str:
+        return "falls " + _client_threshold_below_phrase(candidate_for())
+
+    def target_of_repl(_: re.Match[str]) -> str:
+        return _client_threshold_target_phrase(candidate_for(prefer_positive=True) or candidate_for())
+
+    def above_threshold_repl(_: re.Match[str]) -> str:
+        return _client_threshold_above_phrase(candidate_for(prefer_positive=True) or candidate_for())
+
+    def below_threshold_repl(_: re.Match[str]) -> str:
+        return _client_threshold_below_phrase(candidate_for())
+
     value = re.sub(r"\btarget\s*(?:≥|>=)\s*threshold\b", target_repl, value, flags=re.I)
     value = re.sub(r"(?<![\w-])(?:≥|>=)\s*threshold\b", comparator_repl, value, flags=re.I)
+    value = re.sub(r"\bthreshold\s+of\s+([^.;,\n|]+)", threshold_of_repl, value, flags=re.I)
+    value = re.sub(r"\bfalls\s+below\s+threshold\b", falls_below_repl, value, flags=re.I)
+    value = re.sub(r"\btarget\s+of\s+threshold\b", target_of_repl, value, flags=re.I)
     value = re.sub(
         r"\bthreshold\s+activation\s+rate\b",
         lambda _: _client_threshold_metric_phrase("activation rate", candidate_for("activation rate")),
@@ -836,11 +945,33 @@ def _replace_client_threshold_placeholders_in_line(line: str, catalog: list[dict
         flags=re.I,
     )
     value = re.sub(
+        r"\bactivation\s+validation\s+gate\b",
+        lambda _: _client_threshold_metric_phrase("activation", candidate_for("activation")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bbaseline\s+validation\s+gate\b",
+        lambda _: _client_threshold_metric_phrase("baseline", candidate_for("baseline")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
         r"\bexpand\s+to\s+threshold\b",
         lambda _: _client_threshold_expand_phrase(candidate_for(prefer_positive=True)),
         value,
         flags=re.I,
     )
+    value = re.sub(r"\babove\s+the\s+threshold\b", above_threshold_repl, value, flags=re.I)
+    value = re.sub(r"\bbelow\s+the\s+threshold\b", below_threshold_repl, value, flags=re.I)
+    value = re.sub(
+        r"\b(above|below)\s+(\d+(?:\.\d+)?\s*(?:%|pp|h|hrs?|hours?|d|days?|weeks?|months?))\s+to validate in Sprint 0\s+([^.;,\n|]+)",
+        lambda match: f"{match.group(1)} {match.group(2)} {match.group(3).strip()}",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\bvalidated gate to validate in Sprint 0\b", "validated gate", value, flags=re.I)
+    value = re.sub(r"\bmargin to validate in Sprint 0\b", "validation margin", value, flags=re.I)
     value = re.sub(r"[ \t]{2,}", " ", value)
     return re.sub(r"\s+([,.;:])", r"\1", value)
 
@@ -905,7 +1036,14 @@ def _client_threshold_candidate(text: str) -> dict[str, Any] | None:
     phrase = _redact_unsafe_string(_strip_inline_markdown(str(text or ""))).strip()
     if not phrase or not re.search(r"\d", phrase):
         return None
-    if re.search(r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|\bexpand\s+to\s+threshold\b", phrase, re.I):
+    if re.search(
+        r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|"
+        r"\bexpand\s+to\s+threshold\b|\bthreshold\s+of\s+[^.;,\n|]+|"
+        r"\bfalls\s+below\s+threshold\b|\btarget\s+of\s+threshold\b|"
+        r"\b(?:activation|baseline)\s+validation\s+gate\b",
+        phrase,
+        re.I,
+    ):
         return None
     value, direction = _extract_client_threshold_value(phrase)
     if not value:
@@ -919,17 +1057,19 @@ def _client_threshold_candidate(text: str) -> dict[str, Any] | None:
 
 
 def _extract_client_threshold_value(text: str) -> tuple[str, str]:
+    unit = r"(?:%|pp|h|hrs?|hours?|d|days?|weeks?|months?)"
     patterns = [
-        (r"(?:≥|>=|at\s+least|greater\s+than|more\s+than|above|reaches?|exceeds?)\s*(\d+(?:\.\d+)?\s*(?:%|pp|hours?|hrs?|days?|weeks?|months?)?)", "positive", "at least"),
-        (r"(?:≤|<=|below|under|less\s+than|falls?\s+below)\s*(\d+(?:\.\d+)?\s*(?:%|pp|hours?|hrs?|days?|weeks?|months?)?)", "negative", "below"),
-        (r"\bdown\s+(\d+(?:\.\d+)?\s*(?:%|pp|hours?|hrs?|days?|weeks?|months?)?)", "negative", "down"),
+        (r"\b(\d+(?:\.\d+)?\s*%\s+of\s+[^.;,\n|]+)", "positive", ""),
+        (rf"(?:≥|>=|>|at\s+least|greater\s+than|more\s+than|above|reaches?|exceeds?)\s*(\d+(?:\.\d+)?\s*{unit})", "positive", "at least"),
+        (rf"(?:≤|<=|<|below|under|less\s+than|falls?\s+below)\s*(\d+(?:\.\d+)?\s*{unit})", "negative", "below"),
+        (rf"\bdown\s+(\d+(?:\.\d+)?\s*{unit})", "negative", "down"),
     ]
     for pattern, direction, label in patterns:
         match = re.search(pattern, text, re.I)
         if not match:
             continue
         value = _client_threshold_value_with_tail(match.group(1).strip(), text[match.end():])
-        return f"{label} {value}", direction
+        return f"{label} {value}".strip(), direction
     rolling = re.search(r"\b\d+(?:\.\d+)?[- ]day\s+rolling(?:\s+baseline)?\b", text, re.I)
     if rolling:
         return rolling.group(0), "neutral"
@@ -964,6 +1104,8 @@ def _client_threshold_keywords(text: str) -> set[str]:
         "nrr": r"\bnrr\b",
         "pipeline": r"\bpipeline\b",
         "time-to-value": r"\btime[-\s]to[-\s]value\b",
+        "new trials": r"\bnew\s+trials\b",
+        "trials": r"\btrials?\b",
     }
     for key, pattern in keyword_patterns.items():
         if re.search(pattern, normalized, re.I):
@@ -1013,10 +1155,46 @@ def _client_threshold_at_least_phrase(candidate: dict[str, Any] | None) -> str:
 
 
 def _client_threshold_metric_phrase(metric: str, candidate: dict[str, Any] | None) -> str:
-    label = metric.replace(" ", "-")
+    label = metric.replace("-", " ")
     if candidate and candidate.get("value"):
-        return f"{label} validation gate ({candidate['value']})"
-    return f"{label} validation gate"
+        return f"{label} target ({candidate['value']})"
+    return f"{label} target"
+
+
+def _client_threshold_plain_value(candidate: dict[str, Any] | None) -> str:
+    if not candidate:
+        return ""
+    value = str(candidate.get("value", "")).strip()
+    value = re.sub(r"^(?:at\s+least|below|down)\s+", "", value, flags=re.I).strip()
+    return value
+
+
+def _client_threshold_of_phrase(metric: str, candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return plain
+    return f"validated gate for {metric.strip()}"
+
+
+def _client_threshold_above_phrase(candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return f"above {plain}"
+    return "above the validated gate"
+
+
+def _client_threshold_below_phrase(candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return f"below {plain}"
+    return "below the validated gate"
+
+
+def _client_threshold_target_phrase(candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return f"target of {plain}"
+    return "target of the validated gate"
 
 
 def _client_threshold_expand_phrase(candidate: dict[str, Any] | None) -> str:
