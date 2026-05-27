@@ -36,6 +36,7 @@ from report_quality import (
     UPLOADED_KNOWLEDGE_NO_IMPORTED_EVIDENCE_NOTE,
     UNSUPPORTED_EVIDENCE_FILES_WARNING,
     WAVE2_GRADUATION_MATRIX,
+    assess_risk_classification_gate,
     assess_report_quality_context,
     client_simplify_text,
     commitment_score_text,
@@ -999,8 +1000,10 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
         blocks.extend(["## Source locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
     if not client and (quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state))):
         blocks.extend(["## Telemetry privacy note", TELEMETRY_PRIVACY_CAVEAT])
-    if not client and _risk_classification_may_understate_generated_content(state):
-        blocks.extend(["## Risk classification note", RISK_CLASSIFICATION_WARNING])
+    if not client:
+        risk_gate = assess_risk_classification_gate(state)
+        if risk_gate.warning_applies:
+            blocks.extend(["## Risk classification note", _risk_classification_gate_markdown(risk_gate)])
     warnings = threshold_consistency_warnings(state, quality)
     if client and warnings:
         blocks.extend(["## Threshold note", "\n".join(f"- {warning}" for warning in warnings)])
@@ -1032,29 +1035,30 @@ def _quality_content_text(state: ProjectState) -> str:
     return "\n".join(str(part) for part in parts if part)
 
 
-def _risk_classification_may_understate_generated_content(state: ProjectState) -> bool:
-    if str(getattr(state, "risk_classification", "") or "").lower() != "minimal_risk":
-        return False
-    generated_text = "\n".join(
-        part
-        for part in [
-            getattr(state, "report", "") or "",
-            getattr(getattr(state, "strategy", None), "executive_strategy", "") or "",
-            getattr(getattr(state, "strategy", None), "monitoring_plan", "") or "",
-            getattr(getattr(state, "audit", None), "summary", "") or "",
-            "\n".join(getattr(getattr(state, "audit", None), "top_findings", []) or []),
-            "\n".join(getattr(getattr(state, "audit", None), "observation_needs", []) or []),
-        ]
-        if part
-    )
-    return bool(
-        re.search(
-            r"\b(high risk|critical risk|severe risk|circuit breaker|kill criteria|"
-            r"stop/escalate|escalate|major spend|headcount|compliance|safety|legal)\b",
-            generated_text,
-            re.I,
-        )
-    )
+def _risk_classification_gate_markdown(risk_gate) -> str:
+    source_counts = ", ".join(
+        f"{source}: {count}" for source, count in sorted((risk_gate.source_counts or {}).items())
+    ) or "none"
+    rows = [
+        ["Diagnostic", "Value"],
+        ["Selected classification", risk_gate.selected_classification or "unavailable"],
+        ["Normalized classification", risk_gate.normalized_classification or "unavailable"],
+        ["Highest generated risk severity", risk_gate.highest_generated_risk_severity or "none"],
+        ["High/critical structured risk count", str(risk_gate.high_or_critical_risk_count)],
+        ["Source counts", source_counts],
+    ]
+    parts = [risk_gate.warning_text or RISK_CLASSIFICATION_WARNING, _markdown_table(rows)]
+    risk_rows = [["Source", "Severity", "Title", "Summary"]]
+    for row in list(risk_gate.high_or_critical_risks or [])[:12]:
+        risk_rows.append([
+            row.get("source", ""),
+            row.get("severity", ""),
+            row.get("title", ""),
+            row.get("summary", ""),
+        ])
+    if len(risk_rows) > 1:
+        parts.extend(["### High/critical structured risk diagnostics", _markdown_table(risk_rows)])
+    return "\n\n".join(parts)
 
 
 def _client_decision_reviewed(state: ProjectState) -> str:
