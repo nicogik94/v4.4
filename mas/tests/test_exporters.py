@@ -771,6 +771,89 @@ Resolve blockers within 14 days.
             self.assertNotIn("provisional threshold", markdown)
         self.assertEqual(client_markdown.count("No concrete source locators were available for this project"), 1)
 
+    def test_client_report_and_dossier_finalize_citations_locators_and_threshold_placeholders(self):
+        state = ProjectState(
+            project_id="client-final-citation-threshold",
+            project_name="Client final citation threshold",
+            brief="Decide whether activation and conversion recovery are ready to scale.",
+            report="""# Executive Summary
+Use the pilot target ≥threshold before scale-up.
+Internal locator knowledge_report and [Evidence: knowledge_report | chunk=4] should not ship.
+Operator-only source excerpt: [Evidence: knowledge_operator | chunk=9] remains traceable.
+
+# Evidence Used
+| Evidence | What it suggests | Citation |
+|---|---|---|
+| Activation note | Keep the pilot bounded. | citation unavailable |
+| Conversion note | Validate the onboarding funnel. | No citation available |
+
+| Citation |
+|---|
+| citation unavailable |
+
+Citation
+Citation:
+
+# Monitoring and Kill Criteria
+Use ≥threshold before expanding.
+Track threshold activation rate weekly.
+Track threshold conversion from onboarding.
+Compare against threshold baseline.
+Do not expand to threshold until Sprint 0 validates the gate.
+""",
+        )
+        state.strategy = StrategyOutput(
+            success_metrics=[
+                "Activation rate reaches at least 65%.",
+                "Activation-to-conversion lag down 1.5pp within 14 days.",
+            ],
+            monitoring_plan="Use the activation baseline only after 7-day rolling telemetry is stable.",
+        )
+        state.monitor = MonitorOutput(
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="activation",
+                    trip="Activation rate below 40% for 7-day rolling baseline.",
+                    reset="Activation rate at least 65% for 14 days.",
+                )
+            ],
+            canaries=[
+                MonitorCanary(
+                    signal="activation-to-conversion lag",
+                    direction="down",
+                    window="14-day rolling",
+                    meaning="Conversion lag should fall by 1.5pp within 14 days.",
+                )
+            ],
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+
+        for output in (client_markdown, report_markdown, report_text):
+            for forbidden in (
+                "citation unavailable",
+                "No citation available",
+                "Evidence source unavailable",
+                "knowledge_report",
+                "knowledge_operator",
+                "[Evidence:",
+                "| Citation |",
+                "target ≥threshold",
+                "≥threshold",
+                "threshold activation rate",
+                "threshold conversion",
+                "threshold baseline",
+                "expand to threshold",
+            ):
+                self.assertNotIn(forbidden, output)
+            self.assertNotRegex(output, r"(?mi)^\s*Citation\s*:?\s*$")
+            self.assertIn("65%", output)
+            self.assertIn("1.5pp within 14 days", output)
+            self.assertIn("7-day rolling baseline", output)
+
     def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
         state = make_export_state("operator-monitor-note")
 
