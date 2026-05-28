@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from docx import Document
 from fastapi import HTTPException
 from openpyxl import load_workbook
+from pypdf import PdfReader
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,11 @@ def _docx_text(payload: bytes) -> str:
         for row in table.rows:
             parts.extend(cell.text for cell in row.cells)
     return "\n".join(parts)
+
+
+def _pdf_text(payload: bytes) -> str:
+    reader = PdfReader(BytesIO(payload))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 def _docx_table_count(payload: bytes) -> int:
@@ -298,6 +304,26 @@ Run Sprint 0 first.
 """,
     )
     return state
+
+
+def make_runtime_pdf_polish_state(project_id: str = "runtime-pdf-polish"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Runtime PDF polish",
+        brief="Decide whether Sprint 0 evidence is sufficient before scale.",
+        report=r"""# Executive Summary
+Run Sprint 0.## Evidence maturity
+Citation citation unavailable.
+Raw trace knowledge_runtime and evidence_runtime with source_ref=upload:file-9:notes.md#chunk=2 storage_ref=C:\Users\operator\secret.xlsx should not ship.
+[Inference] [Hypothesis] [Unknown]
+
+# Evidence Used
+| Evidence | What It Suggests | Why It Is Needed | Decision It Validates | Citation status |
+|---|---|---|---|---|
+| Activation note | What It Suggests supports the scale recommendation. | Why It Is Needed supports which owner approves scale-up. | Scale gate | |
+| Measurement note | What It Suggests supports whether telemetry is usable. | Why It Is Needed supports whether to continue Sprint 0. | Measurement gate | |
+""",
+    )
 
 
 class TestCodeVersionFreshness(unittest.TestCase):
@@ -1060,6 +1086,70 @@ This line used to render with a stuck heading.
             self.assertIn("[Unknown]", output)
             self.assertIn("Useful blank note", output)
             self.assertIn("Keep this row even without a status value.", output)
+
+    def test_report_profile_pdf_applies_runtime_citation_polish(self):
+        state = make_runtime_pdf_polish_state("runtime-report-pdf-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "report", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("No concrete source locators were available for this project", compact)
+        self.assertIn("Evidence maturity", compact)
+        for preserved in ("[Inference]", "[Hypothesis]", "[Unknown]"):
+            self.assertIn(preserved, compact)
+        for forbidden in (
+            "Sprint 0.## Evidence maturity",
+            "Citation status",
+            "citation unavailable",
+            "Citation citation unavailable",
+            "knowledge_",
+            "evidence_",
+            "source_ref",
+            "upload:",
+            "storage_ref",
+            "Why It Is Needed supports",
+            "What It Suggests supports",
+        ):
+            self.assertNotIn(forbidden, compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps determine which owner approves scale-up.", compact)
+        self.assertIn("This supports whether telemetry is usable.", compact)
+        self.assertIn("This helps determine whether to continue Sprint 0.", compact)
+
+    def test_client_dossier_profile_pdf_applies_runtime_citation_polish(self):
+        state = make_runtime_pdf_polish_state("runtime-client-pdf-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("No concrete source locators were available for this project", compact)
+        self.assertIn("Evidence maturity", compact)
+        for preserved in ("[Inference]", "[Hypothesis]", "[Unknown]"):
+            self.assertIn(preserved, compact)
+        for forbidden in (
+            "Sprint 0.## Evidence maturity",
+            "Citation status",
+            "citation unavailable",
+            "Citation citation unavailable",
+            "knowledge_",
+            "evidence_",
+            "source_ref",
+            "upload:",
+            "storage_ref",
+            "Why It Is Needed supports",
+            "What It Suggests supports",
+        ):
+            self.assertNotIn(forbidden, compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps determine which owner approves scale-up.", compact)
+        self.assertIn("This supports whether telemetry is usable.", compact)
+        self.assertIn("This helps determine whether to continue Sprint 0.", compact)
 
     def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
         state = make_export_state("operator-monitor-note")
