@@ -409,9 +409,17 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
     else:
         markdown = build_operator_dossier_markdown(state, current_code_version=current_version)
 
+    client_visible_profile = profile_name in {"report", "client_dossier"}
+    if client_visible_profile:
+        markdown = _finalize_client_runtime_render_markdown(markdown, state)
+
     if fmt == "docx":
         return _export_markdown_docx_bytes(markdown, title=filename), PROFILE_MEDIA_TYPES[fmt], filename
-    return _export_markdown_pdf_bytes(markdown, title=filename), PROFILE_MEDIA_TYPES[fmt], filename
+    return _export_markdown_pdf_bytes(
+        markdown,
+        title=filename,
+        client_visible=client_visible_profile,
+    ), PROFILE_MEDIA_TYPES[fmt], filename
 
 
 def build_client_dossier_markdown(
@@ -659,6 +667,12 @@ def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> st
     return _collapse_markdown_blank_lines(value)
 
 
+def _finalize_client_runtime_render_markdown(markdown: str, state: ProjectState) -> str:
+    quality = assess_report_quality_context(state)
+    value = _finalize_export_markdown(markdown, state, audience="client", quality=quality)
+    return _polish_client_report_citation_rendering(value)
+
+
 def _polish_client_report_citation_rendering(markdown: str) -> str:
     value = str(markdown or "")
     value = re.sub(
@@ -666,7 +680,15 @@ def _polish_client_report_citation_rendering(markdown: str) -> str:
         r"\1\n\n\2",
         value,
     )
+    value = re.sub(r"\bCitation\s+(?:citation unavailable|no citation available)\b\.?", "", value, flags=re.I)
+    value = re.sub(r"(?mi)^\s*Citation\s*$", "", value)
     value = re.sub(r"\bWhat It Suggests supports\b", "This supports", value, flags=re.I)
+    value = re.sub(
+        r"\bWhy It Is Needed supports\s+(which|whether)\b",
+        r"This helps determine \1",
+        value,
+        flags=re.I,
+    )
     value = re.sub(r"\bWhy It Is Needed supports\b", "This supports", value, flags=re.I)
     return value
 
@@ -3350,7 +3372,7 @@ def _export_markdown_docx_bytes(markdown: str, *, title: str) -> bytes:
     return buf.getvalue()
 
 
-def _export_markdown_pdf_bytes(markdown: str, *, title: str) -> bytes:
+def _export_markdown_pdf_bytes(markdown: str, *, title: str, client_visible: bool = False) -> bytes:
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -3368,7 +3390,8 @@ def _export_markdown_pdf_bytes(markdown: str, *, title: str) -> bytes:
     body = ParagraphStyle("ProfileBody", parent=styles["BodyText"], fontSize=9.5, leading=13, spaceAfter=4)
 
     story = []
-    for block in _markdown_to_blocks(markdown):
+    render_markdown = _polish_client_report_citation_rendering(markdown) if client_visible else markdown
+    for block in _markdown_to_blocks(render_markdown):
         if block["type"] == "heading":
             style = heading1 if block["level"] == 1 else heading2 if block["level"] == 2 else heading3
             story.append(Paragraph(_as_pdf_text(_strip_inline_markdown(block["text"])), style))
@@ -3391,7 +3414,14 @@ def _export_markdown_pdf_bytes(markdown: str, *, title: str) -> bytes:
                 )
             )
         elif block["type"] == "table":
-            story.extend(_pdf_table_flowables(block["rows"], body, doc.width))
+            story.extend(
+                _pdf_table_flowables(
+                    block["rows"],
+                    body,
+                    doc.width,
+                    client_visible=client_visible,
+                )
+            )
         elif block["type"] == "divider":
             story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CBD5E1"), spaceBefore=4, spaceAfter=4))
         story.append(Spacer(1, 2))
@@ -3510,10 +3540,16 @@ def _add_docx_divider(document: Document) -> None:
     paragraph.paragraph_format.space_after = Pt(4)
 
 
-def _pdf_table_flowables(rows: list[list[str]], body_style: ParagraphStyle, available_width: float) -> list[Any]:
+def _pdf_table_flowables(
+    rows: list[list[str]],
+    body_style: ParagraphStyle,
+    available_width: float,
+    *,
+    client_visible: bool = False,
+) -> list[Any]:
     column_count = max(len(row) for row in rows) if rows else 1
     if column_count > 4:
-        return _pdf_wide_table_cards(rows, body_style, available_width)
+        return _pdf_wide_table_cards(rows, body_style, available_width, client_visible=client_visible)
     return [_pdf_table(rows, body_style, available_width)]
 
 
@@ -3542,7 +3578,13 @@ def _pdf_table(rows: list[list[str]], body_style: ParagraphStyle, available_widt
     return table
 
 
-def _pdf_wide_table_cards(rows: list[list[str]], body_style: ParagraphStyle, available_width: float) -> list[Any]:
+def _pdf_wide_table_cards(
+    rows: list[list[str]],
+    body_style: ParagraphStyle,
+    available_width: float,
+    *,
+    client_visible: bool = False,
+) -> list[Any]:
     if not rows:
         return []
     width = max(len(row) for row in rows)
@@ -3560,6 +3602,8 @@ def _pdf_wide_table_cards(rows: list[list[str]], body_style: ParagraphStyle, ava
         card_rows = []
         for header, value in zip(headers, row):
             if not str(header).strip() and not str(value).strip():
+                continue
+            if client_visible and _is_client_citation_column_header(str(header)) and not str(value).strip():
                 continue
             card_rows.append([
                 Paragraph(_as_pdf_text(_strip_inline_markdown(str(header or f"Field {row_index}"))), label_style),
