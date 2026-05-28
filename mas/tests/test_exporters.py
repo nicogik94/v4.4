@@ -995,6 +995,72 @@ Escalate above the threshold or below the threshold.
             for concrete in ("25%", "29%", "38%", "40%", "48h", "<24h", ">48h", "2pp", "3 days", "5%", "10%", "15%", "20%", "30%", "50%"):
                 self.assertIn(concrete, output)
 
+    def test_final_report_polish_fixes_evidence_maturity_boundary_and_blank_citation_status_tables(self):
+        state = ProjectState(
+            project_id="final-pdf-polish-boundary",
+            project_name="Final PDF polish boundary",
+            brief="Decide whether Sprint 0 evidence is enough to proceed.",
+            report="""# Executive Summary
+Run Sprint 0.## Evidence maturity
+This line used to render with a stuck heading.
+
+# Evidence Used
+| Evidence | What It Suggests | Citation status |
+|---|---|---|
+| Activation note | What It Suggests supports the recommendation. | |
+| Discovery note | Why It Is Needed supports Sprint 0. | |
+""",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+
+        for markdown in (client_markdown, report_markdown):
+            self.assertNotIn("Sprint 0.## Evidence maturity", markdown)
+            self.assertRegex(markdown, r"(?m)^## Evidence maturity$")
+            self.assertNotIn("| Evidence | What It Suggests | Citation status |", markdown)
+            self.assertIn("| Evidence | What It Suggests |", markdown)
+            self.assertIn("| Activation note | This supports the recommendation. |", markdown)
+            self.assertIn("| Discovery note | This supports Sprint 0. |", markdown)
+            self.assertNotIn("What It Suggests supports", markdown)
+            self.assertNotIn("Why It Is Needed supports", markdown)
+
+        self.assertNotIn("Sprint 0.## Evidence maturity", report_text)
+        self.assertIn("Evidence maturity", report_text)
+        self.assertIn("Activation note", report_text)
+        self.assertIn("This supports the recommendation.", report_text)
+        self.assertIn("Discovery note", report_text)
+        self.assertIn("This supports Sprint 0.", report_text)
+
+    def test_final_report_polish_preserves_client_safe_citation_status_markers(self):
+        state = ProjectState(
+            project_id="final-pdf-polish-status-markers",
+            project_name="Final PDF polish status markers",
+            brief="Preserve client-safe citation status labels.",
+            report="""# Evidence Used
+| Evidence | What It Suggests | Citation status |
+|---|---|---|
+| Leadership note | Treat this as directional. | [Inference] |
+| Measurement note | Data coverage is incomplete. | [Unknown] |
+| Strategy note | Validate this before acting. | [Hypothesis] |
+| Useful blank note | Keep this row even without a status value. | |
+""",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+
+        for output in (client_markdown, report_markdown, report_text):
+            self.assertIn("[Inference]", output)
+            self.assertIn("[Hypothesis]", output)
+            self.assertIn("[Unknown]", output)
+            self.assertIn("Useful blank note", output)
+            self.assertIn("Keep this row even without a status value.", output)
+
     def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
         state = make_export_state("operator-monitor-note")
 

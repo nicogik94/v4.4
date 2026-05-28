@@ -655,7 +655,20 @@ def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> st
     value = _remove_standalone_client_citation_rows(value)
     value = _rename_client_citation_table_headers(value)
     value = _replace_client_threshold_placeholders(value, state)
+    value = _polish_client_report_citation_rendering(value)
     return _collapse_markdown_blank_lines(value)
+
+
+def _polish_client_report_citation_rendering(markdown: str) -> str:
+    value = str(markdown or "")
+    value = re.sub(
+        r"(?im)\b(Sprint 0\.)[ \t]*(#{1,6}\s+Evidence maturity\b)",
+        r"\1\n\n\2",
+        value,
+    )
+    value = re.sub(r"\bWhat It Suggests supports\b", "This supports", value, flags=re.I)
+    value = re.sub(r"\bWhy It Is Needed supports\b", "This supports", value, flags=re.I)
+    return value
 
 
 def _ensure_client_delivery_validation_banner(markdown: str) -> str:
@@ -2817,6 +2830,8 @@ def _is_client_citation_column_header(value: str) -> bool:
         "citation",
         "citation marker",
         "citation markers",
+        "citation status",
+        "citation statuses",
         "citation locator",
         "citation locators",
         "locator",
