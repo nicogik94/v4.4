@@ -435,10 +435,14 @@ This section is narrative only and should not replace Decision Gates.
         rows = _xlsx_rows(payload)
         combined = "\n".join("\t".join(row) for row in rows)
 
-        self.assertIn("Operator to define", combined)
+        self.assertIn("Monitoring signal to confirm", combined)
+        self.assertIn("Decision owner to confirm", combined)
+        self.assertIn("Monitoring cadence to confirm", combined)
+        self.assertIn("Validate threshold before using as a change-course gate.", combined)
         self.assertIn("Evidence source unavailable", combined)
-        self.assertIn("Threshold not yet confirmed", combined)
         self.assertIn("Validation required", combined)
+        self.assertNotIn("Operator to define", combined)
+        self.assertNotIn("Threshold not yet confirmed", combined)
 
     def test_client_monitoring_template_uses_concrete_values_and_direction_fidelity(self):
         state = ProjectState(
@@ -557,9 +561,117 @@ Decision Gates remain the threshold source of truth.
         rows = _xlsx_rows(payload)
 
         self.assertEqual(rows[1][0], "Decision Gate")
-        self.assertEqual(rows[1][7], "Threshold not yet confirmed")
+        self.assertEqual(rows[1][7], "Validate threshold before using as a change-course gate.")
         self.assertIn("not parsed into a clear gate table", "\n".join(rows[1]))
         self.assertNotIn("ev-market", rows[1])
+
+    def test_monitoring_template_smoke_cleans_placeholders_and_keeps_operator_evidence_trace_columns(self):
+        state = ProjectState(
+            project_id="monitor-smoke-cleanup",
+            project_name="Monitoring smoke cleanup",
+            brief="Repair activation, data quality, and billing/CRM discrepancy monitoring.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Data quality controls activation recovery.",
+                signal="Data quality completion rate",
+                confirm="completion rate >=80% within 10 business days",
+                reject="completion rate <=30% after 48h",
+                evidence_ids=["evidence_84a1a979a567"],
+            ),
+            Hypothesis(
+                id="H2",
+                text="Qualitative readiness needs an owner.",
+                signal="Qualitative launch readiness",
+                confirm="Leadership review complete",
+                reject="No decision meeting scheduled",
+            ),
+        ]
+        state.strategy = StrategyOutput(
+            preliminary_verdicts=[
+                PreliminaryVerdict(
+                    id="H1",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    evidence="evidence_84a1a979a567",
+                    monitoring_plan="Track data quality from 0% to 100% within 10 business days.",
+                ),
+                PreliminaryVerdict(
+                    id="H2",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    monitoring_plan="Confirm launch readiness with the decision owner.",
+                ),
+            ],
+            success_metrics=[
+                "Activation recovery reaches 40% after 48h.",
+                "Data quality coverage moves from 0% to 100% within 10 business days.",
+                "Calibration target <0.20.",
+                "Qualitative launch readiness review.",
+            ],
+        )
+        state.monitor = MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                daily=[
+                    MonitorScheduleItem(
+                        metric="Activation completion rate reaches 40% within 48h",
+                        source="source_ref=upload:file-2:metrics.csv#row=3 knowledge_alpha storage_ref=C:\\Users\\operator\\private.xlsx",
+                    )
+                ]
+            ),
+            canaries=[
+                MonitorCanary(
+                    signal="billing/CRM delta discrepancy",
+                    window="48h",
+                    meaning="delta should fall below <0.20",
+                )
+            ],
+        )
+
+        client_payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        client_rows = _xlsx_rows(client_payload)
+        client_combined = "\n".join("\t".join(row) for row in client_rows)
+
+        for forbidden in (
+            "Threshold not yet confirmed",
+            "Operator to define",
+            "knowledge_",
+            "source_ref",
+            "upload:",
+            "storage_ref",
+        ):
+            self.assertNotIn(forbidden, client_combined)
+        self.assertNotRegex(client_combined, r"\bevidence_[A-Za-z0-9_.:-]+\b")
+        for expected in (
+            "40%",
+            "0%",
+            "100%",
+            "10 business days",
+            "48h",
+            "<0.20",
+            "Decision owner to confirm",
+            "Monitoring cadence to confirm",
+            "Validate threshold before using as a change-course gate.",
+        ):
+            self.assertIn(expected, client_combined)
+
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        operator_rows = _xlsx_rows(operator_payload)
+        operator_combined = "\n".join("\t".join(row) for row in operator_rows)
+
+        self.assertNotIn("Threshold not yet confirmed", operator_combined)
+        self.assertNotIn("Operator to define", operator_combined)
+        self.assertIn("Owner assignment pending", operator_combined)
+        self.assertIn("Cadence assignment pending", operator_combined)
+
+        operator_header = operator_rows[0]
+        evidence_column = operator_header.index("Evidence IDs")
+        evidence_hits = 0
+        for row in operator_rows[1:]:
+            for index, value in enumerate(row):
+                if re.search(r"\bevidence_[A-Za-z0-9_.:-]+\b", value):
+                    evidence_hits += 1
+                    self.assertEqual(index, evidence_column)
+        self.assertGreater(evidence_hits, 0)
 
     def test_monitoring_template_client_redacts_internal_ids_refs_and_formula_cells(self):
         state = make_export_state("client-monitor-safe")

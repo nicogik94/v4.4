@@ -19,6 +19,7 @@ OPERATOR_TO_DEFINE = "Operator to define"
 VALIDATION_REQUIRED = "Validation required"
 EVIDENCE_SOURCE_UNAVAILABLE = "Evidence source unavailable"
 THRESHOLD_NOT_CONFIRMED = "Threshold not yet confirmed"
+THRESHOLD_VALIDATION_PENDING = "Validate threshold before using as a change-course gate."
 SHEET_NAME = "Monitoring Template"
 
 CLIENT_MONITORING_TEMPLATE_HEADERS: tuple[str, ...] = (
@@ -403,7 +404,68 @@ def _render_row(row: MonitoringTemplateRow, headers: tuple[str, ...], *, audienc
     }
     if audience == "client":
         values = _client_enhance_row_values(values, row)
+    values = _monitoring_safe_render_values(values, audience=audience)
     return [_spreadsheet_safe_cell(values.get(header, ""), audience=audience, header=header) for header in headers]
+
+
+def _monitoring_safe_render_values(values: dict[str, str], *, audience: str) -> dict[str, str]:
+    safe = dict(values)
+    context = " ".join(
+        _text(safe.get(header, ""))
+        for header in (
+            "Metric / signal",
+            "Decision or hypothesis validated",
+            "Source / evidence source",
+            "Target / good sign",
+            "Warning sign",
+            "Cadence",
+            "Notes",
+        )
+    )
+    direction = _desired_direction(context)
+    concrete_values = _extract_concrete_monitoring_values(context)
+
+    for header, value in list(safe.items()):
+        if _text(value) == OPERATOR_TO_DEFINE:
+            safe[header] = _operator_to_define_fallback(header, audience=audience)
+        elif OPERATOR_TO_DEFINE in _text(value):
+            safe[header] = _text(value).replace(OPERATOR_TO_DEFINE, _operator_to_define_fallback(header, audience=audience))
+
+    threshold = _text(safe.get("Stop/change-course threshold", ""))
+    if threshold == THRESHOLD_NOT_CONFIRMED:
+        safe["Stop/change-course threshold"] = _threshold_render_fallback(concrete_values, direction)
+    elif THRESHOLD_NOT_CONFIRMED in threshold:
+        safe["Stop/change-course threshold"] = threshold.replace(
+            THRESHOLD_NOT_CONFIRMED,
+            _threshold_render_fallback(concrete_values, direction),
+        )
+    return safe
+
+
+def _operator_to_define_fallback(header: str, *, audience: str) -> str:
+    if header == "Owner / role":
+        return "Decision owner to confirm" if audience == "client" else "Owner assignment pending"
+    if header == "Cadence":
+        return "Monitoring cadence to confirm" if audience == "client" else "Cadence assignment pending"
+    if header == "Metric / signal":
+        return "Monitoring signal to confirm"
+    if header == "Decision or hypothesis validated":
+        return "Decision or hypothesis to confirm"
+    if header == "Action if triggered":
+        return "Triggered action to confirm"
+    if header == "Target / good sign":
+        return "Target condition to confirm"
+    if header == "Warning sign":
+        return "Warning condition to confirm"
+    return "Monitoring detail to confirm"
+
+
+def _threshold_render_fallback(concrete_values: tuple[str, ...], direction: str) -> str:
+    if concrete_values:
+        return _concrete_threshold_or_placeholder(concrete_values, "")
+    if direction:
+        return _movement_against_direction_text(direction)
+    return THRESHOLD_VALIDATION_PENDING
 
 
 def _client_enhance_row_values(values: dict[str, str], row: MonitoringTemplateRow) -> dict[str, str]:
@@ -491,44 +553,52 @@ def _desired_direction(value: str) -> str:
     text = _normalize_label(value)
     if not text:
         return ""
-    inverse_terms = (
-        "time to value",
-        "time value",
-        "lag",
-        "latency",
-        "delay",
-        "cycle time",
-        "response time",
-        "resolution time",
-        "churn",
-        "failure rate",
-        "error rate",
-        "drop off",
-        "dropoff",
-        "cost",
-        "cac",
-        "risk",
-        "defect",
-        "friction",
+    inverse_patterns = (
+        r"\btime\s+to\s+value\b",
+        r"\btime\s+value\b",
+        r"\blag\b",
+        r"\blatency\b",
+        r"\bdelay\b",
+        r"\bcycle\s+time\b",
+        r"\bresponse\s+time\b",
+        r"\bresolution\s+time\b",
+        r"\bchurn\b",
+        r"\bfailure\s+rate\b",
+        r"\berror\s+rate\b",
+        r"\bdrop\s+off\b",
+        r"\bdropoff\b",
+        r"\bcost\b",
+        r"\bcac\b",
+        r"\brisk\b",
+        r"\bdefect\b",
+        r"\bfriction\b",
+        r"\bbilling\s+crm\s+delta\b",
+        r"\bcrm\s+billing\s+delta\b",
+        r"\bbilling\s+delta\b",
+        r"\bcrm\s+delta\b",
+        r"\bdiscrepanc(?:y|ies)\b",
     )
-    positive_terms = (
-        "activation",
-        "conversion",
-        "qualified",
-        "retention",
-        "revenue",
-        "arr",
-        "pipeline",
-        "win rate",
-        "adoption",
-        "completion",
-        "satisfaction",
-        "quality",
-        "coverage",
+    positive_patterns = (
+        r"\bactivation\b",
+        r"\bconversion\b",
+        r"\bqualified\b",
+        r"\bretention\b",
+        r"\brevenue\b",
+        r"\barr\b",
+        r"\bpipeline\b",
+        r"\bwin\s+rate\b",
+        r"\badoption\b",
+        r"\bcompletion(?:\s+rate)?\b",
+        r"\bresponse\s+rate\b",
+        r"\bsatisfaction\b",
+        r"\bquality\b",
+        r"\bdata\s+quality\b",
+        r"\bdq\s+score\b",
+        r"\bcoverage\b",
     )
-    if any(term in text for term in inverse_terms):
+    if any(re.search(pattern, text, re.I) for pattern in inverse_patterns):
         return "down"
-    if any(term in text for term in positive_terms):
+    if any(re.search(pattern, text, re.I) for pattern in positive_patterns):
         return "up"
     if re.search(r"\b(?:down|decrease|reduce|lower|below|under|fewer|less)\b", text, re.I):
         return "down"
@@ -553,18 +623,27 @@ def _movement_against_direction_text(direction: str) -> str:
 
 def _extract_concrete_monitoring_values(value: str) -> tuple[str, ...]:
     text = _text(value)
+    number = r"\d+(?:\.\d+)?"
+    value_boundary = r"(?=$|[\s,.;:)>\]|])"
+    unit = r"(?:%|pp|h|hrs?|hours?|business\s+days?|days?|weeks?|months?)"
     patterns = [
-        r"\bwithin\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
-        r"\bDay\s+\d+\b",
-        r"\b\d+(?:\.\d+)?[- ]day\s+rolling\b",
-        r"\b\d+(?:\.\d+)?[- ]week\s+rolling\b",
-        r"\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
-        r"\b\d+(?:\.\d+)?\s*pp\b",
-        r"\b\d+(?:\.\d+)?\s*%\b",
+        rf"(?:[<>]=?|≥|≤)\s*{number}\s*{unit}{value_boundary}",
+        rf"(?:[<>]=?|≥|≤)\s*{number}{value_boundary}",
+        rf"\bwithin\s+{number}\s*(?:hours?|hrs?|business\s+days?|days?|weeks?|months?)\b",
+        rf"\bDay\s+{number}\b",
+        rf"\b{number}[- ]day\s+rolling(?:\s+baseline)?\b",
+        rf"\b{number}[- ]week\s+rolling(?:\s+baseline)?\b",
+        rf"\b{number}\s*{unit}{value_boundary}",
     ]
     values: list[str] = []
+    spans: list[tuple[int, int]] = []
     for pattern in patterns:
-        values.extend(match.group(0) for match in re.finditer(pattern, text, re.I))
+        for match in re.finditer(pattern, text, re.I):
+            start, end = match.span()
+            if any(start < existing_end and end > existing_start for existing_start, existing_end in spans):
+                continue
+            spans.append((start, end))
+            values.append(match.group(0))
     return tuple(_unique(values))
 
 
