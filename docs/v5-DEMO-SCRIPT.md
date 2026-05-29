@@ -29,7 +29,7 @@ controls, and client/operator exports.
    Mention `http://localhost:8000` only as the fallback when Docker publishes
    the container on that host port.
 
-2. Open `dashboards/index.html` and set the API base URL to `$base`.
+2. Open the canonical dashboard at `dashboards/index.html` and set the API base URL to `$base`.
 3. Create a project using an example brief from `docs/demo-briefs/`.
 4. Explain that uploads are optional and additive; they do not automatically
    rerun the workflow.

@@ -12,7 +12,7 @@ Status vocabulary used here:
 
 ## 1. One-paragraph summary
 
-v4 is a controlled decision-analysis engine that turns vague strategic, operational, product, or business questions into structured decision work: classification, hypotheses, stress testing, evidence audit, strategy, quality review, monitoring, and final report. It is operator-led, not autonomous: the code controls workflow order, deterministic gates, policy checks, persistence, retrieval eligibility, export boundaries, and report/citation guardrails, while LLM calls generate structured phase outputs inside those constraints. The strongest current shape is a single-operator, localhost-first Strategic Decision Audit workflow surfaced through `START_HERE.md`, `dashboards/index.html`, and the FastAPI backend in `mas/api.py`, with newer backend export profiles and v5-dashboard controls available on the `v44-expansion-wave` branch.
+v4 is a controlled decision-analysis engine that turns vague strategic, operational, product, or business questions into structured decision work: classification, hypotheses, stress testing, evidence audit, strategy, quality review, monitoring, and final report. It is operator-led, not autonomous: the code controls workflow order, deterministic gates, policy checks, persistence, retrieval eligibility, export boundaries, and report/citation guardrails, while LLM calls generate structured phase outputs inside those constraints. The strongest current shape is a single-operator, localhost-first Strategic Decision Audit workflow surfaced through `START_HERE.md`, the canonical v5 dashboard at `dashboards/index.html`, and the FastAPI backend in `mas/api.py`.
 
 ## 2. What v4 is
 
@@ -114,7 +114,7 @@ LLM-generated:
 
 ### Dashboard/operator console
 
-`dashboards/index.html` is the canonical documented v4.4 console. It defaults to `http://localhost:8000`, uses the API directly, and surfaces project creation, phase strip, run/kill controls, Overview, Dossier, Workspace, Decision trace, uploads, report, export, budget, and system/calibration views. `dashboards/index-v5.html` contains newer expansion-wave UI surfaces, including deterministic clarification controls, Bayesian advisory display, and export profile controls for the backend profile export route. It is still best treated as the v5/experimental dashboard unless the repo docs are updated to make it the canonical daily surface.
+`dashboards/index.html` is the canonical/default local operator dashboard. It defaults to `http://localhost:8000` for local file use, supports query-param/localStorage/manual API base overrides, uses the API directly, and surfaces project creation, portfolio summary, project workstation, phase strip, run/kill controls, Overview/Workspace/trace-style views, clarifications, Bayesian advisory display, uploads, report, export profiles, budget, calibration, and runtime readiness details. `dashboards/index-v5.html` is a compatibility/explicit v5 entry point that redirects to `dashboards/index.html`.
 
 ### API surface
 
@@ -123,7 +123,7 @@ LLM-generated:
 Export routes now have two shapes:
 
 - Legacy route, unchanged: `GET /projects/{project_id}/export/{fmt}` with `fmt=pdf|docx`, exporting the current final report.
-- Profile route: `GET /projects/{project_id}/export?profile={profile}&format={format}`. Supported combinations are `report` PDF/DOCX, `client_dossier` PDF/DOCX, `operator_dossier` PDF/DOCX, and `machine_archive` ZIP. Invalid profiles or invalid profile/format pairs return HTTP 400.
+- Profile route: `GET /projects/{project_id}/export?profile={profile}&format={format}`. Supported combinations are `report` PDF/DOCX, `client_dossier` PDF/DOCX, `operator_dossier` PDF/DOCX, `machine_archive` ZIP, `client_monitoring_template` XLSX, and `operator_monitoring_template` XLSX. Invalid profiles or invalid profile/format pairs return HTTP 400.
 
 ## 6. Analytical framework library
 
@@ -147,7 +147,7 @@ v4.4 is primarily a UX/operator-surface release, not a new reasoning-engine rede
 
 The underlying v4.3 architecture remains the core engine: deterministic policy enforcement, prompt-injection intake sanitizer, risk classification, budget caps, kill switch, circuit breakers, persistence, prior consumption, and observability.
 
-Recent `v44-expansion-wave` commits add bounded increments on top of that core: deterministic clarification storage/display, an internal Bayesian scenario adapter, Report Clarity T1 for newly generated reports, profile-based backend exports, and v5-dashboard export profile controls. These are additive surfaces, not an autonomous-agent redesign.
+Recent `v44-expansion-wave` commits add bounded increments on top of that core: deterministic clarification storage/display, an internal Bayesian scenario adapter, Report Clarity T1 for newly generated reports, profile-based backend exports, monitoring template XLSX exports, and canonical v5 dashboard controls. These are additive surfaces, not an autonomous-agent redesign.
 
 The canonical operator path is:
 
@@ -176,7 +176,7 @@ Note on doc/runtime drift: `docs/security/threat-model.md` contains mitigation l
 | Item | Status | Evidence | Notes |
 |---|---|---|---|
 | Uploaded evidence handling | Implemented | `mas/knowledge/files.py`, `mas/knowledge/file_parsers.py`, `mas/api.py`, `docs/v4.4-FILE-UPLOADS-OVERVIEW.md`, `mas/tests/test_file_uploads.py` | Supports PDF, DOCX, TXT, MD, CSV, XLSX with bounded parsing. Uploads do not auto-rerun analysis. |
-| Deterministic clarifications | Implemented as storage/display support | `mas/clarifications.py`, `mas/api.py`, `dashboards/index-v5.html`, `mas/tests/test_clarifications.py`, `mas/tests/test_dashboard_workspace_markup.py` | Generates deterministic follow-up questions, records answers/unavailable status, and displays them in the v5 dashboard. It is not a workflow-control loop and should not be sold as mature blocker-only clarification. |
+| Deterministic clarifications | Implemented as storage/display support | `mas/clarifications.py`, `mas/api.py`, `dashboards/index.html`, `mas/tests/test_clarifications.py`, `mas/tests/test_dashboard_workspace_markup.py` | Generates deterministic follow-up questions, records answers/unavailable status, and displays them in the canonical dashboard. It is not a workflow-control loop and should not be sold as mature blocker-only clarification. |
 | Automatic KPI inference | Partial | `mas/state.py` monitor/strategy models, `mas/orchestrator.py` monitor prompt, `mas/overview.py` metric cards | LLM-generated strategy metrics and monitor schedules exist. There is no separate deterministic KPI inference engine. |
 | Resumable workflow execution | Implemented | `mas/orchestrator.py::run_workflow_sequence`, `mas/tests/test_workflow_runner.py` | Runner starts from first unfinished/failed phase and persists after phases. |
 | Phase-specific LLM routing | Implemented with runtime hooks | `mas/config.py`, `mas/runtime/provider_gateway.py`, `mas/llm_client.py`, `mas/tests/test_runtime_gateway.py` | Phase defaults and override hooks exist. Full broader provider productization is still bounded. |
@@ -184,12 +184,12 @@ Note on doc/runtime drift: `docs/security/threat-model.md` contains mitigation l
 | Report Clarity T1 | Implemented for newly generated reports | `mas/orchestrator.py::build_report_prompt`, `mas/tests/test_report_evidence_register.py`, `mas/tests/test_workflow_runner.py` | The active report prompt asks for a client-facing decision memo with fixed headings and citation discipline. It does not rewrite old reports or PDFs. |
 | Analysis quality fields | Implemented | `mas/state.py`, `mas/tools/scoring.py`, `mas/workspace.py`, `mas/tests/test_core.py` | DQ, deterministic scores, SQI, phase confidence, Brier fields, and gates exist. |
 | Evidence sufficiency fields | Partial | `mas/state.py`, `mas/decision_objects.py`, `mas/explainability.py`, `mas/cdp/*` | Evidence IDs, provenance, observation needs, retrieval visibility, and citation locator checks exist. No full semantic evidence-strength gauge yet. |
-| Template runtime status | Scaffolded | `mas/extensions/packs.py`, `docs/v4.4-TRANCHE-2-PLAN.md`, `dashboards/index-v5.html` | Pack registry exists; v5 dashboard includes template ideas. Active v4.4 backend does not show concrete template packs. |
-| Workspace/trace/report/export surfaces | Implemented | `mas/workspace.py`, `mas/overview.py`, `mas/explainability.py`, `mas/exporters.py`, `mas/api.py`, `dashboards/index.html`, `dashboards/index-v5.html`, `mas/tests/test_exporters.py` | Backend-derived Workspace, Overview, trace/explain, markdown report, legacy DOCX/PDF report export, profile-based dossier exports, and sanitized machine archive ZIP. v5 dashboard has profile export controls; index.html remains the documented v4.4 console. |
+| Template runtime status | Scaffolded | `mas/extensions/packs.py`, `docs/v4.4-TRANCHE-2-PLAN.md`, `dashboards/index.html` | Pack registry exists; dashboard demo-framing labels include template ideas. Active v4.4 backend does not show concrete template packs. |
+| Workspace/trace/report/export surfaces | Implemented | `mas/workspace.py`, `mas/overview.py`, `mas/explainability.py`, `mas/exporters.py`, `mas/api.py`, `dashboards/index.html`, `mas/tests/test_exporters.py` | Backend-derived Workspace, Overview, trace/explain, markdown report, legacy DOCX/PDF report export, profile-based dossier exports, monitoring XLSX exports, and sanitized machine archive ZIP. The canonical dashboard has profile export controls. |
 | Profile-based project exports | Implemented | `mas/exporters.py`, `mas/api.py`, `mas/tests/test_exporters.py` | Supports `report`, `client_dossier`, `operator_dossier`, and `machine_archive`. Client/operator dossiers render PDF/DOCX; machine archive returns sanitized ZIP. Client exports are bounded and do not dump raw ProjectState. |
 | Strategic Decision Audit | Implemented as the core strongest path | `START_HERE.md`, `README.md`, `mas/orchestrator.py`, `mas/prompts/phases/*`, `lead-magnets/sample-decision-audit.md` | Best described as the mature default use case, not necessarily a separate template object. |
-| Automation ROI | Not found as first-class runtime template | `lead-magnets/roi-calculator.html`, `dashboards/index-v5.html` | Can be analyzed as a generic decision brief. Do not claim a hardened Automation ROI backend template in v4.4. |
-| AI Readiness | Not found as first-class runtime template | `dashboards/index-v5.html` mentions an option; active backend pack registry has no concrete pack | Can be analyzed generically, but do not overclaim dedicated runtime support. |
+| Automation ROI | Not found as first-class runtime template | `lead-magnets/roi-calculator.html`, `dashboards/index.html` | Can be analyzed as a generic decision brief. Do not claim a hardened Automation ROI backend template in v4.4. |
+| AI Readiness | Not found as first-class runtime template | `dashboards/index.html` mentions an option; active backend pack registry has no concrete pack | Can be analyzed generically, but do not overclaim dedicated runtime support. |
 | Bayesian priors | Implemented, plus internal scenario adapter | `mas/state.py` `Hypothesis.alpha/beta`, `mas/priors.py`, `mas/tools/scoring.py`, `mas/scenarios/*`, `mas/tests/scenarios/*` | Priors feed prompts when snapshots exist. Bayesian Scenarios T1 is internal-only and deterministic. |
 | Calibration/meta-learning | Partial / data-dependent | `mas/sql/outcomes.sql`, `mas/jobs/update_priors.py`, `mas/priors.py`, `mas/tools/calibration.py`, `mas/api.py` calibration endpoints | Brier/ECE/outcomes/prior snapshots exist. Framework value scoring is an honest stub until enough standardized resolved data exists. |
 | Policy/risk classification | Implemented | `mas/policy.py`, `mas/security/intake_sanitizer.py`, `compliance/eu-ai-act-classification.md`, `mas/api.py` | Operator sets/owns classification. API will not magically enforce every Annex III judgment. |
@@ -202,7 +202,7 @@ The strongest current use case is Strategic Decision Audit: an operator gives th
 
 Evidence: `START_HERE.md` explains this daily workflow; `README.md` frames v4.4 as a single-screen operator release for the same engine; `mas/orchestrator.py`, `mas/config.py`, and `mas/state.py` implement the phase pipeline; `mas/evals/golden_cases.jsonl` contains realistic decision cases; `mas/tests/*` cover workflow, gates, trace, decision objects, retrieval, report evidence registers, and scenario adapters.
 
-Automation ROI and AI Readiness may be valid topics to feed into the general Strategic Decision Audit workflow, but the repo evidence does not support claiming they are hardened first-class v4.4 templates. `lead-magnets/roi-calculator.html` is a marketing/lead-magnet artifact, and `dashboards/index-v5.html` appears future-facing rather than the canonical v4.4 console.
+Automation ROI and AI Readiness may be valid topics to feed into the general Strategic Decision Audit workflow, but the repo evidence does not support claiming they are hardened first-class v4.4 templates. `lead-magnets/roi-calculator.html` is a marketing/lead-magnet artifact, and the dashboard treats these as demo-framing labels rather than backend runtime packs.
 
 ## 11. Human responsibility boundary
 
@@ -220,12 +220,12 @@ v4 assists judgment; it does not own the decision. Every report, recommendation,
 | Prompt builder drift | `mas/orchestrator.py`, `mas/prompts/loader.py`, `mas/prompts/phases/*`, `CHANGELOG.md` | Inline active prompts and file prompts coexist. Changes must verify which path is runtime-active. |
 | Controlled retrieval is narrow | `mas/knowledge/retrieval.py`, `docs/v4.4-CONTROLLED-RETRIEVAL.md`, `START_HERE.md` | Only audit/strategy consume prompt-facing projections; no auto-rerun; no raw prompt dumps. |
 | Knowledge sync is not broad live current-awareness | `mas/knowledge/sync.py`, `docs/v4.4-TRANCHE-3A-KNOWLEDGE-FOUNDATION.md` | Manual/offline and uploaded-file sources are supported; scheduled live connectors remain deferred. |
-| Template/vertical parity is not mature | `mas/extensions/packs.py`, `docs/v4.4-TRANCHE-2-PLAN.md`, `dashboards/index-v5.html` | Avoid selling v4.4 as a complete suite of vertical products. |
+| Template/vertical parity is not mature | `mas/extensions/packs.py`, `docs/v4.4-TRANCHE-2-PLAN.md`, `dashboards/index.html` | Avoid selling v4.4 as a complete suite of vertical products. |
 | Calibration loop is data-dependent | `mas/sql/outcomes.sql`, `mas/jobs/update_priors.py`, `mas/priors.py` | Priors need resolved outcomes and a running DB/job. Framework value scoring is explicitly stubbed until enough standardized data exists. |
 | Policy is fail-soft | `mas/policy.py` | Appropriate for read-only analysis, but unsafe for future irreversible external actions without redesign. |
 | CDP is not full claim defensibility | `mas/cdp/README.md`, `mas/cdp/citation_resolvability.py` | Resolved evidence markers mean locator metadata matches. They do not prove the cited material supports the claim. |
 | Scenario shadow/T1 are internal, not live control | `docs/v4.4-SCENARIO-SHADOW.md`, `mas/scenarios/models.py`, `mas/tests/scenarios/*` | Do not expose or describe buyer-facing posterior probabilities from these adapters. |
-| Clarifications are not workflow blockers | `mas/clarifications.py`, `mas/api.py`, `dashboards/index-v5.html` | Deterministic questions/answers are useful operator context but do not halt, route, or gate workflow execution. |
+| Clarifications are not workflow blockers | `mas/clarifications.py`, `mas/api.py`, `dashboards/index.html` | Deterministic questions/answers are useful operator context but do not halt, route, or gate workflow execution. |
 | Export profiles are not access control | `mas/api.py`, `mas/exporters.py` | Dossier and archive export boundaries reduce accidental overexposure, but public deployment still needs auth/network controls before any export endpoint is exposed. |
 | Dashboard deployment hardening and mobile polish remain gaps | `START_HERE.md`, `CHANGELOG.md`, `dashboards/index.html` | The console is a local operator surface, not a hardened hosted frontend. |
 | Security docs contain some drift | `docs/security/threat-model.md` versus `START_HERE.md` / `mas/api.py` | The threat model describes desired auth mitigations that are not implemented in v4.4. Runtime evidence should win. |
@@ -235,7 +235,7 @@ v4 assists judgment; it does not own the decision. Every report, recommendation,
 
 - Preserve the distinction between implemented, partial, scaffolded, planned, and missing.
 - Inspect repo files before making claims, especially `START_HERE.md`, `CHANGELOG.md`, `README.md`, `mas/orchestrator.py`, `mas/state.py`, `mas/api.py`, `mas/config.py`, `mas/policy.py`, and `mas/tests/*`.
-- Treat `dashboards/index.html` as canonical for documented v4.4 daily operation; treat `dashboards/index-v5.html` as an expansion-wave/v5 dashboard unless new docs say otherwise. When discussing export profile controls, cite `dashboards/index-v5.html` specifically.
+- Treat `dashboards/index.html` as the canonical/default dashboard for daily operation. Treat `dashboards/index-v5.html` only as a compatibility/explicit v5 entry point that redirects to the canonical dashboard.
 - Do not invent product features such as auth, multi-tenancy, public SaaS readiness, autonomous action execution, broad live connectors, or full claim defensibility.
 - Do not claim Report Clarity T1 rewrites old reports. It changes newly generated report-phase output only.
 - Do not describe CDP citation locator review as evidence validation, proof, semantic support, or a defensibility score.
@@ -278,16 +278,16 @@ v4 is not a chat transcript wrapped in a dashboard. Its value is the combination
 | Orchestrator | Implemented | `mas/orchestrator.py` | Sequential API runner is active; LangGraph graph builder also exists. |
 | Phase prompts | Implemented with consolidation caveat | `mas/orchestrator.py`, `mas/prompts/phases/*`, `CHANGELOG.md` | Inline builders are active; file prompt loader exists; full consolidation deferred. Report Clarity T1 is active in `build_report_prompt` for newly generated reports. |
 | ProjectState/state | Implemented | `mas/state.py`, `mas/tests/test_decision_objects.py` | Pydantic blackboard with additive compatibility fields. |
-| Dashboard/operator console | Implemented for local operator use | `dashboards/index.html`, `dashboards/index-v5.html`, `START_HERE.md`, `mas/tests/test_dashboard_workspace_markup.py` | `index.html` remains documented canonical v4.4 console. `index-v5.html` includes expansion-wave controls for clarifications, Bayesian advisory, and export profiles. No separate build step; not hardened hosted frontend. |
+| Dashboard/operator console | Implemented for local operator use | `dashboards/index.html`, `dashboards/index-v5.html`, `START_HERE.md`, `mas/tests/test_dashboard_workspace_markup.py` | `index.html` is the canonical/default v5 dashboard. `index-v5.html` is a compatibility entry point. No separate build step; not hardened hosted frontend. |
 | API | Implemented, unauthenticated | `mas/api.py` | Broad local REST surface; no auth; wildcard CORS. Includes legacy report export, profile export query route, deterministic clarification routes, and scenario-shadow read routes. |
 | Policy layer | Implemented, fail-soft | `mas/policy.py`, `mas/orchestrator.py`, `CHANGELOG.md` | Outside LLM; kill switch/budgets/breakers/approvals; needs operational drills. |
 | Persistence | Implemented with fallback caveat | `mas/store.py`, `mas/sql/outcomes.sql` | Postgres JSONB when configured; in-memory fallback loses state on restart. |
 | Tracing/observability | Implemented optional | `mas/observability.py`, `mas/explainability.py`, `mas/runtime/provider_gateway.py` | Langfuse no-op if unset; backend trace surfaces avoid raw chain-of-thought. |
-| Deterministic clarifications | Implemented as storage/display support | `mas/clarifications.py`, `mas/api.py`, `dashboards/index-v5.html`, `mas/tests/test_clarifications.py` | Deterministic questions/answers/unavailable status; not workflow gating or routing. |
-| Profile exports | Implemented | `mas/exporters.py`, `mas/api.py`, `mas/tests/test_exporters.py`, `dashboards/index-v5.html` | Legacy report export preserved. Query route supports report, client dossier, operator dossier, and sanitized machine archive. v5 dashboard has profile controls. |
+| Deterministic clarifications | Implemented as storage/display support | `mas/clarifications.py`, `mas/api.py`, `dashboards/index.html`, `mas/tests/test_clarifications.py` | Deterministic questions/answers/unavailable status; not workflow gating or routing. |
+| Profile exports | Implemented | `mas/exporters.py`, `mas/api.py`, `mas/tests/test_exporters.py`, `dashboards/index.html` | Legacy report export preserved. Query route supports report, client dossier, operator dossier, monitoring XLSX templates, and sanitized machine archive. The canonical dashboard has profile controls. |
 | Strategic Decision Audit | Strongest implemented path | `START_HERE.md`, `README.md`, `mas/orchestrator.py`, `lead-magnets/sample-decision-audit.md` | Core workflow is best described this way. |
-| Automation ROI | Not first-class backend template | `lead-magnets/roi-calculator.html`, `dashboards/index-v5.html` | Generic analysis possible; dedicated v4.4 runtime template not proven. |
-| AI Readiness | Not first-class backend template | `dashboards/index-v5.html`, `mas/extensions/packs.py` | Future-facing/scaffolded evidence only. |
+| Automation ROI | Not first-class backend template | `lead-magnets/roi-calculator.html`, `dashboards/index.html` | Generic analysis possible; dedicated v4.4 runtime template not proven. |
+| AI Readiness | Not first-class backend template | `dashboards/index.html`, `mas/extensions/packs.py` | Future-facing/scaffolded evidence only. |
 | Calibration/meta-learning | Partial and data-dependent | `mas/sql/outcomes.sql`, `mas/jobs/update_priors.py`, `mas/priors.py`, `mas/tools/calibration.py`, `mas/api.py` | Brier/ECE/prior loop exists; needs resolved outcomes/DB/job; framework value score is stubbed. |
 | Auth/multi-tenancy | Not implemented | `mas/api.py`, `START_HERE.md`, `CHANGELOG.md` | Single-operator localhost assumption. |
 | Deployment readiness | Local/operator-ready, not public-hardened | `START_HERE.md`, `mas/docker-compose.yml`, `mas/api.py` | Public deployment requires auth/proxy/rate limits/ops hardening. |
