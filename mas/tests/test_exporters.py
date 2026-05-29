@@ -326,6 +326,29 @@ Raw trace knowledge_runtime and evidence_runtime with source_ref=upload:file-9:n
     )
 
 
+def make_client_value_preservation_state(project_id: str = "client-value-preservation"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Client value preservation",
+        brief="Improve trial conversion and activation without losing metric values.",
+        report=r"""# Executive Summary
+Source locator note evidence should be validated in Sprint 0.# Client Dossier
+Trial-to-paid conversion moved from 18% to 12%, while activation moved from 46% to 29%.
+Median time to first value moved from 2.4 days to 5.9 days, a 6 percentage-point activation gap.
+The recovery guardrail is 12% to 35%, with follow-up inside 72 hours and 48 hours.
+Threshold not yet confirmed and Operator to define are placeholders, but 18% to 12% and 46% to 29% are real metrics.
+Remove provisional threshold, target of threshold, and threshold of new trials without changing real values.
+
+# Evidence Used
+| Evidence | Why it is needed | Upside | Citation status |
+|---|---|---|---|
+| Conversion snapshot | Why it is needed supports whether the conversion change is real. | Upside supports whether recovery is worth pursuing. | [Inference] |
+| Activation snapshot | Why it is needed supports which funnel step broke. | Upside supports which team should own the fix. | [Hypothesis] |
+| Coverage note | Coverage remains incomplete. | Treat this as directional. | [Unknown] |
+""",
+    )
+
+
 class TestCodeVersionFreshness(unittest.TestCase):
     def test_current_code_version_uses_safe_env_var_first(self):
         env = {
@@ -1087,6 +1110,59 @@ This line used to render with a stuck heading.
             self.assertIn("Useful blank note", output)
             self.assertIn("Keep this row even without a status value.", output)
 
+    def test_client_dossier_preserves_metric_values_and_repairs_title_boundary(self):
+        state = make_client_value_preservation_state("client-value-preservation-dossier")
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        for output in (client_markdown, report_markdown):
+            self.assertNotIn("Sprint 0.# Client Dossier", output)
+            self.assertNotIn("threshold to threshold", output)
+            for concrete in (
+                "18%",
+                "12%",
+                "46%",
+                "29%",
+                "2.4",
+                "5.9",
+                "6 percentage-point",
+                "35%",
+                "72 hours",
+                "48 hours",
+            ):
+                self.assertIn(concrete, output)
+            for forbidden in (
+                "Threshold not yet confirmed",
+                "Operator to define",
+                "provisional threshold",
+                "target of threshold",
+                "threshold of new trials",
+                "supports whether",
+                "supports which",
+                "knowledge_",
+                "evidence_",
+                "source_ref",
+                "upload:",
+                "storage_ref",
+                "citation unavailable",
+            ):
+                self.assertNotIn(forbidden, output)
+            self.assertIn("This helps determine whether the conversion change is real.", output)
+            self.assertIn("This helps determine whether recovery is worth pursuing.", output)
+            self.assertIn("This helps identify which funnel step broke.", output)
+            self.assertIn("This helps identify which team should own the fix.", output)
+            self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, output)
+            self.assertIn("No concrete source locators were available for this project", output)
+            self.assertIn("Evidence maturity", output)
+            self.assertIn("[Inference]", output)
+            self.assertIn("[Hypothesis]", output)
+            self.assertIn("[Unknown]", output)
+
+        self.assertIn("Operator Dossier", operator_markdown)
+        self.assertIn("Technical appendix", operator_markdown)
+
     def test_report_profile_pdf_applies_runtime_citation_polish(self):
         state = make_runtime_pdf_polish_state("runtime-report-pdf-polish")
 
@@ -1115,8 +1191,8 @@ This line used to render with a stuck heading.
         ):
             self.assertNotIn(forbidden, compact)
         self.assertIn("This supports the scale recommendation.", compact)
-        self.assertIn("This helps determine which owner approves scale-up.", compact)
-        self.assertIn("This supports whether telemetry is usable.", compact)
+        self.assertIn("This helps identify which owner approves scale-up.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
         self.assertIn("This helps determine whether to continue Sprint 0.", compact)
 
     def test_client_dossier_profile_pdf_applies_runtime_citation_polish(self):
@@ -1147,8 +1223,8 @@ This line used to render with a stuck heading.
         ):
             self.assertNotIn(forbidden, compact)
         self.assertIn("This supports the scale recommendation.", compact)
-        self.assertIn("This helps determine which owner approves scale-up.", compact)
-        self.assertIn("This supports whether telemetry is usable.", compact)
+        self.assertIn("This helps identify which owner approves scale-up.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
         self.assertIn("This helps determine whether to continue Sprint 0.", compact)
 
     def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):

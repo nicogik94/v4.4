@@ -617,6 +617,9 @@ def _finalize_export_markdown(
     mode = "operator" if str(audience or "").lower() == "operator" else "client"
     quality = quality or assess_report_quality_context(state)
     value = _apply_pricing_placeholder_cleanup(str(markdown or ""), state)
+    metric_fragments: list[str] = []
+    if mode == "client":
+        value, metric_fragments = _protect_client_concrete_metric_values(value)
     value = normalize_export_text(value, audience=mode)
     if mode == "client":
         value = _redact_unsafe_string(value)
@@ -632,6 +635,8 @@ def _finalize_export_markdown(
         value = _finalize_client_visible_artifacts(value, state)
         value = _ensure_single_client_source_locator_note(value, quality)
         value = _ensure_client_delivery_validation_banner(value)
+        value = _restore_client_concrete_metric_values(value, metric_fragments)
+        value = _polish_client_report_citation_rendering(value)
     return value
 
 
@@ -680,16 +685,81 @@ def _polish_client_report_citation_rendering(markdown: str) -> str:
         r"\1\n\n\2",
         value,
     )
+    value = re.sub(
+        r"(?im)\b(Sprint 0\.)[ \t]*(#{1,6}\s+Client Dossier\b)",
+        r"\1\n\n\2",
+        value,
+    )
     value = re.sub(r"\bCitation\s+(?:citation unavailable|no citation available)\b\.?", "", value, flags=re.I)
     value = re.sub(r"(?mi)^\s*Citation\s*$", "", value)
-    value = re.sub(r"\bWhat It Suggests supports\b", "This supports", value, flags=re.I)
+    value = re.sub(r"\bThreshold not yet confirmed\b", "validation threshold to confirm", value, flags=re.I)
+    value = re.sub(r"\bOperator to define\b", "decision owner to confirm", value, flags=re.I)
+    value = _polish_client_metric_comparator_phrasing(value)
     value = re.sub(
-        r"\bWhy It Is Needed supports\s+(which|whether)\b",
-        r"This helps determine \1",
+        r"\b(?:What It Suggests|Why It Is Needed|Why it is needed|Upside)\s+supports\s+whether\b",
+        "This helps determine whether",
         value,
         flags=re.I,
     )
-    value = re.sub(r"\bWhy It Is Needed supports\b", "This supports", value, flags=re.I)
+    value = re.sub(
+        r"\b(?:What It Suggests|Why It Is Needed|Why it is needed|Upside)\s+supports\s+which\b",
+        "This helps identify which",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\bWhat It Suggests supports\b", "This supports", value, flags=re.I)
+    value = re.sub(r"\b(?:Why It Is Needed|Why it is needed|Upside)\s+supports\b", "This supports", value, flags=re.I)
+    value = re.sub(r"\bsupports\s+whether\b", "helps determine whether", value, flags=re.I)
+    value = re.sub(r"\bsupports\s+which\b", "helps identify which", value, flags=re.I)
+    return value
+
+
+def _polish_client_metric_comparator_phrasing(markdown: str) -> str:
+    lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        if re.search(r"\bproposed planning gate\b", line, re.I):
+            lines.append(line)
+            continue
+        value = re.sub(r"\bmore than\s+(\d+(?:\.\d+)?\s*%)", r"above \1", line, flags=re.I)
+        value = re.sub(r"\bless than\s+(\d+(?:\.\d+)?\s*%)", r"below \1", value, flags=re.I)
+        lines.append(value)
+    return "\n".join(lines)
+
+
+def _protect_client_concrete_metric_values(markdown: str) -> tuple[str, list[str]]:
+    fragments: list[str] = []
+    patterns = [
+        r"(?<![A-Za-z0-9_])(?:[<>]=?|≥|≤)\s*\d+(?:\.\d+)?\s*(?:%|pp|h|hrs?|hours?|days?|weeks?|months?)\b",
+        r"\b\d+(?:\.\d+)?\s*%",
+        r"\b\d+(?:\.\d+)?\s*percentage[- ]points?\b",
+        r"\b\d+(?:\.\d+)?\s*(?:h|hrs?|hours?|days?|weeks?|months?)\b",
+    ]
+    value = str(markdown or "")
+
+    def repl(match: re.Match[str]) -> str:
+        line_start = value.rfind("\n", 0, match.start()) + 1
+        line_end = value.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(value)
+        line_context = value[line_start:line_end]
+        if re.search(
+            r"\b(?:probability|scenario[_ -]?probability|structural probability|prior|likelihood|chance|failure probability|predicted failure probability)\b",
+            line_context,
+            re.I,
+        ):
+            return match.group(0)
+        fragments.append(match.group(0))
+        return f"CLIENTMETRICVALUE{len(fragments) - 1}TOKEN"
+
+    for pattern in patterns:
+        value = re.sub(pattern, repl, value, flags=re.I)
+    return value, fragments
+
+
+def _restore_client_concrete_metric_values(markdown: str, fragments: list[str]) -> str:
+    value = str(markdown or "")
+    for index, fragment in enumerate(fragments):
+        value = value.replace(f"CLIENTMETRICVALUE{index}TOKEN", fragment)
     return value
 
 
@@ -2741,7 +2811,8 @@ def _ensure_single_client_source_locator_note(markdown: str, quality) -> str:
 
 
 def _client_safe_text(text: str, quality) -> str:
-    value = client_simplify_text(text, sparse_evidence=quality.sparse_evidence or quality.evidence_warning)
+    protected_text, metric_fragments = _protect_client_concrete_metric_values(str(text or ""))
+    value = client_simplify_text(protected_text, sparse_evidence=quality.sparse_evidence or quality.evidence_warning)
     if quality.decision_domain == "growth":
         replacements = {
             "Search Console": "growth analytics",
@@ -2765,7 +2836,7 @@ def _client_safe_text(text: str, quality) -> str:
         }
         for unsafe, safe in replacements.items():
             value = re.sub(re.escape(unsafe), safe, value, flags=re.I)
-    return value
+    return _polish_client_report_citation_rendering(_restore_client_concrete_metric_values(value, metric_fragments))
 
 
 def _remove_empty_client_citation_marker_columns(markdown: str) -> str:
