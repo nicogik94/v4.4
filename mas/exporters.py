@@ -694,6 +694,14 @@ def _polish_client_report_citation_rendering(markdown: str) -> str:
     value = re.sub(r"(?mi)^\s*Citation\s*$", "", value)
     value = re.sub(r"\bThreshold not yet confirmed\b", "validation threshold to confirm", value, flags=re.I)
     value = re.sub(r"\bOperator to define\b", "decision owner to confirm", value, flags=re.I)
+    value = re.sub(
+        r"\bthreshold probability that above\s+(\d+(?:\.\d+)?\s*pp)\s+divergence\b",
+        r"validation signal that divergence above \1",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\bthreshold probability that above\b", "validation signal that", value, flags=re.I)
+    value = re.sub(r"\bthreshold probability\b", "validation signal", value, flags=re.I)
     value = _polish_client_metric_comparator_phrasing(value)
     value = re.sub(
         r"\b(?:What It Suggests|Why It Is Needed|Why it is needed|Upside)\s+supports\s+whether\b",
@@ -749,7 +757,7 @@ def _protect_client_concrete_metric_values(markdown: str) -> tuple[str, list[str
         ):
             return match.group(0)
         fragments.append(match.group(0))
-        return f"CLIENTMETRICVALUE{len(fragments) - 1}TOKEN"
+        return f"CLIENTMETRICVALUE{len(fragments) - 1}MARKER"
 
     for pattern in patterns:
         value = re.sub(pattern, repl, value, flags=re.I)
@@ -759,6 +767,7 @@ def _protect_client_concrete_metric_values(markdown: str) -> tuple[str, list[str
 def _restore_client_concrete_metric_values(markdown: str, fragments: list[str]) -> str:
     value = str(markdown or "")
     for index, fragment in enumerate(fragments):
+        value = value.replace(f"CLIENTMETRICVALUE{index}MARKER", fragment)
         value = value.replace(f"CLIENTMETRICVALUE{index}TOKEN", fragment)
     return value
 

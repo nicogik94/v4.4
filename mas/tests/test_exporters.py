@@ -336,6 +336,9 @@ Source locator note evidence should be validated in Sprint 0.# Client Dossier
 Trial-to-paid conversion moved from 18% to 12%, while activation moved from 46% to 29%.
 Median time to first value moved from 2.4 days to 5.9 days, a 6 percentage-point activation gap.
 The recovery guardrail is 12% to 35%, with follow-up inside 72 hours and 48 hours.
+Within 7 days: reconcile Stripe trial counts against CRM records before the go/no-go.
+Day 5 and Day 7 reviews preserve normal timeline wording.
+The threshold probability that above 2pp divergence persists should trigger review.
 Threshold not yet confirmed and Operator to define are placeholders, but 18% to 12% and 46% to 29% are real metrics.
 Remove provisional threshold, target of threshold, and threshold of new trials without changing real values.
 
@@ -1131,6 +1134,9 @@ This line used to render with a stuck heading.
                 "35%",
                 "72 hours",
                 "48 hours",
+                "Within 7 days",
+                "Day 5",
+                "Day 7",
             ):
                 self.assertIn(concrete, output)
             for forbidden in (
@@ -1141,6 +1147,8 @@ This line used to render with a stuck heading.
                 "threshold of new trials",
                 "supports whether",
                 "supports which",
+                "Within 7 days=[REDACTED]",
+                "threshold probability that above",
                 "knowledge_",
                 "evidence_",
                 "source_ref",
@@ -1149,6 +1157,8 @@ This line used to render with a stuck heading.
                 "citation unavailable",
             ):
                 self.assertNotIn(forbidden, output)
+            self.assertIn("reconcile Stripe trial counts against CRM records", output)
+            self.assertIn("validation signal that divergence above 2pp persists", output)
             self.assertIn("This helps determine whether the conversion change is real.", output)
             self.assertIn("This helps determine whether recovery is worth pursuing.", output)
             self.assertIn("This helps identify which funnel step broke.", output)
