@@ -23,7 +23,7 @@ every claim is semantically supported by evidence.
 - A configured `.env` in `mas/` with at least one supported model provider key.
 - The repo checked out on the intended demo branch or tag, such as
   `v5-runtime-foundation`.
-- Local operator access to `dashboards/index.html`.
+- Local operator access to the canonical/default dashboard at `dashboards/index.html`.
 
 ## Start The Local Runtime
 
@@ -55,7 +55,7 @@ public security boundary.
 
 ## Open The Dashboard
 
-Open `dashboards/index.html` in a browser. Set the API base URL field to the
+Open the canonical dashboard, `dashboards/index.html`, in a browser. Set the API base URL field to the
 Docker-discovered `$base` value, for example `http://localhost:8001` when Docker
 maps host port 8001 to container port 8000.
 
