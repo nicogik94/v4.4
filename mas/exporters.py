@@ -40,6 +40,7 @@ from report_quality import (
     assess_report_quality_context,
     client_simplify_text,
     commitment_score_text,
+    constraint_adherence_projection,
     evidence_accounting_projection,
     evidence_maturity_projection,
     guard_client_bf_confidence,
@@ -1686,6 +1687,12 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
         risk_gate = assess_risk_classification_gate(state)
         if risk_gate.warning_applies:
             blocks.extend(["## Risk classification note", _risk_classification_gate_markdown(risk_gate)])
+        constraint_projection = constraint_adherence_projection(state)
+        if constraint_projection.warning_applies:
+            blocks.extend([
+                "## Constraint adherence warning",
+                _constraint_adherence_warning_markdown(constraint_projection),
+            ])
     warnings = threshold_consistency_warnings(state, quality)
     if client and warnings:
         blocks.extend(["## Threshold note", "\n".join(f"- {warning}" for warning in warnings)])
@@ -1693,6 +1700,19 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
         if warnings:
             blocks.extend(["## Threshold warnings", "\n".join(f"- {warning}" for warning in warnings)])
     return blocks
+
+
+def _constraint_adherence_warning_markdown(projection) -> str:
+    lines = [projection.warning_text]
+    if getattr(projection, "detected_constraints", None):
+        lines.append("")
+        lines.append("Detected operator constraints:")
+        lines.extend(f"- {item}" for item in projection.detected_constraints)
+    if getattr(projection, "contradiction_signals", None):
+        lines.append("")
+        lines.append("Generated contradiction signals:")
+        lines.extend(f"- {item}" for item in projection.contradiction_signals)
+    return "\n".join(lines)
 
 
 def _quality_content_text(state: ProjectState) -> str:

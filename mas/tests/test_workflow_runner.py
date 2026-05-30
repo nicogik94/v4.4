@@ -28,6 +28,7 @@ from orchestrator import (
     build_hypotheses_prompt,
     build_monitor_prompt,
     build_report_prompt,
+    build_strategy_prompt,
     get_first_unfinished_phase,
     is_workflow_complete,
     normalize_strategy_payload,
@@ -518,6 +519,46 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertNotIn("Defense Index", prompt)
         self.assertNotIn("claim cards", prompt.lower())
 
+    def test_strategy_prompt_includes_original_brief_and_hard_constraint_rules(self):
+        state = ProjectState(
+            project_id="strategy-constraints",
+            project_name="Strategy constraints",
+            brief=(
+                "Limited capacity this month. Recommend only one focused initiative plus "
+                "one small experiment. No major engineering project this month. Budget is "
+                "limited to one small experiment. Avoid broad growth spend until the cause is clearer."
+            ),
+        )
+
+        prompt = build_strategy_prompt(state)
+
+        self.assertIn("OPERATOR HARD CONSTRAINTS", prompt)
+        self.assertIn("Limited capacity this month", prompt)
+        self.assertIn("one focused initiative plus one small experiment", prompt)
+        self.assertIn("Explicit capacity, budget, no-major-project, spend-freeze", prompt)
+        self.assertIn("Do not convert a constrained plan into multiple parallel critical tracks", prompt)
+        self.assertIn("unless the operator explicitly allowed that capacity", prompt)
+
+    def test_report_prompt_preserves_constrained_strategy_shape(self):
+        state = ProjectState(
+            project_id="report-constraints",
+            project_name="Report constraints",
+            brief=(
+                "Limited capacity this month. Only one focused initiative plus one small "
+                "experiment is possible. No major engineering project this month. Avoid broad "
+                "growth spend until the cause is clearer."
+            ),
+        )
+
+        prompt = build_report_prompt(state)
+
+        self.assertIn("Preserve constrained strategy shape", prompt)
+        self.assertIn("one focused initiative plus one small experiment", prompt)
+        self.assertIn("do not expand it into several parallel tracks", prompt)
+        self.assertIn("Defer major engineering work or broad growth spend", prompt)
+        self.assertIn("unless operator hard constraints require fewer actions", prompt)
+        self.assertIn("include only the action count that fits the explicit constraint", prompt)
+
     def test_report_prompt_includes_factual_safety_and_research_depth_rules(self):
         state = make_completed_state("report-factual-safety")
         state.project_name = "SEO content growth"
@@ -833,6 +874,17 @@ class TestWorkflowHelpers(unittest.TestCase):
             self.assertNotIn(forbidden, prompt_text)
         self.assertNotIn("`[Evidence: <evidence_id> | <locator>]` is the only canonical project-evidence citation format", prompt_text)
         self.assertNotIn("canonical `[Evidence: ...]` marker", prompt_text)
+
+    def test_prompt_markdown_files_include_constraint_adherence_language(self):
+        strategy_text = Path("prompts/phases/03-strategy.md").read_text(encoding="utf-8")
+        report_text = Path("prompts/phases/05-report.md").read_text(encoding="utf-8")
+
+        self.assertIn("Operator hard constraints", strategy_text)
+        self.assertIn("one focused initiative plus one small experiment", strategy_text)
+        self.assertIn("Do not convert a constrained plan into multiple parallel critical tracks", strategy_text)
+        self.assertIn("Operator hard constraints", report_text)
+        self.assertIn("Do not expand constrained recommendations into several parallel tracks", report_text)
+        self.assertIn("Do not force a 5-7 item next-step list", report_text)
 
     def test_report_prompt_raw_markdown_parser_detects_load_bearing_markers(self):
         report = """# EXECUTIVE SUMMARY
