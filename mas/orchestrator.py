@@ -319,16 +319,44 @@ Return JSON:
 {f"DATA: {state.data[:2000]}" if state.data else ""}"""
 
 
+def _operator_hard_constraints_prompt_block(state: ProjectState) -> str:
+    """Project operator constraints into phase prompts without mutating state."""
+    parts = [f"Original brief:\n{state.brief[:1800]}"]
+    data_context = getattr(state, "data_context", "")
+    if data_context:
+        parts.append(f"Operator data context:\n{str(data_context)[:1200]}")
+    answers = []
+    for answer in list(getattr(state, "clarification_answers", []) or [])[:12]:
+        answer_text = getattr(answer, "answer_text", "")
+        status = getattr(answer, "status", "")
+        if answer_text:
+            answers.append(f"- {getattr(answer, 'question_id', '')} ({status}): {answer_text[:300]}")
+    if answers:
+        parts.append("Clarification answers:\n" + "\n".join(answers))
+    operator_context = "\n\n".join(part for part in parts if str(part).strip())
+    return f"""OPERATOR HARD CONSTRAINTS:
+The operator-provided context below is the source of truth for capacity, budget, timing, spend, and scope limits.
+{operator_context}
+
+Constraint adherence rules:
+- Explicit capacity, budget, no-major-project, spend-freeze, and "one focused initiative plus one small experiment" constraints dominate recommendation shape.
+- Preserve a constrained plan as one focused initiative plus one small experiment when the operator says that is the available capacity.
+- Do not convert a constrained plan into multiple parallel critical tracks unless the operator explicitly allowed that capacity.
+- Defer major engineering work or broad growth spend when the operator prohibits it or limits the budget to a small experiment."""
+
+
 def build_strategy_prompt(state: ProjectState) -> str:
     ctx_classify = summarize_phase_output("classify", state)
     ctx_hyps = summarize_phase_output("hypotheses", state)
     ctx_audit = summarize_phase_output("audit", state)
     ctx_gauntlet = summarize_phase_output("gauntlet", state)
     retrieval_section, _ = _phase_retrieval_context(state, "strategy")
+    hard_constraints = _operator_hard_constraints_prompt_block(state)
     return f"""PHASE 3: Generate STRATEGY PLAN WITH JUSTIFICATION.
 
 For each hypothesis, give PRELIMINARY VERDICT: LIKELY_CONFIRMED, LIKELY_REJECTED, NEEDS_MONITORING.
 Each strategy action must link to evidence (hypothesis + FMEA + audit finding).
+Respect operator hard constraints before optimizing for ambition or coverage. If the brief limits capacity to one focused initiative plus one small experiment, the strategy must fit that shape. Do not create multiple parallel CRITICAL tracks unless the operator explicitly allowed that capacity.
 
 Return JSON:
 {{"preliminary_verdicts":[{{"id":"H1","verdict":"LIKELY_CONFIRMED","evidence":"","monitoring_plan":""}}],
@@ -345,6 +373,7 @@ Return JSON:
 {ctx_hyps}
 {ctx_gauntlet}
 {ctx_audit}
+{hard_constraints}
 {retrieval_section}
 {f"DATA: {state.data[:500]}" if state.data else ""}"""
 
@@ -438,6 +467,7 @@ def build_report_prompt(state: ProjectState) -> str:
     research_depth_rules = _report_research_depth_rules(quality_context)
     evidence_maturity_rule = _report_evidence_maturity_rule(quality_context)
     sprint0_rule = _report_sprint0_rule(quality_context)
+    hard_constraints = _operator_hard_constraints_prompt_block(state)
     obs_text = _sanitize_report_context("\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations")
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
     return f"""PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers.
@@ -467,9 +497,13 @@ Report writing rules:
 - If ProjectState clarification_cycles or clarification_answers are present in report context, include them only as assumptions, open questions, unavailable context, or operator-provided context.
 - Unanswered clarification questions remain unresolved questions.
 - Clarification answers and questions are not empirical evidence, must not be cited with project evidence markers, and must not be placed in the Evidence Used table as cited facts.
+- Preserve constrained strategy shape. If the operator limited the work to one focused initiative plus one small experiment, do not expand it into several parallel tracks.
+- Defer major engineering work or broad growth spend when the operator prohibits it or limits this period to a small experiment.
 
 REPORT QUALITY CONTEXT:
 {report_quality_rules}
+
+{hard_constraints}
 
 Factual-safety rules:
 {factual_safety_rules}
@@ -519,7 +553,8 @@ Roadmap:
 - If owner, metric, success signal, or threshold is unknown, use: TBD — requires operator confirmation.
 
 Next Steps:
-- Include 5-7 concrete next actions in a table with: action, owner/role, deadline or timeframe, dependency, expected output.
+- Include 5-7 concrete next actions in a table with: action, owner/role, deadline or timeframe, dependency, expected output, unless operator hard constraints require fewer actions.
+- When constraints require fewer actions, include only the action count that fits the explicit constraint and explain the limit.
 - If the report cannot responsibly identify 5 concrete next actions, include fewer and explain what information is needed to complete the list.
 
 Monitoring and Kill Criteria:

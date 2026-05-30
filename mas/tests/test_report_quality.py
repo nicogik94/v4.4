@@ -20,6 +20,8 @@ from report_quality import (  # noqa: E402
     assess_risk_classification_gate,
     assess_report_quality_context,
     client_simplify_text,
+    constraint_adherence_projection,
+    constraint_adherence_warnings,
     evidence_accounting_projection,
     evidence_maturity_projection,
     guard_client_bf_confidence,
@@ -49,6 +51,7 @@ from state import (  # noqa: E402
     ProjectState,
     Risk,
     STPAItem,
+    StrategyAction,
     StrategyOutput,
     UploadedFileManifest,
 )
@@ -64,6 +67,34 @@ def _question(question_id: str, priority=ClarificationPriority.CRITICAL, status=
         source_gap="test_gap",
         status=status,
     )
+
+
+CONSTRAINED_STRATEGY_BRIEF = (
+    "Limited capacity this month. Only one focused initiative plus one small experiment. "
+    "No major engineering project this month. Budget is limited to one small experiment. "
+    "Avoid broad growth spend until the cause is clearer."
+)
+
+
+def _constrained_strategy_state(project_id: str, generated_text: str) -> ProjectState:
+    state = ProjectState(
+        project_id=project_id,
+        project_name="Constrained strategy",
+        brief=CONSTRAINED_STRATEGY_BRIEF,
+        report=generated_text,
+    )
+    state.strategy = StrategyOutput(
+        executive_strategy=generated_text,
+        strategies=[
+            StrategyAction(
+                priority="CRITICAL",
+                action=generated_text,
+                justification="Generated recommendation text under review.",
+            )
+        ],
+        implementation_sequence=generated_text,
+    )
+    return state
 
 
 class TestReportQualityHelpers(unittest.TestCase):
@@ -119,6 +150,78 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertIn("Moderate confidence in the need for Sprint 0 evidence collection", SPARSE_CONFIDENCE_RULE)
         self.assertIn("low confidence in any specific root cause", SPARSE_CONFIDENCE_RULE)
         self.assertNotIn("High confidence only that evidence collection is required", SPARSE_CONFIDENCE_RULE)
+
+    def test_constraint_warning_for_parallel_critical_tracks(self):
+        state = _constrained_strategy_state(
+            "constraint-parallel-tracks",
+            "Recommended path: execute three parallel critical-priority tracks this month.",
+        )
+
+        warnings = constraint_adherence_warnings(state)
+        projection = constraint_adherence_projection(state)
+
+        self.assertTrue(projection.warning_applies)
+        self.assertTrue(warnings)
+        self.assertIn("limited capacity", warnings[0])
+        self.assertIn("multiple parallel critical tracks", warnings[0])
+
+    def test_constraint_warning_for_major_engineering_contradiction(self):
+        state = _constrained_strategy_state(
+            "constraint-major-engineering",
+            "Recommended path: launch a major engineering project this month.",
+        )
+
+        warnings = constraint_adherence_warnings(state)
+
+        self.assertTrue(warnings)
+        self.assertIn("major engineering", warnings[0])
+        self.assertIn("no-major-engineering", warnings[0])
+
+    def test_constraint_warning_for_broad_paid_acquisition_spend(self):
+        state = _constrained_strategy_state(
+            "constraint-paid-acquisition",
+            "Recommended path: increase paid acquisition spend and scale growth spend immediately.",
+        )
+
+        warnings = constraint_adherence_warnings(state)
+
+        self.assertTrue(warnings)
+        self.assertIn("growth spend", warnings[0])
+        self.assertIn("spend constraint", warnings[0])
+
+    def test_constraint_warning_absent_for_compliant_constrained_plan(self):
+        state = _constrained_strategy_state(
+            "constraint-compliant",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding "
+                "experiment. Defer major engineering work and broad growth spend until the cause is clearer."
+            ),
+        )
+
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_negated_forbidden_actions(self):
+        state = _constrained_strategy_state(
+            "constraint-negated",
+            (
+                "Do not run three critical tracks in parallel. Defer the major engineering project. "
+                "Avoid increased paid acquisition spend this month."
+            ),
+        )
+
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_adherence_helper_does_not_mutate_state(self):
+        state = _constrained_strategy_state(
+            "constraint-no-mutation",
+            "Recommended path: execute three parallel critical tracks.",
+        )
+        before = state.model_dump(mode="json")
+
+        constraint_adherence_projection(state)
+        constraint_adherence_warnings(state)
+
+        self.assertEqual(state.model_dump(mode="json"), before)
 
     def test_risk_classification_gate_warns_for_minimal_with_structured_high_or_critical_risks(self):
         state = ProjectState(project_id="risk-gate-high", project_name="Risk gate")

@@ -69,6 +69,10 @@ THRESHOLD_WARNING = (
 )
 THRESHOLD_CONFLICT_UNKNOWN_WARNING = "Possible threshold conflict detected, source unknown."
 THRESHOLD_CONFLICT_BETWEEN_TEMPLATE = "Threshold conflict detected between: {section_a} and {section_b}."
+CONSTRAINT_ADHERENCE_WARNING = (
+    "Constraint adherence warning: generated recommendation may contradict "
+    "explicit operator constraints. Review before client delivery."
+)
 
 PRIMARY_THRESHOLD_SECTION_NAMES = {
     "decision gates",
@@ -416,6 +420,23 @@ class ThresholdSectionClassification:
     classification: str
     reason: str
     threshold_like: bool = False
+
+
+@dataclass(frozen=True)
+class ConstraintAdherenceProjection:
+    warning_applies: bool
+    warning_text: str = ""
+    detected_constraints: tuple[str, ...] = field(default_factory=tuple)
+    contradiction_signals: tuple[str, ...] = field(default_factory=tuple)
+    operator_context_preview: str = ""
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "detected_constraints": list(self.detected_constraints),
+            "contradiction_signals": list(self.contradiction_signals),
+            "operator_context_preview": self.operator_context_preview,
+        }
 
 
 def assess_report_quality_context(state: Any) -> ReportQualityContext:
@@ -933,6 +954,201 @@ def has_concrete_evidence_locators(state: Any) -> bool:
 def has_budget_or_spend_evidence(state: Any) -> bool:
     text = _combined_state_text(state)
     return bool(re.search(r"(\bbudget\b|\bspend\b|\bcost\b|\bfinance\b|\bfinancial\b|\brevenue\b|\bmargin\b|\bsavings?\b|\binvoice\b)", text, re.I))
+
+
+def constraint_adherence_projection(state: Any) -> ConstraintAdherenceProjection:
+    """Detect clear generated-output contradictions against operator constraints.
+
+    This is a read-only advisory projection. It only reads operator-provided
+    context for constraints and only inspects generated strategy/report text for
+    contradiction signals.
+    """
+    operator_text = _operator_constraint_source_text(state)
+    detected_constraints = _detect_operator_hard_constraints(operator_text)
+    if not detected_constraints:
+        return ConstraintAdherenceProjection(warning_applies=False)
+
+    generated_text = _generated_strategy_report_text(state)
+    contradiction_signals = _detect_constraint_contradiction_signals(
+        generated_text,
+        detected_constraints,
+    )
+    warning_applies = bool(contradiction_signals)
+    return ConstraintAdherenceProjection(
+        warning_applies=warning_applies,
+        warning_text=CONSTRAINT_ADHERENCE_WARNING if warning_applies else "",
+        detected_constraints=detected_constraints,
+        contradiction_signals=contradiction_signals,
+        operator_context_preview=_short_constraint_preview(operator_text),
+    )
+
+
+def constraint_adherence_warnings(state: Any) -> list[str]:
+    projection = constraint_adherence_projection(state)
+    if not projection.warning_applies:
+        return []
+    details = []
+    if projection.detected_constraints:
+        details.append("Detected operator constraints: " + ", ".join(projection.detected_constraints) + ".")
+    if projection.contradiction_signals:
+        details.append("Contradiction signals: " + "; ".join(projection.contradiction_signals) + ".")
+    return [" ".join([projection.warning_text, *details]).strip()]
+
+
+def _operator_constraint_source_text(state: Any) -> str:
+    parts = [
+        getattr(state, "brief", ""),
+        getattr(state, "data_context", ""),
+    ]
+    for answer in list(getattr(state, "clarification_answers", []) or []):
+        parts.append(getattr(answer, "answer_text", ""))
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _detect_operator_hard_constraints(text: str) -> tuple[str, ...]:
+    source = str(text or "")
+    detected: list[str] = []
+    if re.search(
+        r"\b(?:limited|constrained|scarce|thin|low)\s+capacity\b|"
+        r"\bcapacity\s+(?:is\s+)?(?:limited|constrained|scarce|thin|low)\b",
+        source,
+        re.I,
+    ):
+        detected.append("limited capacity")
+    if re.search(
+        r"\b(?:only\s+)?(?:one|1)\s+(?:focused\s+)?initiative\b.*\b(?:one|1)\s+(?:small\s+)?experiment\b|"
+        r"\b(?:only\s+)?(?:one|1)\s+(?:small\s+)?experiment\b.*\b(?:one|1)\s+(?:focused\s+)?initiative\b|"
+        r"\bonly\s+(?:one|1)\s+(?:focused\s+)?initiative\b",
+        source,
+        re.I | re.S,
+    ):
+        detected.append("one focused initiative plus one small experiment")
+    if re.search(
+        r"\b(?:no|avoid|defer|without)\s+major\s+engineering\b|"
+        r"\bmajor\s+engineering\s+(?:project|work|initiative|track)\s+(?:is\s+)?(?:not\s+allowed|prohibited|off[- ]limits)\b",
+        source,
+        re.I,
+    ):
+        detected.append("no major engineering project")
+    if re.search(
+        r"\b(?:budget|spend)\s+(?:is\s+)?(?:limited|capped|frozen)\b|"
+        r"\bbudget\s+limited\s+to\b|"
+        r"\b(?:avoid|defer|freeze|no)\s+broad\s+growth\s+spend\b|"
+        r"\bspend\s+freeze\b|"
+        r"\bno\s+(?:new\s+)?(?:paid\s+acquisition|growth)\s+spend\b",
+        source,
+        re.I,
+    ):
+        detected.append("spend or budget limit")
+    return tuple(_unique(detected))
+
+
+def _generated_strategy_report_text(state: Any) -> str:
+    parts = [getattr(state, "report", "")]
+    strategy = getattr(state, "strategy", None)
+    if strategy:
+        parts.extend([
+            getattr(strategy, "executive_strategy", ""),
+            getattr(strategy, "implementation_sequence", ""),
+            getattr(strategy, "monitoring_plan", ""),
+        ])
+        for action in list(getattr(strategy, "strategies", []) or []):
+            parts.extend([
+                getattr(action, "priority", ""),
+                getattr(action, "action", ""),
+                getattr(action, "justification", ""),
+                getattr(action, "expected_impact", ""),
+                getattr(action, "risk_if_ignored", ""),
+                getattr(action, "timeline", ""),
+            ])
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _detect_constraint_contradiction_signals(
+    generated_text: str,
+    detected_constraints: tuple[str, ...],
+) -> tuple[str, ...]:
+    constraints = set(detected_constraints)
+    signals: list[str] = []
+    capacity_limited = bool(
+        constraints
+        & {
+            "limited capacity",
+            "one focused initiative plus one small experiment",
+        }
+    )
+    if capacity_limited and _has_non_negated_constraint_match(
+        generated_text,
+        re.compile(
+            r"\b(?:three|3)\s+parallel\s+critical(?:-priority)?\s+tracks\b|"
+            r"\b(?:run|execute|launch|pursue)\s+(?:three|3)\s+critical\s+tracks\s+in\s+parallel\b|"
+            r"\bmultiple\s+critical\s+tracks\b|"
+            r"\bparallel\s+critical(?:-priority)?\s+tracks\b",
+            re.I,
+        ),
+    ):
+        signals.append("multiple parallel critical tracks despite constrained capacity")
+
+    if "no major engineering project" in constraints and _has_non_negated_constraint_match(
+        generated_text,
+        re.compile(
+            r"\b(?:major|large|full)\s+engineering\s+(?:project|initiative|track|work|build)\b|"
+            r"\bengineering\s+(?:project|initiative|track|work|build)\b.{0,40}\b(?:major|large|full)\b",
+            re.I,
+        ),
+    ):
+        signals.append("major engineering work despite explicit no-major-engineering constraint")
+
+    if "spend or budget limit" in constraints and _has_non_negated_constraint_match(
+        generated_text,
+        re.compile(
+            r"\b(?:increase|increased|scale|expand|raise|ramp(?:\s+up)?)\s+(?:broad\s+)?(?:paid\s+acquisition|growth)\s+spend\b|"
+            r"\b(?:broad|large|major)\s+(?:paid\s+acquisition|growth)\s+spend\b|"
+            r"\b(?:paid\s+acquisition|growth)\s+spend\s+(?:increase|expansion|scale-up)\b|"
+            r"\blarge\s+acquisition\s+spend\s+increase\b",
+            re.I,
+        ),
+    ):
+        signals.append("broad or increased growth spend despite explicit spend constraint")
+
+    return tuple(_unique(signals))
+
+
+def _has_non_negated_constraint_match(text: str, pattern: re.Pattern[str]) -> bool:
+    for segment in _constraint_scan_segments(text):
+        for match in pattern.finditer(segment):
+            if _constraint_match_is_negated(segment, match.start()):
+                continue
+            return True
+    return False
+
+
+def _constraint_scan_segments(text: str) -> list[str]:
+    return [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?])\s+|\n+", str(text or ""))
+        if segment.strip()
+    ]
+
+
+def _constraint_match_is_negated(segment: str, match_start: int) -> bool:
+    prefix = segment[max(0, match_start - 100):match_start]
+    return bool(
+        re.search(
+            r"\b(?:do\s+not|don't|dont|should\s+not|must\s+not|not\s+allowed|"
+            r"avoid|avoids|defer|defers|hold|holds|freeze|freezes|block|blocks|"
+            r"prohibit|prohibits|prohibited|no|never|without|stop|stops)\b",
+            prefix,
+            re.I,
+        )
+    )
+
+
+def _short_constraint_preview(text: str, limit: int = 240) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 3)].rstrip() + "..."
 
 
 def requires_telemetry_privacy_caveat(text: str) -> bool:

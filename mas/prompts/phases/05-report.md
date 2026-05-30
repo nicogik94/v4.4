@@ -10,6 +10,14 @@
 
 Produce the final client-facing dossier **and** the internal meta-learning payload. The dossier is what the client reads; the meta-learning payload is what feeds `jobs/update_priors.py` and the Meta-Learner Database.
 
+## Operator hard constraints
+
+Preserve constrained strategy shape. Operator-provided capacity, budget, timing, spend, and scope limits dominate report wording and roadmap shape.
+
+If the operator constrained the plan to one focused initiative plus one small experiment, preserve one focused initiative plus one small experiment. Do not expand constrained recommendations into several parallel tracks or multiple critical-priority tracks. Defer major engineering work or broad growth spend when the operator prohibits it or limits the current period to a small experiment.
+
+Do not force a 5-7 item next-step list when explicit operator constraints require fewer actions; include only the action count that fits the constraint and explain the limit.
+
 ## Required inputs
 
 Full state across phases 0–4.

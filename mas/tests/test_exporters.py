@@ -70,6 +70,7 @@ from state import (  # noqa: E402
     PhaseStatus,
     PreliminaryVerdict,
     ProjectState,
+    StrategyAction,
     StrategyOutput,
     UploadedFileManifest,
     Verdict,
@@ -274,6 +275,67 @@ Technical notes stay here.
     return state
 
 
+def make_constraint_violation_export_state(project_id: str = "constraint-warning"):
+    state = make_export_state(project_id)
+    state.brief = (
+        "Limited capacity this month. Only one focused initiative plus one small experiment. "
+        "No major engineering project this month. Budget is limited to one small experiment. "
+        "Avoid broad growth spend until the cause is clearer."
+    )
+    state.report = """# Executive Summary
+Recommendation: execute three parallel critical-priority tracks this month.
+
+# The Decision
+Decide how to act with constrained capacity.
+
+# Recommended Path
+Run three critical tracks in parallel, including a major engineering project and increased paid acquisition spend.
+
+# Why This Is Recommended
+The generated report claims parallel execution will move faster.
+
+# Options Considered
+| Option | Verdict |
+|---|---|
+| Three tracks | Recommended |
+
+# Evidence Used
+| Evidence | What it suggests |
+|---|---|
+| Capacity note | Capacity is constrained. |
+
+# Key Risks
+Capacity overload.
+
+# Assumptions and Open Questions
+Whether capacity can support parallel work is unresolved.
+
+# Roadmap
+This month: run three tracks.
+
+# Next Steps
+- Start all tracks.
+
+# Monitoring and Kill Criteria
+Stop if capacity overload appears.
+
+# Appendix: Technical Analysis
+Technical notes.
+"""
+    state.strategy = StrategyOutput(
+        executive_strategy="Execute three parallel critical-priority tracks.",
+        strategies=[
+            StrategyAction(
+                priority="CRITICAL",
+                action="Run three critical tracks in parallel.",
+                justification="Generated contradiction for exporter warning test.",
+            )
+        ],
+        implementation_sequence="Run three critical tracks in parallel.",
+    )
+    return state
+
+
 def make_sparse_growth_state(project_id: str = "sparse-growth"):
     state = ProjectState(
         project_id=project_id,
@@ -421,6 +483,28 @@ class TestProfileExporterHelpers(unittest.TestCase):
         self.assertIn("Standalone report only.", text)
         self.assertNotIn("Executive Summary", text)
         self.assertNotIn("classify summary", text)
+
+    def test_operator_dossier_surfaces_constraint_adherence_warning(self):
+        markdown = build_operator_dossier_markdown(make_constraint_violation_export_state("operator-constraint-warning"))
+
+        self.assertIn("Constraint adherence warning", markdown)
+        self.assertIn("Detected operator constraints", markdown)
+        self.assertIn("limited capacity", markdown)
+        self.assertIn("Generated contradiction signals", markdown)
+        self.assertIn("multiple parallel critical tracks", markdown)
+
+    def test_client_exports_do_not_surface_operator_constraint_warning(self):
+        state = make_constraint_violation_export_state("client-constraint-warning")
+
+        client_dossier = build_client_dossier_markdown(state)
+        client_report = _safe_report_markdown(state)
+
+        self.assertNotIn("Constraint adherence warning", client_dossier)
+        self.assertNotIn("Detected operator constraints", client_dossier)
+        self.assertNotIn("Generated contradiction signals", client_dossier)
+        self.assertNotIn("Constraint adherence warning", client_report)
+        self.assertNotIn("Detected operator constraints", client_report)
+        self.assertNotIn("Generated contradiction signals", client_report)
 
     def test_all_profiles_export_valid_formats(self):
         state = make_export_state("all-profiles")
