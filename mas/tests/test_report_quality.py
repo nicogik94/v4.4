@@ -211,6 +211,24 @@ class TestReportQualityHelpers(unittest.TestCase):
 
         self.assertEqual(constraint_adherence_warnings(state), [])
 
+    def test_constraint_warning_absent_for_paused_deferred_blocked_do_not_do_items(self):
+        state = _constrained_strategy_state(
+            "constraint-paused-do-not-do",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding experiment.\n"
+                "What not to do this month: no major engineering work; no broad growth spend; "
+                "do not increase paid acquisition spend; do not launch a full onboarding redesign.\n"
+                "All growth spend and major engineering are paused until the cause is clearer.\n"
+                "Deferred / blocked / do not do: broad paid acquisition spend remains out of scope."
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
     def test_constraint_adherence_helper_does_not_mutate_state(self):
         state = _constrained_strategy_state(
             "constraint-no-mutation",

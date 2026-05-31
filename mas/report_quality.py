@@ -74,6 +74,39 @@ CONSTRAINT_ADHERENCE_WARNING = (
     "explicit operator constraints. Review before client delivery."
 )
 
+CONSTRAINT_SAFE_PREFIX_PATTERN = re.compile(
+    r"(?:^|[\s([{;:.,|\-–—])"
+    r"(?:do\s+not(?:\s+(?:do|start|launch|recommend|increase|run|execute|pursue))?|"
+    r"don't|dont|should\s+not|must\s+not|cannot|can't|not|no|never|without|"
+    r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
+    r"pause(?:s|d|ing)?|park(?:s|ed|ing)?|prohibit(?:s|ed|ing)?|"
+    r"forbid(?:s|den|ding)?|forbidden|out\s+of\s+scope|off[- ]limits)"
+    r"\s*(?:[:\-–—]\s*)?"
+    r"(?:(?:the|a|an|any|all|new|full|broad|major|large|paid|growth|"
+    r"engineering|critical|parallel|three|3)\s+){0,8}$",
+    re.I,
+)
+
+CONSTRAINT_SAFE_SUFFIX_PATTERN = re.compile(
+    r"^\s*(?:[\])}.,:;()|\-–—]\s*)?"
+    r"(?:(?:and|or)\s+"
+    r"(?:(?:the|a|an|any|all|new|full|broad|major|large|paid|growth|"
+    r"engineering|critical|parallel|three|3)\s+){0,8}[\w-]+\s+){0,3}"
+    r"(?:(?:is|are|be|being|remain|remains|stay|stays|should\s+remain|"
+    r"must\s+remain)\s+)?"
+    r"(?:not\s+(?:recommended|allowed|in\s+scope|this\s+month|now)|"
+    r"paused|deferred|blocked|parked|out\s+of\s+scope|off[- ]limits|"
+    r"prohibited|forbidden|do\s+not\s+(?:do|start|launch|recommend|increase))\b",
+    re.I,
+)
+
+CONSTRAINT_SAFE_HEADING_PATTERN = re.compile(
+    r"\b(?:what\s+not\s+to\s+do|do\s+not\s+do|do\s+not\s+start|"
+    r"do\s+not\s+launch|not\s+this\s+month|out\s+of\s+scope|paused|"
+    r"deferred|blocked)\b",
+    re.I,
+)
+
 PRIMARY_THRESHOLD_SECTION_NAMES = {
     "decision gates",
     "decision matrix",
@@ -1117,28 +1150,64 @@ def _detect_constraint_contradiction_signals(
 def _has_non_negated_constraint_match(text: str, pattern: re.Pattern[str]) -> bool:
     for segment in _constraint_scan_segments(text):
         for match in pattern.finditer(segment):
-            if _constraint_match_is_negated(segment, match.start()):
+            if _constraint_match_is_negated(segment, match.start(), match.end()):
                 continue
             return True
     return False
 
 
 def _constraint_scan_segments(text: str) -> list[str]:
-    return [
-        segment.strip()
-        for segment in re.split(r"(?<=[.!?])\s+|\n+", str(text or ""))
-        if segment.strip()
-    ]
+    segments: list[str] = []
+    safe_heading = ""
+    for line in re.split(r"\n+", str(text or "")):
+        stripped = line.strip()
+        if not stripped:
+            safe_heading = ""
+            continue
+        if stripped.startswith("#"):
+            safe_heading = ""
+        if CONSTRAINT_SAFE_HEADING_PATTERN.search(stripped):
+            safe_heading = stripped
+        for segment in re.split(r"(?<=[.!?])\s+", stripped):
+            segment = segment.strip()
+            if not segment:
+                continue
+            if safe_heading and re.match(r"^(?:[-*]|\d+[.)])\s+", segment):
+                segments.append(f"{safe_heading} {segment}")
+            else:
+                segments.append(segment)
+    return segments
 
 
-def _constraint_match_is_negated(segment: str, match_start: int) -> bool:
-    prefix = segment[max(0, match_start - 100):match_start]
-    return bool(
+def _constraint_match_is_negated(segment: str, match_start: int, match_end: int) -> bool:
+    prefix = segment[max(0, match_start - 180):match_start]
+    suffix = segment[match_end:match_end + 180]
+    if re.search(r"\bwhat\s+not\s+to\s+do\b.{0,160}$", prefix, re.I):
+        return True
+    if _constraint_prefix_has_shared_safe_list(prefix):
+        return True
+    if CONSTRAINT_SAFE_PREFIX_PATTERN.search(prefix):
+        return True
+    return bool(CONSTRAINT_SAFE_SUFFIX_PATTERN.search(suffix))
+
+
+def _constraint_prefix_has_shared_safe_list(prefix: str) -> bool:
+    match = re.search(
+        r"\b(?:do\s+not|don't|dont|should\s+not|must\s+not|cannot|can't|"
+        r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
+        r"pause(?:s|d|ing)?|park(?:s|ed|ing)?|no|never|without|"
+        r"prohibit(?:s|ed|ing)?|forbid(?:s|den|ding)?|forbidden)\b"
+        r"(?P<body>.{0,140})\b(?:and|or)\s*$",
+        prefix,
+        re.I,
+    )
+    if not match:
+        return False
+    return not bool(
         re.search(
-            r"\b(?:do\s+not|don't|dont|should\s+not|must\s+not|not\s+allowed|"
-            r"avoid|avoids|defer|defers|hold|holds|freeze|freezes|block|blocks|"
-            r"prohibit|prohibits|prohibited|no|never|without|stop|stops)\b",
-            prefix,
+            r"\b(?:then|but|however|recommend(?:ed)?|launch|run|execute|"
+            r"increase|scale|expand|raise|ramp(?:\s+up)?|start)\b",
+            match.group("body"),
             re.I,
         )
     )
