@@ -34,6 +34,21 @@ class Priority(str, Enum):
     LOW = "LOW"
 
 
+_ALLOWED_PRIORITY_LABELS = {item.value for item in Priority}
+_LOW_PRIORITY_SEMANTIC_ALIASES = {
+    "DEFERRED",
+    "BLOCKED",
+    "DEFER",
+    "DO_NOT_START",
+    "DO_NOT_DO",
+    "PARKED",
+}
+
+
+def _priority_label_key(value: Any) -> str:
+    return "_".join(str(value).strip().upper().replace("-", " ").split())
+
+
 class DecisionObjectStatus(str, Enum):
     FRESH = "fresh"
     STALE = "stale"
@@ -446,6 +461,16 @@ class StrategyAction(BaseModel):
     timeline: str = ""
     risk_if_ignored: str = ""
     framework_source: str = ""
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority_aliases(cls, value):
+        key = _priority_label_key(value)
+        if key in _LOW_PRIORITY_SEMANTIC_ALIASES:
+            return Priority.LOW
+        if key in _ALLOWED_PRIORITY_LABELS:
+            return key
+        return value
 
 
 class StrategyOutput(BaseModel):
