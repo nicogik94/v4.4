@@ -266,6 +266,28 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertEqual(projection.contradiction_signals, ())
         self.assertEqual(constraint_adherence_warnings(state), [])
 
+    def test_constraint_warning_absent_for_persisted_paid_spend_table_safe_contexts(self):
+        state = _constrained_strategy_state(
+            "constraint-persisted-paid-spend-safe",
+            (
+                "Recommended path: run one focused initiative and one small experiment.\n"
+                "Increase paid acquisition spend | More trials in pipeline | Compounds lead-quality problem "
+                "if paid mix is already degrading conversion; wastes budget | Only if organic channels are "
+                "saturated and lead quality from paid is confirmed healthy | **Do not do this month** |\n"
+                "| Acting on wrong hypothesis before root cause is confirmed | Wastes limited capacity; may "
+                "worsen conversion if, for example, paid spend increases but lead quality is the problem | "
+                "Focused initiative produces data showing a different primary cause than assumed | Gate all "
+                "implementation decisions on Sprint 0 findings; enforce stop condition | Executive Sponsor |\n"
+                "Operator hard constraint: 'Do not recommend broad growth spend until the cause is clearer.'"
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
     def test_constraint_adherence_helper_does_not_mutate_state(self):
         state = _constrained_strategy_state(
             "constraint-no-mutation",

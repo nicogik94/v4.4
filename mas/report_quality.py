@@ -75,7 +75,7 @@ CONSTRAINT_ADHERENCE_WARNING = (
 )
 
 CONSTRAINT_SAFE_PREFIX_PATTERN = re.compile(
-    r"(?:^|[\s([{;:.,|\-–—])"
+    r"(?:^|[\s([{'\";:.,|\-–—])"
     r"(?:do\s+not(?:\s+(?:do|start|launch|recommend|increase|run|execute|pursue))?|"
     r"don't|dont|should\s+not|must\s+not|cannot|can't|not|no|never|without|"
     r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
@@ -110,7 +110,7 @@ CONSTRAINT_SAFE_HEADING_PATTERN = re.compile(
 )
 
 CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN = re.compile(
-    r"(?:^|[\s([{;:.,|\-–—])"
+    r"(?:^|[\s([{'\";:.,|\-–—])"
     r"(?:if|when|unless|whether|risk\s+if|risk\s+of|risks?\s+if|"
     r"warning\s+if|watch\s+if|monitor\s+if|stop\s+if|trigger\s+if|"
     r"consider\s+pausing|consider\s+pause|consider\s+freezing)"
@@ -1165,7 +1165,7 @@ def _detect_constraint_contradiction_signals(
 def _has_non_negated_constraint_match(text: str, pattern: re.Pattern[str]) -> bool:
     for segment in _constraint_scan_segments(text):
         for match in pattern.finditer(segment):
-            if _constraint_match_is_negated(segment, match.start(), match.end()):
+            if _constraint_match_is_negated(segment, match.start(), match.end(), match.group(0)):
                 continue
             return True
     return False
@@ -1194,18 +1194,58 @@ def _constraint_scan_segments(text: str) -> list[str]:
     return segments
 
 
-def _constraint_match_is_negated(segment: str, match_start: int, match_end: int) -> bool:
+def _constraint_match_is_negated(segment: str, match_start: int, match_end: int, match_text: str = "") -> bool:
     prefix = segment[max(0, match_start - 180):match_start]
     suffix = segment[match_end:match_end + 180]
     if re.search(r"\bwhat\s+not\s+to\s+do\b.{0,160}$", prefix, re.I):
         return True
+    if _constraint_markdown_row_has_safe_verdict(segment, match_end):
+        return True
     if _constraint_prefix_has_shared_safe_list(prefix):
         return True
-    if CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN.search(prefix):
+    if _constraint_match_is_conditional_risk_context(prefix, match_text):
         return True
     if CONSTRAINT_SAFE_PREFIX_PATTERN.search(prefix):
         return True
     return bool(CONSTRAINT_SAFE_SUFFIX_PATTERN.search(suffix))
+
+
+def _constraint_markdown_row_has_safe_verdict(segment: str, match_end: int) -> bool:
+    if "|" not in segment:
+        return False
+    suffix = segment[match_end:]
+    return bool(
+        re.search(
+            r"\|\s*(?:\*\*)?\s*(?:do\s+not\s+do(?:\s+this\s+month)?|"
+            r"do\s+not\s+start|not\s+recommended|deferred|blocked|"
+            r"out\s+of\s+scope|paused|parked)(?:\s*(?:\*\*)?)\s*\|",
+            suffix,
+            re.I,
+        )
+    )
+
+
+def _constraint_match_is_conditional_risk_context(prefix: str, match_text: str) -> bool:
+    if not (
+        CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN.search(prefix)
+        or re.search(
+            r"\b(?:if|when|unless|whether|risk\s+if|risk\s+of|risks?\s+if|"
+            r"warning\s+if|watch\s+if|monitor\s+if|stop\s+if|trigger\s+if)\b.{0,120}$",
+            prefix,
+            re.I,
+        )
+    ):
+        return False
+    if re.search(r"\brecommended\s+path\b|\brecommend(?:ed|s)?\b", prefix, re.I):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:paid\s+)?spend\s+increase(?:s|d)?\b|"
+            r"\bpaid\s+acquisition\s+mix\s+continues?\s+shifting\b",
+            match_text,
+            re.I,
+        )
+    )
 
 
 def _constraint_prefix_has_shared_safe_list(prefix: str) -> bool:
