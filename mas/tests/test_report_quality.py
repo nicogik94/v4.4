@@ -189,6 +189,21 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertIn("growth spend", warnings[0])
         self.assertIn("spend constraint", warnings[0])
 
+    def test_constraint_warning_for_affirmative_paid_campaign_or_scale_recommendation(self):
+        for generated_text in (
+            "Recommended path: Launch new paid campaigns this month.",
+            "Recommended path: Scale paid acquisition before diagnosis.",
+            "Recommended path: Expand broad growth spend.",
+        ):
+            with self.subTest(generated_text=generated_text):
+                state = _constrained_strategy_state("constraint-paid-campaign-scale", generated_text)
+
+                warnings = constraint_adherence_warnings(state)
+
+                self.assertTrue(warnings)
+                self.assertIn("growth spend", warnings[0])
+                self.assertIn("spend constraint", warnings[0])
+
     def test_constraint_warning_absent_for_compliant_constrained_plan(self):
         state = _constrained_strategy_state(
             "constraint-compliant",
@@ -220,6 +235,28 @@ class TestReportQualityHelpers(unittest.TestCase):
                 "do not increase paid acquisition spend; do not launch a full onboarding redesign.\n"
                 "All growth spend and major engineering are paused until the cause is clearer.\n"
                 "Deferred / blocked / do not do: broad paid acquisition spend remains out of scope."
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_smoke_style_paid_spend_safe_contexts(self):
+        state = _constrained_strategy_state(
+            "constraint-smoke-paid-spend-safe",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding experiment.\n"
+                "All growth spend and major engineering are paused pending measurement clarity.\n"
+                "What not to do this month: Increase paid acquisition spend.\n"
+                "Do not increase paid acquisition spend.\n"
+                "Freeze paid acquisition budgets at current levels for 30 days; do not launch new paid campaigns.\n"
+                "If rate drops below 10%, consider pausing all paid acquisition spend.\n"
+                "Paid acquisition mix continues shifting during the sprint, worsening the cohort being measured.\n"
+                "Risk if paid spend increases: the measured cohort becomes harder to interpret.\n"
+                "If paid spend increased and H1 is confirmed, continue diagnosis before any scale-up."
             ),
         )
 

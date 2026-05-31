@@ -355,6 +355,11 @@ Run one focused initiative and one small experiment this month.
 # Why This Is Recommended
 What not to do this month: no major engineering work, no broad growth spend, and do not increase paid acquisition spend.
 All growth spend and major engineering are paused until Sprint 0 resolves the cause.
+Freeze paid acquisition budgets at current levels for 30 days; do not launch new paid campaigns.
+If rate drops below 10%, consider pausing all paid acquisition spend.
+Paid acquisition mix continues shifting during the sprint, worsening the cohort being measured.
+Risk if paid spend increases: the measured cohort becomes harder to interpret.
+If paid spend increased and H1 is confirmed, continue diagnosis before any scale-up.
 
 # Options Considered
 | Option | Verdict |
@@ -397,7 +402,10 @@ Major engineering work is not recommended this month.
             StrategyAction(
                 priority="LOW",
                 action="Broad paid acquisition spend (DO NOT DO this month).",
-                justification="BLOCKED until measurement is repaired and the spend constraint changes.",
+                justification=(
+                    "BLOCKED until measurement is repaired and the spend constraint changes. "
+                    "Freeze paid acquisition budgets; do not launch new paid campaigns."
+                ),
             ),
             StrategyAction(
                 priority="LOW",

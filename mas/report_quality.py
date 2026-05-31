@@ -79,11 +79,12 @@ CONSTRAINT_SAFE_PREFIX_PATTERN = re.compile(
     r"(?:do\s+not(?:\s+(?:do|start|launch|recommend|increase|run|execute|pursue))?|"
     r"don't|dont|should\s+not|must\s+not|cannot|can't|not|no|never|without|"
     r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
-    r"pause(?:s|d|ing)?|park(?:s|ed|ing)?|prohibit(?:s|ed|ing)?|"
+    r"pause(?:s|d|ing)?|freeze(?:s|d|ing)?|frozen|park(?:s|ed|ing)?|prohibit(?:s|ed|ing)?|"
     r"forbid(?:s|den|ding)?|forbidden|out\s+of\s+scope|off[- ]limits)"
     r"\s*(?:[:\-–—]\s*)?"
-    r"(?:(?:the|a|an|any|all|new|full|broad|major|large|paid|growth|"
-    r"engineering|critical|parallel|three|3)\s+){0,8}$",
+    r"(?:(?:the|a|an|any|all|current|new|full|broad|major|large|paid|"
+    r"acquisition|growth|campaigns?|budgets?|spend|engineering|critical|"
+    r"parallel|three|3)\s+){0,10}$",
     re.I,
 )
 
@@ -95,15 +96,25 @@ CONSTRAINT_SAFE_SUFFIX_PATTERN = re.compile(
     r"(?:(?:is|are|be|being|remain|remains|stay|stays|should\s+remain|"
     r"must\s+remain)\s+)?"
     r"(?:not\s+(?:recommended|allowed|in\s+scope|this\s+month|now)|"
-    r"paused|deferred|blocked|parked|out\s+of\s+scope|off[- ]limits|"
-    r"prohibited|forbidden|do\s+not\s+(?:do|start|launch|recommend|increase))\b",
+    r"paused|pausing|deferred|blocked|frozen|parked|out\s+of\s+scope|off[- ]limits|"
+    r"prohibited|forbidden|do\s+not\s+(?:do|start|launch|recommend|increase)|"
+    r"continues?\s+shifting|worsening\s+the\s+cohort)\b",
     re.I,
 )
 
 CONSTRAINT_SAFE_HEADING_PATTERN = re.compile(
     r"\b(?:what\s+not\s+to\s+do|do\s+not\s+do|do\s+not\s+start|"
     r"do\s+not\s+launch|not\s+this\s+month|out\s+of\s+scope|paused|"
-    r"deferred|blocked)\b",
+    r"deferred|blocked|risks?|warning|stop[- ]condition|circuit\s+breaker)\b",
+    re.I,
+)
+
+CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN = re.compile(
+    r"(?:^|[\s([{;:.,|\-–—])"
+    r"(?:if|when|unless|whether|risk\s+if|risk\s+of|risks?\s+if|"
+    r"warning\s+if|watch\s+if|monitor\s+if|stop\s+if|trigger\s+if|"
+    r"consider\s+pausing|consider\s+pause|consider\s+freezing)"
+    r"(?:(?:\s+|,)[\w%.-]+){0,10}\s*$",
     re.I,
 )
 
@@ -1136,8 +1147,12 @@ def _detect_constraint_contradiction_signals(
         generated_text,
         re.compile(
             r"\b(?:increase|increased|scale|expand|raise|ramp(?:\s+up)?)\s+(?:broad\s+)?(?:paid\s+acquisition|growth)\s+spend\b|"
+            r"\b(?:increase|increased|scale|expand|raise|ramp(?:\s+up)?)\s+paid\s+(?:spend|budget|budgets)\b|"
+            r"\b(?:scale|expand|ramp(?:\s+up)?)\s+paid\s+acquisition\b|"
+            r"\b(?:launch|start|run|execute)\s+(?:new\s+)?paid\s+campaigns?\b|"
+            r"\b(?:paid\s+acquisition|paid)\s+budgets?\s+(?:increase|increased|expansion|scale-up)\b|"
             r"\b(?:broad|large|major)\s+(?:paid\s+acquisition|growth)\s+spend\b|"
-            r"\b(?:paid\s+acquisition|growth)\s+spend\s+(?:increase|expansion|scale-up)\b|"
+            r"\b(?:paid\s+acquisition|growth|paid)\s+spend\s+(?:increase|increases|increased|expansion|scale-up)\b|"
             r"\blarge\s+acquisition\s+spend\s+increase\b",
             re.I,
         ),
@@ -1186,6 +1201,8 @@ def _constraint_match_is_negated(segment: str, match_start: int, match_end: int)
         return True
     if _constraint_prefix_has_shared_safe_list(prefix):
         return True
+    if CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN.search(prefix):
+        return True
     if CONSTRAINT_SAFE_PREFIX_PATTERN.search(prefix):
         return True
     return bool(CONSTRAINT_SAFE_SUFFIX_PATTERN.search(suffix))
@@ -1195,7 +1212,7 @@ def _constraint_prefix_has_shared_safe_list(prefix: str) -> bool:
     match = re.search(
         r"\b(?:do\s+not|don't|dont|should\s+not|must\s+not|cannot|can't|"
         r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
-        r"pause(?:s|d|ing)?|park(?:s|ed|ing)?|no|never|without|"
+        r"pause(?:s|d|ing)?|freeze(?:s|d|ing)?|frozen|park(?:s|ed|ing)?|no|never|without|"
         r"prohibit(?:s|ed|ing)?|forbid(?:s|den|ding)?|forbidden)\b"
         r"(?P<body>.{0,140})\b(?:and|or)\s*$",
         prefix,
