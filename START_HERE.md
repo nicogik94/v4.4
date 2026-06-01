@@ -9,6 +9,8 @@ Everything else in this bundle is reference material. You don't have to read it 
 
 For a v5 runtime foundation demo workflow, see [`docs/v5-DEMO-WORKFLOW.md`](docs/v5-DEMO-WORKFLOW.md).
 
+For the first packaged offer, see [`docs/v5-STRATEGIC-DECISION-AUDIT.md`](docs/v5-STRATEGIC-DECISION-AUDIT.md).
+
 For local launch checks, Docker Desktop / WSL recovery, and smoke export scanning, see [`docs/local-runtime-smoke.md`](docs/local-runtime-smoke.md).
 
 For the project creation API payload contract and request correlation notes, see [`v5 ingestion contract`](docs/v5-INGESTION-CONTRACT.md).
