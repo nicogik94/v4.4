@@ -22,6 +22,7 @@ from clarifications import (
     ClarificationAnswer,
     ClarificationCycle,
     ClarificationStatus,
+    build_clarification_summary,
     generate_clarification_cycle,
     latest_clarification_cycle,
     mark_clarification_unavailable,
@@ -1875,6 +1876,7 @@ def _clarification_response(
     answer: ClarificationAnswer | None = None,
 ) -> dict[str, Any]:
     latest = latest_clarification_cycle(state)
+    derived_summary = build_clarification_summary(state)
     all_questions = [
         question
         for existing_cycle in state.clarification_cycles
@@ -1899,6 +1901,8 @@ def _clarification_response(
         "answers": [existing_answer.model_dump(mode="json") for existing_answer in state.clarification_answers],
         "status_counts": status_counts,
         "summary": latest.summary if latest else "No clarification cycle generated yet.",
+        "derived_summary": derived_summary.model_dump(mode="json"),
+        "review_rows": [row.model_dump(mode="json") for row in derived_summary.review_rows],
     }
     if cycle is not None:
         payload["cycle"] = cycle.model_dump(mode="json")

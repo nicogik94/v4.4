@@ -1,6 +1,7 @@
 """Tests for deterministic clarification cycles."""
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -11,7 +12,12 @@ if str(ROOT) not in sys.path:
 
 import api  # noqa: E402
 from clarifications import (  # noqa: E402
+    ClarificationAnswer,
+    ClarificationCycle,
+    ClarificationPriority,
+    ClarificationQuestion,
     ClarificationStatus,
+    build_clarification_summary,
     generate_clarification_cycle,
     mark_clarification_unavailable,
     record_clarification_answer,
@@ -147,6 +153,112 @@ class TestClarificationAnswers(unittest.TestCase):
         self.assertEqual(loaded.clarification_answers, [])
 
 
+class TestClarificationSummary(unittest.TestCase):
+    def test_summary_tracks_counts_review_rows_and_next_action_without_mutating(self):
+        state = ProjectState(project_id="clarity-summary", brief="Evaluate the initiative.")
+        state.phase_run_completed_at["strategy"] = datetime(2026, 1, 1, 10, 0, 0).isoformat()
+        state.clarification_cycles = [
+            ClarificationCycle(
+                project_id=state.project_id,
+                cycle_id="cycle-1",
+                questions=[
+                    ClarificationQuestion(
+                        question_id="q-critical",
+                        text="What target outcome matters most?",
+                        why_it_matters="The strategy needs a measurable outcome.",
+                        priority=ClarificationPriority.CRITICAL,
+                        affected_phase="strategy",
+                        source_gap="success_metric",
+                        status=ClarificationStatus.OPEN,
+                    ),
+                    ClarificationQuestion(
+                        question_id="q-high",
+                        text="What budget limit applies?",
+                        why_it_matters="Resource bounds keep actions realistic.",
+                        priority=ClarificationPriority.HIGH,
+                        affected_phase="strategy",
+                        source_gap="budget_resource_constraints",
+                        status=ClarificationStatus.ANSWERED,
+                    ),
+                    ClarificationQuestion(
+                        question_id="q-medium",
+                        text="What evidence should be considered?",
+                        why_it_matters="Evidence separates measured facts from assumptions.",
+                        priority=ClarificationPriority.MEDIUM,
+                        affected_phase="audit",
+                        source_gap="evidence_source_material",
+                        status=ClarificationStatus.UNAVAILABLE,
+                    ),
+                    ClarificationQuestion(
+                        question_id="q-low",
+                        text="Who should read the final report?",
+                        why_it_matters="Audience changes framing.",
+                        priority=ClarificationPriority.LOW,
+                        affected_phase="monitor",
+                        source_gap="stakeholder_audience",
+                        status=ClarificationStatus.SUPERSEDED,
+                    ),
+                ],
+            )
+        ]
+        long_answer = "Budget is capped at $80k for the first month, with finance review before any expansion. " * 3
+        state.clarification_answers = [
+            ClarificationAnswer(
+                answer_id="a-high",
+                question_id="q-high",
+                answer_text=long_answer,
+                status=ClarificationStatus.ANSWERED,
+                answered_at=datetime(2026, 1, 1, 11, 0, 0),
+            ),
+            ClarificationAnswer(
+                answer_id="a-medium",
+                question_id="q-medium",
+                answer_text="Unavailable",
+                status=ClarificationStatus.UNAVAILABLE,
+                answered_at=datetime(2026, 1, 1, 9, 0, 0),
+            ),
+        ]
+        before = state.model_dump(mode="json")
+
+        summary = build_clarification_summary(state)
+
+        self.assertEqual(state.model_dump(mode="json"), before)
+        self.assertEqual(summary.total_cycles, 1)
+        self.assertEqual(summary.total_questions, 4)
+        self.assertEqual(summary.open_count, 1)
+        self.assertEqual(summary.answered_count, 1)
+        self.assertEqual(summary.unavailable_count, 1)
+        self.assertEqual(summary.superseded_count, 1)
+        self.assertEqual(summary.open_required_count, 1)
+        self.assertEqual(summary.resolution_rate, 0.6667)
+        self.assertEqual(summary.affected_phases, ["audit", "strategy", "monitor"])
+        self.assertEqual(summary.latest_cycle_status, "required_open")
+        self.assertIn("Answer critical/high", summary.next_action)
+        self.assertEqual(summary.refresh_candidate_phases, ["strategy"])
+        self.assertEqual(len(summary.review_rows), 4)
+
+        high_row = next(row for row in summary.review_rows if row.question_id == "q-high")
+        self.assertTrue(high_row.required)
+        self.assertTrue(high_row.refresh_candidate)
+        self.assertIn("Budget is capped", high_row.answer_preview)
+        self.assertLessEqual(len(high_row.answer_preview), 140)
+
+    def test_summary_no_cycle_and_no_question_states_are_distinct(self):
+        empty_state = ProjectState(project_id="clarity-no-cycle", brief="Evaluate the initiative.")
+        no_cycle = build_clarification_summary(empty_state)
+        self.assertEqual(no_cycle.latest_cycle_status, "not_generated")
+        self.assertIn("Generate missing-information questions", no_cycle.next_action)
+
+        no_question_state = ProjectState(project_id="clarity-no-question", brief="Complete brief")
+        no_question_state.clarification_cycles = [
+            ClarificationCycle(project_id=no_question_state.project_id, cycle_id="cycle-empty", questions=[])
+        ]
+        no_question = build_clarification_summary(no_question_state)
+        self.assertEqual(no_question.latest_cycle_status, "no_questions")
+        self.assertEqual(no_question.next_action, "No clarification action needed right now.")
+        self.assertEqual(no_question.resolution_rate, 1.0)
+
+
 class TestClarificationApi(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         api.running.clear()
@@ -164,6 +276,9 @@ class TestClarificationApi(unittest.IsolatedAsyncioTestCase):
             cycle_response = await api.create_clarification_cycle(state.project_id)
             self.assertEqual(len(state.clarification_cycles), 1)
             self.assertEqual(len(cycle_response["open_questions"]), len(EXPECTED_GAPS))
+            self.assertEqual(cycle_response["derived_summary"]["total_questions"], len(EXPECTED_GAPS))
+            self.assertEqual(cycle_response["derived_summary"]["open_required_count"], 6)
+            self.assertEqual(len(cycle_response["review_rows"]), len(EXPECTED_GAPS))
             save_mock.assert_awaited()
 
             repeated_response = await api.create_clarification_cycle(state.project_id)
@@ -181,6 +296,8 @@ class TestClarificationApi(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(answer_response["answer"]["status"], "answered")
             self.assertEqual(answer_question.status, ClarificationStatus.ANSWERED)
+            self.assertEqual(answer_response["derived_summary"]["answered_count"], 1)
+            self.assertIn("answer_preview", answer_response["review_rows"][0])
 
             unavailable_question = state.clarification_cycles[-1].questions[1]
             unavailable_response = await api.answer_clarification(
@@ -192,6 +309,7 @@ class TestClarificationApi(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(unavailable_response["answer"]["status"], "unavailable")
             self.assertEqual(unavailable_question.status, ClarificationStatus.UNAVAILABLE)
+            self.assertEqual(unavailable_response["derived_summary"]["unavailable_count"], 1)
 
     async def test_get_route_does_not_mutate_or_save_state(self):
         state = ProjectState(project_id="clarity-api-get", brief="Evaluate the initiative.")

@@ -11,6 +11,8 @@ For a v5 runtime foundation demo workflow, see [`docs/v5-DEMO-WORKFLOW.md`](docs
 
 For local launch checks, Docker Desktop / WSL recovery, and smoke export scanning, see [`docs/local-runtime-smoke.md`](docs/local-runtime-smoke.md).
 
+For using deterministic follow-up questions operationally, see [`docs/v5-ICE-OPERATOR-GUIDE.md`](docs/v5-ICE-OPERATOR-GUIDE.md).
+
 ---
 
 ## The 30-second tour

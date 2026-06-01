@@ -11,7 +11,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import api  # noqa: E402
+from clarifications import (  # noqa: E402
+    ClarificationCycle,
+    ClarificationPriority,
+    ClarificationQuestion,
+    ClarificationStatus,
+)
 from decision_objects import ensure_decision_objects  # noqa: E402
+from overview import build_operator_overview  # noqa: E402
 from state import PhaseStatus  # noqa: E402
 from workspace import build_workspace_summary  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
@@ -121,6 +128,63 @@ class TestWorkspaceSummary(unittest.TestCase):
         self.assertFalse(workspace.imported_evidence_pending_analysis)
         self.assertEqual(workspace.imported_evidence_pending_message, "")
 
+    def test_clarification_summary_is_exposed_without_changing_project_status(self):
+        state = make_state("workspace-clarifications")
+        state.clarification_cycles = [
+            ClarificationCycle(
+                project_id=state.project_id,
+                cycle_id="cycle-1",
+                questions=[
+                    ClarificationQuestion(
+                        question_id="q-critical",
+                        text="What is the decision deadline?",
+                        why_it_matters="Timing changes the strategy.",
+                        priority=ClarificationPriority.CRITICAL,
+                        affected_phase="classify",
+                        source_gap="decision_deadline",
+                        status=ClarificationStatus.OPEN,
+                    )
+                ],
+            )
+        ]
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(workspace.clarification_summary.total_questions, 1)
+        self.assertEqual(workspace.clarification_summary.open_required_count, 1)
+        self.assertEqual(workspace.clarification_summary.latest_cycle_status, "required_open")
+        self.assertNotEqual(workspace.project_status, "blocked")
+        self.assertNotIn("clarification", " ".join(workspace.blocking_reasons).lower())
+
+    def test_overview_next_action_prioritizes_required_clarifications(self):
+        state = make_state("overview-clarifications")
+        state.report = "final report"
+        state.phase_status["report"] = PhaseStatus.COMPLETED
+        state.clarification_cycles = [
+            ClarificationCycle(
+                project_id=state.project_id,
+                cycle_id="cycle-1",
+                questions=[
+                    ClarificationQuestion(
+                        question_id="q-high",
+                        text="What budget limit applies?",
+                        why_it_matters="Resource bounds keep actions realistic.",
+                        priority=ClarificationPriority.HIGH,
+                        affected_phase="strategy",
+                        source_gap="budget_resource_constraints",
+                        status=ClarificationStatus.OPEN,
+                    )
+                ],
+            )
+        ]
+
+        overview = build_operator_overview(state)
+
+        self.assertIn("Answer critical/high clarification", overview.next_operator_action)
+        clarification_metric = next(card for card in overview.key_metrics if card.label == "Clarifications")
+        self.assertEqual(clarification_metric.value, "0/1")
+        self.assertIn("1 required open", clarification_metric.detail)
+
 
 class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -162,3 +226,4 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.current_phase, state.current_phase)
         self.assertIsNotNone(summary.decision_object_health)
         self.assertTrue(summary.imported_evidence_pending_analysis)
+        self.assertIsNotNone(summary.clarification_summary)
