@@ -49,6 +49,28 @@ AI_READINESS_DIMENSIONS = [
     "success metrics and monitoring",
 ]
 
+REAL_ESTATE_DECISION_AUDIT_DOCS = [
+    DOCS_ROOT / "v5-REAL-ESTATE-DECISION-AUDIT.md",
+    DOCS_ROOT / "templates" / "real-estate-decision-audit-intake.md",
+    DOCS_ROOT / "examples" / "real-estate-decision-audit-brief.md",
+    DOCS_ROOT / "v5-REAL-ESTATE-DECISION-DEMO-SCRIPT.md",
+]
+
+REAL_ESTATE_DECISION_DIMENSIONS = [
+    "decision type: buy/sell/hold/lease/develop/renovate/market-entry",
+    "property or portfolio context",
+    "market and submarket assumptions",
+    "rent/revenue assumptions",
+    "expense and capex assumptions",
+    "financing assumptions",
+    "sensitivity/scenario assumptions",
+    "operational constraints",
+    "regulatory/legal/tax questions for human experts",
+    "risk classification and human oversight",
+    "first 30/60/90-day diligence plan",
+    "success metrics and monitoring",
+]
+
 BRIEF_HEADINGS = [
     "# ",
     "## Decision Question",
@@ -90,6 +112,12 @@ def test_automation_roi_audit_package_docs_exist_in_repo_root_docs():
 
 def test_ai_readiness_audit_package_docs_exist_in_repo_root_docs():
     for path in AI_READINESS_AUDIT_DOCS:
+        assert path.exists(), path
+        assert MAS_ROOT / "docs" not in path.parents
+
+
+def test_real_estate_decision_audit_package_docs_exist_in_repo_root_docs():
+    for path in REAL_ESTATE_DECISION_AUDIT_DOCS:
         assert path.exists(), path
         assert MAS_ROOT / "docs" not in path.parents
 
@@ -207,6 +235,56 @@ def test_ai_readiness_audit_entrypoint_has_required_offer_sections():
         "not a first-class backend runtime template",
         "ai readiness example framing",
         "ai_readiness",
+        "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+    ):
+        assert required in lower
+
+
+def test_real_estate_decision_audit_entrypoint_has_required_offer_sections():
+    text = _read(DOCS_ROOT / "v5-REAL-ESTATE-DECISION-AUDIT.md")
+    lower = _normalized_lower(text)
+
+    for heading in (
+        "# Real Estate Decision Audit Packaged Offer",
+        "## What This Offer Is",
+        "## What This Offer Is Not",
+        "## Intake Template",
+        "## Example Brief",
+        "## Recommended Upload Files",
+        "## Operator Runbook",
+        "## Sample Project Framing",
+        "## Expected Export Checklist",
+        "## Client-Safe Positioning Language",
+        "## Boundaries And Disclaimers",
+        "## Related Docs",
+    ):
+        assert heading in text
+
+    for dimension in REAL_ESTATE_DECISION_DIMENSIONS:
+        assert dimension in lower
+
+    for required in (
+        "docs/templates/tests-only",
+        "local operator workflow",
+        "human review is required",
+        "real estate findings are directional, not guarantees",
+        "not investment advice",
+        "not financial advice",
+        "not legal advice",
+        "not tax advice",
+        "not appraisal or valuation certification",
+        "not lending or credit underwriting",
+        "not public saas",
+        "not a guaranteed buy/sell/hold recommendation engine",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+        "strategic decision audit framing",
+        "strategic_audit",
+        "real estate package framing lives in the brief/docs only",
+        "no `real_estate_*` runtime type is introduced",
         "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
         "client-safe after review",
         "operator-only",
@@ -373,6 +451,88 @@ def test_ai_readiness_audit_template_and_example_are_complete():
         assert required in combined
 
 
+def test_real_estate_decision_audit_template_and_example_are_complete():
+    template = _read(DOCS_ROOT / "templates" / "real-estate-decision-audit-intake.md")
+    example = _read(DOCS_ROOT / "examples" / "real-estate-decision-audit-brief.md")
+    combined = _normalized_lower(template + "\n" + example)
+
+    for heading in (
+        "## Real Estate Decision Question",
+        "## Decision Type",
+        "## Property Or Portfolio Context",
+        "## Market And Submarket Assumptions",
+        "## Rent/Revenue Assumptions",
+        "## Expense And Capex Assumptions",
+        "## Financing Assumptions",
+        "## Sensitivity/Scenario Assumptions",
+        "## Operational Constraints",
+        "## Regulatory/Legal/Tax Questions For Human Experts",
+        "## Risk Classification And Human Oversight",
+        "## First 30/60/90-Day Diligence Plan",
+        "## Success Metrics And Monitoring",
+        "## Known Evidence",
+        "## Unknowns",
+        "## Recommended Upload Files",
+        "## Expected Output Types",
+        "## Human Review Notes",
+    ):
+        assert heading in template
+
+    for heading in (
+        "# Real Estate Decision Audit Example Brief",
+        "## Real Estate Decision Question",
+        "## Decision Type",
+        "## Property Or Portfolio Context",
+        "## Market And Submarket Assumptions",
+        "## Rent/Revenue Assumptions",
+        "## Expense And Capex Assumptions",
+        "## Financing Assumptions",
+        "## Sensitivity/Scenario Assumptions",
+        "## Operational Constraints",
+        "## Regulatory/Legal/Tax Questions For Human Experts",
+        "## Risk Classification And Human Oversight",
+        "## First 30/60/90-Day Diligence Plan",
+        "## Success Metrics And Monitoring",
+        "## Known Evidence",
+        "## Unknowns",
+        "## What A Good Recommendation Should Resolve",
+        "## Suggested Files / Evidence To Upload If Available",
+        "## Expected Output Types",
+        "## Human Review Reminder",
+    ):
+        assert heading in example
+
+    for dimension in REAL_ESTATE_DECISION_DIMENSIONS:
+        assert dimension in combined
+
+    for required in (
+        "paste-ready example brief",
+        "local operator workflow",
+        "not a first-class vertical template",
+        "not a first-class backend runtime template",
+        "runtime pack",
+        "human review is required",
+        "real estate findings are directional, not guarantees",
+        "risk classification",
+        "human oversight",
+        "recommended upload files",
+        "success metrics and monitoring",
+        "not investment advice",
+        "not financial advice",
+        "not legal advice",
+        "not tax advice",
+        "not appraisal or valuation certification",
+        "not lending or credit underwriting",
+        "not public saas",
+        "not a guaranteed buy/sell/hold recommendation engine",
+        "not a new reasoning mode",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+    ):
+        assert required in combined
+
+
 def test_strategic_decision_audit_demo_script_uses_existing_local_flow():
     text = _read(DOCS_ROOT / "v5-STRATEGIC-DECISION-DEMO-SCRIPT.md")
     lower = _normalized_lower(text)
@@ -443,6 +603,37 @@ def test_ai_readiness_audit_demo_script_uses_existing_local_flow():
         "not security certification",
         "not public saas",
         "not a guaranteed ai transformation plan",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+    ):
+        assert required in lower
+
+
+def test_real_estate_decision_audit_demo_script_uses_existing_local_flow():
+    text = _read(DOCS_ROOT / "v5-REAL-ESTATE-DECISION-DEMO-SCRIPT.md")
+    lower = _normalized_lower(text)
+
+    for required in (
+        "docker compose port app 8000",
+        "scripts\\demo_smoke_check.py",
+        "dashboards/index.html",
+        "strategic decision audit framing",
+        "fixed phase order",
+        "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
+        "export boundaries",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+        "human review required",
+        "real estate findings are directional, not guarantees",
+        "not investment advice",
+        "not financial advice",
+        "not legal advice",
+        "not tax advice",
+        "not appraisal or valuation certification",
+        "not lending or credit underwriting",
+        "not public saas",
+        "not a guaranteed buy/sell/hold recommendation engine",
         "not a new reasoning mode",
         "not a first-class backend runtime template",
     ):
@@ -562,6 +753,69 @@ def test_ai_readiness_audit_docs_do_not_overclaim_or_change_scope():
         assert prohibited not in combined
 
 
+def test_real_estate_decision_audit_docs_do_not_overclaim_or_change_scope():
+    combined = _normalized_lower("\n".join(_read(path) for path in REAL_ESTATE_DECISION_AUDIT_DOCS))
+
+    for required_boundary in (
+        "docs/templates/tests-only",
+        "local operator workflow",
+        "human review is required",
+        "real estate findings are directional, not guarantees",
+        "not investment advice",
+        "not financial advice",
+        "not legal advice",
+        "not tax advice",
+        "not appraisal or valuation certification",
+        "not lending or credit underwriting",
+        "not public saas",
+        "not a guaranteed buy/sell/hold recommendation engine",
+        "not regulated real-estate decision automation",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+        "no auth",
+        "no auth, tenancy, public deployment hardening",
+        "provider routing changes",
+        "queue/runtime changes",
+        "export schema changes",
+        "dashboard redesign",
+        "vertical-specific runtime logic",
+        "real-estate-specific backend execution",
+    ):
+        assert required_boundary in combined
+
+    for phrase, prefix in (
+        ("investment advice", "not "),
+        ("financial advice", "not "),
+        ("legal advice", "not "),
+        ("tax advice", "not "),
+        ("appraisal or valuation certification", "not "),
+        ("valuation certification", "not appraisal or "),
+        ("lending or credit underwriting", "not "),
+        ("credit underwriting", "not lending or "),
+        ("guaranteed buy/sell/hold recommendation engine", "not a "),
+        ("regulated real-estate decision automation", "not "),
+    ):
+        assert f"{prefix}{phrase}" in combined
+        start = 0
+        while True:
+            index = combined.find(phrase, start)
+            if index == -1:
+                break
+            assert combined[index - len(prefix) : index] == prefix
+            start = index + len(phrase)
+
+    for prohibited in (
+        "guaranteed investment",
+        "appraisal certification",
+        "lending underwriting",
+        "public saas readiness",
+        "new real estate runtime",
+        "first-class real estate runtime",
+        "safe to share before review",
+    ):
+        assert prohibited not in combined
+
+
 def test_demo_docs_use_runtime_foundation_and_non_overclaim_language():
     combined = _normalized_lower("\n".join(_read(path) for path in REQUIRED_DOCS))
 
@@ -623,6 +877,12 @@ def test_start_here_has_exactly_one_ai_readiness_audit_pointer():
     text = _read(REPO_ROOT / "START_HERE.md")
     assert text.count("docs/v5-AI-READINESS-AUDIT.md") == 2
     assert text.count("For the AI Readiness Audit packaged offer") == 1
+
+
+def test_start_here_has_exactly_one_real_estate_decision_audit_pointer():
+    text = _read(REPO_ROOT / "START_HERE.md")
+    assert text.count("docs/v5-REAL-ESTATE-DECISION-AUDIT.md") == 2
+    assert text.count("For the Real Estate Decision Audit packaged offer") == 1
 
 
 def test_ingestion_contract_doc_covers_contract_and_caveats():
