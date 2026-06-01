@@ -13,6 +13,8 @@ For the first packaged offer, see [`docs/v5-STRATEGIC-DECISION-AUDIT.md`](docs/v
 
 For the Automation ROI Audit packaged offer, see [`docs/v5-AUTOMATION-ROI-AUDIT.md`](docs/v5-AUTOMATION-ROI-AUDIT.md).
 
+For the AI Readiness Audit packaged offer, see [`docs/v5-AI-READINESS-AUDIT.md`](docs/v5-AI-READINESS-AUDIT.md).
+
 For local launch checks, Docker Desktop / WSL recovery, and smoke export scanning, see [`docs/local-runtime-smoke.md`](docs/local-runtime-smoke.md).
 
 For the project creation API payload contract and request correlation notes, see [`v5 ingestion contract`](docs/v5-INGESTION-CONTRACT.md).
