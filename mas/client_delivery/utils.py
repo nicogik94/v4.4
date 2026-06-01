@@ -103,6 +103,18 @@ def spreadsheet_text(value: Any) -> str:
 
 def _redact_client_visible(value: str) -> str:
     text = str(value or "")
+    text = re.sub(r"\bpolicy_audit_log\b", "operator audit log redacted", text, flags=re.I)
+    text = re.sub(r"\braw_provider_payload\b", "provider payload redacted", text, flags=re.I)
+    text = re.sub(r"\braw[\s_-]+prompt\b", "prompt redacted", text, flags=re.I)
+    text = re.sub(r"\bproject_state\s*\.\s*json\b", "internal project state redacted", text, flags=re.I)
+    text = re.sub(r"\bmachine_archive\b", "internal machine archive redacted", text, flags=re.I)
+    text = re.sub(
+        r"\bruntime[\s_/-]*preflight(?:[\s_-]+metadata)?\b",
+        "runtime metadata redacted",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\bupload_store\b", "internal upload storage", text, flags=re.I)
     text = re.sub(
         r"\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*[^\s,;|)>\]]+",
         "credential=[redacted]",
@@ -116,6 +128,13 @@ def _redact_client_visible(value: str) -> str:
     text = re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", text, flags=re.I)
     text = re.sub(r"\b[A-Za-z]:[\\/][^\s,;|)>\]]+", "redacted local path", text)
     text = re.sub(r"\\\\[^\s,;|)>\]]+", "redacted local path", text)
+    text = re.sub(r"file://[^\s,;|)>\]]+", "redacted local path", text, flags=re.I)
+    text = re.sub(
+        r"(?<!https:)(?<!http:)/(Users|home|mnt|var|tmp|root|workspace|Volumes|opt)/[^\s,;|)>\]]+",
+        "redacted local path",
+        text,
+        flags=re.I,
+    )
     return text
 
 

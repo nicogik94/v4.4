@@ -705,6 +705,24 @@ def _client_safe_cell(value: str, *, header: str) -> str:
     text = re.sub(r"\bfile[-_][A-Za-z0-9_.:-]+\b", "project file", text, flags=re.I)
     text = re.sub(r"\b(?:BF|RPN|H_norm|rho|scenario_probability|diagnostic score|operator trace)\b[^;,.|]*", "internal diagnostic redacted", text, flags=re.I)
     text = re.sub(r"\b(?:row source|diagnostic notes?|internal source refs?|operator-only)\b", "internal detail", text, flags=re.I)
+    text = _redact_client_internal_metadata(text)
+    return text
+
+
+def _redact_client_internal_metadata(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"\bpolicy_audit_log\b", "operator audit log redacted", text, flags=re.I)
+    text = re.sub(r"\braw_provider_payload\b", "provider payload redacted", text, flags=re.I)
+    text = re.sub(r"\braw[\s_-]+prompt\b", "prompt redacted", text, flags=re.I)
+    text = re.sub(r"\bproject_state\s*\.\s*json\b", "internal project state redacted", text, flags=re.I)
+    text = re.sub(r"\bmachine_archive\b", "internal machine archive redacted", text, flags=re.I)
+    text = re.sub(
+        r"\bruntime[\s_/-]*preflight(?:[\s_-]+metadata)?\b",
+        "runtime metadata redacted",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\bupload_store\b", "internal upload storage", text, flags=re.I)
     return text
 
 
@@ -716,7 +734,7 @@ def _redact_basic(value: str) -> str:
     text = re.sub(r"(?i)\b[A-Z]:[\\/][^\s|]+", "[REDACTED]", text)
     text = re.sub(r"\\\\[A-Za-z0-9_.-]+\\[^\s|]+", "[REDACTED]", text)
     text = re.sub(r"file://[^\s|]+", "[REDACTED]", text)
-    text = re.sub(r"(?<!https:)(?<!http:)\b/(Users|home|mnt|var|tmp|root|workspace|Volumes|opt)/[^\s|]+", "[REDACTED]", text)
+    text = re.sub(r"(?<!https:)(?<!http:)/(Users|home|mnt|var|tmp|root|workspace|Volumes|opt)/[^\s|]+", "[REDACTED]", text)
     return text
 
 

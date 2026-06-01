@@ -7223,12 +7223,24 @@ async function confirmKill() {
 function downloadExport(pid, fmt) {
   if (!pid) return;
   const link = document.createElement('a');
-  link.href = `${apiUrl()}/projects/${pid}/export/${fmt}`;
+  link.href = reportProfileExportUrl(pid, fmt);
   link.target = '_blank';
   link.rel = 'noopener';
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+function legacyExportUrl(pid, fmt) {
+  return `${apiUrl()}/projects/${encodeURIComponent(pid)}/export/${encodeURIComponent(fmt)}`;
+}
+
+function reportProfileExportUrl(pid, fmt) {
+  return profileExportUrl(pid, 'report', fmt);
+}
+
+function profileExportUrl(pid, profile, format) {
+  return `${apiUrl()}/projects/${encodeURIComponent(pid)}/export?profile=${encodeURIComponent(profile)}&format=${encodeURIComponent(format)}`;
 }
 
 function syncExportProfileFormatOptions() {
@@ -7271,7 +7283,7 @@ function exportProjectProfile(pid, profile, format) {
   }
 
   const link = document.createElement('a');
-  link.href = `${apiUrl()}/projects/${encodeURIComponent(pid)}/export?profile=${encodeURIComponent(profile)}&format=${encodeURIComponent(format)}`;
+  link.href = profileExportUrl(pid, profile, format);
   link.target = '_blank';
   link.rel = 'noopener';
   document.body.appendChild(link);
@@ -7385,8 +7397,8 @@ function paletteBuildItems() {
     items.push({ group: 'Actions', icon: '▶', title: killActive ? 'Run project (blocked — kill switch active)' : 'Run project', sub: 'Advance through pending phases', disabled: killActive, run: () => { closePalette(); onRunProject(); } });
     items.push({ group: 'Actions', icon: '■', title: killActive ? 'Kill switch already active' : 'Fire kill switch', sub: 'Halt immediately; reason required', disabled: killActive, run: () => { closePalette(); openKillModal(); } });
     const reportExists = typeof state.project?.report === 'string' && state.project.report.length > 0;
-    items.push({ group: 'Actions', icon: '⤓', title: reportExists ? 'Download DOCX' : 'Download DOCX (no report yet)', sub: '/projects/{id}/export/docx', disabled: !reportExists, run: () => { closePalette(); downloadExport(state.selectedProjectId, 'docx'); } });
-    items.push({ group: 'Actions', icon: '⤓', title: reportExists ? 'Download PDF' : 'Download PDF (no report yet)', sub: '/projects/{id}/export/pdf', disabled: !reportExists, run: () => { closePalette(); downloadExport(state.selectedProjectId, 'pdf'); } });
+    items.push({ group: 'Actions', icon: '⤓', title: reportExists ? 'Download DOCX' : 'Download DOCX (no report yet)', sub: '/projects/{id}/export?profile=report&format=docx', disabled: !reportExists, run: () => { closePalette(); downloadExport(state.selectedProjectId, 'docx'); } });
+    items.push({ group: 'Actions', icon: '⤓', title: reportExists ? 'Download PDF' : 'Download PDF (no report yet)', sub: '/projects/{id}/export?profile=report&format=pdf', disabled: !reportExists, run: () => { closePalette(); downloadExport(state.selectedProjectId, 'pdf'); } });
   }
 
   // Tabs — only when a project is selected

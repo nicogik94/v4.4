@@ -50,6 +50,7 @@ from exporters import (  # noqa: E402
 from monitoring_templates import (  # noqa: E402
     CLIENT_MONITORING_TEMPLATE_HEADERS,
     OPERATOR_MONITORING_TEMPLATE_HEADERS,
+    OPERATOR_TRACE_HEADERS,
     SHEET_NAME,
     monitoring_template_cell_rows,
 )
@@ -599,6 +600,153 @@ class TestProfileExporterHelpers(unittest.TestCase):
         self.assertNotIn("Detected operator constraints", client_report)
         self.assertNotIn("Generated contradiction signals", client_report)
 
+    def test_client_report_and_dossier_strip_operator_diagnostic_boundaries(self):
+        state = make_constraint_violation_export_state("client-boundary-diagnostics")
+        state.report = r"""# Executive Summary
+Run a bounded pilot before scaling.
+Constraint adherence warning: operator-only diagnostic.
+Telemetry privacy note: operator-only logging caveat.
+policy_audit_log records raw_provider_payload, raw_prompt, raw prompt, and runtime/preflight metadata.
+Runtime metadata references project_state.json and C:\Users\operator\private\project_state.json.
+
+# The Decision
+Decide whether to fund the pilot.
+
+# Recommended Path
+Run a bounded pilot.
+
+# Why This Is Recommended
+The pilot limits irreversible commitment.
+
+# Assumptions and Open Questions
+Confirm pilot owner.
+
+# Monitoring and Kill Criteria
+Stop if baseline data access is unavailable.
+"""
+
+        client_report = _safe_report_markdown(state)
+        client_dossier = build_client_dossier_markdown(state)
+        report_docx = _docx_text(export_project_profile_bytes(state, "report", "docx")[0])
+        dossier_docx = _docx_text(export_project_profile_bytes(state, "client_dossier", "docx")[0])
+
+        for output in (client_report, client_dossier, report_docx, dossier_docx):
+            self.assertIn("Run a bounded pilot", output)
+            for forbidden in (
+                "Constraint adherence warning",
+                "Telemetry privacy note",
+                "policy_audit_log",
+                "raw_provider_payload",
+                "raw_prompt",
+                "raw prompt",
+                "project_state",
+                "runtime/preflight metadata",
+                "Runtime metadata",
+                r"C:\Users",
+            ):
+                self.assertNotIn(forbidden, output)
+
+    def test_operator_dossier_preserves_operator_diagnostics_after_unsafe_redaction(self):
+        state = make_constraint_violation_export_state("operator-boundary-diagnostics")
+        state.report = "# Executive Summary\nRecommend dashboard telemetry, product analytics, session replay, and regeneration-event logging."
+        _attach_report_generation_metadata(state, code_version="old123")
+
+        with patch("report_freshness.current_code_version", return_value="new456"):
+            markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Constraint adherence warning", markdown)
+        self.assertIn("Detected operator constraints", markdown)
+        self.assertIn("Telemetry privacy note", markdown)
+        self.assertIn("Policy event count", markdown)
+        self.assertIn("policy_gate_blocked=1", markdown)
+        self.assertIn("Freshness metadata", markdown)
+        self.assertIn("Generated code version", markdown)
+        for forbidden in (
+            "sk-test-secret",
+            "provider-token",
+            "hidden prompt",
+            "hidden reasoning",
+            r"C:\Users\nicoc",
+        ):
+            self.assertNotIn(forbidden, markdown)
+
+    def test_restricted_clarifications_are_hidden_from_client_but_open_questions_remain(self):
+        state = make_export_state("restricted-clarifications")
+        visible = ClarificationQuestion(
+            question_id="visible-client-question",
+            text="Who owns the client-visible pilot decision?",
+            why_it_matters="Ownership controls follow-through.",
+            priority=ClarificationPriority.HIGH,
+            affected_phase="strategy",
+            source_gap="owner",
+            status=ClarificationStatus.OPEN,
+        )
+        restricted_questions = [
+            ClarificationQuestion(
+                question_id="restricted-visibility-question",
+                text="Restricted acquisition term sheet detail",
+                why_it_matters="Contains restricted commercial terms.",
+                priority=ClarificationPriority.CRITICAL,
+                affected_phase="strategy",
+                source_gap="restricted_terms",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"visibility": "restricted"}}),
+            ClarificationQuestion(
+                question_id="operator-audience-question",
+                text="Operator-only pricing override",
+                why_it_matters="Only the operator should review this.",
+                priority=ClarificationPriority.HIGH,
+                affected_phase="audit",
+                source_gap="operator_override",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"audience": "operator"}}),
+            ClarificationQuestion(
+                question_id="internal-classification-question",
+                text="Internal margin sensitivity",
+                why_it_matters="Internal financial sensitivity.",
+                priority=ClarificationPriority.HIGH,
+                affected_phase="classify",
+                source_gap="internal_margin",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"classification": "internal"}}),
+            ClarificationQuestion(
+                question_id="sensitive-question",
+                text="Sensitive customer escalation",
+                why_it_matters="Sensitive customer context.",
+                priority=ClarificationPriority.MEDIUM,
+                affected_phase="monitor",
+                source_gap="sensitive_customer",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"sensitivity": "sensitive"}}),
+            ClarificationQuestion(
+                question_id="client-hidden-question",
+                text="Client hidden legal memo note",
+                why_it_matters="Explicitly hidden from client output.",
+                priority=ClarificationPriority.MEDIUM,
+                affected_phase="audit",
+                source_gap="legal_memo",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"client_visible": False}}),
+        ]
+        state.clarification_cycles = [
+            ClarificationCycle(
+                cycle_id="visibility-cycle",
+                project_id=state.project_id,
+                questions=[visible, *restricted_questions],
+            )
+        ]
+
+        client_markdown = build_client_dossier_markdown(state)
+        client_report = _safe_report_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Who owns the client-visible pilot decision?", client_markdown)
+        self.assertIn("Who owns the client-visible pilot decision?", operator_markdown)
+        for question in restricted_questions:
+            self.assertNotIn(question.text, client_markdown)
+            self.assertNotIn(question.text, client_report)
+            self.assertIn(question.text, operator_markdown)
+
     def test_all_profiles_export_valid_formats(self):
         state = make_export_state("all-profiles")
         expected = {
@@ -907,7 +1055,7 @@ Decision Gates remain the threshold source of truth.
         state.report = r"""# Decision Gates
 | Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source | Notes |
 |---|---|---|---|---|---|---|---|---|
-| =Activation | +good | @warning | -stop if BF 12 or RPN 90 worsens | @Owner | Weekly | =HYPERLINK("http://bad") | upload:file-1:metrics.csv#row=2 | ev-market knowledge_alpha storage_ref=C:\Users\nicoc\secret.xlsx operator trace |
+| =Activation | +good | @warning | -stop if BF 12 or RPN 90 worsens | @Owner | Weekly | =HYPERLINK("http://bad") | upload:file-1:metrics.csv#row=2 | ev-market knowledge_alpha storage_ref=C:\Users\nicoc\secret.xlsx operator trace policy_audit_log raw_provider_payload raw prompt raw_prompt project_state.json machine_archive runtime/preflight metadata upload_store=/Users/nicoc/uploads |
 """
         state.monitor = MonitorOutput(
             ooda_schedule=MonitorOODASchedule(
@@ -933,11 +1081,39 @@ Decision Gates remain the threshold source of truth.
             "storage_ref",
             "source_ref",
             r"C:\Users\nicoc",
+            "/Users/nicoc",
             "BF 12",
             "RPN 90",
             "operator trace",
+            "policy_audit_log",
+            "raw_provider_payload",
+            "raw prompt",
+            "raw_prompt",
+            "project_state.json",
+            "machine_archive",
+            "runtime/preflight metadata",
+            "upload_store",
         ):
             self.assertNotIn(forbidden, combined)
+
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        operator_rows = _xlsx_rows(operator_payload)
+        operator_combined = "\n".join("\t".join(row) for row in operator_rows)
+
+        self.assertEqual(operator_rows[0], tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
+        for header in OPERATOR_TRACE_HEADERS:
+            self.assertIn(header, operator_rows[0])
+        for retained in (
+            "policy_audit_log",
+            "raw_provider_payload",
+            "raw prompt",
+            "project_state.json",
+            "machine_archive",
+            "runtime/preflight metadata",
+        ):
+            self.assertIn(retained, operator_combined)
+        self.assertNotIn(r"C:\Users\nicoc", operator_combined)
+        self.assertNotIn("/Users/nicoc", operator_combined)
 
     def test_monitoring_template_operator_retains_allowed_trace_after_redaction(self):
         state = make_export_state("operator-monitor-trace")
@@ -2741,6 +2917,28 @@ Stop if >2 critical assumptions remain unknown.
 
         self.assertIn("project_state.json", payload)
         self.assertNotIn("raw_project_state.json", payload)
+
+    def test_machine_archive_payload_shape_is_unchanged(self):
+        payload = build_machine_archive_payload(make_export_state("archive-shape"))
+        expected_files = {
+            "calibration_predictions.json",
+            "clarifications.json",
+            "decision_objects.json",
+            "evidence_locator_register.json",
+            "export_manifest.json",
+            "phase_outputs.json",
+            "policy_summary.json",
+            "project_state.json",
+            "report.md",
+            "risk_summary.json",
+            "uploaded_file_manifest.json",
+        }
+
+        self.assertEqual(set(payload), expected_files)
+        self.assertEqual(
+            payload["export_manifest.json"]["included_files"],
+            ["export_manifest.json", *sorted(expected_files - {"export_manifest.json"})],
+        )
 
 
 class TestProfileExportApi(unittest.IsolatedAsyncioTestCase):
