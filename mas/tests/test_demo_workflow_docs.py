@@ -8,6 +8,8 @@ MAS_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = MAS_ROOT.parent
 DOCS_ROOT = REPO_ROOT / "docs"
 
+PACKAGED_OFFERS_INDEX = DOCS_ROOT / "v5-PACKAGED-OFFERS.md"
+
 
 REQUIRED_DOCS = [
     DOCS_ROOT / "v5-DEMO-WORKFLOW.md",
@@ -96,6 +98,11 @@ def test_demo_docs_exist_in_repo_root_docs():
     for path in REQUIRED_DOCS:
         assert path.exists(), path
         assert MAS_ROOT / "docs" not in path.parents
+
+
+def test_packaged_offers_index_exists_in_repo_root_docs():
+    assert PACKAGED_OFFERS_INDEX.exists()
+    assert MAS_ROOT / "docs" not in PACKAGED_OFFERS_INDEX.parents
 
 
 def test_strategic_decision_audit_package_docs_exist_in_repo_root_docs():
@@ -816,6 +823,114 @@ def test_real_estate_decision_audit_docs_do_not_overclaim_or_change_scope():
         assert prohibited not in combined
 
 
+def test_packaged_offers_index_lists_all_package_assets_and_guidance():
+    text = _read(PACKAGED_OFFERS_INDEX)
+    lower = _normalized_lower(text)
+
+    for package_name in (
+        "Strategic Decision Audit",
+        "Automation ROI Audit",
+        "AI Readiness Audit",
+        "Real Estate Decision Audit",
+    ):
+        assert package_name in text
+
+    for link in (
+        "v5-STRATEGIC-DECISION-AUDIT.md",
+        "templates/strategic-decision-audit-intake.md",
+        "examples/strategic-decision-audit-brief.md",
+        "v5-STRATEGIC-DECISION-DEMO-SCRIPT.md",
+        "v5-AUTOMATION-ROI-AUDIT.md",
+        "templates/automation-roi-audit-intake.md",
+        "examples/automation-roi-audit-brief.md",
+        "v5-AUTOMATION-ROI-DEMO-SCRIPT.md",
+        "v5-AI-READINESS-AUDIT.md",
+        "templates/ai-readiness-audit-intake.md",
+        "examples/ai-readiness-audit-brief.md",
+        "v5-AI-READINESS-DEMO-SCRIPT.md",
+        "v5-REAL-ESTATE-DECISION-AUDIT.md",
+        "templates/real-estate-decision-audit-intake.md",
+        "examples/real-estate-decision-audit-brief.md",
+        "v5-REAL-ESTATE-DECISION-DEMO-SCRIPT.md",
+    ):
+        assert link in text
+
+    for required in (
+        "| Package | Best for | Start with | Framing | Boundaries |",
+        "## When To Use Each Package",
+        "## When Not To Use Each Package",
+        "## Package Links",
+        "general high-stakes decision audit",
+        "automation prioritization and ROI assumption review",
+        "directional readiness assessment, not certification",
+        "real-estate decision framing",
+        "packaged workflows over the existing decision engine",
+        "not separate backend products",
+    ):
+        assert required.lower() in lower
+
+
+def test_packaged_offers_index_covers_exports_and_boundaries_without_overclaiming():
+    text = _read(PACKAGED_OFFERS_INDEX)
+    lower = _normalized_lower(text)
+
+    for required in (
+        "export/profile reminder",
+        "v5-output-boundaries.md",
+        "client-safe after review",
+        "client-safe means after review",
+        "local operator workflow",
+        "human review required",
+        "not public saas",
+        "not autonomous decision-making",
+        "not guaranteed recommendations",
+        "not new reasoning modes",
+        "not first-class backend runtime templates",
+        "not legal advice",
+        "not financial advice",
+        "not tax advice",
+        "not investment advice",
+        "not security certification",
+        "not compliance certification",
+        "report",
+        "client_dossier",
+        "client_monitoring_template",
+        "operator_dossier",
+        "operator_monitoring_template",
+        "machine_archive",
+    ):
+        assert required in lower
+
+    for phrase, prefix in (
+        ("public saas", "not "),
+        ("autonomous decision-making", "not "),
+        ("guaranteed recommendation", "not "),
+        ("new reasoning mode", "not "),
+        ("first-class backend runtime template", "not "),
+        ("legal advice", "not "),
+        ("financial advice", "not "),
+        ("tax advice", "not "),
+        ("investment advice", "not "),
+        ("security certification", "not "),
+        ("compliance certification", "not "),
+    ):
+        assert f"{prefix}{phrase}" in lower
+        start = 0
+        while True:
+            index = lower.find(phrase, start)
+            if index == -1:
+                break
+            assert lower[index - len(prefix) : index] == prefix
+            start = index + len(phrase)
+
+    for prohibited in (
+        "public saas ready",
+        "autonomous decision-making engine",
+        "safe to share before review",
+    ):
+        assert prohibited not in lower
+
+
 def test_demo_docs_use_runtime_foundation_and_non_overclaim_language():
     combined = _normalized_lower("\n".join(_read(path) for path in REQUIRED_DOCS))
 
@@ -859,6 +974,12 @@ def test_start_here_has_exactly_one_short_demo_workflow_pointer():
     text = _read(REPO_ROOT / "START_HERE.md")
     assert text.count("docs/v5-DEMO-WORKFLOW.md") == 2
     assert text.count("For a v5 runtime foundation demo workflow") == 1
+
+
+def test_start_here_has_exactly_one_packaged_offers_index_pointer():
+    text = _read(REPO_ROOT / "START_HERE.md")
+    assert text.count("docs/v5-PACKAGED-OFFERS.md") == 2
+    assert text.count("To compare packaged offers and pick the right intake") == 1
 
 
 def test_start_here_has_exactly_one_strategic_decision_audit_pointer():

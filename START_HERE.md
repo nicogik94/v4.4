@@ -9,6 +9,8 @@ Everything else in this bundle is reference material. You don't have to read it 
 
 For a v5 runtime foundation demo workflow, see [`docs/v5-DEMO-WORKFLOW.md`](docs/v5-DEMO-WORKFLOW.md).
 
+To compare packaged offers and pick the right intake, example brief, and demo script, see [`docs/v5-PACKAGED-OFFERS.md`](docs/v5-PACKAGED-OFFERS.md).
+
 For the first packaged offer, see [`docs/v5-STRATEGIC-DECISION-AUDIT.md`](docs/v5-STRATEGIC-DECISION-AUDIT.md).
 
 For the Automation ROI Audit packaged offer, see [`docs/v5-AUTOMATION-ROI-AUDIT.md`](docs/v5-AUTOMATION-ROI-AUDIT.md).
