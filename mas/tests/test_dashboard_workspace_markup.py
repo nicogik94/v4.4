@@ -148,7 +148,12 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         for fmt in ("pdf", "docx", "zip", "xlsx"):
             self.assertIn(fmt, html)
         self.assertIn("/export?profile=", html)
-        self.assertIn("/export/${fmt}", html)
+        self.assertIn("reportProfileExportUrl", html)
+        self.assertIn("profileExportUrl(pid, 'report', fmt)", html)
+        self.assertIn("legacyExportUrl", html)
+        self.assertIn("/export/${encodeURIComponent(fmt)}", html)
+        self.assertIn("/projects/{id}/export?profile=report&format=docx", html)
+        self.assertIn("/projects/{id}/export?profile=report&format=pdf", html)
         self.assertIn("Download DOCX", html)
         self.assertIn("Download PDF", html)
 

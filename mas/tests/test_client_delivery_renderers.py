@@ -153,10 +153,16 @@ def test_renderers_do_not_expose_operator_archive_keys_or_paths(tmp_path):
             }
         ],
     }
-    state["execution_plan"][0]["evidence"] = [operator_diagnostic_payload]
+    state["execution_plan"][0]["evidence"] = [
+        operator_diagnostic_payload,
+        "policy_audit_log raw_provider_payload raw prompt raw_prompt project_state.json machine_archive runtime/preflight metadata",
+        r"/Users/nicoc/private/project_state.json",
+    ]
+    state["execution_plan"][0]["success_criteria"] = "=raw prompt from machine_archive"
     state["critical_assumptions"][0]["evidence"] = [operator_diagnostic_payload]
     state["review"]["reentry_triggers"].append(operator_diagnostic_payload)
     package = build_delivery_package(state)
+    package.execution_plan[0].success_criteria = "=raw prompt from machine_archive"
 
     docx_path = render_board_memo_docx(package, tmp_path / "memo.docx")
     xlsx_path = render_execution_tracker_xlsx(package, tmp_path / "tracker.xlsx")
@@ -168,16 +174,23 @@ def test_renderers_do_not_expose_operator_archive_keys_or_paths(tmp_path):
         "policy_audit_log",
         "raw_provider_payload",
         "raw_prompt",
+        "raw prompt",
         "project_state.json",
+        "machine_archive",
+        "runtime/preflight metadata",
         "runtime_preflight_metadata",
         "provider-secret",
         "sk-client-secret",
         r"C:\Users",
+        "/Users/nicoc",
         "upload_store",
     ):
         assert forbidden not in combined
     assert "credential=[redacted]" in combined
     assert "redacted local path" in combined
+
+    values = [str(value) for value in _xlsx_values(xlsx_path)]
+    assert any(value.startswith("'=prompt redacted") for value in values)
 
 
 def test_xlsx_preserves_numeric_kpi_threshold_cells(tmp_path):

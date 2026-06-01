@@ -13,6 +13,8 @@ For local launch checks, Docker Desktop / WSL recovery, and smoke export scannin
 
 For using deterministic follow-up questions operationally, see [`docs/v5-ICE-OPERATOR-GUIDE.md`](docs/v5-ICE-OPERATOR-GUIDE.md).
 
+Before sharing any export outside the operator team, review [`docs/v5-OUTPUT-BOUNDARIES.md`](docs/v5-OUTPUT-BOUNDARIES.md) for client-safe profiles, operator-only profiles, and machine archive boundaries.
+
 ---
 
 ## The 30-second tour

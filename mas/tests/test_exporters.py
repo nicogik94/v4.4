@@ -50,6 +50,7 @@ from exporters import (  # noqa: E402
 from monitoring_templates import (  # noqa: E402
     CLIENT_MONITORING_TEMPLATE_HEADERS,
     OPERATOR_MONITORING_TEMPLATE_HEADERS,
+    OPERATOR_TRACE_HEADERS,
     SHEET_NAME,
     monitoring_template_cell_rows,
 )
@@ -1054,7 +1055,7 @@ Decision Gates remain the threshold source of truth.
         state.report = r"""# Decision Gates
 | Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source | Notes |
 |---|---|---|---|---|---|---|---|---|
-| =Activation | +good | @warning | -stop if BF 12 or RPN 90 worsens | @Owner | Weekly | =HYPERLINK("http://bad") | upload:file-1:metrics.csv#row=2 | ev-market knowledge_alpha storage_ref=C:\Users\nicoc\secret.xlsx operator trace |
+| =Activation | +good | @warning | -stop if BF 12 or RPN 90 worsens | @Owner | Weekly | =HYPERLINK("http://bad") | upload:file-1:metrics.csv#row=2 | ev-market knowledge_alpha storage_ref=C:\Users\nicoc\secret.xlsx operator trace policy_audit_log raw_provider_payload raw prompt raw_prompt project_state.json machine_archive runtime/preflight metadata upload_store=/Users/nicoc/uploads |
 """
         state.monitor = MonitorOutput(
             ooda_schedule=MonitorOODASchedule(
@@ -1080,11 +1081,39 @@ Decision Gates remain the threshold source of truth.
             "storage_ref",
             "source_ref",
             r"C:\Users\nicoc",
+            "/Users/nicoc",
             "BF 12",
             "RPN 90",
             "operator trace",
+            "policy_audit_log",
+            "raw_provider_payload",
+            "raw prompt",
+            "raw_prompt",
+            "project_state.json",
+            "machine_archive",
+            "runtime/preflight metadata",
+            "upload_store",
         ):
             self.assertNotIn(forbidden, combined)
+
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        operator_rows = _xlsx_rows(operator_payload)
+        operator_combined = "\n".join("\t".join(row) for row in operator_rows)
+
+        self.assertEqual(operator_rows[0], tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
+        for header in OPERATOR_TRACE_HEADERS:
+            self.assertIn(header, operator_rows[0])
+        for retained in (
+            "policy_audit_log",
+            "raw_provider_payload",
+            "raw prompt",
+            "project_state.json",
+            "machine_archive",
+            "runtime/preflight metadata",
+        ):
+            self.assertIn(retained, operator_combined)
+        self.assertNotIn(r"C:\Users\nicoc", operator_combined)
+        self.assertNotIn("/Users/nicoc", operator_combined)
 
     def test_monitoring_template_operator_retains_allowed_trace_after_redaction(self):
         state = make_export_state("operator-monitor-trace")

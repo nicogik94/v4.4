@@ -2,7 +2,7 @@
 
 ICE in this repo means the deterministic clarification workflow: the operator can generate missing-information questions, answer them, mark answers unavailable, and review the saved clarification state before relying on downstream outputs.
 
-This is operator review support. It is not a chatbot, not a new reasoning phase, not access control, not output-level secrecy, and not workflow routing.
+This is operator review support. It is not a chatbot, not a new reasoning phase, not access control, not auth/permissions, and not workflow routing. Client and operator artifacts are separated by deterministic export-boundary filtering; see [`v5-OUTPUT-BOUNDARIES.md`](v5-OUTPUT-BOUNDARIES.md).
 
 ## When To Use It
 
@@ -42,7 +42,7 @@ The dashboard and API expose a derived summary:
 - `latest cycle status` distinguishes no cycle, no questions, required open, optional open, resolved, and superseded states.
 - `next action` is deterministic guidance for the operator.
 
-If `required open` is nonzero, treat the report as internal review material until those questions are answered or explicitly marked unavailable and the affected output has been reviewed.
+If `required open` is nonzero, treat the report as internal review material until those questions are answered or explicitly marked unavailable and the affected output has been reviewed. Restricted/operator/internal/sensitive clarification content is filtered from client-facing exports when marked by metadata, but that filtering is an export boundary, not an access-control system.
 
 ## Review And Refresh
 
@@ -57,17 +57,26 @@ Typical next actions:
 
 These labels are guidance only. They do not change workflow status.
 
+## Output Boundary Reference
+
+Use [`docs/v5-OUTPUT-BOUNDARIES.md`](v5-OUTPUT-BOUNDARIES.md) before sharing artifacts externally. In short:
+
+- Client-safe profiles are `report`, `client_dossier`, and `client_monitoring_template`, after human review.
+- Operator-only profiles are `operator_dossier` and `operator_monitoring_template`.
+- `machine_archive` is internal and machine-readable, not a client deliverable.
+- The filtering is deterministic cleanup at export time. It is not authentication, permissions, tenancy, encryption, or a public deployment control.
+
 ## Boundaries
 
 ICE deliberately stays narrow in this wave:
 
 - no chatbot UI
-- no output-level secrecy or compartmentalization
+- no auth or permission model
 - no new auth, tenancy, or public deployment control
 - no new LLM prompt or phase
 - no report wording rewrite
 - no machine archive schema change
-- no monitoring template change
+- no monitoring template shape change beyond client-side cleanup of explicit internal/runtime/operator-only metadata
 - no automatic workflow routing
 
 Human review remains required before sharing client-facing outputs.
