@@ -23,6 +23,13 @@ STRATEGIC_DECISION_AUDIT_DOCS = [
     DOCS_ROOT / "v5-STRATEGIC-DECISION-DEMO-SCRIPT.md",
 ]
 
+AUTOMATION_ROI_AUDIT_DOCS = [
+    DOCS_ROOT / "v5-AUTOMATION-ROI-AUDIT.md",
+    DOCS_ROOT / "templates" / "automation-roi-audit-intake.md",
+    DOCS_ROOT / "examples" / "automation-roi-audit-brief.md",
+    DOCS_ROOT / "v5-AUTOMATION-ROI-DEMO-SCRIPT.md",
+]
+
 BRIEF_HEADINGS = [
     "# ",
     "## Decision Question",
@@ -40,6 +47,10 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _normalized_lower(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
 def test_demo_docs_exist_in_repo_root_docs():
     for path in REQUIRED_DOCS:
         assert path.exists(), path
@@ -52,9 +63,15 @@ def test_strategic_decision_audit_package_docs_exist_in_repo_root_docs():
         assert MAS_ROOT / "docs" not in path.parents
 
 
+def test_automation_roi_audit_package_docs_exist_in_repo_root_docs():
+    for path in AUTOMATION_ROI_AUDIT_DOCS:
+        assert path.exists(), path
+        assert MAS_ROOT / "docs" not in path.parents
+
+
 def test_strategic_decision_audit_entrypoint_has_required_offer_sections():
     text = _read(DOCS_ROOT / "v5-STRATEGIC-DECISION-AUDIT.md")
-    lower = " ".join(text.lower().split())
+    lower = _normalized_lower(text)
 
     for heading in (
         "# Strategic Decision Audit Packaged Offer",
@@ -88,10 +105,50 @@ def test_strategic_decision_audit_entrypoint_has_required_offer_sections():
         assert required in lower
 
 
+def test_automation_roi_audit_entrypoint_has_required_offer_sections():
+    text = _read(DOCS_ROOT / "v5-AUTOMATION-ROI-AUDIT.md")
+    lower = _normalized_lower(text)
+
+    for heading in (
+        "# Automation ROI Audit Packaged Offer",
+        "## What This Offer Is",
+        "## What This Offer Is Not",
+        "## Intake Template",
+        "## Example Brief",
+        "## Recommended Upload Files",
+        "## Operator Runbook",
+        "## Sample Project Framing",
+        "## Expected Export Checklist",
+        "## Client-Safe Positioning Language",
+        "## Boundaries And Disclaimers",
+    ):
+        assert heading in text
+
+    for required in (
+        "docs/templates/tests-only",
+        "local operator workflow",
+        "human review is required",
+        "roi assumptions are estimates, not guarantees",
+        "not legal advice",
+        "not financial advice",
+        "not public saas",
+        "not a guaranteed automation recommendation engine",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+        "automation roi example framing",
+        "automation_roi",
+        "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+    ):
+        assert required in lower
+
+
 def test_strategic_decision_audit_template_and_example_are_complete():
     template = _read(DOCS_ROOT / "templates" / "strategic-decision-audit-intake.md")
     example = _read(DOCS_ROOT / "examples" / "strategic-decision-audit-brief.md")
-    combined = " ".join((template + "\n" + example).lower().split())
+    combined = _normalized_lower(template + "\n" + example)
 
     for heading in (
         "## Decision Question",
@@ -121,9 +178,61 @@ def test_strategic_decision_audit_template_and_example_are_complete():
     assert "not a new reasoning mode" in combined
 
 
+def test_automation_roi_audit_template_and_example_are_complete():
+    template = _read(DOCS_ROOT / "templates" / "automation-roi-audit-intake.md")
+    example = _read(DOCS_ROOT / "examples" / "automation-roi-audit-brief.md")
+    combined = _normalized_lower(template + "\n" + example)
+
+    for heading in (
+        "## Automation Question",
+        "## Candidate Workflows",
+        "## Current Workflow Baseline",
+        "## Volume And Time Assumptions",
+        "## Cost And ROI Assumptions",
+        "## Implementation Constraints",
+        "## Known Evidence",
+        "## Unknowns",
+        "## Success Criteria",
+        "## Risk Classification",
+        "## Recommended Upload Files",
+        "## Expected Output Types",
+        "## Human Review Notes",
+    ):
+        assert heading in template
+
+    for heading in (
+        "# Automation ROI Audit Example Brief",
+        "## Automation Question",
+        "## Candidate Workflows",
+        "## Current Workflow Baseline",
+        "## Volume And Time Assumptions",
+        "## Cost And ROI Assumptions",
+        "## Implementation Constraints",
+        "## Known Evidence",
+        "## Unknowns",
+        "## What A Good Recommendation Should Resolve",
+        "## Suggested Files / Evidence To Upload If Available",
+        "## Expected Output Types",
+        "## Human Review Reminder",
+    ):
+        assert heading in example
+
+    assert "paste-ready example brief" in combined
+    assert "not a first-class vertical template" in combined
+    assert "not a first-class backend runtime template" in combined
+    assert "runtime pack" in combined
+    assert "human review is required" in combined
+    assert "roi assumptions are estimates, not guarantees" in combined
+    assert "not legal advice" in combined
+    assert "not financial advice" in combined
+    assert "not public saas" in combined
+    assert "not a guaranteed automation recommendation engine" in combined
+    assert "not a new reasoning mode" in combined
+
+
 def test_strategic_decision_audit_demo_script_uses_existing_local_flow():
     text = _read(DOCS_ROOT / "v5-STRATEGIC-DECISION-DEMO-SCRIPT.md")
-    lower = " ".join(text.lower().split())
+    lower = _normalized_lower(text)
 
     for required in (
         "docker compose port app 8000",
@@ -144,8 +253,33 @@ def test_strategic_decision_audit_demo_script_uses_existing_local_flow():
         assert required in lower
 
 
+def test_automation_roi_audit_demo_script_uses_existing_local_flow():
+    text = _read(DOCS_ROOT / "v5-AUTOMATION-ROI-DEMO-SCRIPT.md")
+    lower = _normalized_lower(text)
+
+    for required in (
+        "docker compose port app 8000",
+        "scripts\\demo_smoke_check.py",
+        "dashboards/index.html",
+        "automation roi example framing",
+        "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+        "human review required",
+        "roi assumptions are estimates, not guarantees",
+        "not legal advice",
+        "not financial advice",
+        "not public saas",
+        "not a guaranteed automation recommendation engine",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+    ):
+        assert required in lower
+
+
 def test_strategic_decision_audit_docs_do_not_overclaim_or_change_scope():
-    combined = " ".join("\n".join(_read(path) for path in STRATEGIC_DECISION_AUDIT_DOCS).lower().split())
+    combined = _normalized_lower("\n".join(_read(path) for path in STRATEGIC_DECISION_AUDIT_DOCS))
 
     for required_boundary in (
         "no auth",
@@ -171,8 +305,46 @@ def test_strategic_decision_audit_docs_do_not_overclaim_or_change_scope():
         assert prohibited not in combined
 
 
+def test_automation_roi_audit_docs_do_not_overclaim_or_change_scope():
+    combined = _normalized_lower("\n".join(_read(path) for path in AUTOMATION_ROI_AUDIT_DOCS))
+
+    for required_boundary in (
+        "docs/templates/tests-only",
+        "local operator workflow",
+        "human review is required",
+        "roi assumptions are estimates, not guarantees",
+        "not legal advice",
+        "not financial advice",
+        "not public saas",
+        "not a guaranteed automation recommendation engine",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+        "no auth",
+        "no auth, tenancy, public deployment hardening",
+        "provider routing changes",
+        "queue/runtime changes",
+        "export schema changes",
+        "automation-specific backend execution",
+    ):
+        assert required_boundary in combined
+
+    for prohibited in (
+        "guaranteed roi",
+        "guarantees roi",
+        "guarantees savings",
+        "public saas ready",
+        "autonomous implementation engine",
+        "finance-approved by the engine",
+        "legally approved by the engine",
+        "new automation runtime",
+        "first-class automation runtime",
+        "safe to share before review",
+    ):
+        assert prohibited not in combined
+
+
 def test_demo_docs_use_runtime_foundation_and_non_overclaim_language():
-    combined = " ".join("\n".join(_read(path) for path in REQUIRED_DOCS).lower().split())
+    combined = _normalized_lower("\n".join(_read(path) for path in REQUIRED_DOCS))
 
     assert "v5 runtime foundation demo workflow" in combined
     assert "not a fully released v5 product" in combined
@@ -222,8 +394,14 @@ def test_start_here_has_exactly_one_strategic_decision_audit_pointer():
     assert text.count("For the first packaged offer") == 1
 
 
+def test_start_here_has_exactly_one_automation_roi_audit_pointer():
+    text = _read(REPO_ROOT / "START_HERE.md")
+    assert text.count("docs/v5-AUTOMATION-ROI-AUDIT.md") == 2
+    assert text.count("For the Automation ROI Audit packaged offer") == 1
+
+
 def test_ingestion_contract_doc_covers_contract_and_caveats():
-    text = " ".join(_read(DOCS_ROOT / "v5-INGESTION-CONTRACT.md").lower().split())
+    text = _normalized_lower(_read(DOCS_ROOT / "v5-INGESTION-CONTRACT.md"))
 
     assert "case.v1" in text
     assert "legacy compatibility" in text
