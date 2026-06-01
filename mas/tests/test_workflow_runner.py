@@ -2296,6 +2296,36 @@ class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
             ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"),
         )
 
+    async def test_ingestion_metadata_does_not_change_run_start_or_phase_sequence(self):
+        state = ProjectState(
+            project_id="ingestion-run-start",
+            project_name="Ingestion run start",
+            brief="Run with versioned ingestion metadata.",
+            data="Supporting signal.",
+            ingestion_contract_version="case.v1",
+            ingestion_source="crm",
+            ingestion_external_case_id="case-456",
+            ingestion_metadata={"segment": "enterprise"},
+        )
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            response = await api.run_full_workflow(state.project_id, BackgroundTasks())
+
+        active = await workflow_run_state.get_active_project_run(state.project_id)
+        record = await workflow_run_state.get_workflow_run(response["run_id"])
+        self.assertEqual(
+            WORKFLOW_PHASE_SEQUENCE,
+            ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"),
+        )
+        self.assertEqual(response["status"], "started")
+        self.assertEqual(response["project_id"], state.project_id)
+        self.assertIn("run_id", response)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.run_id, response["run_id"])
+        self.assertEqual(record.status, "queued")
+        self.assertEqual(record.current_phase, "")
+        self.assertIn(state.project_id, api.running)
+
     async def test_run_rejects_when_workflow_is_process_local_running(self):
         state = make_completed_state("running-project-run")
         api.running.add(state.project_id)

@@ -2940,6 +2940,40 @@ Stop if >2 critical assumptions remain unknown.
             ["export_manifest.json", *sorted(expected_files - {"export_manifest.json"})],
         )
 
+    def test_machine_archive_contract_is_unchanged_with_ingestion_metadata(self):
+        state = make_export_state("archive-ingestion-metadata")
+        state.ingestion_contract_version = "case.v1"
+        state.ingestion_source = "crm"
+        state.ingestion_external_case_id = "case-export"
+        state.ingestion_metadata = {"segment": "enterprise", "priority": "high"}
+        expected_files = {
+            "calibration_predictions.json",
+            "clarifications.json",
+            "decision_objects.json",
+            "evidence_locator_register.json",
+            "export_manifest.json",
+            "phase_outputs.json",
+            "policy_summary.json",
+            "project_state.json",
+            "report.md",
+            "risk_summary.json",
+            "uploaded_file_manifest.json",
+        }
+        expected_included_files = ["export_manifest.json", *sorted(expected_files - {"export_manifest.json"})]
+
+        payload = build_machine_archive_payload(state)
+        zip_payload, _, _ = export_project_profile_bytes(state, "machine_archive", "zip")
+
+        self.assertEqual(set(payload), expected_files)
+        self.assertEqual(payload["export_manifest.json"]["export_schema_version"], "1.0")
+        self.assertEqual(payload["export_manifest.json"]["included_files"], expected_included_files)
+        with zipfile.ZipFile(BytesIO(zip_payload)) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read("export_manifest.json").decode("utf-8"))
+        self.assertEqual(names, expected_files)
+        self.assertEqual(manifest["export_schema_version"], "1.0")
+        self.assertEqual(manifest["included_files"], expected_included_files)
+
 
 class TestProfileExportApi(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

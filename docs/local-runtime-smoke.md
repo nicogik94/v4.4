@@ -2,6 +2,8 @@
 
 This runbook is for local, single-operator use. It does not make the API public-safe and does not add authentication, tenancy, rate limits, or deployment hardening.
 
+For `POST /projects` payload shapes, `X-Request-ID` correlation, and run ID behavior, see `docs/v5-INGESTION-CONTRACT.md`.
+
 ## Standard Launch
 
 From PowerShell:

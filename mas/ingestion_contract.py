@@ -33,6 +33,8 @@ class NormalizedIngestionContract:
 
 def normalize_project_ingestion(payload: Mapping[str, Any]) -> NormalizedIngestionContract:
     """Normalize legacy and case.v1 project creation payloads."""
+    if not isinstance(payload, Mapping) and hasattr(payload, "model_dump"):
+        payload = payload.model_dump()
     if not isinstance(payload, Mapping):
         raise IngestionContractError("Project creation payload must be a JSON object.")
 

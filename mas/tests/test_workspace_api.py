@@ -40,6 +40,24 @@ class TestWorkspaceSummary(unittest.TestCase):
         self.assertEqual(workspace.decision_object_health.status, "fresh")
         self.assertGreater(workspace.active_risk_count, 0)
 
+    def test_workspace_exposes_additive_ingestion_provenance_labels(self):
+        state = make_state("workspace-provenance")
+        state.ingestion_contract_version = "case.v1"
+        state.ingestion_source = "crm"
+        state.ingestion_external_case_id = "case-123"
+        state.ingestion_metadata = {"segment": "midmarket", "priority": "high"}
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(workspace.input_contract.contract_version, "case.v1")
+        self.assertEqual(workspace.input_contract.source, "crm")
+        self.assertEqual(workspace.input_contract.external_case_id, "case-123")
+        self.assertEqual(workspace.input_contract.metadata_keys, ["priority", "segment"])
+        self.assertEqual(workspace.response_metadata.response_schema_version, "workspace.summary.v1")
+        self.assertEqual(workspace.response_metadata.generated_by, "mas.workspace")
+        self.assertEqual(workspace.response_metadata.provenance, "backend_computed")
+        self.assertEqual(workspace.response_metadata.input_contract_version, "case.v1")
+
     def test_stale_workspace_state_is_exposed(self):
         state = make_state("workspace-stale")
         ensure_decision_objects(state, trigger="pre-stale")
@@ -198,12 +216,22 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
 
     async def test_queue_endpoint_returns_backend_queue_rows(self):
         state = make_state("queue-api")
+        state.ingestion_contract_version = "case.v1"
+        state.ingestion_source = "api"
+        state.ingestion_external_case_id = "queue-case"
+        state.ingestion_metadata = {"team": "ops"}
         with patch("api.store.list_all", new=AsyncMock(return_value=[state])):
             rows = await api.get_project_queue()
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].project_id, state.project_id)
         self.assertIn(rows[0].project_status, {"safe_to_proceed", "stale", "blocked", "review_required", "completed"})
+        self.assertEqual(rows[0].input_contract.contract_version, "case.v1")
+        self.assertEqual(rows[0].input_contract.source, "api")
+        self.assertEqual(rows[0].input_contract.external_case_id, "queue-case")
+        self.assertEqual(rows[0].input_contract.metadata_keys, ["team"])
+        self.assertEqual(rows[0].response_metadata.response_schema_version, "workspace.queue_item.v1")
+        self.assertEqual(rows[0].response_metadata.input_contract_version, "case.v1")
 
     async def test_workspace_endpoint_returns_authoritative_summary(self):
         state = make_state("workspace-api")
@@ -300,6 +328,27 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.ingestion_source, "operator")
         self.assertEqual(state.ingestion_external_case_id, "")
         self.assertEqual(state.ingestion_metadata, {})
+
+    async def test_old_project_state_payload_loads_with_ingestion_defaults(self):
+        state = ProjectState.model_validate(
+            {
+                "project_id": "old-payload",
+                "project_name": "Old payload",
+                "brief": "Stored before ingestion metadata existed.",
+                "data": "Legacy supporting data.",
+            }
+        )
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(state.ingestion_contract_version, "legacy.v1")
+        self.assertEqual(state.ingestion_source, "operator")
+        self.assertEqual(state.ingestion_external_case_id, "")
+        self.assertEqual(state.ingestion_metadata, {})
+        self.assertEqual(workspace.input_contract.contract_version, "legacy.v1")
+        self.assertEqual(workspace.input_contract.source, "operator")
+        self.assertEqual(workspace.input_contract.external_case_id, "")
+        self.assertEqual(workspace.input_contract.metadata_keys, [])
 
 
 class TestRequestIdMiddleware(unittest.TestCase):
