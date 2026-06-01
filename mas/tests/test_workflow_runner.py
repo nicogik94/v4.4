@@ -538,6 +538,12 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("Explicit capacity, budget, no-major-project, spend-freeze", prompt)
         self.assertIn("Do not convert a constrained plan into multiple parallel critical tracks", prompt)
         self.assertIn("unless the operator explicitly allowed that capacity", prompt)
+        self.assertIn("priority must be exactly one of CRITICAL, HIGH, MEDIUM, LOW", prompt)
+        self.assertIn("For deferred/blocked/do-not-do items, use priority LOW", prompt)
+        self.assertIn(
+            "put \"DEFERRED\", \"BLOCKED\", \"DO NOT START\", or \"DO NOT DO\" in the action/title/justification",
+            prompt,
+        )
 
     def test_report_prompt_preserves_constrained_strategy_shape(self):
         state = ProjectState(
@@ -882,6 +888,8 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("Operator hard constraints", strategy_text)
         self.assertIn("one focused initiative plus one small experiment", strategy_text)
         self.assertIn("Do not convert a constrained plan into multiple parallel critical tracks", strategy_text)
+        self.assertIn("priority must be exactly one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`", strategy_text)
+        self.assertIn("For deferred/blocked/do-not-do items, use priority `LOW`", strategy_text)
         self.assertIn("Operator hard constraints", report_text)
         self.assertIn("Do not expand constrained recommendations into several parallel tracks", report_text)
         self.assertIn("Do not force a 5-7 item next-step list", report_text)
@@ -1028,6 +1036,63 @@ class TestWorkflowHelpers(unittest.TestCase):
         strategy = StrategyOutput(**normalize_strategy_payload(payload))
 
         self.assertEqual(strategy.reentry_check, "")
+
+    def test_strategy_priority_aliases_normalize_to_low_without_losing_semantics(self):
+        payload = make_strategy_payload()
+        payload["strategies"] = [
+            {
+                "priority": "DEFERRED",
+                "action": "Sales follow-up cadence repair (DEFERRED - data dependency)",
+                "justification": "DEFERRED until CRM coverage is measured.",
+                "evidence_chain": "H1 + audit",
+            },
+            {
+                "priority": "BLOCKED",
+                "action": "Analytics instrumentation repair (BLOCKED - owner approval)",
+                "justification": "BLOCKED until RevOps confirms the source of truth.",
+                "evidence_chain": "H1 + audit",
+            },
+            {
+                "priority": "DEFER",
+                "action": "Defer paid acquisition expansion",
+                "justification": "DEFER broad spend until CAC attribution is trusted.",
+                "evidence_chain": "H2 + audit",
+            },
+            {
+                "priority": "DO_NOT_START",
+                "action": "New lifecycle automation (DO NOT START - data dependency)",
+                "justification": "DO NOT START until contact health is repaired.",
+                "evidence_chain": "H3 + audit",
+            },
+            {
+                "priority": "DO_NOT_DO",
+                "action": "Broad growth spend (DO NOT DO this month)",
+                "justification": "DO NOT DO while the operator budget is limited to a small experiment.",
+                "evidence_chain": "H2 + audit",
+            },
+            {
+                "priority": "PARKED",
+                "action": "Parked data warehouse migration",
+                "justification": "PARKED because it would violate the no-major-engineering constraint.",
+                "evidence_chain": "H3 + audit",
+            },
+        ]
+
+        strategy = StrategyOutput(**payload)
+
+        self.assertEqual([item.priority for item in strategy.strategies], [Priority.LOW] * 6)
+        visible_text = "\n".join(
+            f"{item.action}\n{item.justification}" for item in strategy.strategies
+        )
+        for marker in ("DEFERRED", "BLOCKED", "DEFER", "DO NOT START", "DO NOT DO", "PARKED"):
+            self.assertIn(marker, visible_text)
+
+    def test_unknown_strategy_priority_still_fails_validation(self):
+        payload = make_strategy_payload()
+        payload["strategies"][0]["priority"] = "SOMEDAY"
+
+        with self.assertRaises(Exception):
+            StrategyOutput(**payload)
 
     def test_strategy_normalization_does_not_weaken_unrelated_validation(self):
         payload = make_strategy_payload({"target": "monitor"})
@@ -1318,6 +1383,52 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
             updated.strategy.reentry_check,
             '{"target":"monitor","triggers":["R8","R1"]}',
         )
+
+    async def test_strategy_phase_normalizes_deferred_priority_aliases_and_preserves_wording(self):
+        state = make_completed_state("strategy-phase-priority-aliases")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        state.strategy = None
+        state.strategy_raw = "previous raw strategy"
+        payload = make_strategy_payload("Re-evaluate at 30 days")
+        payload["strategies"] = [
+            {
+                "priority": "DEFERRED",
+                "action": "Sales Follow-Up Cadence Repair (DO NOT START - data dependency)",
+                "justification": "DEFERRED until CRM source coverage and owner approval are available.",
+                "evidence_chain": "H1 + audit",
+                "expected_impact": "Prevents premature execution.",
+                "effort": "Low",
+                "timeline": "after data readiness",
+                "risk_if_ignored": "Team starts work before the blocker is resolved.",
+                "framework_source": "PREMORTEM",
+            },
+            {
+                "priority": "BLOCKED",
+                "action": "Lifecycle automation expansion (BLOCKED - attribution gap)",
+                "justification": "BLOCKED until the operator resolves attribution and budget constraints.",
+                "evidence_chain": "H2 + audit",
+                "expected_impact": "Avoids broad spend before measurement is trusted.",
+                "effort": "Low",
+                "timeline": "after attribution repair",
+                "risk_if_ignored": "Budget is spent without a reliable signal.",
+                "framework_source": "EVOI",
+            },
+        ]
+        response = make_response(json.dumps(payload), 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.COMPLETED)
+        self.assertEqual(updated.phase_confidence["strategy"], 1.0)
+        self.assertIsNotNone(updated.strategy)
+        self.assertIsNone(updated.strategy_raw)
+        self.assertEqual([item.priority for item in updated.strategy.strategies], [Priority.LOW, Priority.LOW])
+        self.assertIn("DO NOT START", updated.strategy.strategies[0].action)
+        self.assertIn("DEFERRED", updated.strategy.strategies[0].justification)
+        self.assertIn("BLOCKED", updated.strategy.strategies[1].action)
+        self.assertIn("BLOCKED", updated.strategy.strategies[1].justification)
 
     async def test_malformed_strategy_stores_raw_and_fails_phase(self):
         state = make_completed_state("strategy-phase-malformed")

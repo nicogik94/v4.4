@@ -189,6 +189,21 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertIn("growth spend", warnings[0])
         self.assertIn("spend constraint", warnings[0])
 
+    def test_constraint_warning_for_affirmative_paid_campaign_or_scale_recommendation(self):
+        for generated_text in (
+            "Recommended path: Launch new paid campaigns this month.",
+            "Recommended path: Scale paid acquisition before diagnosis.",
+            "Recommended path: Expand broad growth spend.",
+        ):
+            with self.subTest(generated_text=generated_text):
+                state = _constrained_strategy_state("constraint-paid-campaign-scale", generated_text)
+
+                warnings = constraint_adherence_warnings(state)
+
+                self.assertTrue(warnings)
+                self.assertIn("growth spend", warnings[0])
+                self.assertIn("spend constraint", warnings[0])
+
     def test_constraint_warning_absent_for_compliant_constrained_plan(self):
         state = _constrained_strategy_state(
             "constraint-compliant",
@@ -209,6 +224,68 @@ class TestReportQualityHelpers(unittest.TestCase):
             ),
         )
 
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_paused_deferred_blocked_do_not_do_items(self):
+        state = _constrained_strategy_state(
+            "constraint-paused-do-not-do",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding experiment.\n"
+                "What not to do this month: no major engineering work; no broad growth spend; "
+                "do not increase paid acquisition spend; do not launch a full onboarding redesign.\n"
+                "All growth spend and major engineering are paused until the cause is clearer.\n"
+                "Deferred / blocked / do not do: broad paid acquisition spend remains out of scope."
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_smoke_style_paid_spend_safe_contexts(self):
+        state = _constrained_strategy_state(
+            "constraint-smoke-paid-spend-safe",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding experiment.\n"
+                "All growth spend and major engineering are paused pending measurement clarity.\n"
+                "What not to do this month: Increase paid acquisition spend.\n"
+                "Do not increase paid acquisition spend.\n"
+                "Freeze paid acquisition budgets at current levels for 30 days; do not launch new paid campaigns.\n"
+                "If rate drops below 10%, consider pausing all paid acquisition spend.\n"
+                "Paid acquisition mix continues shifting during the sprint, worsening the cohort being measured.\n"
+                "Risk if paid spend increases: the measured cohort becomes harder to interpret.\n"
+                "If paid spend increased and H1 is confirmed, continue diagnosis before any scale-up."
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_persisted_paid_spend_table_safe_contexts(self):
+        state = _constrained_strategy_state(
+            "constraint-persisted-paid-spend-safe",
+            (
+                "Recommended path: run one focused initiative and one small experiment.\n"
+                "Increase paid acquisition spend | More trials in pipeline | Compounds lead-quality problem "
+                "if paid mix is already degrading conversion; wastes budget | Only if organic channels are "
+                "saturated and lead quality from paid is confirmed healthy | **Do not do this month** |\n"
+                "| Acting on wrong hypothesis before root cause is confirmed | Wastes limited capacity; may "
+                "worsen conversion if, for example, paid spend increases but lead quality is the problem | "
+                "Focused initiative produces data showing a different primary cause than assumed | Gate all "
+                "implementation decisions on Sprint 0 findings; enforce stop condition | Executive Sponsor |\n"
+                "Operator hard constraint: 'Do not recommend broad growth spend until the cause is clearer.'"
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
         self.assertEqual(constraint_adherence_warnings(state), [])
 
     def test_constraint_adherence_helper_does_not_mutate_state(self):

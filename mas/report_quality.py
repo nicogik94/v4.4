@@ -74,6 +74,50 @@ CONSTRAINT_ADHERENCE_WARNING = (
     "explicit operator constraints. Review before client delivery."
 )
 
+CONSTRAINT_SAFE_PREFIX_PATTERN = re.compile(
+    r"(?:^|[\s([{'\";:.,|\-–—])"
+    r"(?:do\s+not(?:\s+(?:do|start|launch|recommend|increase|run|execute|pursue))?|"
+    r"don't|dont|should\s+not|must\s+not|cannot|can't|not|no|never|without|"
+    r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
+    r"pause(?:s|d|ing)?|freeze(?:s|d|ing)?|frozen|park(?:s|ed|ing)?|prohibit(?:s|ed|ing)?|"
+    r"forbid(?:s|den|ding)?|forbidden|out\s+of\s+scope|off[- ]limits)"
+    r"\s*(?:[:\-–—]\s*)?"
+    r"(?:(?:the|a|an|any|all|current|new|full|broad|major|large|paid|"
+    r"acquisition|growth|campaigns?|budgets?|spend|engineering|critical|"
+    r"parallel|three|3)\s+){0,10}$",
+    re.I,
+)
+
+CONSTRAINT_SAFE_SUFFIX_PATTERN = re.compile(
+    r"^\s*(?:[\])}.,:;()|\-–—]\s*)?"
+    r"(?:(?:and|or)\s+"
+    r"(?:(?:the|a|an|any|all|new|full|broad|major|large|paid|growth|"
+    r"engineering|critical|parallel|three|3)\s+){0,8}[\w-]+\s+){0,3}"
+    r"(?:(?:is|are|be|being|remain|remains|stay|stays|should\s+remain|"
+    r"must\s+remain)\s+)?"
+    r"(?:not\s+(?:recommended|allowed|in\s+scope|this\s+month|now)|"
+    r"paused|pausing|deferred|blocked|frozen|parked|out\s+of\s+scope|off[- ]limits|"
+    r"prohibited|forbidden|do\s+not\s+(?:do|start|launch|recommend|increase)|"
+    r"continues?\s+shifting|worsening\s+the\s+cohort)\b",
+    re.I,
+)
+
+CONSTRAINT_SAFE_HEADING_PATTERN = re.compile(
+    r"\b(?:what\s+not\s+to\s+do|do\s+not\s+do|do\s+not\s+start|"
+    r"do\s+not\s+launch|not\s+this\s+month|out\s+of\s+scope|paused|"
+    r"deferred|blocked|risks?|warning|stop[- ]condition|circuit\s+breaker)\b",
+    re.I,
+)
+
+CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN = re.compile(
+    r"(?:^|[\s([{'\";:.,|\-–—])"
+    r"(?:if|when|unless|whether|risk\s+if|risk\s+of|risks?\s+if|"
+    r"warning\s+if|watch\s+if|monitor\s+if|stop\s+if|trigger\s+if|"
+    r"consider\s+pausing|consider\s+pause|consider\s+freezing)"
+    r"(?:(?:\s+|,)[\w%.-]+){0,10}\s*$",
+    re.I,
+)
+
 PRIMARY_THRESHOLD_SECTION_NAMES = {
     "decision gates",
     "decision matrix",
@@ -1103,8 +1147,12 @@ def _detect_constraint_contradiction_signals(
         generated_text,
         re.compile(
             r"\b(?:increase|increased|scale|expand|raise|ramp(?:\s+up)?)\s+(?:broad\s+)?(?:paid\s+acquisition|growth)\s+spend\b|"
+            r"\b(?:increase|increased|scale|expand|raise|ramp(?:\s+up)?)\s+paid\s+(?:spend|budget|budgets)\b|"
+            r"\b(?:scale|expand|ramp(?:\s+up)?)\s+paid\s+acquisition\b|"
+            r"\b(?:launch|start|run|execute)\s+(?:new\s+)?paid\s+campaigns?\b|"
+            r"\b(?:paid\s+acquisition|paid)\s+budgets?\s+(?:increase|increased|expansion|scale-up)\b|"
             r"\b(?:broad|large|major)\s+(?:paid\s+acquisition|growth)\s+spend\b|"
-            r"\b(?:paid\s+acquisition|growth)\s+spend\s+(?:increase|expansion|scale-up)\b|"
+            r"\b(?:paid\s+acquisition|growth|paid)\s+spend\s+(?:increase|increases|increased|expansion|scale-up)\b|"
             r"\blarge\s+acquisition\s+spend\s+increase\b",
             re.I,
         ),
@@ -1117,28 +1165,106 @@ def _detect_constraint_contradiction_signals(
 def _has_non_negated_constraint_match(text: str, pattern: re.Pattern[str]) -> bool:
     for segment in _constraint_scan_segments(text):
         for match in pattern.finditer(segment):
-            if _constraint_match_is_negated(segment, match.start()):
+            if _constraint_match_is_negated(segment, match.start(), match.end(), match.group(0)):
                 continue
             return True
     return False
 
 
 def _constraint_scan_segments(text: str) -> list[str]:
-    return [
-        segment.strip()
-        for segment in re.split(r"(?<=[.!?])\s+|\n+", str(text or ""))
-        if segment.strip()
-    ]
+    segments: list[str] = []
+    safe_heading = ""
+    for line in re.split(r"\n+", str(text or "")):
+        stripped = line.strip()
+        if not stripped:
+            safe_heading = ""
+            continue
+        if stripped.startswith("#"):
+            safe_heading = ""
+        if CONSTRAINT_SAFE_HEADING_PATTERN.search(stripped):
+            safe_heading = stripped
+        for segment in re.split(r"(?<=[.!?])\s+", stripped):
+            segment = segment.strip()
+            if not segment:
+                continue
+            if safe_heading and re.match(r"^(?:[-*]|\d+[.)])\s+", segment):
+                segments.append(f"{safe_heading} {segment}")
+            else:
+                segments.append(segment)
+    return segments
 
 
-def _constraint_match_is_negated(segment: str, match_start: int) -> bool:
-    prefix = segment[max(0, match_start - 100):match_start]
+def _constraint_match_is_negated(segment: str, match_start: int, match_end: int, match_text: str = "") -> bool:
+    prefix = segment[max(0, match_start - 180):match_start]
+    suffix = segment[match_end:match_end + 180]
+    if re.search(r"\bwhat\s+not\s+to\s+do\b.{0,160}$", prefix, re.I):
+        return True
+    if _constraint_markdown_row_has_safe_verdict(segment, match_end):
+        return True
+    if _constraint_prefix_has_shared_safe_list(prefix):
+        return True
+    if _constraint_match_is_conditional_risk_context(prefix, match_text):
+        return True
+    if CONSTRAINT_SAFE_PREFIX_PATTERN.search(prefix):
+        return True
+    return bool(CONSTRAINT_SAFE_SUFFIX_PATTERN.search(suffix))
+
+
+def _constraint_markdown_row_has_safe_verdict(segment: str, match_end: int) -> bool:
+    if "|" not in segment:
+        return False
+    suffix = segment[match_end:]
     return bool(
         re.search(
-            r"\b(?:do\s+not|don't|dont|should\s+not|must\s+not|not\s+allowed|"
-            r"avoid|avoids|defer|defers|hold|holds|freeze|freezes|block|blocks|"
-            r"prohibit|prohibits|prohibited|no|never|without|stop|stops)\b",
+            r"\|\s*(?:\*\*)?\s*(?:do\s+not\s+do(?:\s+this\s+month)?|"
+            r"do\s+not\s+start|not\s+recommended|deferred|blocked|"
+            r"out\s+of\s+scope|paused|parked)(?:\s*(?:\*\*)?)\s*\|",
+            suffix,
+            re.I,
+        )
+    )
+
+
+def _constraint_match_is_conditional_risk_context(prefix: str, match_text: str) -> bool:
+    if not (
+        CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN.search(prefix)
+        or re.search(
+            r"\b(?:if|when|unless|whether|risk\s+if|risk\s+of|risks?\s+if|"
+            r"warning\s+if|watch\s+if|monitor\s+if|stop\s+if|trigger\s+if)\b.{0,120}$",
             prefix,
+            re.I,
+        )
+    ):
+        return False
+    if re.search(r"\brecommended\s+path\b|\brecommend(?:ed|s)?\b", prefix, re.I):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:paid\s+)?spend\s+increase(?:s|d)?\b|"
+            r"\bpaid\s+acquisition\s+mix\s+continues?\s+shifting\b",
+            match_text,
+            re.I,
+        )
+    )
+
+
+def _constraint_prefix_has_shared_safe_list(prefix: str) -> bool:
+    match = re.search(
+        r"\b(?:do\s+not|don't|dont|should\s+not|must\s+not|cannot|can't|"
+        r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
+        r"pause(?:s|d|ing)?|freeze(?:s|d|ing)?|frozen|park(?:s|ed|ing)?|no|never|without|"
+        r"prohibit(?:s|ed|ing)?|forbid(?:s|den|ding)?|forbidden)\b"
+        r"(?P<body>.{0,140})\b(?:and|or)\s*$",
+        prefix,
+        re.I,
+    )
+    if not match:
+        return False
+    return not bool(
+        re.search(
+            r"\b(?:then|but|however|recommend(?:ed)?|launch|run|execute|"
+            r"increase|scale|expand|raise|ramp(?:\s+up)?|start)\b",
+            match.group("body"),
             re.I,
         )
     )

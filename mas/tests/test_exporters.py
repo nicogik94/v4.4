@@ -336,6 +336,88 @@ Technical notes.
     return state
 
 
+def make_constraint_compliant_export_state(project_id: str = "constraint-compliant"):
+    state = make_export_state(project_id)
+    state.brief = (
+        "Limited capacity this month. Only one focused initiative plus one small experiment. "
+        "No major engineering project this month. Budget is limited to one small experiment. "
+        "Avoid broad growth spend until the cause is clearer."
+    )
+    state.report = """# Executive Summary
+Recommendation: run one focused retention initiative and one small onboarding experiment.
+
+# The Decision
+Decide how to act with constrained capacity.
+
+# Recommended Path
+Run one focused initiative and one small experiment this month.
+
+# Why This Is Recommended
+What not to do this month: no major engineering work, no broad growth spend, and do not increase paid acquisition spend.
+All growth spend and major engineering are paused until Sprint 0 resolves the cause.
+Freeze paid acquisition budgets at current levels for 30 days; do not launch new paid campaigns.
+If rate drops below 10%, consider pausing all paid acquisition spend.
+Paid acquisition mix continues shifting during the sprint, worsening the cohort being measured.
+Risk if paid spend increases: the measured cohort becomes harder to interpret.
+If paid spend increased and H1 is confirmed, continue diagnosis before any scale-up.
+
+# Options Considered
+| Option | Verdict |
+|---|---|
+| Focused initiative plus small experiment | Recommended |
+| Broad paid acquisition spend | DO NOT DO this month |
+
+# Evidence Used
+| Evidence | What it suggests |
+|---|---|
+| Capacity note | Capacity is constrained. |
+
+# Key Risks
+Starting blocked work would violate the operator constraint.
+
+# Assumptions and Open Questions
+Deferred / blocked / do not do: broad paid acquisition spend remains out of scope.
+
+# Roadmap
+This month: one focused initiative and one small experiment.
+
+# Next Steps
+- Start the focused initiative.
+- Start the small experiment.
+
+# Monitoring and Kill Criteria
+Stop if the experiment cannot be measured.
+
+# Appendix: Technical Analysis
+Major engineering work is not recommended this month.
+"""
+    state.strategy = StrategyOutput(
+        executive_strategy="Run one focused initiative and one small experiment.",
+        strategies=[
+            StrategyAction(
+                priority="CRITICAL",
+                action="Run the focused retention initiative.",
+                justification="Fits the capacity constraint.",
+            ),
+            StrategyAction(
+                priority="LOW",
+                action="Broad paid acquisition spend (DO NOT DO this month).",
+                justification=(
+                    "BLOCKED until measurement is repaired and the spend constraint changes. "
+                    "Freeze paid acquisition budgets; do not launch new paid campaigns."
+                ),
+            ),
+            StrategyAction(
+                priority="LOW",
+                action="Major engineering redesign (DEFERRED).",
+                justification="DEFERRED because major engineering work is out of scope this month.",
+            ),
+        ],
+        implementation_sequence="Focused initiative -> small experiment. Do not launch major engineering work.",
+    )
+    return state
+
+
 def make_sparse_growth_state(project_id: str = "sparse-growth"):
     state = ProjectState(
         project_id=project_id,
@@ -492,6 +574,17 @@ class TestProfileExporterHelpers(unittest.TestCase):
         self.assertIn("limited capacity", markdown)
         self.assertIn("Generated contradiction signals", markdown)
         self.assertIn("multiple parallel critical tracks", markdown)
+
+    def test_operator_dossier_omits_constraint_warning_for_compliant_constrained_output(self):
+        markdown = build_operator_dossier_markdown(
+            make_constraint_compliant_export_state("operator-constraint-compliant")
+        )
+
+        self.assertNotIn("Constraint adherence warning", markdown)
+        self.assertNotIn("Detected operator constraints", markdown)
+        self.assertNotIn("Generated contradiction signals", markdown)
+        self.assertIn("DO NOT DO this month", markdown)
+        self.assertIn("DEFERRED", markdown)
 
     def test_client_exports_do_not_surface_operator_constraint_warning(self):
         state = make_constraint_violation_export_state("client-constraint-warning")

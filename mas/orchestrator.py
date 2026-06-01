@@ -357,6 +357,7 @@ def build_strategy_prompt(state: ProjectState) -> str:
 For each hypothesis, give PRELIMINARY VERDICT: LIKELY_CONFIRMED, LIKELY_REJECTED, NEEDS_MONITORING.
 Each strategy action must link to evidence (hypothesis + FMEA + audit finding).
 Respect operator hard constraints before optimizing for ambition or coverage. If the brief limits capacity to one focused initiative plus one small experiment, the strategy must fit that shape. Do not create multiple parallel CRITICAL tracks unless the operator explicitly allowed that capacity.
+The strategy priority field is strict: priority must be exactly one of CRITICAL, HIGH, MEDIUM, LOW. For deferred/blocked/do-not-do items, use priority LOW and put "DEFERRED", "BLOCKED", "DO NOT START", or "DO NOT DO" in the action/title/justification, not in priority.
 
 Return JSON:
 {{"preliminary_verdicts":[{{"id":"H1","verdict":"LIKELY_CONFIRMED","evidence":"","monitoring_plan":""}}],
