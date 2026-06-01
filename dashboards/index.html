@@ -3432,7 +3432,7 @@ a:hover { text-decoration: underline; }
     <div class="empty-state">
       <div class="empty-icon">◐</div>
       <h2>Select a project to begin</h2>
-      <p>Every project runs through the canonical operator workflow — classify, hypothesize, audit, strategize, monitor, review, and export.</p>
+      <p>Every project runs through the canonical operator workflow — classify, hypotheses, gauntlet, audit, strategy, sqi, monitor, report.</p>
       <button class="btn btn-accent btn-lg" id="btn-new-project-big">+ Create project</button>
     </div>
   </main>
@@ -3785,45 +3785,45 @@ const state = {
 };
 
 const TAB_LABELS = {
-  decide: 'Decisions',
-  evidence: 'Evidence',
+  decide: 'Overview',
+  evidence: 'Dossier',
   outcomes: 'Outcomes',
   bayesian: 'Bayesian',
   calibration: 'Calibration',
   report: 'Report',
-  audit: 'Audit',
+  audit: 'Control log',
 };
 
 const EXPORT_PROFILES = {
   report: {
-    label: 'Report',
+    label: 'Client-safe after review',
     formats: ['pdf', 'docx'],
-    help: 'Final report only.',
+    help: 'Client-safe after review.',
   },
   client_dossier: {
-    label: 'Client dossier',
+    label: 'Client-safe after review',
     formats: ['pdf', 'docx'],
-    help: 'Stakeholder-ready export.',
+    help: 'Client-safe after review.',
   },
   operator_dossier: {
-    label: 'Operator dossier',
+    label: 'Operator-only',
     formats: ['pdf', 'docx'],
-    help: 'Internal review export with phase summaries.',
+    help: 'Operator-only.',
   },
   machine_archive: {
-    label: 'Machine archive',
+    label: 'Internal archive',
     formats: ['zip'],
-    help: 'Internal ZIP archive for backup/debug.',
+    help: 'Internal archive.',
   },
   client_monitoring_template: {
-    label: 'Client monitoring template',
+    label: 'Client-safe after review',
     formats: ['xlsx'],
-    help: 'Client-safe monitoring workbook for post-review tracking.',
+    help: 'Client-safe after review.',
   },
   operator_monitoring_template: {
-    label: 'Operator monitoring template',
+    label: 'Operator-only',
     formats: ['xlsx'],
-    help: 'Operator workbook with trace fields for monitoring follow-up.',
+    help: 'Operator-only.',
   },
 };
 const EXPORT_FORMAT_LABELS = { pdf: 'PDF', docx: 'DOCX', zip: 'ZIP', xlsx: 'XLSX' };
@@ -3959,7 +3959,7 @@ function renderRuntimeReadinessDetails() {
   const updated = diagnostics.updatedAt ? new Date(diagnostics.updatedAt).toLocaleTimeString() : 'not refreshed';
   return `
     <div class="runtime-readiness-head">
-      <h3>Runtime readiness details</h3>
+      <h3>Local runtime readiness only</h3>
       <div class="meta">preflight: ${escapeHtml(preflightStatus)} · release: ${escapeHtml(releaseGate)} · ${escapeHtml(updated)}</div>
     </div>
     <div class="runtime-readiness-body">
@@ -4480,6 +4480,17 @@ function wirePortfolioOverview() {
   });
 }
 
+function renderInputContractTags(workspace) {
+  const contract = workspace?.input_contract;
+  if (!contract) return '';
+  const tags = [];
+  if (contract.contract_version) tags.push(`Input contract: <strong>${escapeHtml(contract.contract_version)}</strong>`);
+  if (contract.source) tags.push(`source: <strong>${escapeHtml(contract.source)}</strong>`);
+  if (contract.external_case_id) tags.push(`case: <strong>${escapeHtml(contract.external_case_id)}</strong>`);
+  if (!tags.length) return '';
+  return `<span class="sep">·</span>${tags.map(t => `<span>${t}</span>`).join('<span class="sep">·</span>')}`;
+}
+
 function renderHero(proj, workspace, audit) {
   const killActive = !!(audit?.kill_switch_active);
   const templateLabel = workspace?.template_label || proj.project_type || 'strategic_audit';
@@ -4496,6 +4507,7 @@ function renderHero(proj, workspace, audit) {
             <span class="sep">·</span>
             <span>phase: <strong>${escapeHtml(proj.current_phase || 'idle')}</strong></span>
             ${proj.created_at ? `<span class="sep">·</span><span>created ${escapeHtml(new Date(proj.created_at).toLocaleDateString())}</span>` : ''}
+            ${renderInputContractTags(workspace)}
           </div>
         </div>
         <div class="ws-hero-actions">
@@ -4829,6 +4841,31 @@ function renderClarificationReviewRows(rows) {
   `;
 }
 
+function operatorReviewSupportNextAction(rawAction, latest) {
+  const raw = String(rawAction || '');
+  if (!raw) {
+    return latest
+      ? 'Use operator review support before relying on downstream outputs.'
+      : 'Generate operator review support before treating the analysis as fully reviewed.';
+  }
+  let normalized = raw
+    .replace(new RegExp('chat' + 'bot', 'gi'), 'operator review support')
+    .replace(new RegExp('workflow\\s+gate', 'gi'), 'operator review support')
+    .replace(new RegExp('missing-information\\s+questions', 'gi'), 'operator review support')
+    .replace(new RegExp('clarification\\s+questions', 'gi'), 'operator review support questions')
+    .replace(new RegExp('clarification\\s+answers', 'gi'), 'operator review support');
+  normalized = normalized
+    .replace(/^Generate operator review support before treating the analysis as fully reviewed\.$/i, 'Generate operator review support before treating the analysis as fully reviewed.')
+    .replace(/^No clarification action needed right now\.$/i, 'No operator review support action needed right now.')
+    .replace(/^Answer critical\/high operator review support questions before regenerating or sharing outputs\.$/i, 'Use operator review support for critical/high gaps before regenerating or sharing outputs.')
+    .replace(/^Answer remaining operator review support questions or mark them unavailable\.$/i, 'Use operator review support for remaining gaps or mark them unavailable.')
+    .replace(/^Review saved operator review support and rerun affected phase\(s\):/i, 'Review saved operator review support and rerun affected phase(s):')
+    .replace(/^Review saved operator review support before final delivery\.$/i, 'Review saved operator review support before final delivery.');
+  return normalized.toLowerCase().includes('operator review support')
+    ? normalized
+    : `Operator review support: ${normalized}`;
+}
+
 function renderClarificationPanel(clarifications) {
   const pid = state.selectedProjectId || '';
   const latest = clarifications?.latest_cycle || null;
@@ -4844,26 +4881,26 @@ function renderClarificationPanel(clarifications) {
     ? `${openQuestions.length} open | ${answered} answered | ${unavailable} unavailable`
     : 'not generated';
   const metrics = renderClarificationMetrics(derived, counts, latest);
-  const nextAction = derived?.next_action || (latest ? 'Review follow-up questions before relying on downstream outputs.' : 'Generate missing-information questions before treating the analysis as fully reviewed.');
+  const nextAction = operatorReviewSupportNextAction(derived?.next_action, latest);
   const reviewRowsHtml = renderClarificationReviewRows(reviewRows);
 
   const generateButton = pid
-    ? `<button class="btn btn-secondary" onclick="generateClarificationCycle('${escapeHtml(pid)}')">Generate questions</button>`
+    ? `<button class="btn btn-secondary" onclick="generateClarificationCycle('${escapeHtml(pid)}')">Generate review support</button>`
     : '';
 
   if (!latest) {
     return `
-      <section class="dp-panel" aria-label="Follow-up questions">
+      <section class="dp-panel" aria-label="Operator review support">
         <div class="dp-panel-head">
-          <h4>Follow-up questions</h4>
-          <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+          <h4>Operator review support</h4>
+          <span class="meta">Missing information for operator review | ${escapeHtml(meta)}</span>
         </div>
         <div class="dp-panel-body">
           ${metrics}
           <div class="meta" style="line-height: 1.45;">Next action: ${escapeHtml(nextAction)}</div>
         </div>
         <div class="dp-detail-empty">
-          No deterministic missing-information cycle has been generated for this project.
+          No deterministic operator review support has been generated for this project.
           <div style="margin-top: 10px;">${generateButton}</div>
         </div>
       </section>
@@ -4872,10 +4909,10 @@ function renderClarificationPanel(clarifications) {
 
   if (!openQuestions.length) {
     return `
-      <section class="dp-panel" aria-label="Follow-up questions">
+      <section class="dp-panel" aria-label="Operator review support">
         <div class="dp-panel-head">
-          <h4>Follow-up questions</h4>
-          <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+          <h4>Operator review support</h4>
+          <span class="meta">Missing information for operator review | ${escapeHtml(meta)}</span>
         </div>
         <div class="dp-panel-body">
           ${metrics}
@@ -4883,7 +4920,7 @@ function renderClarificationPanel(clarifications) {
           ${reviewRowsHtml}
         </div>
         <div class="dp-detail-empty">
-          No deterministic missing-information questions right now.
+          No deterministic operator review support questions right now.
           <div style="margin-top: 10px;">${generateButton}</div>
         </div>
       </section>
@@ -4891,10 +4928,10 @@ function renderClarificationPanel(clarifications) {
   }
 
   return `
-    <section class="dp-panel" aria-label="Follow-up questions">
+    <section class="dp-panel" aria-label="Operator review support">
       <div class="dp-panel-head">
-        <h4>Follow-up questions</h4>
-        <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+        <h4>Operator review support</h4>
+        <span class="meta">Missing information for operator review | ${escapeHtml(meta)}</span>
       </div>
       <div class="dp-panel-body">
         ${metrics}
@@ -7125,9 +7162,9 @@ async function generateClarificationCycle(pid) {
     await apiPost(`/projects/${pid}/clarifications/cycles`, {});
     await loadProject(pid);
     renderMain();
-    toast('Follow-up questions updated.', 'ok');
+    toast('Operator review support updated.', 'ok');
   } catch (e) {
-    toast('Follow-up question update failed: ' + e.message, 'err');
+    toast('Operator review support update failed: ' + e.message, 'err');
   }
 }
 

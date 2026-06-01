@@ -35,12 +35,14 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
 
         self.assertIn("v5 canonical dashboard", html)
         self.assertIn("canonical operator workflow", html)
+        self.assertIn("classify, hypotheses, gauntlet, audit, strategy, sqi, monitor, report", html)
         self.assertIn("Portfolio / Operator summary", html)
         self.assertIn("command palette", html)
-        self.assertIn("Follow-up questions", html)
-        self.assertIn("Missing information", html)
+        self.assertIn("Operator review support", html)
+        self.assertIn("Missing information for operator review", html)
         self.assertIn("renderClarificationMetrics", html)
         self.assertIn("renderClarificationReviewRows", html)
+        self.assertIn("operatorReviewSupportNextAction", html)
         self.assertIn("Saved answer review", html)
         self.assertIn("Answer preview", html)
         self.assertIn("required open", html)
@@ -55,6 +57,9 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertNotIn("controlled local demo", html)
         self.assertNotIn("canonical dashboard remains index.html", html)
         self.assertNotIn("v5 controlled local demo", html)
+        self.assertNotIn("Follow-up questions", html)
+        self.assertNotIn("chatbot", html)
+        self.assertNotIn("workflow gate", html)
 
     def test_canonical_dashboard_api_routes_and_workflow_controls_are_present(self):
         if not HTML_PATH.exists():
@@ -88,6 +93,15 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("apiUrl = () => API_BASE", html)
         self.assertIn("http://localhost:8000", html)
 
+        for tab_value, label in (
+            ("decide", "Overview"),
+            ("evidence", "Dossier"),
+            ("audit", "Control log"),
+        ):
+            self.assertIn(f"{tab_value}: '{label}'", html)
+        self.assertIn("const tabs = ['decide', 'evidence', 'outcomes', 'calibration', 'report', 'audit']", html)
+        self.assertIn('data-tab="${t}"', html)
+
         for phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"):
             self.assertIn(phase, html)
         self.assertIn(
@@ -105,13 +119,14 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("/runtime/release-readiness", html)
         self.assertIn("diagnosticPill", html)
         self.assertIn("runtime-readiness-panel", html)
-        self.assertIn("Runtime readiness details", html)
+        self.assertIn("Local runtime readiness only", html)
         self.assertIn("Release blockers", html)
         self.assertIn("Release warnings", html)
         self.assertIn("Preflight failed/degraded checks", html)
         self.assertIn("runtimePreflightItems", html)
         self.assertIn("runtimeReleaseItems", html)
         self.assertIn("renderRuntimeReadinessPanel", html)
+        self.assertNotIn("Runtime readiness details", html)
 
     def test_canonical_export_profile_controls_are_present(self):
         if not HTML_PATH.exists():
@@ -126,12 +141,9 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("export-profile-submit", html)
 
         for label in (
-            "Report",
-            "Client dossier",
-            "Operator dossier",
-            "Machine archive",
-            "Client monitoring template",
-            "Operator monitoring template",
+            "Client-safe after review",
+            "Operator-only",
+            "Internal archive",
         ):
             self.assertIn(label, html)
 
@@ -156,6 +168,26 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("/projects/{id}/export?profile=report&format=pdf", html)
         self.assertIn("Download DOCX", html)
         self.assertIn("Download PDF", html)
+
+        for old_label in (
+            "Client dossier",
+            "Operator dossier",
+            "Machine archive",
+            "Client monitoring template",
+            "Operator monitoring template",
+        ):
+            self.assertNotIn(old_label, html)
+
+    def test_dashboard_surfaces_supported_input_contract_labels_only(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("renderInputContractTags", html)
+        self.assertIn("workspace?.input_contract", html)
+        self.assertIn("Input contract:", html)
+        self.assertNotIn("Request ID:", html)
+        self.assertNotIn("Run ID:", html)
 
     def test_index_v5_is_compatibility_entrypoint(self):
         if not HTML_V5_PATH.exists():
