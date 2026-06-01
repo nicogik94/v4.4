@@ -30,6 +30,25 @@ AUTOMATION_ROI_AUDIT_DOCS = [
     DOCS_ROOT / "v5-AUTOMATION-ROI-DEMO-SCRIPT.md",
 ]
 
+AI_READINESS_AUDIT_DOCS = [
+    DOCS_ROOT / "v5-AI-READINESS-AUDIT.md",
+    DOCS_ROOT / "templates" / "ai-readiness-audit-intake.md",
+    DOCS_ROOT / "examples" / "ai-readiness-audit-brief.md",
+    DOCS_ROOT / "v5-AI-READINESS-DEMO-SCRIPT.md",
+]
+
+AI_READINESS_DIMENSIONS = [
+    "business goals and use-case fit",
+    "process maturity",
+    "data availability and quality",
+    "tool stack and integration constraints",
+    "team capability and adoption risk",
+    "governance, privacy, and security constraints",
+    "risk classification and human oversight",
+    "first 30/60/90-day action plan",
+    "success metrics and monitoring",
+]
+
 BRIEF_HEADINGS = [
     "# ",
     "## Decision Question",
@@ -65,6 +84,12 @@ def test_strategic_decision_audit_package_docs_exist_in_repo_root_docs():
 
 def test_automation_roi_audit_package_docs_exist_in_repo_root_docs():
     for path in AUTOMATION_ROI_AUDIT_DOCS:
+        assert path.exists(), path
+        assert MAS_ROOT / "docs" not in path.parents
+
+
+def test_ai_readiness_audit_package_docs_exist_in_repo_root_docs():
+    for path in AI_READINESS_AUDIT_DOCS:
         assert path.exists(), path
         assert MAS_ROOT / "docs" not in path.parents
 
@@ -137,6 +162,51 @@ def test_automation_roi_audit_entrypoint_has_required_offer_sections():
         "not a first-class backend runtime template",
         "automation roi example framing",
         "automation_roi",
+        "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+    ):
+        assert required in lower
+
+
+def test_ai_readiness_audit_entrypoint_has_required_offer_sections():
+    text = _read(DOCS_ROOT / "v5-AI-READINESS-AUDIT.md")
+    lower = _normalized_lower(text)
+
+    for heading in (
+        "# AI Readiness Audit Packaged Offer",
+        "## What This Offer Is",
+        "## What This Offer Is Not",
+        "## Intake Template",
+        "## Example Brief",
+        "## Recommended Upload Files",
+        "## Operator Runbook",
+        "## Sample Project Framing",
+        "## Expected Export Checklist",
+        "## Client-Safe Positioning Language",
+        "## Boundaries And Disclaimers",
+        "## Related Docs",
+    ):
+        assert heading in text
+
+    for dimension in AI_READINESS_DIMENSIONS:
+        assert dimension in lower
+
+    for required in (
+        "docs/templates/tests-only",
+        "local operator workflow",
+        "human review is required",
+        "readiness findings are directional, not guarantees",
+        "not legal advice",
+        "not compliance certification",
+        "not security certification",
+        "not public saas",
+        "not a guaranteed ai transformation plan",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+        "ai readiness example framing",
+        "ai_readiness",
         "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
         "client-safe after review",
         "operator-only",
@@ -230,6 +300,79 @@ def test_automation_roi_audit_template_and_example_are_complete():
     assert "not a new reasoning mode" in combined
 
 
+def test_ai_readiness_audit_template_and_example_are_complete():
+    template = _read(DOCS_ROOT / "templates" / "ai-readiness-audit-intake.md")
+    example = _read(DOCS_ROOT / "examples" / "ai-readiness-audit-brief.md")
+    combined = _normalized_lower(template + "\n" + example)
+
+    for heading in (
+        "## Readiness Question",
+        "## Business Goals And Use-Case Fit",
+        "## Process Maturity",
+        "## Data Availability And Quality",
+        "## Tool Stack And Integration Constraints",
+        "## Team Capability And Adoption Risk",
+        "## Governance, Privacy, And Security Constraints",
+        "## Risk Classification And Human Oversight",
+        "## First 30/60/90-Day Action Plan",
+        "## Success Metrics And Monitoring",
+        "## Known Evidence",
+        "## Unknowns",
+        "## Recommended Upload Files",
+        "## Expected Output Types",
+        "## Human Review Notes",
+    ):
+        assert heading in template
+
+    for heading in (
+        "# AI Readiness Audit Example Brief",
+        "## Readiness Question",
+        "## Business Goals And Use-Case Fit",
+        "## Process Maturity",
+        "## Data Availability And Quality",
+        "## Tool Stack And Integration Constraints",
+        "## Team Capability And Adoption Risk",
+        "## Governance, Privacy, And Security Constraints",
+        "## Risk Classification And Human Oversight",
+        "## First 30/60/90-Day Action Plan",
+        "## Success Metrics And Monitoring",
+        "## Known Evidence",
+        "## Unknowns",
+        "## What A Good Recommendation Should Resolve",
+        "## Suggested Files / Evidence To Upload If Available",
+        "## Expected Output Types",
+        "## Human Review Reminder",
+    ):
+        assert heading in example
+
+    for dimension in AI_READINESS_DIMENSIONS:
+        assert dimension in combined
+
+    for required in (
+        "paste-ready example brief",
+        "local operator workflow",
+        "not a first-class vertical template",
+        "not a first-class backend runtime template",
+        "runtime pack",
+        "human review is required",
+        "readiness findings are directional, not guarantees",
+        "risk classification",
+        "human oversight",
+        "recommended upload files",
+        "success metrics and monitoring",
+        "not legal advice",
+        "not compliance certification",
+        "not security certification",
+        "not public saas",
+        "not a guaranteed ai transformation plan",
+        "not a new reasoning mode",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+    ):
+        assert required in combined
+
+
 def test_strategic_decision_audit_demo_script_uses_existing_local_flow():
     text = _read(DOCS_ROOT / "v5-STRATEGIC-DECISION-DEMO-SCRIPT.md")
     lower = _normalized_lower(text)
@@ -272,6 +415,34 @@ def test_automation_roi_audit_demo_script_uses_existing_local_flow():
         "not financial advice",
         "not public saas",
         "not a guaranteed automation recommendation engine",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+    ):
+        assert required in lower
+
+
+def test_ai_readiness_audit_demo_script_uses_existing_local_flow():
+    text = _read(DOCS_ROOT / "v5-AI-READINESS-DEMO-SCRIPT.md")
+    lower = _normalized_lower(text)
+
+    for required in (
+        "docker compose port app 8000",
+        "scripts\\demo_smoke_check.py",
+        "dashboards/index.html",
+        "ai readiness example framing",
+        "fixed phase order",
+        "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
+        "export boundaries",
+        "client-safe after review",
+        "operator-only",
+        "internal archive",
+        "human review required",
+        "readiness findings are directional, not guarantees",
+        "not legal advice",
+        "not compliance certification",
+        "not security certification",
+        "not public saas",
+        "not a guaranteed ai transformation plan",
         "not a new reasoning mode",
         "not a first-class backend runtime template",
     ):
@@ -343,6 +514,54 @@ def test_automation_roi_audit_docs_do_not_overclaim_or_change_scope():
         assert prohibited not in combined
 
 
+def test_ai_readiness_audit_docs_do_not_overclaim_or_change_scope():
+    combined = _normalized_lower("\n".join(_read(path) for path in AI_READINESS_AUDIT_DOCS))
+
+    for required_boundary in (
+        "docs/templates/tests-only",
+        "local operator workflow",
+        "human review is required",
+        "readiness findings are directional, not guarantees",
+        "not legal advice",
+        "not compliance certification",
+        "not security certification",
+        "not public saas",
+        "not a guaranteed ai transformation plan",
+        "not a new reasoning mode",
+        "not a first-class backend runtime template",
+        "no auth",
+        "no auth, tenancy, public deployment hardening",
+        "provider routing changes",
+        "queue/runtime changes",
+        "export schema changes",
+        "ai-specific backend execution",
+    ):
+        assert required_boundary in combined
+
+    for required_negated_boundary in (
+        "compliance certification",
+        "security certification",
+    ):
+        assert f"not {required_negated_boundary}" in combined
+        start = 0
+        while True:
+            index = combined.find(required_negated_boundary, start)
+            if index == -1:
+                break
+            assert combined[index - 4 : index] == "not "
+            start = index + len(required_negated_boundary)
+
+    for prohibited in (
+        "guaranteed transformation",
+        "public saas readiness",
+        "autonomous ai transformation engine",
+        "new ai readiness runtime",
+        "first-class ai readiness runtime",
+        "safe-to-share-before-review",
+    ):
+        assert prohibited not in combined
+
+
 def test_demo_docs_use_runtime_foundation_and_non_overclaim_language():
     combined = _normalized_lower("\n".join(_read(path) for path in REQUIRED_DOCS))
 
@@ -398,6 +617,12 @@ def test_start_here_has_exactly_one_automation_roi_audit_pointer():
     text = _read(REPO_ROOT / "START_HERE.md")
     assert text.count("docs/v5-AUTOMATION-ROI-AUDIT.md") == 2
     assert text.count("For the Automation ROI Audit packaged offer") == 1
+
+
+def test_start_here_has_exactly_one_ai_readiness_audit_pointer():
+    text = _read(REPO_ROOT / "START_HERE.md")
+    assert text.count("docs/v5-AI-READINESS-AUDIT.md") == 2
+    assert text.count("For the AI Readiness Audit packaged offer") == 1
 
 
 def test_ingestion_contract_doc_covers_contract_and_caveats():
