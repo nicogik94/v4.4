@@ -6,6 +6,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from clarifications import ClarificationSummary, build_clarification_summary
 from decision_objects import compute_source_state_hash, ensure_decision_objects
 from knowledge.freshness import build_knowledge_health
 from knowledge.retrieval import RetrievalPhaseImpactSummary, build_prompt_facing_retrieval_impact
@@ -80,6 +81,7 @@ class WorkspaceSummary(BaseModel):
     score_summary: ScoreSummary = Field(default_factory=ScoreSummary)
     decision_object_health: DecisionObjectHealth = Field(default_factory=DecisionObjectHealth)
     knowledge_health: KnowledgeHealthSummary = Field(default_factory=KnowledgeHealthSummary)
+    clarification_summary: ClarificationSummary = Field(default_factory=ClarificationSummary)
     active_risks: list[Risk] = Field(default_factory=list)
     evidence_timeline: list[Evidence] = Field(default_factory=list)
     hypothesis_table: list[WorkspaceHypothesisRow] = Field(default_factory=list)
@@ -139,6 +141,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
     has_stale_downstream = any(status == "stale" for status in phase_statuses.values()) or health_status == "stale"
     import_pending, import_pending_phase, import_pending_message = _import_pending_analysis(state)
     knowledge_health = KnowledgeHealthSummary(**build_knowledge_health(state))
+    clarification_summary = build_clarification_summary(state)
     retrieval_visibility = build_prompt_facing_retrieval_impact(state)
     project_status = _project_status(state, blocking_reasons, requires_approval, has_stale_downstream)
     active_risks = sorted(
@@ -193,6 +196,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         ),
         decision_object_health=decision_object_health,
         knowledge_health=knowledge_health,
+        clarification_summary=clarification_summary,
         active_risks=active_risks[:12],
         evidence_timeline=evidence_timeline[:24],
         hypothesis_table=hypothesis_table,

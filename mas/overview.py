@@ -120,6 +120,19 @@ def build_operator_overview(state: ProjectState) -> OperatorOverviewSummary:
                 detail=impact.overview,
             )
         )
+    clarification_summary = workspace.clarification_summary
+    if clarification_summary.total_cycles or clarification_summary.total_questions:
+        metric_cards.append(
+            OverviewMetricCard(
+                label="Clarifications",
+                value=f"{clarification_summary.answered_count + clarification_summary.unavailable_count}/{clarification_summary.total_questions}",
+                detail=(
+                    f"{clarification_summary.open_required_count} required open; "
+                    f"{clarification_summary.open_count} open total; "
+                    f"latest cycle {clarification_summary.latest_cycle_status}"
+                ),
+            )
+        )
 
     justification_blocks = [
         OverviewJustificationBlock(
@@ -199,12 +212,17 @@ def _sources_message(workspace: WorkspaceSummary, files: list[OverviewFileRow]) 
 def _next_operator_action(workspace: WorkspaceSummary) -> str:
     if workspace.blocking_reasons:
         return f"Resolve blocking issue: {workspace.blocking_reasons[0]}"
+    clarification_summary = workspace.clarification_summary
+    if clarification_summary.open_required_count:
+        return clarification_summary.next_action
     if workspace.requires_approval:
         return "Review and resolve pending approvals before proceeding."
     if workspace.imported_evidence_pending_analysis:
         return workspace.imported_evidence_pending_message or "Rerun analysis to incorporate imported evidence."
     if workspace.has_stale_downstream:
         return "Rerun the stale downstream phases when ready."
+    if clarification_summary.refresh_candidate_phases:
+        return clarification_summary.next_action
     if workspace.project_status == "completed":
         return "Review the report, trace, and exports before sharing externally."
     return "Continue with the next pending phase or upload more context if needed."

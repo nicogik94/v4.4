@@ -4779,16 +4779,73 @@ function renderSQICard(sqi) {
   `;
 }
 
+function renderClarificationMetrics(summary, fallbackCounts, latest) {
+  const total = Number(summary?.total_questions ?? 0);
+  const open = Number(summary?.open_count ?? fallbackCounts?.open ?? 0);
+  const requiredOpen = Number(summary?.open_required_count ?? 0);
+  const answered = Number(summary?.answered_count ?? fallbackCounts?.answered ?? 0);
+  const unavailable = Number(summary?.unavailable_count ?? fallbackCounts?.unavailable ?? 0);
+  const resolution = summary?.resolution_rate != null && !Number.isNaN(Number(summary.resolution_rate))
+    ? `${Math.round(Number(summary.resolution_rate) * 100)}%`
+    : '—';
+  const status = summary?.latest_cycle_status || (latest ? 'generated' : 'not_generated');
+  return `
+    <div class="dp-stats" style="margin: 0 0 10px;">
+      <span><b>${escapeHtml(String(total))}</b> total</span>
+      <span><b>${escapeHtml(String(open))}</b> open</span>
+      <span><b>${escapeHtml(String(requiredOpen))}</b> required open</span>
+      <span><b>${escapeHtml(String(answered))}</b> answered</span>
+      <span><b>${escapeHtml(String(unavailable))}</b> unavailable</span>
+      <span><b>${escapeHtml(resolution)}</b> resolved</span>
+      <span>${escapeHtml(status)}</span>
+    </div>
+  `;
+}
+
+function renderClarificationReviewRows(rows) {
+  const savedRows = rows.filter(r => {
+    const status = String(r.status || '').toLowerCase();
+    return ['answered', 'unavailable', 'superseded'].includes(status);
+  });
+  if (!savedRows.length) return '';
+  return `
+    <div style="display: grid; gap: 8px; margin-top: 10px;">
+      <div class="meta" style="font-weight: 700; color: var(--ink-2);">Saved answer review</div>
+      ${savedRows.map(row => `
+        <div class="dp-detail-card">
+          <div class="dp-stats" style="margin-bottom: 8px;">
+            <span>${escapeHtml(row.status || '')}</span>
+            <span>${escapeHtml(row.priority || '')}</span>
+            <span>${escapeHtml(row.affected_phase || '')}</span>
+            <span>${escapeHtml(row.source_gap || '')}</span>
+          </div>
+          <div style="font-weight: 700; color: var(--ink-1); margin-bottom: 6px;">${escapeHtml(row.text || '')}</div>
+          <div class="meta" style="line-height: 1.45; margin-bottom: 6px;">Why it matters: ${escapeHtml(row.why_it_matters || '')}</div>
+          <div class="meta" style="line-height: 1.45;">Answer preview: ${escapeHtml(row.answer_preview || 'No answer text saved for this row.')}</div>
+          ${row.refresh_candidate ? `<div class="meta" style="line-height: 1.45; margin-top: 6px; color: var(--warn);">Refresh note: ${escapeHtml(row.refresh_reason || 'Review this answer before relying on affected outputs.')}</div>` : ''}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
 function renderClarificationPanel(clarifications) {
   const pid = state.selectedProjectId || '';
   const latest = clarifications?.latest_cycle || null;
   const openQuestions = Array.isArray(clarifications?.open_questions) ? clarifications.open_questions : [];
   const counts = clarifications?.status_counts || {};
+  const derived = clarifications?.derived_summary || {};
+  const reviewRows = Array.isArray(clarifications?.review_rows)
+    ? clarifications.review_rows
+    : (Array.isArray(derived?.review_rows) ? derived.review_rows : []);
   const answered = Number(counts.answered || 0);
   const unavailable = Number(counts.unavailable || 0);
   const meta = latest
     ? `${openQuestions.length} open | ${answered} answered | ${unavailable} unavailable`
     : 'not generated';
+  const metrics = renderClarificationMetrics(derived, counts, latest);
+  const nextAction = derived?.next_action || (latest ? 'Review follow-up questions before relying on downstream outputs.' : 'Generate missing-information questions before treating the analysis as fully reviewed.');
+  const reviewRowsHtml = renderClarificationReviewRows(reviewRows);
 
   const generateButton = pid
     ? `<button class="btn btn-secondary" onclick="generateClarificationCycle('${escapeHtml(pid)}')">Generate questions</button>`
@@ -4800,6 +4857,10 @@ function renderClarificationPanel(clarifications) {
         <div class="dp-panel-head">
           <h4>Follow-up questions</h4>
           <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+        </div>
+        <div class="dp-panel-body">
+          ${metrics}
+          <div class="meta" style="line-height: 1.45;">Next action: ${escapeHtml(nextAction)}</div>
         </div>
         <div class="dp-detail-empty">
           No deterministic missing-information cycle has been generated for this project.
@@ -4816,6 +4877,11 @@ function renderClarificationPanel(clarifications) {
           <h4>Follow-up questions</h4>
           <span class="meta">Missing information | ${escapeHtml(meta)}</span>
         </div>
+        <div class="dp-panel-body">
+          ${metrics}
+          <div class="meta" style="line-height: 1.45;">Next action: ${escapeHtml(nextAction)}</div>
+          ${reviewRowsHtml}
+        </div>
         <div class="dp-detail-empty">
           No deterministic missing-information questions right now.
           <div style="margin-top: 10px;">${generateButton}</div>
@@ -4829,6 +4895,10 @@ function renderClarificationPanel(clarifications) {
       <div class="dp-panel-head">
         <h4>Follow-up questions</h4>
         <span class="meta">Missing information | ${escapeHtml(meta)}</span>
+      </div>
+      <div class="dp-panel-body">
+        ${metrics}
+        <div class="meta" style="line-height: 1.45;">Next action: ${escapeHtml(nextAction)}</div>
       </div>
       <div style="display: grid; gap: 10px;">
         ${openQuestions.map(q => {
@@ -4852,6 +4922,7 @@ function renderClarificationPanel(clarifications) {
           `;
         }).join('')}
       </div>
+      ${reviewRowsHtml}
     </section>
   `;
 }
