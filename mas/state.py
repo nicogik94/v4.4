@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 
 from clarifications import ClarificationAnswer, ClarificationCycle
+from ingestion_contract import DEFAULT_INGESTION_SOURCE, LEGACY_CONTRACT_VERSION
 
 
 class PhaseStatus(str, Enum):
@@ -602,6 +603,10 @@ class ProjectState(BaseModel):
     # Input
     brief: str = ""
     data: str = ""
+    ingestion_contract_version: str = LEGACY_CONTRACT_VERSION
+    ingestion_source: str = DEFAULT_INGESTION_SOURCE
+    ingestion_external_case_id: str = ""
+    ingestion_metadata: dict[str, Any] = Field(default_factory=dict)
     imported_evidence: list[Evidence] = Field(default_factory=list)
     imported_signals: list[Signal] = Field(default_factory=list)
     knowledge_layer: Optional[KnowledgeLayerState] = None

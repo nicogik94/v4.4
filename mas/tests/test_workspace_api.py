@@ -1,9 +1,12 @@
 """Tests for backend-computed queue/workspace summaries."""
 import sys
 import unittest
+import uuid
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +22,7 @@ from clarifications import (  # noqa: E402
 )
 from decision_objects import ensure_decision_objects  # noqa: E402
 from overview import build_operator_overview  # noqa: E402
-from state import PhaseStatus  # noqa: E402
+from state import PhaseStatus, ProjectState  # noqa: E402
 from workspace import build_workspace_summary  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
 
@@ -227,3 +230,104 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(summary.decision_object_health)
         self.assertTrue(summary.imported_evidence_pending_analysis)
         self.assertIsNotNone(summary.clarification_summary)
+
+    async def test_create_project_accepts_legacy_ingestion_payload(self):
+        save = AsyncMock()
+        with patch("api.store.save", new=save), patch("decision_events.append", new=AsyncMock()):
+            response = await api.create_project(
+                {
+                    "name": "Legacy intake",
+                    "brief": "Decide whether to launch the pilot.",
+                    "data": "Existing customer interview notes.",
+                }
+            )
+
+        saved_state = save.await_args.args[0]
+        self.assertEqual(response.name, "Legacy intake")
+        self.assertEqual(saved_state.project_name, "Legacy intake")
+        self.assertEqual(saved_state.brief, "Decide whether to launch the pilot.")
+        self.assertEqual(saved_state.data, "Existing customer interview notes.")
+        self.assertEqual(saved_state.ingestion_contract_version, "legacy.v1")
+        self.assertEqual(saved_state.ingestion_source, "operator")
+        self.assertEqual(saved_state.ingestion_external_case_id, "")
+        self.assertEqual(saved_state.ingestion_metadata, {})
+
+    async def test_create_project_accepts_case_v1_ingestion_payload(self):
+        save = AsyncMock()
+        payload = {
+            "contract_version": "case.v1",
+            "name": "Case intake",
+            "brief": "Decide whether to expand onboarding automation.",
+            "data": "Activation is 41% for the last cohort.",
+            "source": "crm",
+            "external_case_id": "case-123",
+            "metadata": {"segment": "midmarket", "priority": "high"},
+        }
+
+        with patch("api.store.save", new=save), patch("decision_events.append", new=AsyncMock()):
+            response = await api.create_project(payload)
+
+        saved_state = save.await_args.args[0]
+        self.assertEqual(response.name, "Case intake")
+        self.assertEqual(saved_state.project_name, "Case intake")
+        self.assertEqual(saved_state.brief, "Decide whether to expand onboarding automation.")
+        self.assertEqual(saved_state.data, "Activation is 41% for the last cohort.")
+        self.assertEqual(saved_state.ingestion_contract_version, "case.v1")
+        self.assertEqual(saved_state.ingestion_source, "crm")
+        self.assertEqual(saved_state.ingestion_external_case_id, "case-123")
+        self.assertEqual(saved_state.ingestion_metadata, {"segment": "midmarket", "priority": "high"})
+
+    async def test_create_project_rejects_mixed_legacy_and_case_payload(self):
+        with self.assertRaises(api.HTTPException) as ctx:
+            await api.create_project(
+                {
+                    "name": "Conflicting legacy name",
+                    "case": {
+                        "contract_version": "case.v1",
+                        "name": "Case intake",
+                        "brief": "Decide whether to expand onboarding automation.",
+                    },
+                }
+            )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("cannot mix legacy fields", ctx.exception.detail)
+
+    async def test_project_state_has_backward_compatible_ingestion_defaults(self):
+        state = ProjectState(project_id="defaults", project_name="Defaults", brief="Brief")
+
+        self.assertEqual(state.ingestion_contract_version, "legacy.v1")
+        self.assertEqual(state.ingestion_source, "operator")
+        self.assertEqual(state.ingestion_external_case_id, "")
+        self.assertEqual(state.ingestion_metadata, {})
+
+
+class TestRequestIdMiddleware(unittest.TestCase):
+    def test_request_id_middleware_echoes_safe_supplied_value(self):
+        client = TestClient(api.app)
+        try:
+            response = client.get(
+                "/missing",
+                headers={"X-Request-ID": "req_123-ABC.456:trace"},
+            )
+        finally:
+            client.close()
+
+        self.assertEqual(response.headers["X-Request-ID"], "req_123-ABC.456:trace")
+        self.assertNotIn("req_123-ABC.456:trace", response.text)
+
+    def test_request_id_middleware_generates_uuid_when_absent_or_unsafe(self):
+        client = TestClient(api.app)
+        try:
+            absent_response = client.get("/missing")
+            unsafe_response = client.get("/missing", headers={"X-Request-ID": "bad request id"})
+        finally:
+            client.close()
+
+        absent_request_id = absent_response.headers["X-Request-ID"]
+        unsafe_request_id = unsafe_response.headers["X-Request-ID"]
+        uuid.UUID(absent_request_id)
+        uuid.UUID(unsafe_request_id)
+        self.assertNotEqual(unsafe_request_id, "bad request id")
+        self.assertNotIn(absent_request_id, absent_response.text)
+        self.assertNotIn(unsafe_request_id, unsafe_response.text)
