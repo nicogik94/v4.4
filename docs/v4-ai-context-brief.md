@@ -120,6 +120,8 @@ LLM-generated:
 
 `mas/api.py` is the FastAPI layer. It exposes project CRUD, run/phase execution, state, queue, overview, workspace, trace/explain, knowledge, uploads, CSV import, gates, report, export, outcomes, calibration, policy controls, approvals, breaker reset, kill switch, risk classification, deterministic clarifications, and scenario-shadow read routes. It does not implement API authentication in v4.4; CORS is configured with `allow_origins=["*"]`.
 
+Project creation has an additive ingestion adapter for legacy `name`/`brief`/`data` requests and versioned `case.v1` payloads. See `docs/v5-INGESTION-CONTRACT.md` for the narrow contract, request ID correlation behavior, and caveats; it does not change prompts, report semantics, provider routing, workflow order, or export schemas.
+
 Export routes now have two shapes:
 
 - Legacy route, unchanged: `GET /projects/{project_id}/export/{fmt}` with `fmt=pdf|docx`, exporting the current final report.

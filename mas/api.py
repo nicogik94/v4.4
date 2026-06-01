@@ -7,13 +7,14 @@ if DATABASE_URL is unset. Langfuse tracing wired via observability.py.
 """
 import asyncio
 import json
+import re
 import uuid
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, File, Form, UploadFile
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ValidationError
@@ -79,6 +80,7 @@ from extensions.connectors import (
     CSVColumnMapping as CSVColumnMappingSpec,
     ConnectorImportRequest,
 )
+from ingestion_contract import IngestionContractError, normalize_project_ingestion
 from ingestion import merge_imported_records
 from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
 from runtime import run_state as workflow_run_state
@@ -102,6 +104,8 @@ logger = logging.getLogger("v4-api")
 
 running: set[str] = set()
 auto_refresh_jobs: set[str] = set()
+REQUEST_ID_HEADER = "X-Request-ID"
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 @asynccontextmanager
@@ -129,6 +133,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = _normalize_request_id(request.headers.get(REQUEST_ID_HEADER))
+    response = await call_next(request)
+    response.headers[REQUEST_ID_HEADER] = request_id
+    return response
+
+
+def _normalize_request_id(value: str | None) -> str:
+    if value and _SAFE_REQUEST_ID.fullmatch(value):
+        return value
+    return str(uuid.uuid4())
 
 
 class CreateProjectRequest(BaseModel):
@@ -331,12 +349,21 @@ def _release_readiness_items(checks: dict[str, Any], target_status: str) -> list
 
 
 @app.post("/projects", response_model=ProjectResponse)
-async def create_project(req: CreateProjectRequest):
+async def create_project(payload: dict[str, Any] = Body(...)):
+    try:
+        req = normalize_project_ingestion(payload)
+    except IngestionContractError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
     state = ProjectState(
         project_id=str(uuid.uuid4()),
         project_name=req.name,
         brief=req.brief,
         data=req.data,
+        ingestion_contract_version=req.contract_version,
+        ingestion_source=req.source,
+        ingestion_external_case_id=req.external_case_id,
+        ingestion_metadata=req.metadata,
         created_at=datetime.now(),
     )
     # v4.4 — apply optional classification at create time

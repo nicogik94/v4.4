@@ -1,9 +1,12 @@
 """Tests for backend-computed queue/workspace summaries."""
 import sys
 import unittest
+import uuid
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +22,7 @@ from clarifications import (  # noqa: E402
 )
 from decision_objects import ensure_decision_objects  # noqa: E402
 from overview import build_operator_overview  # noqa: E402
-from state import PhaseStatus  # noqa: E402
+from state import PhaseStatus, ProjectState  # noqa: E402
 from workspace import build_workspace_summary  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
 
@@ -36,6 +39,24 @@ class TestWorkspaceSummary(unittest.TestCase):
         self.assertTrue(workspace.workflow_running)
         self.assertEqual(workspace.decision_object_health.status, "fresh")
         self.assertGreater(workspace.active_risk_count, 0)
+
+    def test_workspace_exposes_additive_ingestion_provenance_labels(self):
+        state = make_state("workspace-provenance")
+        state.ingestion_contract_version = "case.v1"
+        state.ingestion_source = "crm"
+        state.ingestion_external_case_id = "case-123"
+        state.ingestion_metadata = {"segment": "midmarket", "priority": "high"}
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(workspace.input_contract.contract_version, "case.v1")
+        self.assertEqual(workspace.input_contract.source, "crm")
+        self.assertEqual(workspace.input_contract.external_case_id, "case-123")
+        self.assertEqual(workspace.input_contract.metadata_keys, ["priority", "segment"])
+        self.assertEqual(workspace.response_metadata.response_schema_version, "workspace.summary.v1")
+        self.assertEqual(workspace.response_metadata.generated_by, "mas.workspace")
+        self.assertEqual(workspace.response_metadata.provenance, "backend_computed")
+        self.assertEqual(workspace.response_metadata.input_contract_version, "case.v1")
 
     def test_stale_workspace_state_is_exposed(self):
         state = make_state("workspace-stale")
@@ -195,12 +216,22 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
 
     async def test_queue_endpoint_returns_backend_queue_rows(self):
         state = make_state("queue-api")
+        state.ingestion_contract_version = "case.v1"
+        state.ingestion_source = "api"
+        state.ingestion_external_case_id = "queue-case"
+        state.ingestion_metadata = {"team": "ops"}
         with patch("api.store.list_all", new=AsyncMock(return_value=[state])):
             rows = await api.get_project_queue()
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].project_id, state.project_id)
         self.assertIn(rows[0].project_status, {"safe_to_proceed", "stale", "blocked", "review_required", "completed"})
+        self.assertEqual(rows[0].input_contract.contract_version, "case.v1")
+        self.assertEqual(rows[0].input_contract.source, "api")
+        self.assertEqual(rows[0].input_contract.external_case_id, "queue-case")
+        self.assertEqual(rows[0].input_contract.metadata_keys, ["team"])
+        self.assertEqual(rows[0].response_metadata.response_schema_version, "workspace.queue_item.v1")
+        self.assertEqual(rows[0].response_metadata.input_contract_version, "case.v1")
 
     async def test_workspace_endpoint_returns_authoritative_summary(self):
         state = make_state("workspace-api")
@@ -227,3 +258,125 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(summary.decision_object_health)
         self.assertTrue(summary.imported_evidence_pending_analysis)
         self.assertIsNotNone(summary.clarification_summary)
+
+    async def test_create_project_accepts_legacy_ingestion_payload(self):
+        save = AsyncMock()
+        with patch("api.store.save", new=save), patch("decision_events.append", new=AsyncMock()):
+            response = await api.create_project(
+                {
+                    "name": "Legacy intake",
+                    "brief": "Decide whether to launch the pilot.",
+                    "data": "Existing customer interview notes.",
+                }
+            )
+
+        saved_state = save.await_args.args[0]
+        self.assertEqual(response.name, "Legacy intake")
+        self.assertEqual(saved_state.project_name, "Legacy intake")
+        self.assertEqual(saved_state.brief, "Decide whether to launch the pilot.")
+        self.assertEqual(saved_state.data, "Existing customer interview notes.")
+        self.assertEqual(saved_state.ingestion_contract_version, "legacy.v1")
+        self.assertEqual(saved_state.ingestion_source, "operator")
+        self.assertEqual(saved_state.ingestion_external_case_id, "")
+        self.assertEqual(saved_state.ingestion_metadata, {})
+
+    async def test_create_project_accepts_case_v1_ingestion_payload(self):
+        save = AsyncMock()
+        payload = {
+            "contract_version": "case.v1",
+            "name": "Case intake",
+            "brief": "Decide whether to expand onboarding automation.",
+            "data": "Activation is 41% for the last cohort.",
+            "source": "crm",
+            "external_case_id": "case-123",
+            "metadata": {"segment": "midmarket", "priority": "high"},
+        }
+
+        with patch("api.store.save", new=save), patch("decision_events.append", new=AsyncMock()):
+            response = await api.create_project(payload)
+
+        saved_state = save.await_args.args[0]
+        self.assertEqual(response.name, "Case intake")
+        self.assertEqual(saved_state.project_name, "Case intake")
+        self.assertEqual(saved_state.brief, "Decide whether to expand onboarding automation.")
+        self.assertEqual(saved_state.data, "Activation is 41% for the last cohort.")
+        self.assertEqual(saved_state.ingestion_contract_version, "case.v1")
+        self.assertEqual(saved_state.ingestion_source, "crm")
+        self.assertEqual(saved_state.ingestion_external_case_id, "case-123")
+        self.assertEqual(saved_state.ingestion_metadata, {"segment": "midmarket", "priority": "high"})
+
+    async def test_create_project_rejects_mixed_legacy_and_case_payload(self):
+        with self.assertRaises(api.HTTPException) as ctx:
+            await api.create_project(
+                {
+                    "name": "Conflicting legacy name",
+                    "case": {
+                        "contract_version": "case.v1",
+                        "name": "Case intake",
+                        "brief": "Decide whether to expand onboarding automation.",
+                    },
+                }
+            )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("cannot mix legacy fields", ctx.exception.detail)
+
+    async def test_project_state_has_backward_compatible_ingestion_defaults(self):
+        state = ProjectState(project_id="defaults", project_name="Defaults", brief="Brief")
+
+        self.assertEqual(state.ingestion_contract_version, "legacy.v1")
+        self.assertEqual(state.ingestion_source, "operator")
+        self.assertEqual(state.ingestion_external_case_id, "")
+        self.assertEqual(state.ingestion_metadata, {})
+
+    async def test_old_project_state_payload_loads_with_ingestion_defaults(self):
+        state = ProjectState.model_validate(
+            {
+                "project_id": "old-payload",
+                "project_name": "Old payload",
+                "brief": "Stored before ingestion metadata existed.",
+                "data": "Legacy supporting data.",
+            }
+        )
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(state.ingestion_contract_version, "legacy.v1")
+        self.assertEqual(state.ingestion_source, "operator")
+        self.assertEqual(state.ingestion_external_case_id, "")
+        self.assertEqual(state.ingestion_metadata, {})
+        self.assertEqual(workspace.input_contract.contract_version, "legacy.v1")
+        self.assertEqual(workspace.input_contract.source, "operator")
+        self.assertEqual(workspace.input_contract.external_case_id, "")
+        self.assertEqual(workspace.input_contract.metadata_keys, [])
+
+
+class TestRequestIdMiddleware(unittest.TestCase):
+    def test_request_id_middleware_echoes_safe_supplied_value(self):
+        client = TestClient(api.app)
+        try:
+            response = client.get(
+                "/missing",
+                headers={"X-Request-ID": "req_123-ABC.456:trace"},
+            )
+        finally:
+            client.close()
+
+        self.assertEqual(response.headers["X-Request-ID"], "req_123-ABC.456:trace")
+        self.assertNotIn("req_123-ABC.456:trace", response.text)
+
+    def test_request_id_middleware_generates_uuid_when_absent_or_unsafe(self):
+        client = TestClient(api.app)
+        try:
+            absent_response = client.get("/missing")
+            unsafe_response = client.get("/missing", headers={"X-Request-ID": "bad request id"})
+        finally:
+            client.close()
+
+        absent_request_id = absent_response.headers["X-Request-ID"]
+        unsafe_request_id = unsafe_response.headers["X-Request-ID"]
+        uuid.UUID(absent_request_id)
+        uuid.UUID(unsafe_request_id)
+        self.assertNotEqual(unsafe_request_id, "bad request id")
+        self.assertNotIn(absent_request_id, absent_response.text)
+        self.assertNotIn(unsafe_request_id, unsafe_response.text)

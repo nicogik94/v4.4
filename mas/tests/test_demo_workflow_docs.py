@@ -84,6 +84,33 @@ def test_start_here_has_exactly_one_short_demo_workflow_pointer():
     assert text.count("For a v5 runtime foundation demo workflow") == 1
 
 
+def test_ingestion_contract_doc_covers_contract_and_caveats():
+    text = " ".join(_read(DOCS_ROOT / "v5-INGESTION-CONTRACT.md").lower().split())
+
+    assert "case.v1" in text
+    assert "legacy compatibility" in text
+    assert "conflict rejection" in text
+    assert "x-request-id" in text
+    assert "run_id" in text
+    assert "no api authentication" in text
+    assert "no tenancy" in text
+    assert "no public deployment hardening" in text
+    assert "does not change prompts" in text
+    assert "report semantics" in text
+    assert "queue/runtime architecture" in text
+    assert "export_schema_version" in text
+
+
+def test_ingestion_contract_has_short_references_from_entry_docs():
+    start_here = _read(REPO_ROOT / "START_HERE.md")
+    context_brief = _read(DOCS_ROOT / "v4-ai-context-brief.md")
+    runtime_smoke = _read(DOCS_ROOT / "local-runtime-smoke.md")
+
+    assert start_here.count("docs/v5-INGESTION-CONTRACT.md") == 1
+    assert context_brief.count("docs/v5-INGESTION-CONTRACT.md") == 1
+    assert runtime_smoke.count("docs/v5-INGESTION-CONTRACT.md") == 1
+
+
 def test_demo_checklist_includes_artifact_and_compose_exclusions():
     text = _read(DOCS_ROOT / "v5-DEMO-READINESS-CHECKLIST.md").lower()
 
