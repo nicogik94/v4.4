@@ -138,6 +138,48 @@ def test_renderers_use_deterministic_client_visible_serialization(tmp_path):
     assert "'=HYPERLINK(\"http://bad\")" in values
 
 
+def test_renderers_do_not_expose_operator_archive_keys_or_paths(tmp_path):
+    state = fake_state()
+    operator_diagnostic_payload = {
+        "Constraint adherence warning": "",
+        "Telemetry privacy note": "",
+        "policy_audit_log": [
+            {
+                "event_type": "policy_gate_blocked",
+                "raw_provider_payload": {"token": "token=provider-secret"},
+                "raw_prompt": "api_key=sk-client-secret",
+                "project_state.json": r"C:\Users\nicoc\private\project_state.json",
+                "runtime_preflight_metadata": {"upload_store": r"C:\Users\nicoc\upload_store"},
+            }
+        ],
+    }
+    state["execution_plan"][0]["evidence"] = [operator_diagnostic_payload]
+    state["critical_assumptions"][0]["evidence"] = [operator_diagnostic_payload]
+    state["review"]["reentry_triggers"].append(operator_diagnostic_payload)
+    package = build_delivery_package(state)
+
+    docx_path = render_board_memo_docx(package, tmp_path / "memo.docx")
+    xlsx_path = render_execution_tracker_xlsx(package, tmp_path / "tracker.xlsx")
+
+    combined = _docx_text(docx_path) + "\n" + "\n".join(str(value) for value in _xlsx_values(xlsx_path))
+    for forbidden in (
+        "Constraint adherence warning",
+        "Telemetry privacy note",
+        "policy_audit_log",
+        "raw_provider_payload",
+        "raw_prompt",
+        "project_state.json",
+        "runtime_preflight_metadata",
+        "provider-secret",
+        "sk-client-secret",
+        r"C:\Users",
+        "upload_store",
+    ):
+        assert forbidden not in combined
+    assert "credential=[redacted]" in combined
+    assert "redacted local path" in combined
+
+
 def test_xlsx_preserves_numeric_kpi_threshold_cells(tmp_path):
     package = build_delivery_package(fake_state())
     path = render_execution_tracker_xlsx(package, tmp_path / "tracker.xlsx")

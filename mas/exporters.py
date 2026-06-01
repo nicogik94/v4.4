@@ -656,7 +656,8 @@ def _apply_pricing_placeholder_cleanup(markdown: str, state: ProjectState) -> st
 
 
 def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> str:
-    value = _drop_client_operator_only_locator_lines(str(markdown or ""))
+    value = _drop_client_operator_diagnostic_lines(str(markdown or ""))
+    value = _drop_client_operator_only_locator_lines(value)
     value = _fix_client_generated_duplicate_words(value)
     value = _remove_empty_client_citation_marker_columns(value)
     value = _strip_client_citation_placeholder_noise(value)
@@ -670,6 +671,7 @@ def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> st
     value = _rename_client_citation_table_headers(value)
     value = _replace_client_threshold_placeholders(value, state)
     value = _polish_client_report_citation_rendering(value)
+    value = _drop_client_operator_diagnostic_lines(value)
     return _collapse_markdown_blank_lines(value)
 
 
@@ -807,6 +809,26 @@ def _drop_client_operator_only_locator_lines(markdown: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
+
+
+def _drop_client_operator_diagnostic_lines(markdown: str) -> str:
+    return "\n".join(
+        line
+        for line in str(markdown or "").splitlines()
+        if not _is_client_operator_diagnostic_line(line)
+    )
+
+
+def _is_client_operator_diagnostic_line(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:constraint adherence warning|telemetry privacy note|policy_audit_log|"
+            r"raw_provider_payload|raw_prompt|raw\s+prompt|runtime\s*/\s*preflight\s+metadata|"
+            r"runtime\s+metadata|preflight\s+metadata)\b|project_state\s*\.\s*json",
+            str(line or ""),
+            flags=re.I,
+        )
+    )
 
 
 def _strip_client_citation_placeholder_noise(markdown: str) -> str:
@@ -3112,6 +3134,8 @@ def _client_clarifications_markdown(state: ProjectState) -> str:
     questions = []
     for cycle in state.clarification_cycles or []:
         for question in cycle.questions or []:
+            if not _clarification_question_client_visible(question):
+                continue
             status = _enum_value(question.status)
             if status in {"open", "unavailable"}:
                 questions.append([
@@ -3123,6 +3147,47 @@ def _client_clarifications_markdown(state: ProjectState) -> str:
     if not questions:
         return ""
     return _markdown_table([["Open question", "Why it matters", "Affected phase", "Status"], *questions])
+
+
+def _clarification_question_client_visible(question: Any) -> bool:
+    if _client_visible_flag_is_false(getattr(question, "client_visible", None)):
+        return False
+
+    metadata = getattr(question, "metadata", None)
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            normalized_key = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+            if normalized_key == "client_visible" and _client_visible_flag_is_false(value):
+                return False
+            if normalized_key in {"visibility", "audience", "audience_scope", "classification", "sensitivity", "access", "scope"}:
+                if _client_restricted_metadata_value(value):
+                    return False
+
+    for attr in ("visibility", "audience", "audience_scope", "classification", "sensitivity", "access", "scope"):
+        if _client_restricted_metadata_value(getattr(question, attr, None)):
+            return False
+    return True
+
+
+def _client_visible_flag_is_false(value: Any) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "no", "0", "hidden"}
+    return False
+
+
+def _client_restricted_metadata_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return any(_client_restricted_metadata_value(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_client_restricted_metadata_value(item) for item in value)
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
+    parts = {part for part in normalized.split("_") if part}
+    restricted_values = {"restricted", "operator", "internal", "sensitive", "confidential"}
+    return normalized in {"operator_only", "operator_internal"} or bool(parts & restricted_values)
 
 
 def _operator_clarifications_markdown(state: ProjectState) -> str:
