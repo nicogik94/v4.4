@@ -669,6 +669,7 @@ def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> st
     value = _strip_client_citation_placeholder_noise(value)
     value = _remove_standalone_client_citation_rows(value)
     value = _rename_client_citation_table_headers(value)
+    value = _clean_client_orphan_markdown_table_rows(value)
     value = _replace_client_threshold_placeholders(value, state)
     value = _polish_client_report_citation_rendering(value)
     value = _drop_client_operator_diagnostic_lines(value)
@@ -2951,6 +2952,44 @@ def _clean_client_citation_table_block(block: list[str]) -> list[str]:
         if row_index > 1 and not any(cell.strip() for cell in kept):
             continue
         cleaned.append(_format_markdown_table_row(kept))
+    return cleaned
+
+
+def _clean_client_orphan_markdown_table_rows(markdown: str) -> str:
+    source_lines = str(markdown or "").splitlines()
+    output: list[str] = []
+    index = 0
+    in_code_block = False
+    while index < len(source_lines):
+        line = source_lines[index]
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            output.append(line)
+            index += 1
+            continue
+        if in_code_block or not _looks_like_markdown_table_line(line):
+            output.append(line)
+            index += 1
+            continue
+        block: list[str] = []
+        while index < len(source_lines) and _looks_like_markdown_table_line(source_lines[index]):
+            block.append(source_lines[index])
+            index += 1
+        output.extend(_clean_client_orphan_markdown_table_block(block))
+    return "\n".join(output)
+
+
+def _clean_client_orphan_markdown_table_block(block: list[str]) -> list[str]:
+    rows = [_split_markdown_table_row(line) for line in block]
+    if len(rows) >= 2 and rows[0] and not _is_client_markdown_separator_cells(rows[0]) and _is_client_markdown_separator_cells(rows[1]):
+        return block
+    cleaned: list[str] = []
+    for row in rows:
+        if not row or _is_client_markdown_separator_cells(row):
+            continue
+        cells = [cell.strip() for cell in row if cell.strip()]
+        if cells:
+            cleaned.append("- " + "; ".join(cells))
     return cleaned
 
 
