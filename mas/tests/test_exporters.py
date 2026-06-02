@@ -500,6 +500,86 @@ Run Sprint 0 first.
     )
 
 
+def make_client_language_polish_state(project_id: str = "client-language-polish"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Automation ROI client language polish",
+        brief="Decide whether the Automation ROI pilot is ready for client rollout.",
+        report="""# Executive Summary
+Run Sprint 0 first.
+
+# Evidence Used
+| Evidence | What it suggests | Caveat |
+|---|---|---|
+| Tool budget and capacity assumptions | Why it is needed supports the tool and staff time budget is approved and available | caveat: budget assumptions need validation |
+| Control readiness note | Why it is needed indicate that minimum controls are in place before go-live | caveat: control owner must confirm |
+| Operations Lead note | Operations Lead supports output is trustworthy | caveat: sampled workflow only |
+
+# Monitoring and Kill Criteria
+Track output trust metric weekly. Stop if spend is above 20% over approved budget.
+Escalate hypothesis 5 if queue lag persists. Watch hypothesis 9 momentum risk.
+If architecture hypothesis fails, pause rollout.
+""",
+        knowledge_layer=KnowledgeLayerState(
+            uploaded_files=[
+                UploadedFileManifest(
+                    file_id="file-1",
+                    filename="automation-roi-notes.md",
+                    parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                )
+            ]
+        ),
+        monitor=MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                daily=[MonitorScheduleItem(metric="output trust metric", owner="Operations Lead", source="pilot dashboard")]
+            ),
+            canaries=[
+                MonitorCanary(
+                    signal="automation architecture assumption drift",
+                    direction="down",
+                    window="7d",
+                    meaning="momentum assumption check",
+                )
+            ],
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="S5",
+                    trip="more than 20% over approved budget",
+                    reset="two stable weeks",
+                )
+            ],
+        ),
+    )
+
+
+def _assert_client_language_polished(testcase: unittest.TestCase, compact: str) -> None:
+    lower = compact.lower()
+    for forbidden in (
+        "why it is needed supports",
+        "why it is needed indicate",
+        "supports output is trustworthy",
+        "hypothesis 5",
+        "hypothesis 9",
+        "architecture hypothesis",
+        "above 20% over",
+    ):
+        testcase.assertNotIn(forbidden, lower)
+    for preserved in (
+        CLIENT_DELIVERY_VALIDATION_BANNER,
+        "Evidence maturity: Partial evidence",
+        "output trust metric",
+        "more than 20% over approved budget",
+        "caveat: budget assumptions need validation",
+    ):
+        testcase.assertIn(preserved, compact)
+    testcase.assertIn("This helps indicate that the tool and staff time budget is approved and available", compact)
+    testcase.assertIn("This indicates that minimum controls are in place before go-live", compact)
+    testcase.assertIn("Operations Lead indicates the output is trustworthy", compact)
+    testcase.assertIn("the technical feasibility check", compact)
+    testcase.assertIn("the momentum assumption", compact)
+    testcase.assertIn("the automation architecture assumption", compact)
+
+
 def make_client_value_preservation_state(project_id: str = "client-value-preservation"):
     return ProjectState(
         project_id=project_id,
@@ -1587,6 +1667,16 @@ This line used to render with a stuck heading.
         self.assertIn("This helps determine whether telemetry is usable.", compact)
         self.assertIn("This helps determine whether to continue Sprint 0.", compact)
 
+    def test_report_profile_pdf_polishes_client_language_artifacts(self):
+        state = make_client_language_polish_state("report-client-language-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "report", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        _assert_client_language_polished(self, compact)
+
     def test_report_profile_pdf_filters_orphan_evidence_table_separator_artifacts(self):
         state = make_orphan_evidence_separator_state("report-orphan-evidence-separator")
 
@@ -1636,6 +1726,17 @@ This line used to render with a stuck heading.
         self.assertIn("This helps identify which owner approves scale-up.", compact)
         self.assertIn("This helps determine whether telemetry is usable.", compact)
         self.assertIn("This helps determine whether to continue Sprint 0.", compact)
+
+    def test_client_dossier_profile_pdf_polishes_client_language_artifacts(self):
+        state = make_client_language_polish_state("dossier-client-language-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn("What evidence was used", compact)
+        _assert_client_language_polished(self, compact)
 
     def test_client_dossier_profile_pdf_filters_orphan_evidence_table_separator_artifacts(self):
         state = make_orphan_evidence_separator_state("client-dossier-orphan-evidence-separator")

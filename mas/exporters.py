@@ -723,6 +723,27 @@ def _polish_client_report_citation_rendering(markdown: str) -> str:
     value = re.sub(r"\b(?:Why It Is Needed|Why it is needed|Upside)\s+supports\b", "This supports", value, flags=re.I)
     value = re.sub(r"\bsupports\s+whether\b", "helps determine whether", value, flags=re.I)
     value = re.sub(r"\bsupports\s+which\b", "helps identify which", value, flags=re.I)
+    return _polish_client_language_artifacts(value)
+
+
+def _polish_client_language_artifacts(markdown: str) -> str:
+    value = str(markdown or "")
+    value = re.sub(r"\bWhy it is needed\s+indicates?\s+that\b", "This indicates that", value, flags=re.I)
+    value = re.sub(
+        r"\bThis supports\s+(the\s+[^.;,\n]+?)\s+(is|are|was|were|has|have|can|will|should|must)\b",
+        lambda match: f"This helps indicate that {match.group(1)} {match.group(2)}",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\b([A-Z][A-Za-z&/ -]{1,80})\s+supports\s+output\s+is\s+trustworthy\b",
+        r"\1 indicates the output is trustworthy",
+        value,
+    )
+    value = re.sub(r"\babove\s+(\d+(?:\.\d+)?\s*%)\s+over\b", r"more than \1 over", value, flags=re.I)
+    value = re.sub(r"\barchitecture hypothesis\b", "the automation architecture assumption", value, flags=re.I)
+    value = re.sub(r"\bhypothesis\s+5\b", "the technical feasibility check", value, flags=re.I)
+    value = re.sub(r"\bhypothesis\s+9\b", "the momentum assumption", value, flags=re.I)
     return value
 
 
