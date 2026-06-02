@@ -2140,6 +2140,13 @@ def operator_sqi_summary(state: ProjectState) -> str:
         rows.append([f"Dimension: {dimension.name}", f"{_fmt_value(dimension.score)} ({dimension.grade}) - {dimension.finding}"])
     if state.sqi.improvement_actions:
         rows.append(["Improvement actions", "; ".join(state.sqi.improvement_actions)])
+    strategy_metrics = getattr(getattr(state, "strategy", None), "success_metrics", None) or []
+    if not strategy_metrics and monitor_has_signals(getattr(state, "monitor", None)):
+        monitor_lines = monitor_success_metric_lines(state.monitor)
+        metrics_note = "Strategy-level metrics not populated; monitoring metrics available separately."
+        if monitor_lines:
+            metrics_note += " " + "; ".join(monitor_lines)
+        rows.append(["Metrics source", metrics_note])
     coverage = assess_hypothesis_variable_coverage(state)
     if coverage.missing_critical_categories:
         rows.append([
@@ -3661,9 +3668,7 @@ def _consume_table(lines: list[str], start: int) -> tuple[list[list[str]], int] 
             break
         rows.append(_split_table_row(line))
         idx += 1
-    width = max(len(row) for row in rows)
-    rows = [row + [""] * (width - len(row)) for row in rows]
-    return rows, idx
+    return _normalize_render_table_rows(rows), idx
 
 
 def _normalize_markdown_line(line: str) -> str:
@@ -3681,7 +3686,27 @@ def _is_markdown_divider(line: str) -> bool:
 
 def _is_markdown_separator_row(line: str) -> bool:
     cells = _split_table_row(line)
-    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+    return _is_markdown_separator_cells(cells)
+
+
+def _is_markdown_separator_cells(cells: list[str]) -> bool:
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", str(cell).strip().replace(" ", "")) for cell in cells)
+
+
+def _normalize_render_table_rows(rows: list[list[str]]) -> list[list[str]]:
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    header = rows[0] + [""] * (width - len(rows[0]))
+    normalized = [header]
+    for row in rows[1:]:
+        if _is_markdown_separator_cells(row):
+            continue
+        padded = row + [""] * (width - len(row))
+        if not any(str(cell).strip() for cell in padded):
+            continue
+        normalized.append(padded)
+    return normalized
 
 
 def _split_table_row(line: str) -> list[str]:
@@ -3690,6 +3715,7 @@ def _split_table_row(line: str) -> list[str]:
 
 
 def _add_docx_table(document: Document, rows: list[list[str]]) -> None:
+    rows = _normalize_render_table_rows(rows)
     if not rows:
         return
     table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
@@ -3712,6 +3738,9 @@ def _pdf_table_flowables(
     *,
     client_visible: bool = False,
 ) -> list[Any]:
+    rows = _normalize_render_table_rows(rows)
+    if not rows:
+        return []
     column_count = max(len(row) for row in rows) if rows else 1
     if column_count > 4:
         return _pdf_wide_table_cards(rows, body_style, available_width, client_visible=client_visible)
