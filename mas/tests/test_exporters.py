@@ -484,6 +484,22 @@ def make_runtime_pdf_polish_state_with_table_artifacts(project_id: str = "runtim
     return state
 
 
+def make_orphan_evidence_separator_state(project_id: str = "orphan-evidence-separator"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Automation ROI orphan evidence separator",
+        brief="Decide whether the automation ROI pilot is ready to scale.",
+        report="""# Executive Summary
+Run Sprint 0 first.
+
+# Evidence Used
+|---|---|---|---|---|
+| Tool budget and capacity assumptions | evidence strength: directional | caveat: needs validation | Scale decision | [Hypothesis] |
+| Queue timing notes | evidence strength: partial | caveat: sampled logs only | Staffing decision | [Inference] |
+""",
+    )
+
+
 def make_client_value_preservation_state(project_id: str = "client-value-preservation"):
     return ProjectState(
         project_id=project_id,
@@ -1571,6 +1587,24 @@ This line used to render with a stuck heading.
         self.assertIn("This helps determine whether telemetry is usable.", compact)
         self.assertIn("This helps determine whether to continue Sprint 0.", compact)
 
+    def test_report_profile_pdf_filters_orphan_evidence_table_separator_artifacts(self):
+        state = make_orphan_evidence_separator_state("report-orphan-evidence-separator")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "report", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("Tool budget and capacity assumptions", compact)
+        self.assertIn("evidence strength: directional", compact)
+        self.assertIn("caveat: needs validation", compact)
+        self.assertIn("[Hypothesis]", compact)
+        self.assertNotIn("|---", compact)
+        self.assertNotIn("| Tool budget and capacity assumptions", compact)
+        self.assertNotIn("Tool budget and capacity assumptions | evidence strength", compact)
+
     def test_client_dossier_profile_pdf_applies_runtime_citation_polish(self):
         state = make_runtime_pdf_polish_state("runtime-client-pdf-polish")
 
@@ -1602,6 +1636,25 @@ This line used to render with a stuck heading.
         self.assertIn("This helps identify which owner approves scale-up.", compact)
         self.assertIn("This helps determine whether telemetry is usable.", compact)
         self.assertIn("This helps determine whether to continue Sprint 0.", compact)
+
+    def test_client_dossier_profile_pdf_filters_orphan_evidence_table_separator_artifacts(self):
+        state = make_orphan_evidence_separator_state("client-dossier-orphan-evidence-separator")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("What evidence was used", compact)
+        self.assertIn("Tool budget and capacity assumptions", compact)
+        self.assertIn("evidence strength: directional", compact)
+        self.assertIn("caveat: needs validation", compact)
+        self.assertIn("[Hypothesis]", compact)
+        self.assertNotIn("|---", compact)
+        self.assertNotIn("| Tool budget and capacity assumptions", compact)
+        self.assertNotIn("Tool budget and capacity assumptions | evidence strength", compact)
 
     def test_client_dossier_profile_pdf_filters_evidence_table_separator_artifacts(self):
         state = make_runtime_pdf_polish_state_with_table_artifacts("automation-roi-pdf-table-artifacts")
