@@ -471,6 +471,19 @@ Raw trace knowledge_runtime and evidence_runtime with source_ref=upload:file-9:n
     )
 
 
+def make_runtime_pdf_polish_state_with_table_artifacts(project_id: str = "runtime-pdf-polish-artifacts"):
+    state = make_runtime_pdf_polish_state(project_id)
+    state.project_name = "Automation ROI export polish"
+    state.brief = "Decide whether the automation ROI pilot is ready to scale."
+    state.report = state.report.replace(
+        "| Activation note | What It Suggests supports the scale recommendation. |",
+        "|---|---|---|---|---|\n"
+        "| | | | | |\n"
+        "| Activation note | What It Suggests supports the scale recommendation. |",
+    )
+    return state
+
+
 def make_client_value_preservation_state(project_id: str = "client-value-preservation"):
     return ProjectState(
         project_id=project_id,
@@ -1590,6 +1603,44 @@ This line used to render with a stuck heading.
         self.assertIn("This helps determine whether telemetry is usable.", compact)
         self.assertIn("This helps determine whether to continue Sprint 0.", compact)
 
+    def test_client_dossier_profile_pdf_filters_evidence_table_separator_artifacts(self):
+        state = make_runtime_pdf_polish_state_with_table_artifacts("automation-roi-pdf-table-artifacts")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("Evidence", compact)
+        self.assertIn("What It Suggests", compact)
+        self.assertIn("Why It Is Needed", compact)
+        self.assertIn("Decision It Validates", compact)
+        self.assertIn("Activation note", compact)
+        self.assertIn("Measurement note", compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
+        self.assertNotIn("|---|---|---|---|---|", compact)
+        self.assertNotRegex(compact, r"(?:^|\s)-{3}(?:\s+-{3}){2,}(?:\s|$)")
+
+    def test_client_dossier_profile_docx_filters_evidence_table_separator_artifacts(self):
+        state = make_runtime_pdf_polish_state_with_table_artifacts("automation-roi-docx-table-artifacts")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "docx")
+        text = _docx_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("Activation note", compact)
+        self.assertIn("Measurement note", compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
+        self.assertNotIn("|---|---|---|---|---|", compact)
+        self.assertNotIn("---", {line.strip() for line in text.splitlines()})
+
     def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
         state = make_export_state("operator-monitor-note")
 
@@ -1878,6 +1929,12 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         operator_markdown = build_operator_dossier_markdown(state)
         client_markdown = build_client_dossier_markdown(state)
 
+        self.assertIn("SQI / quality review", operator_markdown)
+        self.assertIn("Metrics source", operator_markdown)
+        self.assertIn("Strategy-level metrics not populated; monitoring metrics available separately.", operator_markdown)
+        self.assertIn("daily monitor: Pilot activation", operator_markdown)
+        self.assertIn("canary: Regeneration failure rate", operator_markdown)
+        self.assertIn("circuit breaker: failure rate more than 15%", operator_markdown)
         self.assertIn("Success metrics are captured in the monitoring plan below.", operator_markdown)
         self.assertIn("Regeneration failure rate", operator_markdown)
         self.assertIn("Pilot activation", client_markdown)
