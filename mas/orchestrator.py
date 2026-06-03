@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from datetime import date, datetime
+from pathlib import Path
 from typing import Awaitable, Callable, Literal
 
 from langgraph.graph import StateGraph, END
@@ -36,6 +37,11 @@ from tools.scoring import (
     check_gate, evaluate_reentry_triggers, invalidate_downstream,
     compute_det_scores, compute_brier_score, summarize_phase_output
 )
+from workflow_templates import (
+    DEFAULT_PROJECT_TYPE,
+    TECHNOLOGY_READINESS_PHASE_SEQUENCE,
+    get_workflow_phase_sequence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,10 @@ ARCHITECTURE: 5-layer VSM (Operations>Coordination via Decision Dossier>Control/
 CONVERGENCE: BF>10, H_norm<0.15, D_KL<0.01, EVSI/ENBS>0, OBF sequential, Futility<15%, Real-options, Thompson BETA.INV, Graduation>0.95/Drop<0.05, Brier, ECE, Portfolio ρ<0.5, MECE 5 tests.
 
 Be specific, quantitative, actionable."""
+
+TECHNOLOGY_READINESS_SYSTEM_PREAMBLE = """You are executing the Technology Readiness & Transfer Audit.
+
+This is an operator-reviewed, evidence-backed assessment. Do not claim legal patentability, TRL certification, guaranteed commercial transfer, or autonomous decision-making. Separate facts, assumptions, and missing evidence. Use preliminary language when evidence is incomplete."""
 
 REPORT_CITATION_DISCIPLINE = """MANDATORY REPORT CITATION DISCIPLINE:
 - Final report project-evidence citations must use concrete markers copied from PROJECT EVIDENCE LOCATORS.
@@ -225,6 +235,9 @@ def build_system_prompt(phase: str, json_mode: bool = True, calibration_hint: st
     Populated from priors.get_prior_hint() at run time. Empty string → identical
     to v4.1 behavior. Non-empty → the LLM sees historical calibration context.
     """
+    if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        mode = "\n\nReturn ONLY valid JSON, no markdown fences, no preamble." if json_mode else "\n\nWrite structured professional output. Markdown."
+        return f"{TECHNOLOGY_READINESS_SYSTEM_PREAMBLE}{mode}{calibration_hint}"
     frameworks = FRAMEWORKS_BY_PHASE.get(phase, [])
     fw_text = "\n".join(f"  {fw}" for fw in frameworks)
     mode = "\n\nReturn ONLY valid JSON, no markdown fences, no preamble." if json_mode else "\n\nWrite structured professional output. Markdown."
@@ -576,6 +589,91 @@ TIMER: {timer_text}
 PROJECT: {state.brief[:400]}"""
 
 
+_TECHNOLOGY_READINESS_PROMPT_DIR = Path(__file__).parent / "prompts" / "technology_readiness"
+
+
+def _read_technology_readiness_prompt(phase: str) -> str:
+    return (_TECHNOLOGY_READINESS_PROMPT_DIR / f"{phase}.md").read_text(encoding="utf-8")
+
+
+def _technology_readiness_context(state: ProjectState, phase: str) -> str:
+    sequence = get_workflow_phase_sequence(getattr(state, "project_type", DEFAULT_PROJECT_TYPE))
+    previous = []
+    if phase in sequence:
+        for prior_phase in sequence[: sequence.index(phase)]:
+            summary = state.phase_summaries.get(prior_phase, "")
+            if summary:
+                previous.append(f"{prior_phase}: {summary[:800]}")
+            else:
+                output = getattr(state, prior_phase, None)
+                if output is not None and hasattr(output, "model_dump"):
+                    previous.append(
+                        f"{prior_phase}: "
+                        + json.dumps(output.model_dump(mode="json"), ensure_ascii=False, default=str)[:800]
+                    )
+    prior_context = "\n".join(previous) if previous else "No completed prior technology-readiness phases."
+    data = state.data[:4000] if state.data else "No supplemental project data supplied."
+    return f"""PROJECT TYPE: {getattr(state, "project_type", DEFAULT_PROJECT_TYPE)}
+PROJECT NAME: {state.project_name}
+PROJECT BRIEF:
+{state.brief[:4000]}
+
+SUPPLEMENTAL DATA:
+{data}
+
+PRIOR TECHNOLOGY READINESS CONTEXT:
+{prior_context}"""
+
+
+def build_technology_readiness_prompt(state: ProjectState, phase: str) -> str:
+    phase_prompt = _read_technology_readiness_prompt(phase)
+    return f"""{phase_prompt}
+
+ASSESSMENT CONTEXT:
+{_technology_readiness_context(state, phase)}
+
+Return the requested JSON object only."""
+
+
+def build_scope_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "scope")
+
+
+def build_scientific_inventory_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "scientific_inventory")
+
+
+def build_trl_diagnosis_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "trl_diagnosis")
+
+
+def build_research_industry_alignment_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "research_industry_alignment")
+
+
+def build_ip_protection_axis_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "ip_protection_axis")
+
+
+def build_next_level_recommendations_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "next_level_recommendations")
+
+
+def build_technical_validation_plan_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "technical_validation_plan")
+
+
+def build_industrial_transfer_plan_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "industrial_transfer_plan")
+
+
+def build_readiness_roadmap_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "readiness_roadmap")
+
+
+def build_executive_summary_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "executive_summary")
+
 def _report_quality_prompt_block(context) -> str:
     lines = [
         f"- Decision domain: {context.decision_domain}.",
@@ -762,12 +860,26 @@ PROMPT_BUILDERS = {
     "monitor": build_monitor_prompt,
     "sqi": build_sqi_prompt,
     "report": build_report_prompt,
+    "scope": build_scope_prompt,
+    "scientific_inventory": build_scientific_inventory_prompt,
+    "trl_diagnosis": build_trl_diagnosis_prompt,
+    "research_industry_alignment": build_research_industry_alignment_prompt,
+    "ip_protection_axis": build_ip_protection_axis_prompt,
+    "next_level_recommendations": build_next_level_recommendations_prompt,
+    "technical_validation_plan": build_technical_validation_plan_prompt,
+    "industrial_transfer_plan": build_industrial_transfer_plan_prompt,
+    "readiness_roadmap": build_readiness_roadmap_prompt,
+    "executive_summary": build_executive_summary_prompt,
 }
 
 WORKFLOW_PHASE_SEQUENCE = (
     "classify", "hypotheses", "gauntlet", "audit",
     "strategy", "sqi", "monitor", "report",
 )
+
+
+def workflow_phase_sequence_for_state(state: ProjectState) -> tuple[str, ...]:
+    return get_workflow_phase_sequence(getattr(state, "project_type", DEFAULT_PROJECT_TYPE))
 
 UNFINISHED_PHASE_STATUSES = {
     PhaseStatus.PENDING, PhaseStatus.RUNNING, PhaseStatus.FAILED, PhaseStatus.STALE
@@ -797,7 +909,7 @@ def _phase_has_output(state: ProjectState, phase: str) -> bool:
 
 
 def get_first_unfinished_phase(state: ProjectState) -> str | None:
-    for phase in WORKFLOW_PHASE_SEQUENCE:
+    for phase in workflow_phase_sequence_for_state(state):
         status = _normalized_phase_status(state.phase_status.get(phase, PhaseStatus.PENDING))
         if status in UNFINISHED_PHASE_STATUSES:
             return phase
@@ -820,6 +932,8 @@ def _parsed_json_matches_phase(phase: str, parsed) -> bool:
         return isinstance(parsed, list) or (
             isinstance(parsed, dict) and isinstance(parsed.get("hypotheses"), list)
         )
+    if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        return isinstance(parsed, dict)
     if phase in ("gauntlet", "audit", "strategy", "monitor", "sqi"):
         return isinstance(parsed, dict)
     return True
@@ -1056,6 +1170,14 @@ def _phase_json_retry_instruction(phase: str) -> str:
             "meaning. chaos_drills items must contain what, when, measure. "
             "commitment_score must be numeric 0-100. No markdown fences, bullets, "
             "or prose before/after. Start with { and end with }."
+        )
+    if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        return (
+            "Return ONLY one JSON object matching the required Technology "
+            "Readiness phase schema from the prompt. Do not return an array, "
+            "markdown, legal/certification claims, or prose outside JSON. "
+            "Use empty arrays, explicit unknown strings, and preliminary language "
+            "when evidence is missing. Start with { and end with }."
         )
     return "Return ONLY a single JSON object. Do NOT return an array or bullet list."
 
@@ -1309,7 +1431,10 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
         if parsed is not None and _parsed_json_matches_phase(phase, parsed):
             _store_phase_output(state, phase, parsed)
-            if phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "sqi") and not _phase_has_output(state, phase):
+            if (
+                phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "sqi")
+                or phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE
+            ) and not _phase_has_output(state, phase):
                 if phase == "audit":
                     state.audit_raw = response.text
                 elif phase == "strategy":
@@ -1391,12 +1516,13 @@ async def run_workflow_sequence(
         )
         ensure_decision_objects(state, trigger=f"workflow_resume:{start_phase}")
 
-    start_index = WORKFLOW_PHASE_SEQUENCE.index(start_phase)
+    sequence = workflow_phase_sequence_for_state(state)
+    start_index = sequence.index(start_phase)
 
     if persist_state:
         await persist_state(state)
 
-    for phase in WORKFLOW_PHASE_SEQUENCE[start_index:]:
+    for phase in sequence[start_index:]:
         status = _normalized_phase_status(state.phase_status.get(phase, PhaseStatus.PENDING))
         if status == PhaseStatus.COMPLETED and _phase_has_output(state, phase):
             continue
@@ -1469,7 +1595,8 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
     """Store parsed LLM output into the appropriate state field."""
     from state import (
         ClassifyOutput, Hypothesis, GauntletOutput, AuditOutput,
-        StrategyOutput, MonitorOutput, SQIOutput
+        StrategyOutput, MonitorOutput, SQIOutput,
+        validate_technology_readiness_output,
     )
 
     try:
@@ -1527,6 +1654,10 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             state.monitor = MonitorOutput(**data)
         elif phase == "sqi":
             state.sqi = SQIOutput(**data)
+        elif phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            if not isinstance(data, dict):
+                raise ValueError(f"{phase} output must be a JSON object")
+            setattr(state, phase, validate_technology_readiness_output(phase, data))
     except Exception as e:
         preview = repr(data)
         logger.error(

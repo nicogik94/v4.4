@@ -131,6 +131,16 @@ PHASE_ACTION_MAP: dict[str, Reversibility] = {
     "sqi": Reversibility.REVERSIBLE_INTERNAL,
     "monitor": Reversibility.REVERSIBLE_INTERNAL,
     "report": Reversibility.REVERSIBLE_INTERNAL,
+    "scope": Reversibility.REVERSIBLE_INTERNAL,
+    "scientific_inventory": Reversibility.REVERSIBLE_INTERNAL,
+    "trl_diagnosis": Reversibility.REVERSIBLE_INTERNAL,
+    "research_industry_alignment": Reversibility.REVERSIBLE_INTERNAL,
+    "ip_protection_axis": Reversibility.REVERSIBLE_INTERNAL,
+    "next_level_recommendations": Reversibility.REVERSIBLE_INTERNAL,
+    "technical_validation_plan": Reversibility.REVERSIBLE_INTERNAL,
+    "industrial_transfer_plan": Reversibility.REVERSIBLE_INTERNAL,
+    "readiness_roadmap": Reversibility.REVERSIBLE_INTERNAL,
+    "executive_summary": Reversibility.REVERSIBLE_INTERNAL,
     # Sealing a project is irreversible internal — the gauntlet output cannot
     # be re-opened without operator override. Already gated in orchestrator.
     "seal_project": Reversibility.IRREVERSIBLE_INTERNAL,

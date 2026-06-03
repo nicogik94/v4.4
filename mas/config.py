@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 
+from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE
+
 APP_VERSION = "4.4.0"
 
 # ═══ LLM Provider Configuration ═══
@@ -97,6 +99,17 @@ MODEL_ROUTING: dict[str, ModelConfig] = {
         max_tokens=8000, temperature=0.3, thinking_budget=10000
     ),
 }
+for _technology_readiness_phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+    MODEL_ROUTING.setdefault(
+        _technology_readiness_phase,
+        ModelConfig(
+            provider=Provider.ANTHROPIC,
+            model="claude-sonnet-4-6",
+            max_tokens=6000,
+            temperature=0.2,
+            thinking_budget=5000,
+        ),
+    )
 
 # Fallback chain: primary → retry 3x → fallback → retry 2x → degraded
 FALLBACK_CHAIN = {
@@ -120,6 +133,18 @@ TASK_PROFILE_BY_PHASE: dict[str, str] = {
     "monitor": "monitoring_ops",
     "report": "report_synthesis",
 }
+TASK_PROFILE_BY_PHASE.update({
+    "scope": "strict_structured_output",
+    "scientific_inventory": "deep_reasoning",
+    "trl_diagnosis": "deep_reasoning",
+    "research_industry_alignment": "deep_reasoning",
+    "ip_protection_axis": "deep_reasoning",
+    "next_level_recommendations": "deep_reasoning",
+    "technical_validation_plan": "deep_reasoning",
+    "industrial_transfer_plan": "deep_reasoning",
+    "readiness_roadmap": "deep_reasoning",
+    "executive_summary": "report_synthesis",
+})
 
 # Candidate aliases are resolved by runtime/provider_gateway.py.  "phase_default"
 # always means the MODEL_ROUTING entry for the active phase, preserving the
@@ -196,6 +221,46 @@ GATE_CONFIGS: dict[str, GateConfig] = {
     "report": GateConfig(
         min_confidence=0.7,
         required_fields=[],
+    ),
+    "scope": GateConfig(
+        min_confidence=0.6,
+        required_fields=["technology_name", "assessment_boundary", "target_environment"],
+    ),
+    "scientific_inventory": GateConfig(
+        min_confidence=0.6,
+        required_fields=["scientific_basis", "evidence_items"],
+    ),
+    "trl_diagnosis": GateConfig(
+        min_confidence=0.6,
+        required_fields=["current_trl", "target_trl", "why_not_higher", "legal_or_certification_disclaimer"],
+    ),
+    "research_industry_alignment": GateConfig(
+        min_confidence=0.6,
+        required_fields=["criteria_scores", "overall_alignment_score"],
+    ),
+    "ip_protection_axis": GateConfig(
+        min_confidence=0.6,
+        required_fields=["ip_risk_notes", "specialist_review_required"],
+    ),
+    "next_level_recommendations": GateConfig(
+        min_confidence=0.6,
+        required_fields=["current_trl", "next_target_trl", "required_evidence", "advancement_criteria"],
+    ),
+    "technical_validation_plan": GateConfig(
+        min_confidence=0.6,
+        required_fields=["validation_tests", "acceptance_criteria", "evidence_to_collect"],
+    ),
+    "industrial_transfer_plan": GateConfig(
+        min_confidence=0.6,
+        required_fields=["ideal_industrial_partner", "minimum_transfer_package", "evidence_required_before_transfer"],
+    ),
+    "readiness_roadmap": GateConfig(
+        min_confidence=0.6,
+        required_fields=["roadmap_phases", "decision_gates", "go_no_go_criteria"],
+    ),
+    "executive_summary": GateConfig(
+        min_confidence=0.6,
+        required_fields=["current_trl", "readiness_verdict_code", "readiness_verdict", "operator_summary"],
     ),
 }
 

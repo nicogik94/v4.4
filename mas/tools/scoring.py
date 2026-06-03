@@ -3,6 +3,7 @@ v4 Multi-Agent System — Deterministic Tools
 Pure mathematical scoring, Bayesian calculations, convergence checks.
 Zero LLM involvement — these are the system's ground truth.
 """
+import json
 import math
 import re
 from collections import deque
@@ -12,6 +13,7 @@ from state import (
     ClassifyOutput, AuditOutput, Prediction, PhaseStatus
 )
 from config import GATE_CONFIGS, REENTRY_TRIGGERS, INVALIDATION_MAP
+from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE, get_downstream_phases
 
 
 # ═══ CONVERGENCE GATE EVALUATOR ═══
@@ -131,7 +133,10 @@ def _phase_has_material_output(state: ProjectState, phase: str) -> bool:
 
 def invalidate_downstream(state: ProjectState, changed_phase: str) -> list[str]:
     """Nullify all downstream outputs when an upstream phase changes."""
-    to_invalidate = collect_downstream_phases(changed_phase)
+    project_type = getattr(state, "project_type", "")
+    to_invalidate = get_downstream_phases(project_type, changed_phase)
+    if not to_invalidate:
+        to_invalidate = collect_downstream_phases(changed_phase)
     invalidated = []
 
     for phase in to_invalidate:
@@ -313,4 +318,15 @@ def summarize_phase_output(phase: str, state: ProjectState) -> str:
             f"watch={','.join(m.reentry_watch[:5])}"
         )
 
+    if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        output = getattr(state, phase, None)
+        if output is None:
+            return ""
+        payload = output.model_dump(mode="json") if hasattr(output, "model_dump") else output
+        return f"{phase.upper()}:" + json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )[:500]
     return ""
