@@ -11,16 +11,25 @@ from io import BytesIO
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 
 from report_quality import assess_report_quality_context, evidence_maturity_projection
 
 
 OPERATOR_TO_DEFINE = "Operator to define"
-VALIDATION_REQUIRED = "Validation required"
-EVIDENCE_SOURCE_UNAVAILABLE = "Evidence source unavailable"
+VALIDATION_REQUIRED = "To be confirmed"
+EVIDENCE_SOURCE_UNAVAILABLE = "Not supplied"
 THRESHOLD_NOT_CONFIRMED = "Threshold not yet confirmed"
-THRESHOLD_VALIDATION_PENDING = "Validate threshold before using as a change-course gate."
+THRESHOLD_VALIDATION_PENDING = "To be confirmed"
 SHEET_NAME = "Monitoring Template"
+README_SHEET_NAME = "README"
+STOP_CHANGE_SHEET_NAME = "Stop - Change Criteria"
+OODA_SHEET_NAME = "OODA Schedule"
+CIRCUIT_BREAKER_SHEET_NAME = "Circuit Breakers"
+CANARIES_SHEET_NAME = "Canaries"
+REENTRY_RISK_SHEET_NAME = "Re-entry Watch - Risks"
+REVIEW_LOG_SHEET_NAME = "Review Log"
+METADATA_SHEET_NAME = "Metadata - Evidence Maturity"
 
 CLIENT_MONITORING_TEMPLATE_HEADERS: tuple[str, ...] = (
     "Metric / signal",
@@ -96,18 +105,144 @@ def monitoring_template_xlsx_bytes(state: Any, *, audience: str) -> bytes:
     """Serialize monitoring rows as a spreadsheet-safe XLSX workbook."""
     mode = "operator" if str(audience or "").lower() == "operator" else "client"
     headers = OPERATOR_MONITORING_TEMPLATE_HEADERS if mode == "operator" else CLIENT_MONITORING_TEMPLATE_HEADERS
+    rows = build_monitoring_template_rows(state)
     workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.title = SHEET_NAME
-    worksheet.append(list(headers))
-    for row in build_monitoring_template_rows(state):
-        worksheet.append(_render_row(row, headers, audience=mode))
-    for column in worksheet.columns:
-        max_len = max(len(str(cell.value or "")) for cell in column)
-        worksheet.column_dimensions[column[0].column_letter].width = min(max(max_len + 2, 14), 42)
+    readme = workbook.active
+    readme.title = README_SHEET_NAME
+    _write_readme_sheet(readme, mode)
+    _write_tabular_sheet(
+        workbook.create_sheet(SHEET_NAME),
+        headers,
+        [_render_row(row, headers, audience=mode) for row in rows],
+    )
+    if mode == "client":
+        _write_tabular_sheet(
+            workbook.create_sheet(STOP_CHANGE_SHEET_NAME),
+            headers,
+            [_render_row(row, headers, audience=mode) for row in _stop_change_rows(rows)],
+        )
+        _write_tabular_sheet(
+            workbook.create_sheet(CANARIES_SHEET_NAME),
+            headers,
+            [_render_row(row, headers, audience=mode) for row in _rows_by_source(rows, "monitor_canary")],
+        )
+    else:
+        _write_tabular_sheet(
+            workbook.create_sheet(OODA_SHEET_NAME),
+            headers,
+            [_render_row(row, headers, audience=mode) for row in _rows_with_source_prefix(rows, "monitor_ooda_")],
+        )
+        _write_tabular_sheet(
+            workbook.create_sheet(CIRCUIT_BREAKER_SHEET_NAME),
+            headers,
+            [_render_row(row, headers, audience=mode) for row in _rows_by_source(rows, "monitor_circuit_breaker")],
+        )
+        _write_tabular_sheet(
+            workbook.create_sheet(CANARIES_SHEET_NAME),
+            headers,
+            [_render_row(row, headers, audience=mode) for row in _rows_by_source(rows, "monitor_canary")],
+        )
+        _write_tabular_sheet(
+            workbook.create_sheet(REENTRY_RISK_SHEET_NAME),
+            headers,
+            [_render_row(row, headers, audience=mode) for row in _reentry_risk_rows(rows)],
+        )
+        _write_metadata_sheet(workbook.create_sheet(METADATA_SHEET_NAME), state)
+    _write_review_log_sheet(workbook.create_sheet(REVIEW_LOG_SHEET_NAME))
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def _write_readme_sheet(worksheet: Any, audience: str) -> None:
+    worksheet.append(["Monitoring workbook"])
+    worksheet.append(["Audience", "Operator" if audience == "operator" else "Client"])
+    worksheet.append(["Human review", "Human review required before client delivery."])
+    worksheet.append(["Validation boundary", "Validate monitoring thresholds before using them as change-course gates."])
+    worksheet.append(["Source", "Rows are exported from the existing monitoring plan, strategy outputs, and Decision Gates."])
+    if audience == "operator":
+        worksheet.append(["Operator note", "Operator workbook may include trace columns for review and troubleshooting."])
+    else:
+        worksheet.append(["Client note", "Client workbook omits raw internal IDs and diagnostic-only references where possible."])
+    _style_sheet(worksheet, freeze=False)
+
+
+def _write_tabular_sheet(worksheet: Any, headers: tuple[str, ...], rows: list[list[str]]) -> None:
+    worksheet.append(list(headers))
+    if rows:
+        for row in rows:
+            worksheet.append(row)
+    else:
+        worksheet.append(["Not supplied", *["Not applicable"] * (len(headers) - 1)])
+    _style_sheet(worksheet, freeze=True)
+
+
+def _write_review_log_sheet(worksheet: Any) -> None:
+    _write_tabular_sheet(
+        worksheet,
+        ("Review date", "Reviewer", "Status", "Notes"),
+        [["To be confirmed", "To be confirmed", "To be confirmed", "Record review decisions, threshold changes, and owner follow-up here."]],
+    )
+
+
+def _write_metadata_sheet(worksheet: Any, state: Any) -> None:
+    context = assess_report_quality_context(state)
+    projection = evidence_maturity_projection(state, context)
+    rows = [
+        ["Field", "Value"],
+        ["Evidence maturity", _text(getattr(projection, "maturity", "")) or "To be confirmed"],
+        ["Client-use status", _text(getattr(projection, "client_use_status", "")) or "To be confirmed"],
+        ["Validation required", _text(getattr(projection, "validation_required", "")) or "To be confirmed"],
+        ["Uploaded files", _text(getattr(projection, "uploaded_files", "")) or "0"],
+        ["Imported evidence", _text(getattr(projection, "imported_evidence", "")) or "0"],
+        ["Imported signals", _text(getattr(projection, "imported_signals", "")) or "0"],
+        ["Human review", "Human review required before client delivery."],
+    ]
+    for row in rows:
+        worksheet.append(row)
+    _style_sheet(worksheet, freeze=True)
+
+
+def _style_sheet(worksheet: Any, *, freeze: bool) -> None:
+    header_fill = PatternFill(start_color="E5E7EB", end_color="E5E7EB", fill_type="solid")
+    header_font = Font(bold=True)
+    wrap = Alignment(wrap_text=True, vertical="top")
+    if freeze:
+        worksheet.freeze_panes = "A2"
+    for row in worksheet.iter_rows():
+        for cell in row:
+            cell.alignment = wrap
+    for cell in worksheet[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+    for column in worksheet.columns:
+        max_len = max(len(str(cell.value or "")) for cell in column)
+        worksheet.column_dimensions[column[0].column_letter].width = min(max(max_len + 2, 14), 48)
+
+
+def _rows_by_source(rows: tuple[MonitoringTemplateRow, ...], source: str) -> list[MonitoringTemplateRow]:
+    return [row for row in rows if row.row_source == source]
+
+
+def _rows_with_source_prefix(rows: tuple[MonitoringTemplateRow, ...], prefix: str) -> list[MonitoringTemplateRow]:
+    return [row for row in rows if row.row_source.startswith(prefix)]
+
+
+def _stop_change_rows(rows: tuple[MonitoringTemplateRow, ...]) -> list[MonitoringTemplateRow]:
+    return [
+        row
+        for row in rows
+        if row.row_source in {"decision_gates", "monitor_circuit_breaker"}
+        or _text(row.stop_change_threshold) not in {"", THRESHOLD_NOT_CONFIRMED, THRESHOLD_VALIDATION_PENDING}
+    ]
+
+
+def _reentry_risk_rows(rows: tuple[MonitoringTemplateRow, ...]) -> list[MonitoringTemplateRow]:
+    return [
+        row
+        for row in rows
+        if row.row_source in {"strategy_preliminary_verdict", "strategy_success_metric", "decision_gates"}
+    ]
 
 
 def monitoring_template_cell_rows(state: Any, *, audience: str) -> tuple[tuple[str, ...], ...]:
@@ -443,21 +578,9 @@ def _monitoring_safe_render_values(values: dict[str, str], *, audience: str) -> 
 
 
 def _operator_to_define_fallback(header: str, *, audience: str) -> str:
-    if header == "Owner / role":
-        return "Decision owner to confirm" if audience == "client" else "Owner assignment pending"
-    if header == "Cadence":
-        return "Monitoring cadence to confirm" if audience == "client" else "Cadence assignment pending"
-    if header == "Metric / signal":
-        return "Monitoring signal to confirm"
-    if header == "Decision or hypothesis validated":
-        return "Decision or hypothesis to confirm"
-    if header == "Action if triggered":
-        return "Triggered action to confirm"
-    if header == "Target / good sign":
-        return "Target condition to confirm"
-    if header == "Warning sign":
-        return "Warning condition to confirm"
-    return "Monitoring detail to confirm"
+    if header == "Source / evidence source":
+        return "Not supplied"
+    return "To be confirmed"
 
 
 def _threshold_render_fallback(concrete_values: tuple[str, ...], direction: str) -> str:
@@ -501,11 +624,9 @@ def _client_enhance_row_values(values: dict[str, str], row: MonitoringTemplateRo
         return enhanced
 
     if concrete_values and enhanced["Owner / role"] == OPERATOR_TO_DEFINE:
-        enhanced["Owner / role"] = "Decision owner to confirm"
+        enhanced["Owner / role"] = "To be confirmed"
     if concrete_values and enhanced["Cadence"] == OPERATOR_TO_DEFINE:
-        enhanced["Cadence"] = _first_cadence_value(concrete_values) or "Monitoring cadence to confirm"
-    if concrete_values and enhanced["Source / evidence source"] == EVIDENCE_SOURCE_UNAVAILABLE:
-        enhanced["Source / evidence source"] = "Monitoring source to confirm"
+        enhanced["Cadence"] = _first_cadence_value(concrete_values) or "To be confirmed"
     if enhanced["Target / good sign"] == VALIDATION_REQUIRED:
         enhanced["Target / good sign"] = _expected_trend_text(direction) if direction else "Review against Decision Gates"
     if enhanced["Warning sign"] == VALIDATION_REQUIRED:
@@ -705,7 +826,16 @@ def _client_safe_cell(value: str, *, header: str) -> str:
     text = re.sub(r"\bfile[-_][A-Za-z0-9_.:-]+\b", "project file", text, flags=re.I)
     text = re.sub(r"\b(?:BF|RPN|H_norm|rho|scenario_probability|diagnostic score|operator trace)\b[^;,.|]*", "internal diagnostic redacted", text, flags=re.I)
     text = re.sub(r"\b(?:row source|diagnostic notes?|internal source refs?|operator-only)\b", "internal detail", text, flags=re.I)
+    text = _client_monitoring_language_polish(text)
     text = _redact_client_internal_metadata(text)
+    return text
+
+
+def _client_monitoring_language_polish(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"\barchitecture hypothesis\b", "automation architecture assumption", text, flags=re.I)
+    text = re.sub(r"\bH5\b|\bhypothesis\s+5\b", "technical feasibility check", text, flags=re.I)
+    text = re.sub(r"\bH9\b|\bhypothesis\s+9\b", "momentum assumption", text, flags=re.I)
     return text
 
 

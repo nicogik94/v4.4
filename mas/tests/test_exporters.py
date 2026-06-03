@@ -106,6 +106,33 @@ def _xlsx_rows(payload: bytes) -> tuple[tuple[str, ...], ...]:
     return tuple(rows)
 
 
+def _xlsx_workbook(payload: bytes):
+    return load_workbook(BytesIO(payload), data_only=False)
+
+
+def _xlsx_sheet_rows(workbook, sheet_name: str) -> tuple[tuple[str, ...], ...]:
+    worksheet = workbook[sheet_name]
+    rows = []
+    for row in worksheet.iter_rows(values_only=True):
+        rows.append(tuple("" if value is None else str(value) for value in row))
+    return tuple(rows)
+
+
+def _xlsx_visible_text(workbook) -> str:
+    parts: list[str] = []
+    for worksheet in workbook.worksheets:
+        for row in worksheet.iter_rows(values_only=True):
+            parts.extend(str(value) for value in row if value not in (None, ""))
+    return "\n".join(parts)
+
+
+def _assert_sheet_has_usability_polish(testcase: unittest.TestCase, workbook, sheet_name: str) -> None:
+    worksheet = workbook[sheet_name]
+    testcase.assertEqual(worksheet.freeze_panes, "A2")
+    testcase.assertTrue(any((dimension.width or 0) > 14 for dimension in worksheet.column_dimensions.values()))
+    testcase.assertTrue(any(cell.alignment.wrap_text for row in worksheet.iter_rows() for cell in row))
+
+
 def _attach_report_generation_metadata(
     state: ProjectState,
     *,
@@ -552,6 +579,89 @@ If architecture hypothesis fails, pause rollout.
     )
 
 
+def make_monitoring_xlsx_polish_state(project_id: str = "monitoring-xlsx-polish"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Automation ROI monitoring XLSX polish",
+        brief="Decide whether the Automation ROI pilot is ready for rollout.",
+        report="""# Executive Summary
+Run the monitored pilot before rollout.
+
+# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source | Notes |
+|---|---|---|---|---|---|---|---|---|
+| Output trust metric | Trust score improves above 85% | Trust score below 70% | stop if more than 20% over approved budget | Operations Lead | Weekly | pause rollout and review controls | Pilot dashboard | caveat: budget assumptions need validation |
+
+# Monitoring and Kill Criteria
+Watch hypothesis 5 queue risk, hypothesis 9 momentum risk, and architecture hypothesis drift.
+""",
+        knowledge_layer=KnowledgeLayerState(
+            uploaded_files=[
+                UploadedFileManifest(
+                    file_id="file-1",
+                    filename="monitoring-plan.md",
+                    parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                )
+            ]
+        ),
+        hypotheses=[
+            Hypothesis(
+                id="H5",
+                text="Technical feasibility depends on trustworthy automation outputs.",
+                signal="output trust metric",
+                confirm="trust score above 85%",
+                reject="spend more than 20% over approved budget",
+                evidence_ids=["evidence_monitoring_notes"],
+            ),
+            Hypothesis(
+                id="H9",
+                text="Momentum depends on weekly adoption.",
+                signal="momentum assumption adoption",
+                confirm="weekly adoption improves",
+                reject="weekly adoption stalls",
+            ),
+        ],
+        strategy=StrategyOutput(
+            preliminary_verdicts=[
+                PreliminaryVerdict(
+                    id="H5",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    evidence="evidence_monitoring_notes",
+                    monitoring_plan="Track output trust metric weekly and pause if budget is more than 20% over approved budget.",
+                )
+            ],
+            success_metrics=["Output trust metric above 85% by Day 30."],
+            review_date="Day 30",
+        ),
+        monitor=MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                weekly=[
+                    MonitorScheduleItem(
+                        metric="Output trust metric",
+                        owner="Operations Lead",
+                        source="Pilot dashboard above 85%",
+                    )
+                ]
+            ),
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="H5 technical feasibility",
+                    trip="more than 20% over approved budget",
+                    reset="below 10% over budget for two reviews",
+                )
+            ],
+            canaries=[
+                MonitorCanary(
+                    signal="architecture hypothesis drift",
+                    direction="down",
+                    window="7-day rolling",
+                    meaning="hypothesis 9 momentum risk",
+                )
+            ],
+        ),
+    )
+
+
 def _assert_client_language_polished(testcase: unittest.TestCase, compact: str) -> None:
     lower = compact.lower()
     for forbidden in (
@@ -914,6 +1024,74 @@ This section is narrative only and should not replace Decision Gates.
         self.assertEqual(rows[1][8], "pause rollout")
         self.assertGreaterEqual(len(rows), 2)
 
+    def test_client_monitoring_workbook_has_demo_ready_sheets_and_client_safe_text(self):
+        state = make_monitoring_xlsx_polish_state("client-monitor-workbook-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        workbook = _xlsx_workbook(payload)
+        expected_sheets = {
+            "README",
+            SHEET_NAME,
+            "Stop - Change Criteria",
+            "Canaries",
+            "Review Log",
+        }
+        workbook_text = _xlsx_visible_text(workbook)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertTrue(expected_sheets.issubset(set(workbook.sheetnames)))
+        for sheet_name in expected_sheets:
+            self.assertGreaterEqual(len(_xlsx_sheet_rows(workbook, sheet_name)), 1, sheet_name)
+        self.assertEqual(_xlsx_sheet_rows(workbook, SHEET_NAME)[0], tuple(CLIENT_MONITORING_TEMPLATE_HEADERS))
+        self.assertIn("Metric / signal", _xlsx_sheet_rows(workbook, "Stop - Change Criteria")[0])
+        self.assertIn("Output trust metric", workbook_text)
+        self.assertIn("more than 20% over approved budget", workbook_text)
+        self.assertIn("Operations Lead", workbook_text)
+        self.assertIn("Weekly", workbook_text)
+        self.assertIn("Pilot dashboard", workbook_text)
+        self.assertIn("caveat: budget assumptions need validation", workbook_text)
+        self.assertIn("Human review required before client delivery.", workbook_text)
+        self.assertIn("To be confirmed", workbook_text)
+        self.assertIn("Not supplied", workbook_text)
+        for forbidden in ("hypothesis 5", "hypothesis 9", "architecture hypothesis", "H5", "H9"):
+            self.assertNotIn(forbidden, workbook_text)
+        for sheet_name in (SHEET_NAME, "Stop - Change Criteria", "Canaries", "Review Log"):
+            _assert_sheet_has_usability_polish(self, workbook, sheet_name)
+
+    def test_operator_monitoring_workbook_has_demo_ready_sheets_and_trace_context(self):
+        state = make_monitoring_xlsx_polish_state("operator-monitor-workbook-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        workbook = _xlsx_workbook(payload)
+        expected_sheets = {
+            "README",
+            SHEET_NAME,
+            "OODA Schedule",
+            "Circuit Breakers",
+            "Canaries",
+            "Re-entry Watch - Risks",
+            "Review Log",
+            "Metadata - Evidence Maturity",
+        }
+        workbook_text = _xlsx_visible_text(workbook)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertTrue(expected_sheets.issubset(set(workbook.sheetnames)))
+        for sheet_name in expected_sheets:
+            self.assertGreaterEqual(len(_xlsx_sheet_rows(workbook, sheet_name)), 1, sheet_name)
+        self.assertEqual(_xlsx_sheet_rows(workbook, SHEET_NAME)[0], tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
+        for header in OPERATOR_TRACE_HEADERS:
+            self.assertIn(header, _xlsx_sheet_rows(workbook, SHEET_NAME)[0])
+        self.assertIn("Output trust metric", workbook_text)
+        self.assertIn("more than 20% over approved budget", workbook_text)
+        self.assertIn("H5", workbook_text)
+        self.assertIn("Row source", workbook_text)
+        self.assertIn("monitor.circuit_breakers[0]", workbook_text)
+        self.assertIn("Evidence maturity", workbook_text)
+        self.assertIn("Human review required before client delivery.", workbook_text)
+        for sheet_name in (SHEET_NAME, "OODA Schedule", "Circuit Breakers", "Canaries", "Re-entry Watch - Risks", "Review Log"):
+            _assert_sheet_has_usability_polish(self, workbook, sheet_name)
+
     def test_monitoring_template_uses_safe_placeholders_for_missing_values(self):
         state = ProjectState(project_id="monitor-placeholders", project_name="Monitor placeholders", brief="Brief")
 
@@ -921,14 +1099,12 @@ This section is narrative only and should not replace Decision Gates.
         rows = _xlsx_rows(payload)
         combined = "\n".join("\t".join(row) for row in rows)
 
-        self.assertIn("Monitoring signal to confirm", combined)
-        self.assertIn("Decision owner to confirm", combined)
-        self.assertIn("Monitoring cadence to confirm", combined)
-        self.assertIn("Validate threshold before using as a change-course gate.", combined)
-        self.assertIn("Evidence source unavailable", combined)
-        self.assertIn("Validation required", combined)
+        self.assertIn("To be confirmed", combined)
+        self.assertIn("Not supplied", combined)
         self.assertNotIn("Operator to define", combined)
         self.assertNotIn("Threshold not yet confirmed", combined)
+        self.assertNotIn("Validation required", combined)
+        self.assertNotIn("Evidence source unavailable", combined)
 
     def test_client_monitoring_template_uses_concrete_values_and_direction_fidelity(self):
         state = ProjectState(
@@ -1047,7 +1223,7 @@ Decision Gates remain the threshold source of truth.
         rows = _xlsx_rows(payload)
 
         self.assertEqual(rows[1][0], "Decision Gate")
-        self.assertEqual(rows[1][7], "Validate threshold before using as a change-course gate.")
+        self.assertEqual(rows[1][7], "To be confirmed")
         self.assertIn("not parsed into a clear gate table", "\n".join(rows[1]))
         self.assertNotIn("ev-market", rows[1])
 
@@ -1134,9 +1310,7 @@ Decision Gates remain the threshold source of truth.
             "10 business days",
             "48h",
             "<0.20",
-            "Decision owner to confirm",
-            "Monitoring cadence to confirm",
-            "Validate threshold before using as a change-course gate.",
+            "To be confirmed",
         ):
             self.assertIn(expected, client_combined)
 
@@ -1146,8 +1320,7 @@ Decision Gates remain the threshold source of truth.
 
         self.assertNotIn("Threshold not yet confirmed", operator_combined)
         self.assertNotIn("Operator to define", operator_combined)
-        self.assertIn("Owner assignment pending", operator_combined)
-        self.assertIn("Cadence assignment pending", operator_combined)
+        self.assertIn("To be confirmed", operator_combined)
 
         operator_header = operator_rows[0]
         evidence_column = operator_header.index("Evidence IDs")
