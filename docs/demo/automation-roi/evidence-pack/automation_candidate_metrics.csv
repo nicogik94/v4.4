@@ -1,0 +1,5 @@
+candidate_workflow,current_weekly_hours,current_monthly_volume,error_or_rework_rate,estimated_tool_cost_monthly,review_owner,automation_constraints
+sales proposal drafting,7,36,8%,900,Sales Operations Lead,synthetic demo data only; no private or client data; legal review required for external claims
+support triage,18,420,12%,1400,Support Operations Lead,synthetic demo data only; no private or client data; category consistency and escalation quality unresolved
+finance reconciliation,10,160,5%,1800,Finance Operations Lead,synthetic demo data only; no private or client data; finance and security review required
+customer success renewal prep,11,74,9%,1100,Customer Success Operations Lead,synthetic demo data only; no private or client data; source data fragmented across CRM and account notes

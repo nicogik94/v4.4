@@ -1,0 +1,24 @@
+# Risk And Compliance Notes
+
+This file uses synthetic demo data only. It includes no private or client data.
+
+Recommended risk classification:
+- `high_risk`
+
+High-risk rationale:
+- Finance automation candidates can affect financial operations.
+- Proposal and renewal workflows may generate external-facing claims.
+- Support triage can affect customer experience and escalation quality.
+- Human review is required for high-risk/finance automation.
+
+Required reviews before implementation:
+- Finance review for ROI, cost, and savings assumptions.
+- Legal review for external claims.
+- Security and privacy review for data access and retention.
+- Operations review for owner capacity and change-management risk.
+
+Boundaries:
+- Hypothesis-driven diagnostic, not measured audit.
+- Validate before client delivery.
+- Evidence gaps still required before implementation.
+- No autonomous approval, procurement, staffing, or customer-facing action.

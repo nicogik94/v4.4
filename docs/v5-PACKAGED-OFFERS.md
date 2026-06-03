@@ -60,6 +60,11 @@ means after review.
 | AI Readiness Audit | [Main](v5-AI-READINESS-AUDIT.md) | [Intake](templates/ai-readiness-audit-intake.md) | [Example](examples/ai-readiness-audit-brief.md) | [Demo](v5-AI-READINESS-DEMO-SCRIPT.md) |
 | Real Estate Decision Audit | [Main](v5-REAL-ESTATE-DECISION-AUDIT.md) | [Intake](templates/real-estate-decision-audit-intake.md) | [Example](examples/real-estate-decision-audit-brief.md) | [Demo](v5-REAL-ESTATE-DECISION-DEMO-SCRIPT.md) |
 
+## Canonical Demo Bundle
+
+For a reproducible Automation ROI demo bundle and operator runbook, use
+[`Automation ROI canonical demo runbook`](demo/AUTOMATION-ROI-DEMO-RUNBOOK.md).
+
 ## Export/Profile Reminder
 
 Use [`v5-OUTPUT-BOUNDARIES.md`](v5-OUTPUT-BOUNDARIES.md) before sending any

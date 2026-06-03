@@ -1,0 +1,21 @@
+# Tool Budget Assumptions
+
+This file uses synthetic demo data only. It includes no private or client data.
+
+Approved pilot budget range:
+- Monthly tool budget target: 900 to 1800 depending on selected workflow.
+- Implementation support: one part-time engineering owner.
+- Operator review: one named review owner per workflow.
+
+Review capacity assumptions:
+- Sales Operations Lead can review proposal drafts twice weekly.
+- Support Operations Lead can review triage quality weekly.
+- Finance Operations Lead must approve reconciliation controls before pilot.
+- Customer Success Operations Lead can review renewal summaries weekly.
+
+Integration limits:
+- Use existing systems and approved data access only.
+- No new customer-facing autonomous action.
+- No production rollout before Sprint 0 evidence is reviewed.
+- Stop/change-course threshold should trigger if pilot cost is more than 20%
+  over approved budget or quality exceptions increase materially.
