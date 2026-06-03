@@ -9,6 +9,8 @@ REPO_ROOT = MAS_ROOT.parent
 DOCS_ROOT = REPO_ROOT / "docs"
 
 PACKAGED_OFFERS_INDEX = DOCS_ROOT / "v5-PACKAGED-OFFERS.md"
+AUTOMATION_ROI_CANONICAL_DEMO_ROOT = DOCS_ROOT / "demo" / "automation-roi"
+AUTOMATION_ROI_CANONICAL_RUNBOOK = DOCS_ROOT / "demo" / "AUTOMATION-ROI-DEMO-RUNBOOK.md"
 
 
 REQUIRED_DOCS = [
@@ -30,6 +32,22 @@ AUTOMATION_ROI_AUDIT_DOCS = [
     DOCS_ROOT / "templates" / "automation-roi-audit-intake.md",
     DOCS_ROOT / "examples" / "automation-roi-audit-brief.md",
     DOCS_ROOT / "v5-AUTOMATION-ROI-DEMO-SCRIPT.md",
+]
+
+AUTOMATION_ROI_CANONICAL_DEMO_FILES = [
+    AUTOMATION_ROI_CANONICAL_RUNBOOK,
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "brief.md",
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "supporting-data.md",
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "CANARY-CHECKLIST.md",
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "evidence-pack" / "automation_candidate_metrics.csv",
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "evidence-pack" / "current_process_notes.txt",
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "evidence-pack" / "tool_budget_assumptions.txt",
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "evidence-pack" / "risk_and_compliance_notes.txt",
+    AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "evidence-pack" / "sprint0_evidence_pack_notes.txt",
+]
+
+AUTOMATION_ROI_CANONICAL_EVIDENCE_FILES = [
+    path for path in AUTOMATION_ROI_CANONICAL_DEMO_FILES if "evidence-pack" in path.parts
 ]
 
 AI_READINESS_AUDIT_DOCS = [
@@ -115,6 +133,103 @@ def test_automation_roi_audit_package_docs_exist_in_repo_root_docs():
     for path in AUTOMATION_ROI_AUDIT_DOCS:
         assert path.exists(), path
         assert MAS_ROOT / "docs" not in path.parents
+
+
+def test_automation_roi_canonical_demo_bundle_exists_in_repo_root_docs():
+    for path in AUTOMATION_ROI_CANONICAL_DEMO_FILES:
+        assert path.exists(), path
+        assert DOCS_ROOT in path.parents
+        assert MAS_ROOT / "docs" not in path.parents
+
+
+def test_automation_roi_canonical_evidence_pack_uses_ascii_filenames():
+    for path in AUTOMATION_ROI_CANONICAL_EVIDENCE_FILES:
+        assert path.name.isascii(), path
+
+
+def test_automation_roi_canonical_demo_excludes_generated_artifacts():
+    forbidden_suffixes = {".pdf", ".xlsx", ".zip", ".sqlite", ".sqlite3", ".db", ".pyc"}
+    for path in AUTOMATION_ROI_CANONICAL_DEMO_ROOT.rglob("*"):
+        if path.is_file():
+            assert path.suffix.lower() not in forbidden_suffixes, path
+
+
+def test_automation_roi_canonical_runbook_covers_contract_and_operations():
+    text = _read(AUTOMATION_ROI_CANONICAL_RUNBOOK)
+    lower = _normalized_lower(text)
+
+    for required in (
+        "TEST Aut-ROI Canonical Demo",
+        "Automation ROI example framing",
+        "high_risk",
+        "Validate before client delivery",
+        "docker compose port app 8000",
+        r"scripts\demo_smoke_check.py",
+        "/runtime/preflight",
+        "/runtime/release-readiness",
+        "classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report",
+    ):
+        assert required in text
+
+    for profile in (
+        "report",
+        "client_dossier",
+        "operator_dossier",
+        "client_monitoring_template",
+        "operator_monitoring_template",
+    ):
+        assert profile in text
+
+    for required in (
+        "hypothesis-driven diagnostic, not measured audit",
+        "evidence gaps still required before implementation",
+        "human review required for high-risk/finance automation",
+        "upload_store not writable",
+        "docker desktop / wsl mount issue",
+        "stale project wall-clock budget cap",
+        "failed classify due to reused old project",
+        "pycache",
+        "sqlite",
+        "docker-compose.yml",
+        "do not commit generated pdfs",
+        "do not commit generated pdfs, xlsx files, zip archives",
+    ):
+        assert required in lower
+
+
+def test_automation_roi_canonical_canary_checklist_covers_export_quality():
+    text = _read(AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "CANARY-CHECKLIST.md")
+    lower = _normalized_lower(text)
+
+    for required in (
+        "runtime/preflight pass",
+        "all phases complete",
+        "evidence maturity is `partial evidence`",
+        "uploaded files parsed",
+        "citation markers resolved",
+        "no raw markdown table artifacts",
+        "no rough client wording",
+        "client xlsx expected sheets exist",
+        "operator xlsx expected sheets exist",
+        "client xlsx does not expose `hypothesis 5`",
+        "client xlsx does not expose `hypothesis 9`",
+        "client xlsx does not expose `architecture hypothesis`",
+        "monitoring metric present",
+        "monitoring threshold present",
+        "monitoring owner present",
+    ):
+        assert required in lower
+
+
+def test_automation_roi_canonical_demo_assets_are_synthetic_and_not_private():
+    for path in (
+        AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "brief.md",
+        AUTOMATION_ROI_CANONICAL_DEMO_ROOT / "supporting-data.md",
+        *AUTOMATION_ROI_CANONICAL_EVIDENCE_FILES,
+    ):
+        lower = _normalized_lower(_read(path))
+        assert "synthetic demo data only" in lower
+        assert "no private or client data" in lower
 
 
 def test_ai_readiness_audit_package_docs_exist_in_repo_root_docs():
@@ -868,6 +983,14 @@ def test_packaged_offers_index_lists_all_package_assets_and_guidance():
         "not separate backend products",
     ):
         assert required.lower() in lower
+
+
+def test_packaged_offers_index_links_canonical_automation_roi_demo_once():
+    text = _read(PACKAGED_OFFERS_INDEX)
+
+    assert "Canonical Demo Bundle" in text
+    assert "Automation ROI canonical demo runbook" in text
+    assert text.count("demo/AUTOMATION-ROI-DEMO-RUNBOOK.md") == 1
 
 
 def test_packaged_offers_index_covers_exports_and_boundaries_without_overclaiming():
