@@ -57,6 +57,10 @@ import report_freshness
 from hypothesis_coverage import assess_hypothesis_variable_coverage
 from monitoring_templates import monitoring_template_xlsx_bytes
 from state import ProjectState
+from technology_readiness_workbook import (
+    TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
+    technology_readiness_workbook_xlsx_bytes,
+)
 
 
 def build_export_filename(state: ProjectState, ext: str) -> str:
@@ -333,6 +337,7 @@ EXPORT_PROFILE_FORMATS = {
     "client_monitoring_template": {"xlsx"},
     "operator_dossier": {"pdf", "docx"},
     "operator_monitoring_template": {"xlsx"},
+    TECHNOLOGY_READINESS_WORKBOOK_PROFILE: {"xlsx"},
     "machine_archive": {"zip"},
 }
 
@@ -382,7 +387,7 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
     if profile_name not in EXPORT_PROFILE_FORMATS:
         raise ValueError(f"profile must be one of {sorted(EXPORT_PROFILE_FORMATS)}")
     if fmt not in PROFILE_MEDIA_TYPES:
-        raise ValueError("format must be pdf, docx, or zip")
+        raise ValueError("format must be pdf, docx, xlsx, or zip")
     if fmt not in EXPORT_PROFILE_FORMATS[profile_name]:
         raise ValueError(f"profile={profile_name} does not support format={fmt}")
 
@@ -393,6 +398,10 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
     if profile_name in {"client_monitoring_template", "operator_monitoring_template"}:
         audience = "operator" if profile_name.startswith("operator") else "client"
         return monitoring_template_xlsx_bytes(state, audience=audience), PROFILE_MEDIA_TYPES[fmt], filename
+    if profile_name == TECHNOLOGY_READINESS_WORKBOOK_PROFILE:
+        if getattr(state, "project_type", "") != "technology_readiness":
+            raise ValueError("profile=technology_readiness_workbook requires project_type=technology_readiness")
+        return technology_readiness_workbook_xlsx_bytes(state), PROFILE_MEDIA_TYPES[fmt], filename
 
     current_version = report_freshness.current_code_version()
     if profile_name == "report":

@@ -11,6 +11,8 @@ DOCS_ROOT = REPO_ROOT / "docs"
 PACKAGED_OFFERS_INDEX = DOCS_ROOT / "v5-PACKAGED-OFFERS.md"
 AUTOMATION_ROI_CANONICAL_DEMO_ROOT = DOCS_ROOT / "demo" / "automation-roi"
 AUTOMATION_ROI_CANONICAL_RUNBOOK = DOCS_ROOT / "demo" / "AUTOMATION-ROI-DEMO-RUNBOOK.md"
+TECHNOLOGY_READINESS_DEMO_ROOT = MAS_ROOT / "docs" / "demo" / "technology-readiness"
+TECHNOLOGY_READINESS_RUNBOOK = TECHNOLOGY_READINESS_DEMO_ROOT / "RUNBOOK.md"
 
 
 REQUIRED_DOCS = [
@@ -140,6 +142,34 @@ def test_automation_roi_canonical_demo_bundle_exists_in_repo_root_docs():
         assert path.exists(), path
         assert DOCS_ROOT in path.parents
         assert MAS_ROOT / "docs" not in path.parents
+
+
+def test_technology_readiness_demo_runbook_covers_workbook_and_decision_layer():
+    assert TECHNOLOGY_READINESS_RUNBOOK.exists()
+    text = _read(TECHNOLOGY_READINESS_RUNBOOK)
+    lower = _normalized_lower(text)
+
+    for required in (
+        "technology_readiness",
+        "Technology Readiness & Transfer Audit",
+        "docs/demo/technology-readiness/brief.md",
+        "docs/demo/technology-readiness/supporting-data.md",
+        "technology_readiness_workbook",
+        "Stage-gate decision",
+        "Claim ledger",
+        "Go/no-go checklist",
+    ):
+        assert required in text
+
+    for required in (
+        "not trl certification",
+        "legal patentability advice",
+        "guarantee of commercial transfer",
+        "operator-reviewed readiness assessment",
+        "specialist review is required",
+        "do not commit generated xlsx files",
+    ):
+        assert required in lower
 
 
 def test_automation_roi_canonical_evidence_pack_uses_ascii_filenames():

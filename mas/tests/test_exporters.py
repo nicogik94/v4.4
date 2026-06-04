@@ -47,6 +47,10 @@ from exporters import (  # noqa: E402
     operator_monitoring_summary,
     sanitize_for_export,
 )
+from technology_readiness_workbook import (  # noqa: E402
+    TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
+    TECHNOLOGY_READINESS_WORKBOOK_SHEETS,
+)
 from monitoring_templates import (  # noqa: E402
     CLIENT_MONITORING_TEMPLATE_HEADERS,
     OPERATOR_MONITORING_TEMPLATE_HEADERS,
@@ -57,6 +61,7 @@ from monitoring_templates import (  # noqa: E402
 from state import (  # noqa: E402
     AuditOutput,
     ClassifyOutput,
+    Evidence,
     FileParseStatus,
     FileParseSummary,
     FMEAItem,
@@ -527,6 +532,155 @@ Run Sprint 0 first.
     )
 
 
+def make_technology_readiness_export_state(project_id: str = "technology-readiness-workbook"):
+    state = ProjectState(
+        project_id=project_id,
+        project_name="Lab coating readiness",
+        project_type="technology_readiness",
+        brief="Assess a lab coating for transfer readiness.",
+    )
+    state.imported_evidence = [
+        Evidence(
+            evidence_id="ev-science",
+            title="Scientific basis note",
+            summary="Bench chemistry supports the proposed mechanism.",
+            category="scientific_basis",
+            source_phase="scientific_inventory",
+        ),
+        Evidence(
+            evidence_id="ev-poc",
+            title="Proof-of-concept result",
+            summary="Small batch proof of concept was observed.",
+            category="proof_of_concept",
+            source_phase="trl_diagnosis",
+        ),
+    ]
+    state.scientific_inventory = {
+        "scientific_basis": ["published chemistry analogy"],
+        "critical_components": ["coating precursor"],
+        "current_experiments": ["small batch trial"],
+        "known_limitations": ["repeatability not demonstrated"],
+        "evidence_items": [{"evidence_id": "ev-science", "category": "scientific_basis"}],
+        "missing_evidence": ["controlled validation"],
+        "confidence": "preliminary",
+    }
+    state.trl_diagnosis = {
+        "current_trl": 3,
+        "target_trl": 4,
+        "confidence": "medium",
+        "current_phase_name": "Protection and proof of concept",
+        "evidence_supporting_current_trl": ["ev-science", "ev-poc"],
+        "why_not_higher": "Controlled validation and reproducibility are missing.",
+        "evidence_gaps": ["reproducibility", "controlled_validation", "ip_review"],
+        "legal_or_certification_disclaimer": "This is not TRL certification.",
+    }
+    state.research_industry_alignment = {
+        "criteria_scores": {
+            criterion: {
+                "score": 3,
+                "evidence": "planning evidence",
+                "gap": "validation gap",
+                "recommendation": "collect targeted evidence",
+            }
+            for criterion in (
+                "technical_novelty",
+                "patentable_potential",
+                "industrial_application",
+                "functional_advantage",
+                "reproducibility",
+                "scalability",
+                "potential_cost",
+                "industrial_interest",
+                "regulatory_barriers",
+                "trl_4_6_compatibility",
+            )
+        },
+        "overall_alignment_score": 3.0,
+        "top_alignment_strengths": ["clear industrial use case"],
+        "top_alignment_gaps": ["no partner feedback"],
+        "prioritized_industrial_applications": ["pilot coating line"],
+        "confidence": "medium",
+    }
+    state.ip_protection_axis = {
+        "material_composition": {
+            "preliminary_assessment": "Promising but uncertain.",
+            "evidence": ["ev-science"],
+            "gap": "specialist review missing",
+            "disclosure_risk": "Review before external demos.",
+            "recommended_review": "Specialist review required.",
+        },
+        "synthesis_method": {},
+        "specific_use": {},
+        "device_or_system": {},
+        "critical_parameters": {},
+        "know_how": {},
+        "ip_risk_notes": ["Do not claim legal patentability."],
+        "specialist_review_required": True,
+        "confidence": "low",
+    }
+    state.next_level_recommendations = {
+        "current_trl": 3,
+        "next_target_trl": 4,
+        "current_phase_name": "Protection and proof of concept",
+        "next_phase_name": "Controlled technical validation",
+        "main_gap_to_next_level": "Repeatable controlled validation is missing.",
+        "recommended_actions": [{"owner": "Technical lead", "action": "run repeatability protocol"}],
+        "required_tests": ["repeatability test"],
+        "required_evidence": ["reproducibility", "controlled_validation", "ip_review"],
+        "expected_deliverables": ["validation report"],
+        "risks_to_reduce": ["false-positive lab result"],
+        "suggested_owners": ["Technical lead", "IP specialist"],
+        "estimated_time_range": "6-12 months",
+        "advancement_criteria": ["repeatable result under controlled protocol"],
+        "confidence": "medium",
+    }
+    state.technical_validation_plan = {
+        "validation_tests": [{"name": "repeatability protocol", "owner": "Technical lead"}],
+        "acceptance_criteria": ["three repeatable runs"],
+        "measurement_plan": ["capture batch variance"],
+        "failure_modes": ["coating instability"],
+        "evidence_to_collect": ["controlled_validation"],
+        "confidence": "medium",
+    }
+    state.industrial_transfer_plan = {
+        "ideal_industrial_partner": "Pilot manufacturing partner",
+        "partner_validation_needed": ["partner feedback"],
+        "minimum_transfer_package": ["non-confidential brief", "validation protocol"],
+        "transfer_model_options": ["sponsored validation"],
+        "negotiation_risks": ["premature disclosure"],
+        "evidence_required_before_transfer": ["ip_review", "partner_feedback"],
+        "confidence": "low",
+    }
+    state.readiness_roadmap = {
+        "roadmap_phases": [
+            {
+                "trl": "TRL 4",
+                "phase_name": "Controlled technical validation",
+                "time_range": "6-12 months",
+                "objective": "validate repeatability",
+                "evidence_needed": ["controlled_validation"],
+                "decision_gate": "repeatability gate",
+            }
+        ],
+        "timeline": [{"phase": "TRL 4", "range": "6-12 months"}],
+        "decision_gates": [{"gate": "repeatability gate"}],
+        "resources_needed": ["technical lead"],
+        "go_no_go_criteria": ["controlled validation completed"],
+        "confidence": "medium",
+    }
+    state.executive_summary = {
+        "current_trl": 3,
+        "target_trl": 4,
+        "readiness_verdict_code": "ready_for_proof_of_concept",
+        "readiness_verdict": "Ready for controlled validation planning, not advancement.",
+        "top_blockers": ["reproducibility", "IP review"],
+        "recommended_next_step": "Run controlled validation protocol.",
+        "operator_summary": "Evidence-backed estimate requires operator review.",
+        "confidence": "medium",
+    }
+    return state
+
+
 def make_client_language_polish_state(project_id: str = "client-language-polish"):
     return ProjectState(
         project_id=project_id,
@@ -977,12 +1131,18 @@ Stop if baseline data access is unavailable.
             ("operator_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ("operator_dossier", "pdf"): "application/pdf",
             ("operator_monitoring_template", "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            (TECHNOLOGY_READINESS_WORKBOOK_PROFILE, "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ("machine_archive", "zip"): "application/zip",
         }
 
         for (profile, fmt), media_type in expected.items():
             with self.subTest(profile=profile, format=fmt):
-                payload, actual_media_type, filename = export_project_profile_bytes(state, profile, fmt)
+                export_state = (
+                    make_technology_readiness_export_state("all-profiles-tech")
+                    if profile == TECHNOLOGY_READINESS_WORKBOOK_PROFILE
+                    else state
+                )
+                payload, actual_media_type, filename = export_project_profile_bytes(export_state, profile, fmt)
                 self.assertGreater(len(payload), 100)
                 self.assertEqual(actual_media_type, media_type)
                 self.assertIn(f"{profile}-", filename)
@@ -991,12 +1151,46 @@ Stop if baseline data access is unavailable.
                 if fmt == "zip":
                     with zipfile.ZipFile(BytesIO(payload)) as archive:
                         self.assertNotIn("raw_project_state.json", archive.namelist())
-                if fmt == "xlsx":
+                if profile == TECHNOLOGY_READINESS_WORKBOOK_PROFILE:
+                    workbook = _xlsx_workbook(payload)
+                    self.assertEqual(tuple(workbook.sheetnames), TECHNOLOGY_READINESS_WORKBOOK_SHEETS)
+                elif fmt == "xlsx":
                     self.assertEqual(_xlsx_rows(payload)[0], (
                         tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS)
                         if profile.startswith("operator")
                         else tuple(CLIENT_MONITORING_TEMPLATE_HEADERS)
                     ))
+
+    def test_technology_readiness_workbook_profile_exports_expected_sheets_and_safety_language(self):
+        state = make_technology_readiness_export_state("tech-workbook-profile")
+
+        payload, media_type, filename = export_project_profile_bytes(state, TECHNOLOGY_READINESS_WORKBOOK_PROFILE, "xlsx")
+        workbook = _xlsx_workbook(payload)
+        workbook_text = _xlsx_visible_text(workbook)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("tech-workbook-profile-technology_readiness_workbook-", filename)
+        self.assertEqual(tuple(workbook.sheetnames), TECHNOLOGY_READINESS_WORKBOOK_SHEETS)
+        self.assertIn("This workbook is an operator-reviewed readiness assessment.", workbook_text)
+        self.assertIn("not TRL certification", workbook_text)
+        self.assertIn("legal patentability advice", workbook_text)
+        self.assertIn("guarantee of commercial transfer", workbook_text)
+        self.assertIn("Evidence Register", workbook.sheetnames)
+        self.assertIn("Next-Level Recommendations", workbook.sheetnames)
+        self.assertIn("Stage-Gate Decisions", workbook.sheetnames)
+        self.assertIn("Claim Ledger", workbook.sheetnames)
+        self.assertIn("scientific_basis", workbook_text)
+        self.assertIn("proof_of_concept", workbook_text)
+        self.assertIn("reproducibility", workbook_text)
+        self.assertIn("controlled_validation", workbook_text)
+        self.assertIn("hold", workbook_text)
+        self.assertIn("Controlled validation and reproducibility are missing.", workbook_text)
+
+    def test_technology_readiness_workbook_profile_requires_matching_project_type(self):
+        state = make_export_state("non-tech-workbook")
+
+        with self.assertRaises(ValueError):
+            export_project_profile_bytes(state, TECHNOLOGY_READINESS_WORKBOOK_PROFILE, "xlsx")
 
     def test_monitoring_template_profiles_export_xlsx_with_stable_headers(self):
         state = make_export_state("monitor-template")

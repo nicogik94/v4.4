@@ -22,6 +22,8 @@ from tools.technology_readiness import (
     READINESS_VERDICT_CODES,
     RESEARCH_INDUSTRY_CRITERIA,
     TRL_PHASES,
+    build_claim_ledger,
+    build_stage_gate_decision,
     compute_alignment_score,
     compute_evidence_sufficiency,
     normalize_trl,
@@ -36,6 +38,7 @@ from workflow_templates import (
 
 
 PROMPT_DIR = ROOT / "prompts" / "technology_readiness"
+DEMO_RUNBOOK = ROOT / "docs" / "demo" / "technology-readiness" / "RUNBOOK.md"
 
 
 def test_technology_readiness_state_uses_template_sequence():
@@ -164,6 +167,136 @@ def test_technology_readiness_helpers_are_deterministic():
     assert any("TRL 5+" in warning for warning in warnings)
     assert any("specialist_review_required=False" in warning for warning in warnings)
     assert any("Unknown readiness verdict code" in warning for warning in warnings)
+
+
+def test_stage_gate_decision_blocks_advancement_without_required_evidence():
+    trl_3_to_4 = build_stage_gate_decision(
+        {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "evidence_categories": ["scientific_basis", "proof_of_concept"],
+            "required_evidence": ["reproducibility"],
+        }
+    )
+    assert trl_3_to_4["decision"] == "hold"
+    assert any("reproducibility" in gap for gap in trl_3_to_4["blocking_gaps"])
+
+    trl_4_to_5 = build_stage_gate_decision(
+        {
+            "current_trl": 4,
+            "next_target_trl": 5,
+            "evidence_categories": ["reproducibility", "controlled_validation"],
+        }
+    )
+    assert trl_4_to_5["decision"] == "hold"
+    assert any("relevant_environment" in gap for gap in trl_4_to_5["blocking_gaps"])
+
+    trl_6_to_7 = build_stage_gate_decision(
+        {
+            "current_trl": 6,
+            "next_target_trl": 7,
+            "evidence_categories": ["reproducibility", "controlled_validation", "relevant_environment"],
+        }
+    )
+    assert trl_6_to_7["decision"] == "hold"
+    assert any("industrial_validation" in gap or "partner_feedback" in gap for gap in trl_6_to_7["blocking_gaps"])
+
+    unknown_current = build_stage_gate_decision(
+        {
+            "current_trl": 0,
+            "next_target_trl": 3,
+            "evidence_categories": ["scientific_basis", "proof_of_concept"],
+        }
+    )
+    assert unknown_current["decision"] != "proceed"
+
+
+def test_stage_gate_proceed_requires_supplied_evidence_and_ip_conditions():
+    proceed = build_stage_gate_decision(
+        {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "evidence_categories": ["reproducibility"],
+            "required_evidence": ["reproducibility"],
+        }
+    )
+    assert proceed["decision"] == "proceed"
+
+    conditional = build_stage_gate_decision(
+        {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "evidence_categories": ["controlled_validation"],
+            "ip_claims_present": True,
+        }
+    )
+    assert conditional["decision"] == "proceed_with_conditions"
+    assert "ip_review" in conditional["required_evidence"]
+
+
+def test_claim_ledger_downgrades_missing_evidence_and_flags_ip_claims():
+    ledger = build_claim_ledger(
+        {
+            "current_trl": 3,
+            "confidence": "high",
+            "why_not_higher": "controlled validation missing",
+            "required_evidence": ["controlled_validation"],
+            "readiness_verdict": "ready only for proof-of-concept review",
+            "ip_claims": ["material composition may have a preliminary protection path"],
+            "evidence_categories": ["scientific_basis"],
+        }
+    )
+
+    current_claim = next(claim for claim in ledger["claims"] if claim["claim_id"] == "trl-current")
+    ip_claim = next(claim for claim in ledger["claims"] if claim["claim_id"] == "ip-1")
+
+    assert current_claim["label"] == "hypothesis"
+    assert current_claim["confidence"] == "low"
+    assert "controlled validation missing" in current_claim["limitations"]
+    assert current_claim["validate_with"] == ["controlled_validation"]
+    assert ip_claim["label"] != "fact"
+    assert ip_claim["validate_with"] == ["ip_review"]
+    assert any("Unsupported high-confidence" in warning for warning in ledger["warnings"])
+
+
+def test_claim_ledger_uses_supplied_evidence_ids_without_inventing_them():
+    ledger = build_claim_ledger(
+        {
+            "current_trl": 4,
+            "confidence": "high",
+            "evidence_ids": ["ev-controlled"],
+            "evidence_categories": ["controlled_validation"],
+        }
+    )
+
+    current_claim = next(claim for claim in ledger["claims"] if claim["claim_id"] == "trl-current")
+    assert current_claim["label"] == "fact"
+    assert current_claim["evidence_ids"] == ["ev-controlled"]
+    assert ledger["warnings"] == []
+
+
+def test_technology_readiness_demo_runbook_covers_wave_b_flow():
+    assert DEMO_RUNBOOK.exists()
+    text = DEMO_RUNBOOK.read_text(encoding="utf-8")
+
+    for required in (
+        "technology_readiness",
+        "Technology Readiness & Transfer Audit",
+        "/templates",
+        "brief.md",
+        "supporting-data.md",
+        "Current TRL likely 3",
+        "Next target likely TRL 4",
+        "reproducibility not demonstrated",
+        "controlled validation protocol",
+        "technology_readiness_workbook",
+        "Claim ledger",
+        "Stage-gate decision",
+        "not TRL certification",
+        "legal patentability advice",
+        "guarantee of commercial transfer",
+    ):
+        assert required in text
 
 
 def test_template_package_does_not_import_missing_base_modules():
