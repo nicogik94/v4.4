@@ -144,9 +144,59 @@ def test_store_phase_output_validates_technology_readiness_payload():
 
     assert isinstance(state.scope, TechnologyReadinessScopeOutput)
     assert state.scope.technology_name == "Lab coating"
+    assert state.scope.stakeholders == ["principal investigator"]
+    assert state.scope.constraints == []
+    assert state.scope.assumptions == ["operator-reviewed evidence only"]
     assert _parsed_json_matches_phase("scope", payload)
     assert not _parsed_json_matches_phase("scope", [payload])
     assert "legal/certification" in _phase_json_retry_instruction("scope")
+
+
+def test_scope_output_normalizes_object_lists_without_dropping_detail():
+    state = ProjectState(project_id="scope-object-lists", project_type="technology_readiness", brief="x")
+    payload = {
+        "technology_name": "Lab coating",
+        "assessment_boundary": "prototype chemistry only",
+        "target_environment": "pilot manufacturing line",
+        "intended_next_milestone": "proof of concept",
+        "stakeholders": [
+            {"role": "Technology Transfer Office", "note": "not formally engaged"},
+        ],
+        "constraints": [
+            {"constraint": "Pilot line access", "impact": "unavailable until Q3"},
+            {"constraint": "Budget cap", "note": "operator should confirm"},
+        ],
+        "assumptions": [
+            {"assumption": "Bench tests transfer to pilot coating", "basis": "operator brief"},
+        ],
+        "validation_questions": [
+            {"question": "Which partner owns pilot validation?", "owner": "TTO"},
+        ],
+        "evidence_gaps": [
+            {"gap": "No reproducibility pack", "source": "uploaded evidence"},
+        ],
+        "confidence": "preliminary",
+    }
+
+    _store_phase_output(state, "scope", payload)
+
+    assert isinstance(state.scope, TechnologyReadinessScopeOutput)
+    assert state.scope.stakeholders == ["Technology Transfer Office — not formally engaged"]
+    assert state.scope.constraints == [
+        "Pilot line access — unavailable until Q3",
+        "Budget cap — operator should confirm",
+    ]
+    assert state.scope.assumptions == ["Bench tests transfer to pilot coating — operator brief"]
+    assert state.scope.validation_questions == ["Which partner owns pilot validation? — TTO"]
+    assert state.scope.evidence_gaps == ["No reproducibility pack — uploaded evidence"]
+
+
+def test_scope_prompt_requires_plain_string_arrays():
+    text = (PROMPT_DIR / "scope.md").read_text(encoding="utf-8")
+
+    assert "arrays of plain strings" in text
+    assert "not arrays of objects" in text
+    assert "Technology Transfer Office" in text
 
 
 def test_technology_readiness_helpers_are_deterministic():

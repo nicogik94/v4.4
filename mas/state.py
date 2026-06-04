@@ -565,6 +565,86 @@ class SQIOutput(BaseModel):
 
 # ═══ Technology Readiness & Transfer Audit ═══
 
+_SCOPE_STRING_PRIMARY_KEYS = (
+    "role",
+    "name",
+    "title",
+    "stakeholder",
+    "constraint",
+    "assumption",
+    "question",
+    "gap",
+    "description",
+    "value",
+)
+_SCOPE_STRING_DETAIL_KEYS = (
+    "note",
+    "status",
+    "evidence",
+    "basis",
+    "impact",
+    "owner",
+    "source",
+    "recommendation",
+)
+
+
+def _technology_scope_item_to_string(value: Any) -> str:
+    """Preserve model-emitted scope detail while satisfying list[str] fields."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        primary: list[str] = []
+        details: list[str] = []
+        used: set[str] = set()
+
+        for key in _SCOPE_STRING_PRIMARY_KEYS:
+            if key in value:
+                text = _technology_scope_item_to_string(value.get(key))
+                if text:
+                    primary.append(text)
+                used.add(key)
+
+        for key in _SCOPE_STRING_DETAIL_KEYS:
+            if key in value:
+                text = _technology_scope_item_to_string(value.get(key))
+                if text:
+                    details.append(text)
+                used.add(key)
+
+        for key, item in value.items():
+            if key in used:
+                continue
+            text = _technology_scope_item_to_string(item)
+            if text:
+                details.append(f"{key}: {text}")
+
+        if primary and details:
+            return f"{'; '.join(primary)} — {'; '.join(details)}"
+        if primary:
+            return "; ".join(primary)
+        return "; ".join(details)
+    if isinstance(value, (list, tuple, set)):
+        parts = [_technology_scope_item_to_string(item) for item in value]
+        return "; ".join(part for part in parts if part)
+    return str(value).strip()
+
+
+def _technology_scope_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [value]
+    normalized = [_technology_scope_item_to_string(item) for item in items]
+    return [item for item in normalized if item]
+
+
 class TechnologyReadinessScopeOutput(BaseModel):
     technology_name: str = ""
     assessment_boundary: str = ""
@@ -573,7 +653,20 @@ class TechnologyReadinessScopeOutput(BaseModel):
     stakeholders: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    validation_questions: list[str] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
     confidence: str = ""
+
+    @field_validator(
+        "stakeholders",
+        "constraints",
+        "assumptions",
+        "validation_questions",
+        "evidence_gaps",
+        mode="before",
+    )
+    def _coerce_scope_string_list(cls, value):
+        return _technology_scope_string_list(value)
 
 
 class TechnologyReadinessScientificInventoryOutput(BaseModel):
