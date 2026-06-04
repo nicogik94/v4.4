@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from workflow_templates import DEFAULT_PROJECT_TYPE, normalize_project_type
+
 
 LEGACY_CONTRACT_VERSION = "legacy.v1"
 CASE_CONTRACT_VERSION = "case.v1"
@@ -26,6 +28,7 @@ class NormalizedIngestionContract:
     source: str = DEFAULT_INGESTION_SOURCE
     external_case_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    project_type: str = DEFAULT_PROJECT_TYPE
     risk_classification: str | None = None
     risk_rationale: str = ""
     risk_set_by: str = "operator"
@@ -64,6 +67,7 @@ def _normalize_legacy(payload: Mapping[str, Any]) -> NormalizedIngestionContract
     brief = _string_field(payload, "brief", required=True)
     data = _string_field(payload, "data", default="")
     risk = _risk_options(payload)
+    project_type = _project_type_option(payload)
     return NormalizedIngestionContract(
         name=name,
         brief=brief,
@@ -72,6 +76,7 @@ def _normalize_legacy(payload: Mapping[str, Any]) -> NormalizedIngestionContract
         source=DEFAULT_INGESTION_SOURCE,
         external_case_id="",
         metadata={},
+        project_type=project_type,
         **risk,
     )
 
@@ -92,6 +97,7 @@ def _normalize_case_v1(
         raise IngestionContractError("metadata must be a JSON object.")
 
     risk = _risk_options(risk_payload)
+    project_type = _project_type_option(payload, fallback_payload=risk_payload)
     return NormalizedIngestionContract(
         name=_string_field(payload, "name", required=True),
         brief=_string_field(payload, "brief", required=True),
@@ -100,6 +106,7 @@ def _normalize_case_v1(
         source=_string_field(payload, "source", default=DEFAULT_INGESTION_SOURCE),
         external_case_id=_string_field(payload, "external_case_id", default=""),
         metadata=dict(metadata),
+        project_type=project_type,
         **risk,
     )
 
@@ -110,6 +117,20 @@ def _risk_options(payload: Mapping[str, Any]) -> dict[str, Any]:
         "risk_rationale": _string_field(payload, "risk_rationale", default=""),
         "risk_set_by": _string_field(payload, "risk_set_by", default="operator"),
     }
+
+
+def _project_type_option(
+    payload: Mapping[str, Any],
+    *,
+    fallback_payload: Mapping[str, Any] | None = None,
+) -> str:
+    value = payload.get("project_type", None)
+    if value is None and fallback_payload is not None:
+        value = fallback_payload.get("project_type", None)
+    try:
+        return normalize_project_type(value)
+    except ValueError as exc:
+        raise IngestionContractError(str(exc)) from exc
 
 
 def _string_field(

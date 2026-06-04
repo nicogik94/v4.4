@@ -10,6 +10,12 @@ from enum import Enum
 
 from clarifications import ClarificationAnswer, ClarificationCycle
 from ingestion_contract import DEFAULT_INGESTION_SOURCE, LEGACY_CONTRACT_VERSION
+from workflow_templates import (
+    DEFAULT_PROJECT_TYPE,
+    STRATEGIC_AUDIT_PHASE_SEQUENCE,
+    get_workflow_phase_sequence,
+    normalize_project_type,
+)
 
 
 class PhaseStatus(str, Enum):
@@ -557,6 +563,161 @@ class SQIOutput(BaseModel):
     improvement_actions: list[str] = Field(default_factory=list)
 
 
+# ═══ Technology Readiness & Transfer Audit ═══
+
+class TechnologyReadinessScopeOutput(BaseModel):
+    technology_name: str = ""
+    assessment_boundary: str = ""
+    target_environment: str = ""
+    intended_next_milestone: str = ""
+    stakeholders: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class TechnologyReadinessScientificInventoryOutput(BaseModel):
+    scientific_basis: list[str] = Field(default_factory=list)
+    critical_components: list[str] = Field(default_factory=list)
+    current_experiments: list[str] = Field(default_factory=list)
+    known_limitations: list[str] = Field(default_factory=list)
+    evidence_items: list[dict] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class TechnologyReadinessTRLDiagnosisOutput(BaseModel):
+    current_trl: int = 0
+    target_trl: int = 0
+    confidence: str = ""
+    current_phase_name: str = ""
+    evidence_supporting_current_trl: list[str] = Field(default_factory=list)
+    why_not_higher: str = ""
+    evidence_gaps: list[str] = Field(default_factory=list)
+    legal_or_certification_disclaimer: str = ""
+
+
+class ResearchIndustryCriterionScore(BaseModel):
+    score: float = 0.0
+    evidence: str = ""
+    gap: str = ""
+    recommendation: str = ""
+
+
+class TechnologyReadinessResearchIndustryAlignmentOutput(BaseModel):
+    criteria_scores: dict[str, ResearchIndustryCriterionScore] = Field(default_factory=dict)
+    overall_alignment_score: float = 0.0
+    top_alignment_strengths: list[str] = Field(default_factory=list)
+    top_alignment_gaps: list[str] = Field(default_factory=list)
+    prioritized_industrial_applications: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class IPProtectionAxisAssessment(BaseModel):
+    preliminary_assessment: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    gap: str = ""
+    disclosure_risk: str = ""
+    recommended_review: str = ""
+
+
+class TechnologyReadinessIPProtectionAxisOutput(BaseModel):
+    material_composition: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
+    synthesis_method: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
+    specific_use: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
+    device_or_system: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
+    critical_parameters: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
+    know_how: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
+    ip_risk_notes: list[str] = Field(default_factory=list)
+    specialist_review_required: bool = True
+    confidence: str = ""
+
+
+class TechnologyReadinessNextLevelRecommendationsOutput(BaseModel):
+    current_trl: int = 0
+    next_target_trl: int = 0
+    current_phase_name: str = ""
+    next_phase_name: str = ""
+    main_gap_to_next_level: str = ""
+    recommended_actions: list[dict] = Field(default_factory=list)
+    required_tests: list[str] = Field(default_factory=list)
+    required_evidence: list[str] = Field(default_factory=list)
+    expected_deliverables: list[str] = Field(default_factory=list)
+    risks_to_reduce: list[str] = Field(default_factory=list)
+    suggested_owners: list[str] = Field(default_factory=list)
+    estimated_time_range: str = ""
+    advancement_criteria: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class TechnologyReadinessTechnicalValidationPlanOutput(BaseModel):
+    validation_tests: list[dict] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    measurement_plan: list[str] = Field(default_factory=list)
+    failure_modes: list[str] = Field(default_factory=list)
+    evidence_to_collect: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class TechnologyReadinessIndustrialTransferPlanOutput(BaseModel):
+    ideal_industrial_partner: str = ""
+    partner_validation_needed: list[str] = Field(default_factory=list)
+    minimum_transfer_package: list[str] = Field(default_factory=list)
+    transfer_model_options: list[str] = Field(default_factory=list)
+    negotiation_risks: list[str] = Field(default_factory=list)
+    evidence_required_before_transfer: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class RoadmapPhase(BaseModel):
+    trl: str = ""
+    phase_name: str = ""
+    time_range: str = ""
+    objective: str = ""
+    evidence_needed: list[str] = Field(default_factory=list)
+    decision_gate: str = ""
+
+
+class TechnologyReadinessReadinessRoadmapOutput(BaseModel):
+    roadmap_phases: list[RoadmapPhase] = Field(default_factory=list)
+    timeline: list[dict] = Field(default_factory=list)
+    decision_gates: list[dict] = Field(default_factory=list)
+    resources_needed: list[str] = Field(default_factory=list)
+    go_no_go_criteria: list[str] = Field(default_factory=list)
+    confidence: str = ""
+
+
+class TechnologyReadinessExecutiveSummaryOutput(BaseModel):
+    current_trl: int = 0
+    target_trl: int = 0
+    readiness_verdict_code: str = "not_assessable"
+    readiness_verdict: str = ""
+    top_blockers: list[str] = Field(default_factory=list)
+    recommended_next_step: str = ""
+    operator_summary: str = ""
+    confidence: str = ""
+
+
+TECHNOLOGY_READINESS_OUTPUT_MODELS = {
+    "scope": TechnologyReadinessScopeOutput,
+    "scientific_inventory": TechnologyReadinessScientificInventoryOutput,
+    "trl_diagnosis": TechnologyReadinessTRLDiagnosisOutput,
+    "research_industry_alignment": TechnologyReadinessResearchIndustryAlignmentOutput,
+    "ip_protection_axis": TechnologyReadinessIPProtectionAxisOutput,
+    "next_level_recommendations": TechnologyReadinessNextLevelRecommendationsOutput,
+    "technical_validation_plan": TechnologyReadinessTechnicalValidationPlanOutput,
+    "industrial_transfer_plan": TechnologyReadinessIndustrialTransferPlanOutput,
+    "readiness_roadmap": TechnologyReadinessReadinessRoadmapOutput,
+    "executive_summary": TechnologyReadinessExecutiveSummaryOutput,
+}
+
+
+def validate_technology_readiness_output(phase: str, payload: dict):
+    model = TECHNOLOGY_READINESS_OUTPUT_MODELS.get(phase)
+    if model is None:
+        raise ValueError(f"Unsupported technology readiness phase: {phase}")
+    return model(**payload)
+
 # ═══ Deterministic Scoring ═══
 
 class DetScores(BaseModel):
@@ -598,6 +759,7 @@ class ProjectState(BaseModel):
     # Identity
     project_id: str = ""
     project_name: str = ""
+    project_type: str = DEFAULT_PROJECT_TYPE
     created_at: datetime = Field(default_factory=datetime.now)
 
     # Input
@@ -616,10 +778,7 @@ class ProjectState(BaseModel):
     # Phase tracking
     current_phase: str = "classify"
     phase_status: dict[str, PhaseStatus] = Field(default_factory=lambda: {
-        p: PhaseStatus.PENDING for p in [
-            "classify", "hypotheses", "gauntlet", "audit",
-            "strategy", "sqi", "monitor", "report"
-        ]
+        p: PhaseStatus.PENDING for p in STRATEGIC_AUDIT_PHASE_SEQUENCE
     })
     phase_confidence: dict[str, float] = Field(default_factory=dict)
     phase_run_completed_at: dict[str, str] = Field(default_factory=dict)
@@ -640,6 +799,16 @@ class ProjectState(BaseModel):
     monitor: Optional[MonitorOutput] = None
     sqi: Optional[SQIOutput] = None
     det_scores: Optional[DetScores] = None
+    scope: Optional[TechnologyReadinessScopeOutput] = None
+    scientific_inventory: Optional[TechnologyReadinessScientificInventoryOutput] = None
+    trl_diagnosis: Optional[TechnologyReadinessTRLDiagnosisOutput] = None
+    research_industry_alignment: Optional[TechnologyReadinessResearchIndustryAlignmentOutput] = None
+    ip_protection_axis: Optional[TechnologyReadinessIPProtectionAxisOutput] = None
+    next_level_recommendations: Optional[TechnologyReadinessNextLevelRecommendationsOutput] = None
+    technical_validation_plan: Optional[TechnologyReadinessTechnicalValidationPlanOutput] = None
+    industrial_transfer_plan: Optional[TechnologyReadinessIndustrialTransferPlanOutput] = None
+    readiness_roadmap: Optional[TechnologyReadinessReadinessRoadmapOutput] = None
+    executive_summary: Optional[TechnologyReadinessExecutiveSummaryOutput] = None
 
     # Phase 4: Monitor
     observations: dict[str, str] = Field(default_factory=dict)
@@ -713,3 +882,28 @@ class ProjectState(BaseModel):
     # The operator and any compliance reviewer reads this to verify
     # the deterministic enforcement layer worked correctly.
     policy_audit_log: list[dict] = Field(default_factory=list)
+
+    @field_validator("project_type", mode="before")
+    @classmethod
+    def _coerce_project_type(cls, value):
+        return normalize_project_type(value)
+
+    def model_post_init(self, __context) -> None:
+        sequence = get_workflow_phase_sequence(self.project_type)
+        self.phase_status = {
+            phase: _coerce_phase_status(self.phase_status.get(phase, PhaseStatus.PENDING))
+            for phase in sequence
+        }
+        if self.current_phase not in sequence:
+            self.current_phase = sequence[0]
+        for phase in sequence:
+            self.re_entry_count.setdefault(phase, 0)
+
+
+def _coerce_phase_status(value) -> PhaseStatus:
+    if isinstance(value, PhaseStatus):
+        return value
+    try:
+        return PhaseStatus(value)
+    except Exception:
+        return PhaseStatus.PENDING

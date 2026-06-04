@@ -29,6 +29,16 @@ PHASE_MODULE_MAP = {
     "sqi":        "phases/03-strategy.md",    # SQI lives inside strategy module
     "monitor":    "phases/04-monitor.md",
     "report":     "phases/05-report.md",
+    "scope":      "technology_readiness/scope.md",
+    "scientific_inventory": "technology_readiness/scientific_inventory.md",
+    "trl_diagnosis": "technology_readiness/trl_diagnosis.md",
+    "research_industry_alignment": "technology_readiness/research_industry_alignment.md",
+    "ip_protection_axis": "technology_readiness/ip_protection_axis.md",
+    "next_level_recommendations": "technology_readiness/next_level_recommendations.md",
+    "technical_validation_plan": "technology_readiness/technical_validation_plan.md",
+    "industrial_transfer_plan": "technology_readiness/industrial_transfer_plan.md",
+    "readiness_roadmap": "technology_readiness/readiness_roadmap.md",
+    "executive_summary": "technology_readiness/executive_summary.md",
 }
 
 

@@ -1,0 +1,413 @@
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import templates.technology_readiness as technology_template
+from orchestrator import (
+    PROMPT_BUILDERS,
+    WORKFLOW_PHASE_SEQUENCE,
+    _parsed_json_matches_phase,
+    _phase_json_retry_instruction,
+    _store_phase_output,
+    workflow_phase_sequence_for_state,
+)
+from state import ProjectState, TechnologyReadinessScopeOutput
+from tools.technology_readiness import (
+    EVIDENCE_CATEGORIES,
+    IP_PROTECTION_AXES,
+    READINESS_VERDICT_CODES,
+    RESEARCH_INDUSTRY_CRITERIA,
+    TRL_PHASES,
+    build_claim_ledger,
+    build_readiness_radar_scorecard,
+    build_stage_gate_decision,
+    build_tto_handoff_package,
+    compute_alignment_score,
+    compute_evidence_sufficiency,
+    normalize_trl,
+    overclaim_warnings,
+    rank_technology_readiness_portfolio,
+    unknown_evidence_categories,
+)
+from workflow_templates import (
+    STRATEGIC_AUDIT_PHASE_SEQUENCE,
+    TECHNOLOGY_READINESS_PHASE_SEQUENCE,
+    get_workflow_phase_sequence,
+)
+
+
+PROMPT_DIR = ROOT / "prompts" / "technology_readiness"
+DEMO_RUNBOOK = ROOT / "docs" / "demo" / "technology-readiness" / "RUNBOOK.md"
+
+
+def test_technology_readiness_state_uses_template_sequence():
+    state = ProjectState(
+        project_id="tech-sequence",
+        project_name="Technology readiness",
+        brief="Assess a lab prototype for industrial transfer.",
+        project_type="technology_readiness",
+    )
+
+    assert state.project_type == "technology_readiness"
+    assert state.current_phase == "scope"
+    assert tuple(state.phase_status) == TECHNOLOGY_READINESS_PHASE_SEQUENCE
+    assert workflow_phase_sequence_for_state(state) == TECHNOLOGY_READINESS_PHASE_SEQUENCE
+
+
+def test_existing_project_type_sequences_are_unchanged():
+    assert WORKFLOW_PHASE_SEQUENCE == STRATEGIC_AUDIT_PHASE_SEQUENCE
+    assert get_workflow_phase_sequence("strategic_audit") == STRATEGIC_AUDIT_PHASE_SEQUENCE
+    assert get_workflow_phase_sequence("ai_readiness") == STRATEGIC_AUDIT_PHASE_SEQUENCE
+    assert get_workflow_phase_sequence("automation_roi") == STRATEGIC_AUDIT_PHASE_SEQUENCE
+    assert ProjectState(project_id="default", brief="x").current_phase == "classify"
+
+
+def test_technology_readiness_prompts_exist_and_have_builders():
+    state = ProjectState(project_id="tech-prompts", project_type="technology_readiness", brief="x")
+
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        prompt_file = PROMPT_DIR / f"{phase}.md"
+        assert prompt_file.exists(), phase
+        assert prompt_file.read_text(encoding="utf-8").strip(), phase
+        assert phase in PROMPT_BUILDERS
+        built = PROMPT_BUILDERS[phase](state)
+        assert "ASSESSMENT CONTEXT:" in built
+        assert "Return the requested JSON object only." in built
+
+
+def test_trl_prompt_has_overclaim_controls():
+    text = (PROMPT_DIR / "trl_diagnosis.md").read_text(encoding="utf-8")
+
+    assert "TRL 7+" in text
+    assert "Do not assign TRL 8+" in text
+    assert "Do not assign TRL 9" in text
+    assert "why_not_higher" in text
+    assert "This is not certification" in text
+
+
+def test_research_industry_prompt_lists_all_criteria():
+    text = (PROMPT_DIR / "research_industry_alignment.md").read_text(encoding="utf-8")
+
+    for criterion in RESEARCH_INDUSTRY_CRITERIA:
+        assert criterion in text
+    for field in ("score", "evidence", "gap", "recommendation"):
+        assert f'"{field}"' in text
+
+
+def test_ip_prompt_requires_specialist_review_and_all_axes():
+    text = (PROMPT_DIR / "ip_protection_axis.md").read_text(encoding="utf-8")
+
+    for axis in IP_PROTECTION_AXES:
+        assert axis in text
+    assert "specialist_review_required" in text
+    assert "Do not claim legal patentability" in text
+    assert "requires specialist review" in text
+
+
+def test_next_level_prompt_requires_evidence_and_advancement_criteria():
+    text = (PROMPT_DIR / "next_level_recommendations.md").read_text(encoding="utf-8")
+
+    assert "required_evidence" in text
+    assert "advancement_criteria" in text
+    assert "Do not recommend advancement without explicit evidence requirements" in text
+
+
+def test_roadmap_and_executive_summary_prompt_controls():
+    roadmap = (PROMPT_DIR / "readiness_roadmap.md").read_text(encoding="utf-8")
+    summary = (PROMPT_DIR / "executive_summary.md").read_text(encoding="utf-8")
+
+    for phase in TRL_PHASES.values():
+        assert phase["trl"] in roadmap
+        assert phase["time_range"] in roadmap
+    for verdict_code in READINESS_VERDICT_CODES:
+        assert verdict_code in summary
+
+
+def test_store_phase_output_validates_technology_readiness_payload():
+    state = ProjectState(project_id="store-tech", project_type="technology_readiness", brief="x")
+    payload = {
+        "technology_name": "Lab coating",
+        "assessment_boundary": "prototype chemistry only",
+        "target_environment": "pilot manufacturing line",
+        "intended_next_milestone": "proof of concept",
+        "stakeholders": ["principal investigator"],
+        "constraints": [],
+        "assumptions": ["operator-reviewed evidence only"],
+        "confidence": "preliminary",
+    }
+
+    _store_phase_output(state, "scope", payload)
+
+    assert isinstance(state.scope, TechnologyReadinessScopeOutput)
+    assert state.scope.technology_name == "Lab coating"
+    assert _parsed_json_matches_phase("scope", payload)
+    assert not _parsed_json_matches_phase("scope", [payload])
+    assert "legal/certification" in _phase_json_retry_instruction("scope")
+
+
+def test_technology_readiness_helpers_are_deterministic():
+    assert normalize_trl("TRL 4.7") == 4
+    assert normalize_trl("TRL 99") == 9
+    assert compute_alignment_score({"technical_novelty": {"score": 4}, "unknown": 5}) == 4.0
+
+    evidence = compute_evidence_sufficiency(["scientific_basis", "proof_of_concept", "unexpected"])
+    assert evidence["coverage_count"] == 2
+    assert evidence["unknown_categories"] == ["unexpected"]
+    assert unknown_evidence_categories(EVIDENCE_CATEGORIES) == []
+
+    warnings = overclaim_warnings(
+        {
+            "current_trl": 5,
+            "evidence_categories": ["scientific_basis"],
+            "specialist_review_required": False,
+            "readiness_verdict_code": "unsupported",
+        }
+    )
+    assert any("TRL 5+" in warning for warning in warnings)
+    assert any("specialist_review_required=False" in warning for warning in warnings)
+    assert any("Unknown readiness verdict code" in warning for warning in warnings)
+
+
+def test_stage_gate_decision_blocks_advancement_without_required_evidence():
+    trl_3_to_4 = build_stage_gate_decision(
+        {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "evidence_categories": ["scientific_basis", "proof_of_concept"],
+            "required_evidence": ["reproducibility"],
+        }
+    )
+    assert trl_3_to_4["decision"] == "hold"
+    assert any("reproducibility" in gap for gap in trl_3_to_4["blocking_gaps"])
+
+    trl_4_to_5 = build_stage_gate_decision(
+        {
+            "current_trl": 4,
+            "next_target_trl": 5,
+            "evidence_categories": ["reproducibility", "controlled_validation"],
+        }
+    )
+    assert trl_4_to_5["decision"] == "hold"
+    assert any("relevant_environment" in gap for gap in trl_4_to_5["blocking_gaps"])
+
+    trl_6_to_7 = build_stage_gate_decision(
+        {
+            "current_trl": 6,
+            "next_target_trl": 7,
+            "evidence_categories": ["reproducibility", "controlled_validation", "relevant_environment"],
+        }
+    )
+    assert trl_6_to_7["decision"] == "hold"
+    assert any("industrial_validation" in gap or "partner_feedback" in gap for gap in trl_6_to_7["blocking_gaps"])
+
+    unknown_current = build_stage_gate_decision(
+        {
+            "current_trl": 0,
+            "next_target_trl": 3,
+            "evidence_categories": ["scientific_basis", "proof_of_concept"],
+        }
+    )
+    assert unknown_current["decision"] != "proceed"
+
+
+def test_stage_gate_proceed_requires_supplied_evidence_and_ip_conditions():
+    proceed = build_stage_gate_decision(
+        {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "evidence_categories": ["reproducibility"],
+            "required_evidence": ["reproducibility"],
+        }
+    )
+    assert proceed["decision"] == "proceed"
+
+    conditional = build_stage_gate_decision(
+        {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "evidence_categories": ["controlled_validation"],
+            "ip_claims_present": True,
+        }
+    )
+    assert conditional["decision"] == "proceed_with_conditions"
+    assert "ip_review" in conditional["required_evidence"]
+
+
+def test_claim_ledger_downgrades_missing_evidence_and_flags_ip_claims():
+    ledger = build_claim_ledger(
+        {
+            "current_trl": 3,
+            "confidence": "high",
+            "why_not_higher": "controlled validation missing",
+            "required_evidence": ["controlled_validation"],
+            "readiness_verdict": "ready only for proof-of-concept review",
+            "ip_claims": ["material composition may have a preliminary protection path"],
+            "evidence_categories": ["scientific_basis"],
+        }
+    )
+
+    current_claim = next(claim for claim in ledger["claims"] if claim["claim_id"] == "trl-current")
+    ip_claim = next(claim for claim in ledger["claims"] if claim["claim_id"] == "ip-1")
+
+    assert current_claim["label"] == "hypothesis"
+    assert current_claim["confidence"] == "low"
+    assert "controlled validation missing" in current_claim["limitations"]
+    assert current_claim["validate_with"] == ["controlled_validation"]
+    assert ip_claim["label"] != "fact"
+    assert ip_claim["validate_with"] == ["ip_review"]
+    assert any("Unsupported high-confidence" in warning for warning in ledger["warnings"])
+
+
+def test_claim_ledger_uses_supplied_evidence_ids_without_inventing_them():
+    ledger = build_claim_ledger(
+        {
+            "current_trl": 4,
+            "confidence": "high",
+            "evidence_ids": ["ev-controlled"],
+            "evidence_categories": ["controlled_validation"],
+        }
+    )
+
+    current_claim = next(claim for claim in ledger["claims"] if claim["claim_id"] == "trl-current")
+    assert current_claim["label"] == "fact"
+    assert current_claim["evidence_ids"] == ["ev-controlled"]
+    assert ledger["warnings"] == []
+
+
+def test_readiness_radar_caps_scores_without_evidence():
+    empty = build_readiness_radar_scorecard({"current_trl": 6, "research_industry_alignment_score": 5})
+
+    assert set(empty) == {
+        "technical_readiness",
+        "evidence_readiness",
+        "ip_readiness",
+        "market_application_readiness",
+        "scaling_readiness",
+        "regulatory_readiness",
+        "transfer_readiness",
+        "partner_readiness",
+    }
+    assert empty["technical_readiness"]["score"] <= 1
+    assert empty["evidence_readiness"]["confidence"] == "low"
+    assert empty["ip_readiness"]["score"] <= 2
+    assert empty["partner_readiness"]["score"] <= 2
+
+    stronger = build_readiness_radar_scorecard(
+        {
+            "current_trl": 5,
+            "research_industry_alignment_score": 4,
+            "evidence_categories": [
+                "scientific_basis",
+                "proof_of_concept",
+                "reproducibility",
+                "controlled_validation",
+                "relevant_environment",
+                "ip_review",
+                "partner_feedback",
+            ],
+        }
+    )
+    assert stronger["evidence_readiness"]["score"] > empty["evidence_readiness"]["score"]
+    assert stronger["ip_readiness"]["score"] > empty["ip_readiness"]["score"]
+    assert stronger["partner_readiness"]["score"] > empty["partner_readiness"]["score"]
+
+
+def test_tto_handoff_package_keeps_confidential_and_non_confidential_boundaries():
+    package = build_tto_handoff_package(
+        {
+            "technology_name": "Lab coating",
+            "current_trl": 3,
+            "evidence_categories": ["scientific_basis", "proof_of_concept"],
+        }
+    )
+
+    assert "non_confidential_summary" in package
+    assert "confidential_technical_appendix_outline" in package
+    assert "disclosure_risk_notes" in package
+    combined = "\n".join(str(value) for value in package.values())
+    assert "Disclosure risk before publication or external demos" in combined
+    assert "Specialist review required" in combined
+    assert "not legal advice" in combined
+    assert "legal patentability" in combined
+    assert "guaranteed transfer" in combined
+    assert "legally patentable" not in combined.lower()
+
+
+def test_portfolio_helper_ranks_supported_evidence_above_unsupported_high_trl():
+    ranked = rank_technology_readiness_portfolio(
+        [
+            {
+                "project_id": "unsupported-high-trl",
+                "technology_name": "Unsupported high TRL",
+                "current_trl": 6,
+                "target_trl": 7,
+                "research_industry_alignment_score": 5,
+                "evidence_categories": ["scientific_basis"],
+            },
+            {
+                "project_id": "supported-validation",
+                "technology_name": "Supported validation",
+                "current_trl": 4,
+                "target_trl": 5,
+                "research_industry_alignment_score": 4,
+                "evidence_categories": [
+                    "scientific_basis",
+                    "proof_of_concept",
+                    "reproducibility",
+                    "controlled_validation",
+                    "relevant_environment",
+                    "ip_review",
+                    "partner_feedback",
+                ],
+            },
+            {
+                "project_id": "early-uncertain",
+                "technology_name": "Early uncertain research",
+                "current_trl": 2,
+                "research_industry_alignment_score": 2,
+                "evidence_categories": [],
+            },
+        ]
+    )
+
+    assert ranked[0]["project_id"] == "supported-validation"
+    assert ranked[0]["recommended_priority"] in {"high", "medium"}
+    assert next(row for row in ranked if row["project_id"] == "unsupported-high-trl")["recommended_priority"] == "defer"
+    assert next(row for row in ranked if row["project_id"] == "early-uncertain")["recommended_priority"] == "defer"
+
+
+def test_technology_readiness_demo_runbook_covers_wave_b_flow():
+    assert DEMO_RUNBOOK.exists()
+    text = DEMO_RUNBOOK.read_text(encoding="utf-8")
+
+    for required in (
+        "technology_readiness",
+        "Technology Readiness & Transfer Audit",
+        "/templates",
+        "brief.md",
+        "supporting-data.md",
+        "Current TRL likely 3",
+        "Next target likely TRL 4",
+        "reproducibility not demonstrated",
+        "controlled validation protocol",
+        "technology_readiness_workbook",
+        "Claim ledger",
+        "Stage-gate decision",
+        "not TRL certification",
+        "legal patentability advice",
+        "guarantee of commercial transfer",
+    ):
+        assert required in text
+
+
+def test_template_package_does_not_import_missing_base_modules():
+    source = (ROOT / "templates" / "technology_readiness" / "__init__.py").read_text(encoding="utf-8")
+
+    assert technology_template.TEMPLATE["project_type"] == "technology_readiness"
+    assert technology_template.TEMPLATE["phase_sequence"] == TECHNOLOGY_READINESS_PHASE_SEQUENCE
+    assert "from templates.registry" not in source
+    assert "from templates.base" not in source

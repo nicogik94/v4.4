@@ -3466,8 +3466,9 @@ a:hover { text-decoration: underline; }
           <option value="strategic_audit">Strategic Decision Audit framing</option>
           <option value="automation_roi">Automation ROI example framing</option>
           <option value="ai_readiness">AI readiness example framing</option>
+          <option value="technology_readiness">Technology Readiness &amp; Transfer Audit</option>
         </select>
-        <div class="hint">Framing label only; the backend workflow remains classify → hypotheses → gauntlet → audit → strategy → sqi → monitor → report and this does not create vertical runtime packs.</div>
+        <div class="hint">Framing label only for strategic-audit style templates; Technology Readiness uses its registered TRL workflow. Assess technology maturity, TRL, evidence gaps, IP/protection considerations, validation plan, transfer readiness, and next-level recommendations. Selecting a label alone does not create vertical runtime packs.</div>
       </div>
       <div class="form-row">
         <label>Brief — describe the decision <span class="required-star">*</span></label>
@@ -3824,6 +3825,11 @@ const EXPORT_PROFILES = {
     label: 'Operator-only',
     formats: ['xlsx'],
     help: 'Operator-only.',
+  },
+  technology_readiness_workbook: {
+    label: 'Technology readiness workbook',
+    formats: ['xlsx'],
+    help: 'Operator-reviewed TRL, evidence, stage-gate, claim ledger, and transfer-readiness workbook for technology_readiness projects.',
   },
 };
 const EXPORT_FORMAT_LABELS = { pdf: 'PDF', docx: 'DOCX', zip: 'ZIP', xlsx: 'XLSX' };

@@ -72,7 +72,8 @@ from scenarios import (
 from state import (
     ProjectState, PhaseStatus,
     ClassifyOutput, Hypothesis, GauntletOutput,
-    AuditOutput, StrategyOutput, MonitorOutput,
+    AuditOutput, StrategyOutput, MonitorOutput, SQIOutput,
+    validate_technology_readiness_output,
     KnowledgeLayerState, SourceRegistryEntry,
 )
 from decision_objects import ensure_decision_objects
@@ -98,6 +99,12 @@ from exporters import (
 )
 from config import APP_VERSION
 import store
+from workflow_templates import (
+    TECHNOLOGY_READINESS_PHASE_SEQUENCE,
+    all_editable_phases,
+    get_workflow_phase_sequence,
+    list_workflow_templates,
+)
 import observability
 
 logger = logging.getLogger("v4-api")
@@ -153,6 +160,7 @@ class CreateProjectRequest(BaseModel):
     name: str = "New Project"
     brief: str
     data: str = ""
+    project_type: str = "strategic_audit"
     # v4.4 — optional combined classification at create time. Backward-compatible:
     # if omitted, project defaults to minimal_risk and operator can set later via
     # POST /projects/{id}/risk-classification.
@@ -239,6 +247,7 @@ class ProjectResponse(BaseModel):
     project_id: str
     name: str
     current_phase: str
+    project_type: str = "strategic_audit"
     phase_status: dict
     classify_domain: str | None = None
     hypothesis_count: int = 0
@@ -287,7 +296,7 @@ class ClarificationAnswerRequest(BaseModel):
     status: str = "answered"
 
 
-EDITABLE_PHASES = {"classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "report"}
+EDITABLE_PHASES = all_editable_phases()
 
 
 @app.get("/health")
@@ -300,6 +309,11 @@ async def health():
         "tracing": "langfuse" if observability.enabled() else "off",
     }
 
+
+
+@app.get("/templates")
+async def list_templates():
+    return {"templates": list_workflow_templates()}
 
 @app.get("/runtime/preflight")
 async def runtime_preflight():
@@ -361,6 +375,7 @@ async def create_project(payload: dict[str, Any] = Body(...)):
         brief=req.brief,
         data=req.data,
         ingestion_contract_version=req.contract_version,
+        project_type=req.project_type,
         ingestion_source=req.source,
         ingestion_external_case_id=req.external_case_id,
         ingestion_metadata=req.metadata,
@@ -396,7 +411,7 @@ async def create_project(payload: dict[str, Any] = Body(...)):
             actor_id=req.risk_set_by or "operator",
             payload={
                 "project_name": state.project_name,
-                "project_type": getattr(req, "project_type", ""),
+                "project_type": state.project_type,
                 "risk_classification": state.risk_classification,
             },
         )
@@ -918,12 +933,15 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
         }
 
     invalidated: list[str] = []
+    sequence = get_workflow_phase_sequence(getattr(state, "project_type", "strategic_audit"))
     if any(key in ("brief", "data") for key in changed_keys):
-        invalidated = _invalidate_from_phase(state, "classify", include_self=True)
-        state.current_phase = invalidated[0] if invalidated else "classify"
+        restart_phase = "classify" if "classify" in sequence else sequence[0]
+        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
+        state.current_phase = invalidated[0] if invalidated else restart_phase
     elif any(key in ("observations", "timer_logs") for key in changed_keys):
-        invalidated = _invalidate_from_phase(state, "monitor", include_self=True)
-        state.current_phase = invalidated[0] if invalidated else "monitor"
+        restart_phase = "monitor" if "monitor" in sequence else sequence[0]
+        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
+        state.current_phase = invalidated[0] if invalidated else restart_phase
 
     _log_operator_edit(state, "input", changed_field_paths, invalidated)
     ensure_decision_objects(state, trigger="api.patch_input")
@@ -1526,6 +1544,9 @@ def _clear_phase_output(state: ProjectState, phase: str) -> None:
         state.sqi = None
     elif phase == "report":
         state.report = None
+    elif phase in get_workflow_phase_sequence(getattr(state, "project_type", "strategic_audit")):
+        if hasattr(state, phase):
+            setattr(state, phase, None)
 
 
 def _mark_phase_stale(state: ProjectState, phase: str) -> bool:
@@ -1604,6 +1625,14 @@ def _validate_phase_payload(phase: str, payload: Any):
             data = _require_dict_payload(phase, payload)
             return MonitorOutput(**data), _field_paths_for_payload(phase, data)
 
+        if phase == "sqi":
+            data = _require_dict_payload(phase, payload)
+            return SQIOutput(**data), _field_paths_for_payload(phase, data)
+
+        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            data = _require_dict_payload(phase, payload)
+            return validate_technology_readiness_output(phase, data), _field_paths_for_payload(phase, data)
+
         if phase == "report":
             if isinstance(payload, dict):
                 report_text = payload.get("report")
@@ -1637,6 +1666,10 @@ def _apply_phase_output(state: ProjectState, phase: str, validated) -> None:
         state.det_scores = compute_det_scores(state.strategy)
     elif phase == "monitor":
         state.monitor = validated
+    elif phase == "sqi":
+        state.sqi = validated
+    elif phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        setattr(state, phase, validated)
     elif phase == "report":
         state.report = validated
 
@@ -1667,7 +1700,7 @@ def _log_operator_edit(
 
 
 def _analysis_pending_phase_for_import(state: ProjectState) -> str:
-    for phase in ("report", "monitor", "sqi", "strategy", "audit", "gauntlet", "hypotheses", "classify"):
+    for phase in reversed(get_workflow_phase_sequence(getattr(state, "project_type", "strategic_audit"))):
         if _phase_has_material_output(state, phase):
             return phase
     return ""
@@ -1886,6 +1919,7 @@ def _to_response(s: ProjectState) -> ProjectResponse:
         name=s.project_name,
         current_phase=s.current_phase,
         phase_status={k: v.value if hasattr(v, 'value') else str(v) for k, v in s.phase_status.items()},
+        project_type=s.project_type,
         classify_domain=s.classify.domain if s.classify else None,
         hypothesis_count=len(s.hypotheses or []),
         strategy_count=len(s.strategy.strategies) if s.strategy else 0,

@@ -52,6 +52,9 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("Demo framing", html)
         self.assertIn("Framing label only", html)
         self.assertIn("does not create vertical runtime packs", html)
+        self.assertIn('value="technology_readiness"', html)
+        self.assertIn("Technology Readiness &amp; Transfer Audit", html)
+        self.assertIn("Assess technology maturity, TRL, evidence gaps, IP/protection considerations, validation plan, transfer readiness, and next-level recommendations.", html)
 
         self.assertNotIn("controlled experimental dashboard", html)
         self.assertNotIn("controlled local demo", html)
@@ -154,6 +157,7 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
             "machine_archive",
             "client_monitoring_template",
             "operator_monitoring_template",
+            "technology_readiness_workbook",
         ):
             self.assertIn(profile, html)
 
