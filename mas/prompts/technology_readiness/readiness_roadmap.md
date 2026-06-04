@@ -5,6 +5,7 @@ Return ONE structured JSON object for the `readiness_roadmap` phase.
 General controls:
 - Make this an evidence-aware assessment.
 - Separate facts, assumptions, and missing evidence in the field values when relevant.
+- For fields shown as text lists, return arrays of plain strings, not arrays of objects; use object arrays only where the schema explicitly shows objects.
 - Do not claim TRL certification, legal patentability, guaranteed commercial transfer, or autonomous decision-making.
 - Roadmap gates are operator-reviewed go/no-go points, not autonomous decisions.
 
