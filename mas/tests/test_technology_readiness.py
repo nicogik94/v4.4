@@ -1,11 +1,13 @@
 from pathlib import Path
 import sys
+from typing import get_args, get_origin
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import state as state_models
 import templates.technology_readiness as technology_template
 from orchestrator import (
     PROMPT_BUILDERS,
@@ -15,7 +17,11 @@ from orchestrator import (
     _store_phase_output,
     workflow_phase_sequence_for_state,
 )
-from state import ProjectState, TechnologyReadinessScopeOutput
+from state import (
+    ProjectState,
+    TechnologyReadinessResearchIndustryAlignmentOutput,
+    TechnologyReadinessScopeOutput,
+)
 from tools.technology_readiness import (
     EVIDENCE_CATEGORIES,
     IP_PROTECTION_AXES,
@@ -197,6 +203,102 @@ def test_scope_prompt_requires_plain_string_arrays():
     assert "arrays of plain strings" in text
     assert "not arrays of objects" in text
     assert "Technology Transfer Office" in text
+
+
+def test_all_technology_readiness_prompts_require_plain_string_arrays():
+    for prompt_file in sorted(PROMPT_DIR.glob("*.md")):
+        text = prompt_file.read_text(encoding="utf-8")
+        assert "plain strings" in text, prompt_file.name
+        assert "arrays of objects" in text, prompt_file.name
+
+
+def test_research_industry_alignment_normalizes_prioritized_application_objects():
+    state = ProjectState(project_id="research-application-objects", project_type="technology_readiness", brief="x")
+    payload = {
+        "criteria_scores": {
+            "technical_novelty": {
+                "score": 4,
+                "evidence": "Operator supplied coating data.",
+                "gap": "Independent replication not supplied.",
+                "recommendation": "Collect reproducibility evidence.",
+            }
+        },
+        "overall_alignment_score": 3.7,
+        "top_alignment_strengths": [
+            {"name": "Corrosion resistance", "evidence": "bench exposure results"},
+        ],
+        "top_alignment_gaps": [
+            {"gap": "Partner requirements not confirmed", "recommendation": "Run partner discovery"},
+        ],
+        "prioritized_industrial_applications": [
+            {
+                "application": "Marine and offshore structures",
+                "rationale": "high corrosion exposure",
+                "gap": "partner requirements not confirmed",
+            },
+            {
+                "application": "Chemical storage tanks",
+                "rationale": "aggressive operating environment",
+                "gap": "coating lifetime data missing",
+            },
+            {
+                "application": "Port infrastructure",
+                "rationale": "maintenance cost sensitivity",
+                "gap": "buyer economics not validated",
+            },
+        ],
+        "confidence": "preliminary",
+    }
+
+    _store_phase_output(state, "research_industry_alignment", payload)
+
+    assert isinstance(state.research_industry_alignment, TechnologyReadinessResearchIndustryAlignmentOutput)
+    assert state.research_industry_alignment.prioritized_industrial_applications == [
+        "Marine and offshore structures — high corrosion exposure; partner requirements not confirmed",
+        "Chemical storage tanks — aggressive operating environment; coating lifetime data missing",
+        "Port infrastructure — maintenance cost sensitivity; buyer economics not validated",
+    ]
+    assert state.research_industry_alignment.top_alignment_strengths == [
+        "Corrosion resistance — bench exposure results",
+    ]
+    assert state.research_industry_alignment.top_alignment_gaps == [
+        "Partner requirements not confirmed — Run partner discovery",
+    ]
+
+
+def _technology_readiness_list_string_fields(model_class):
+    return [
+        field_name
+        for field_name, field_info in model_class.model_fields.items()
+        if get_origin(field_info.annotation) is list and get_args(field_info.annotation) == (str,)
+    ]
+
+
+def test_all_technology_readiness_list_string_fields_normalize_object_values():
+    model_classes = set(state_models.TECHNOLOGY_READINESS_OUTPUT_MODELS.values())
+    model_classes.update({state_models.IPProtectionAxisAssessment, state_models.RoadmapPhase})
+    expected = "Normalized item — retained note; custom_key: custom detail"
+
+    covered_fields = []
+    for model_class in sorted(model_classes, key=lambda cls: cls.__name__):
+        for field_name in _technology_readiness_list_string_fields(model_class):
+            instance = model_class(
+                **{
+                    field_name: [
+                        {
+                            "name": "Normalized item",
+                            "note": "retained note",
+                            "custom_key": "custom detail",
+                        }
+                    ]
+                }
+            )
+            assert getattr(instance, field_name) == [expected], f"{model_class.__name__}.{field_name}"
+            covered_fields.append(f"{model_class.__name__}.{field_name}")
+
+    assert "TechnologyReadinessResearchIndustryAlignmentOutput.prioritized_industrial_applications" in covered_fields
+    assert "TechnologyReadinessScopeOutput.stakeholders" in covered_fields
+    assert "RoadmapPhase.evidence_needed" in covered_fields
 
 
 def test_technology_readiness_helpers_are_deterministic():

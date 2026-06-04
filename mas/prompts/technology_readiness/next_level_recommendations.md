@@ -5,6 +5,7 @@ Return ONE structured JSON object for the `next_level_recommendations` phase.
 General controls:
 - Make this an evidence-aware assessment.
 - Separate facts, assumptions, and missing evidence in the field values when relevant.
+- For fields shown as text lists, return arrays of plain strings, not arrays of objects; use object arrays only where the schema explicitly shows objects.
 - Do not claim TRL certification, legal patentability, guaranteed commercial transfer, or autonomous decision-making.
 - Recommendations are operator-reviewed next steps, not autonomous advancement decisions.
 

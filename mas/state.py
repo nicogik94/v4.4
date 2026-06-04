@@ -3,8 +3,8 @@ v4 Multi-Agent System — State Models (Shared Blackboard)
 All project data flows through this typed state. Each agent reads scoped slices and writes structured outputs.
 """
 from __future__ import annotations
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Any
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Optional, Any, get_args, get_origin
 from datetime import datetime
 from enum import Enum
 
@@ -565,7 +565,8 @@ class SQIOutput(BaseModel):
 
 # ═══ Technology Readiness & Transfer Audit ═══
 
-_SCOPE_STRING_PRIMARY_KEYS = (
+_TECHNOLOGY_STRING_PRIMARY_KEYS = (
+    "application",
     "role",
     "name",
     "title",
@@ -574,10 +575,18 @@ _SCOPE_STRING_PRIMARY_KEYS = (
     "assumption",
     "question",
     "gap",
+    "test",
+    "criterion",
+    "deliverable",
+    "risk",
+    "owner",
+    "phase",
     "description",
     "value",
 )
-_SCOPE_STRING_DETAIL_KEYS = (
+_TECHNOLOGY_STRING_DETAIL_KEYS = (
+    "rationale",
+    "gap",
     "note",
     "status",
     "evidence",
@@ -589,50 +598,60 @@ _SCOPE_STRING_DETAIL_KEYS = (
 )
 
 
-def _technology_scope_item_to_string(value: Any) -> str:
-    """Preserve model-emitted scope detail while satisfying list[str] fields."""
+def _technology_readiness_item_to_string(value: Any) -> str:
+    """Preserve model-emitted detail while satisfying Technology Readiness list[str] fields."""
     if value is None:
         return ""
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
-        primary: list[str] = []
+        primary = ""
         details: list[str] = []
         used: set[str] = set()
 
-        for key in _SCOPE_STRING_PRIMARY_KEYS:
+        for key in _TECHNOLOGY_STRING_PRIMARY_KEYS:
             if key in value:
-                text = _technology_scope_item_to_string(value.get(key))
+                text = _technology_readiness_item_to_string(value.get(key))
                 if text:
-                    primary.append(text)
-                used.add(key)
+                    primary = text
+                    used.add(key)
+                    break
 
-        for key in _SCOPE_STRING_DETAIL_KEYS:
-            if key in value:
-                text = _technology_scope_item_to_string(value.get(key))
-                if text:
-                    details.append(text)
-                used.add(key)
+        for key in _TECHNOLOGY_STRING_DETAIL_KEYS:
+            if key in used or key not in value:
+                continue
+            text = _technology_readiness_item_to_string(value.get(key))
+            if text:
+                details.append(text)
+            used.add(key)
+
+        for key in _TECHNOLOGY_STRING_PRIMARY_KEYS:
+            if key in used or key not in value:
+                continue
+            text = _technology_readiness_item_to_string(value.get(key))
+            if text:
+                details.append(f"{key}: {text}")
+            used.add(key)
 
         for key, item in value.items():
             if key in used:
                 continue
-            text = _technology_scope_item_to_string(item)
+            text = _technology_readiness_item_to_string(item)
             if text:
                 details.append(f"{key}: {text}")
 
         if primary and details:
-            return f"{'; '.join(primary)} — {'; '.join(details)}"
+            return f"{primary} — {'; '.join(details)}"
         if primary:
-            return "; ".join(primary)
+            return primary
         return "; ".join(details)
     if isinstance(value, (list, tuple, set)):
-        parts = [_technology_scope_item_to_string(item) for item in value]
+        parts = [_technology_readiness_item_to_string(item) for item in value]
         return "; ".join(part for part in parts if part)
     return str(value).strip()
 
 
-def _technology_scope_string_list(value: Any) -> list[str]:
+def _technology_readiness_string_list(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
@@ -641,11 +660,28 @@ def _technology_scope_string_list(value: Any) -> list[str]:
         items = value
     else:
         items = [value]
-    normalized = [_technology_scope_item_to_string(item) for item in items]
+    normalized = [_technology_readiness_item_to_string(item) for item in items]
     return [item for item in normalized if item]
 
 
-class TechnologyReadinessScopeOutput(BaseModel):
+def _is_list_of_strings_annotation(annotation: Any) -> bool:
+    return get_origin(annotation) is list and get_args(annotation) == (str,)
+
+
+class TechnologyReadinessOutputBase(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_technology_readiness_string_lists(cls, data):
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for field_name, field_info in cls.model_fields.items():
+            if field_name in normalized and _is_list_of_strings_annotation(field_info.annotation):
+                normalized[field_name] = _technology_readiness_string_list(normalized[field_name])
+        return normalized
+
+
+class TechnologyReadinessScopeOutput(TechnologyReadinessOutputBase):
     technology_name: str = ""
     assessment_boundary: str = ""
     target_environment: str = ""
@@ -657,19 +693,8 @@ class TechnologyReadinessScopeOutput(BaseModel):
     evidence_gaps: list[str] = Field(default_factory=list)
     confidence: str = ""
 
-    @field_validator(
-        "stakeholders",
-        "constraints",
-        "assumptions",
-        "validation_questions",
-        "evidence_gaps",
-        mode="before",
-    )
-    def _coerce_scope_string_list(cls, value):
-        return _technology_scope_string_list(value)
 
-
-class TechnologyReadinessScientificInventoryOutput(BaseModel):
+class TechnologyReadinessScientificInventoryOutput(TechnologyReadinessOutputBase):
     scientific_basis: list[str] = Field(default_factory=list)
     critical_components: list[str] = Field(default_factory=list)
     current_experiments: list[str] = Field(default_factory=list)
@@ -679,7 +704,7 @@ class TechnologyReadinessScientificInventoryOutput(BaseModel):
     confidence: str = ""
 
 
-class TechnologyReadinessTRLDiagnosisOutput(BaseModel):
+class TechnologyReadinessTRLDiagnosisOutput(TechnologyReadinessOutputBase):
     current_trl: int = 0
     target_trl: int = 0
     confidence: str = ""
@@ -690,14 +715,14 @@ class TechnologyReadinessTRLDiagnosisOutput(BaseModel):
     legal_or_certification_disclaimer: str = ""
 
 
-class ResearchIndustryCriterionScore(BaseModel):
+class ResearchIndustryCriterionScore(TechnologyReadinessOutputBase):
     score: float = 0.0
     evidence: str = ""
     gap: str = ""
     recommendation: str = ""
 
 
-class TechnologyReadinessResearchIndustryAlignmentOutput(BaseModel):
+class TechnologyReadinessResearchIndustryAlignmentOutput(TechnologyReadinessOutputBase):
     criteria_scores: dict[str, ResearchIndustryCriterionScore] = Field(default_factory=dict)
     overall_alignment_score: float = 0.0
     top_alignment_strengths: list[str] = Field(default_factory=list)
@@ -706,7 +731,7 @@ class TechnologyReadinessResearchIndustryAlignmentOutput(BaseModel):
     confidence: str = ""
 
 
-class IPProtectionAxisAssessment(BaseModel):
+class IPProtectionAxisAssessment(TechnologyReadinessOutputBase):
     preliminary_assessment: str = ""
     evidence: list[str] = Field(default_factory=list)
     gap: str = ""
@@ -714,7 +739,7 @@ class IPProtectionAxisAssessment(BaseModel):
     recommended_review: str = ""
 
 
-class TechnologyReadinessIPProtectionAxisOutput(BaseModel):
+class TechnologyReadinessIPProtectionAxisOutput(TechnologyReadinessOutputBase):
     material_composition: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
     synthesis_method: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
     specific_use: IPProtectionAxisAssessment = Field(default_factory=IPProtectionAxisAssessment)
@@ -726,7 +751,7 @@ class TechnologyReadinessIPProtectionAxisOutput(BaseModel):
     confidence: str = ""
 
 
-class TechnologyReadinessNextLevelRecommendationsOutput(BaseModel):
+class TechnologyReadinessNextLevelRecommendationsOutput(TechnologyReadinessOutputBase):
     current_trl: int = 0
     next_target_trl: int = 0
     current_phase_name: str = ""
@@ -743,7 +768,7 @@ class TechnologyReadinessNextLevelRecommendationsOutput(BaseModel):
     confidence: str = ""
 
 
-class TechnologyReadinessTechnicalValidationPlanOutput(BaseModel):
+class TechnologyReadinessTechnicalValidationPlanOutput(TechnologyReadinessOutputBase):
     validation_tests: list[dict] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
     measurement_plan: list[str] = Field(default_factory=list)
@@ -752,7 +777,7 @@ class TechnologyReadinessTechnicalValidationPlanOutput(BaseModel):
     confidence: str = ""
 
 
-class TechnologyReadinessIndustrialTransferPlanOutput(BaseModel):
+class TechnologyReadinessIndustrialTransferPlanOutput(TechnologyReadinessOutputBase):
     ideal_industrial_partner: str = ""
     partner_validation_needed: list[str] = Field(default_factory=list)
     minimum_transfer_package: list[str] = Field(default_factory=list)
@@ -762,7 +787,7 @@ class TechnologyReadinessIndustrialTransferPlanOutput(BaseModel):
     confidence: str = ""
 
 
-class RoadmapPhase(BaseModel):
+class RoadmapPhase(TechnologyReadinessOutputBase):
     trl: str = ""
     phase_name: str = ""
     time_range: str = ""
@@ -771,7 +796,7 @@ class RoadmapPhase(BaseModel):
     decision_gate: str = ""
 
 
-class TechnologyReadinessReadinessRoadmapOutput(BaseModel):
+class TechnologyReadinessReadinessRoadmapOutput(TechnologyReadinessOutputBase):
     roadmap_phases: list[RoadmapPhase] = Field(default_factory=list)
     timeline: list[dict] = Field(default_factory=list)
     decision_gates: list[dict] = Field(default_factory=list)
@@ -780,7 +805,7 @@ class TechnologyReadinessReadinessRoadmapOutput(BaseModel):
     confidence: str = ""
 
 
-class TechnologyReadinessExecutiveSummaryOutput(BaseModel):
+class TechnologyReadinessExecutiveSummaryOutput(TechnologyReadinessOutputBase):
     current_trl: int = 0
     target_trl: int = 0
     readiness_verdict_code: str = "not_assessable"
