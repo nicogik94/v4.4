@@ -23,11 +23,14 @@ from tools.technology_readiness import (
     RESEARCH_INDUSTRY_CRITERIA,
     TRL_PHASES,
     build_claim_ledger,
+    build_readiness_radar_scorecard,
     build_stage_gate_decision,
+    build_tto_handoff_package,
     compute_alignment_score,
     compute_evidence_sufficiency,
     normalize_trl,
     overclaim_warnings,
+    rank_technology_readiness_portfolio,
     unknown_evidence_categories,
 )
 from workflow_templates import (
@@ -273,6 +276,108 @@ def test_claim_ledger_uses_supplied_evidence_ids_without_inventing_them():
     assert current_claim["label"] == "fact"
     assert current_claim["evidence_ids"] == ["ev-controlled"]
     assert ledger["warnings"] == []
+
+
+def test_readiness_radar_caps_scores_without_evidence():
+    empty = build_readiness_radar_scorecard({"current_trl": 6, "research_industry_alignment_score": 5})
+
+    assert set(empty) == {
+        "technical_readiness",
+        "evidence_readiness",
+        "ip_readiness",
+        "market_application_readiness",
+        "scaling_readiness",
+        "regulatory_readiness",
+        "transfer_readiness",
+        "partner_readiness",
+    }
+    assert empty["technical_readiness"]["score"] <= 1
+    assert empty["evidence_readiness"]["confidence"] == "low"
+    assert empty["ip_readiness"]["score"] <= 2
+    assert empty["partner_readiness"]["score"] <= 2
+
+    stronger = build_readiness_radar_scorecard(
+        {
+            "current_trl": 5,
+            "research_industry_alignment_score": 4,
+            "evidence_categories": [
+                "scientific_basis",
+                "proof_of_concept",
+                "reproducibility",
+                "controlled_validation",
+                "relevant_environment",
+                "ip_review",
+                "partner_feedback",
+            ],
+        }
+    )
+    assert stronger["evidence_readiness"]["score"] > empty["evidence_readiness"]["score"]
+    assert stronger["ip_readiness"]["score"] > empty["ip_readiness"]["score"]
+    assert stronger["partner_readiness"]["score"] > empty["partner_readiness"]["score"]
+
+
+def test_tto_handoff_package_keeps_confidential_and_non_confidential_boundaries():
+    package = build_tto_handoff_package(
+        {
+            "technology_name": "Lab coating",
+            "current_trl": 3,
+            "evidence_categories": ["scientific_basis", "proof_of_concept"],
+        }
+    )
+
+    assert "non_confidential_summary" in package
+    assert "confidential_technical_appendix_outline" in package
+    assert "disclosure_risk_notes" in package
+    combined = "\n".join(str(value) for value in package.values())
+    assert "Disclosure risk before publication or external demos" in combined
+    assert "Specialist review required" in combined
+    assert "not legal advice" in combined
+    assert "legal patentability" in combined
+    assert "guaranteed transfer" in combined
+    assert "legally patentable" not in combined.lower()
+
+
+def test_portfolio_helper_ranks_supported_evidence_above_unsupported_high_trl():
+    ranked = rank_technology_readiness_portfolio(
+        [
+            {
+                "project_id": "unsupported-high-trl",
+                "technology_name": "Unsupported high TRL",
+                "current_trl": 6,
+                "target_trl": 7,
+                "research_industry_alignment_score": 5,
+                "evidence_categories": ["scientific_basis"],
+            },
+            {
+                "project_id": "supported-validation",
+                "technology_name": "Supported validation",
+                "current_trl": 4,
+                "target_trl": 5,
+                "research_industry_alignment_score": 4,
+                "evidence_categories": [
+                    "scientific_basis",
+                    "proof_of_concept",
+                    "reproducibility",
+                    "controlled_validation",
+                    "relevant_environment",
+                    "ip_review",
+                    "partner_feedback",
+                ],
+            },
+            {
+                "project_id": "early-uncertain",
+                "technology_name": "Early uncertain research",
+                "current_trl": 2,
+                "research_industry_alignment_score": 2,
+                "evidence_categories": [],
+            },
+        ]
+    )
+
+    assert ranked[0]["project_id"] == "supported-validation"
+    assert ranked[0]["recommended_priority"] in {"high", "medium"}
+    assert next(row for row in ranked if row["project_id"] == "unsupported-high-trl")["recommended_priority"] == "defer"
+    assert next(row for row in ranked if row["project_id"] == "early-uncertain")["recommended_priority"] == "defer"
 
 
 def test_technology_readiness_demo_runbook_covers_wave_b_flow():

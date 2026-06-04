@@ -17,6 +17,7 @@ from tools.technology_readiness import (
     WORKBOOK_DISCLAIMER,
     build_claim_ledger,
     build_stage_gate_decision,
+    build_tto_handoff_package,
     compute_alignment_score,
     compute_evidence_sufficiency,
 )
@@ -37,6 +38,7 @@ TECHNOLOGY_READINESS_WORKBOOK_SHEETS: tuple[str, ...] = (
     "Readiness Roadmap",
     "Go-No-Go Checklist",
     "Claim Ledger",
+    "TTO Handoff",
 )
 
 
@@ -57,6 +59,7 @@ def technology_readiness_workbook_xlsx_bytes(state: ProjectState) -> bytes:
     _write_readiness_roadmap(workbook.create_sheet("Readiness Roadmap"), state)
     _write_go_no_go(workbook.create_sheet("Go-No-Go Checklist"), state)
     _write_claim_ledger(workbook.create_sheet("Claim Ledger"), state)
+    _write_tto_handoff(workbook.create_sheet("TTO Handoff"), state)
 
     buffer = BytesIO()
     workbook.save(buffer)
@@ -344,6 +347,28 @@ def _write_claim_ledger(worksheet: Any, state: ProjectState) -> None:
         ])
     if ledger["warnings"]:
         rows.append(["warnings", _join(ledger["warnings"]), "", "", "", "", "", "", "", ""])
+    _write_rows(worksheet, rows)
+
+
+def _write_tto_handoff(worksheet: Any, state: ProjectState) -> None:
+    scope = _phase_dict(state, "scope")
+    trl = _phase_dict(state, "trl_diagnosis")
+    package = build_tto_handoff_package(
+        {
+            "technology_name": scope.get("technology_name") or state.project_name,
+            "current_trl": trl.get("current_trl"),
+            "evidence_categories": evidence_categories_for_state(state),
+        }
+    )
+    rows = [["Section", "Value"]]
+    rows.append(["invention_disclosure_draft", _join(package["invention_disclosure_draft"])])
+    rows.append(["non_confidential_summary", package["non_confidential_summary"]])
+    rows.append(["confidential_technical_appendix_outline", _join(package["confidential_technical_appendix_outline"])])
+    rows.append(["ip_review_questions", _join(package["ip_review_questions"])])
+    rows.append(["partner_validation_brief", package["partner_validation_brief"]])
+    rows.append(["commercialization_route_options", _join(package["commercialization_route_options"])])
+    rows.append(["evidence_checklist_before_external_disclosure", _join(package["evidence_checklist_before_external_disclosure"])])
+    rows.append(["disclosure_risk_notes", _join(package["disclosure_risk_notes"])])
     _write_rows(worksheet, rows)
 
 

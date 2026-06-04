@@ -1179,12 +1179,15 @@ Stop if baseline data access is unavailable.
         self.assertIn("Next-Level Recommendations", workbook.sheetnames)
         self.assertIn("Stage-Gate Decisions", workbook.sheetnames)
         self.assertIn("Claim Ledger", workbook.sheetnames)
+        self.assertIn("TTO Handoff", workbook.sheetnames)
         self.assertIn("scientific_basis", workbook_text)
         self.assertIn("proof_of_concept", workbook_text)
         self.assertIn("reproducibility", workbook_text)
         self.assertIn("controlled_validation", workbook_text)
         self.assertIn("hold", workbook_text)
         self.assertIn("Controlled validation and reproducibility are missing.", workbook_text)
+        self.assertIn("non_confidential_summary", workbook_text)
+        self.assertIn("Specialist review required", workbook_text)
 
     def test_technology_readiness_workbook_profile_requires_matching_project_type(self):
         state = make_export_state("non-tech-workbook")
