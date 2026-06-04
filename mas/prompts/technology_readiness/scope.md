@@ -26,3 +26,5 @@ Rules:
 - Define the assessment boundary narrowly enough that TRL and transfer readiness can be evaluated.
 - State the intended next milestone without implying approval or certification.
 - If the technology, environment, stakeholders, or constraints are unclear, mark them as missing evidence or assumptions.
+- `stakeholders`, `constraints`, `assumptions`, and any optional string-list keys must be arrays of plain strings, not arrays of objects.
+- Do not return objects such as `{"role": "Technology Transfer Office", "note": "not formally engaged"}` inside those arrays; combine the detail into one readable string such as `"Technology Transfer Office — not formally engaged"`.
