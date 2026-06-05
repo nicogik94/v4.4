@@ -664,20 +664,47 @@ def _technology_readiness_string_list(value: Any) -> list[str]:
     return [item for item in normalized if item]
 
 
+def _technology_readiness_dict_list(value: Any) -> list[dict]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [dict(value)]
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [value]
+
+    normalized: list[dict] = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+        else:
+            normalized.append({"summary": _technology_readiness_item_to_string(item)})
+    return normalized
+
+
 def _is_list_of_strings_annotation(annotation: Any) -> bool:
     return get_origin(annotation) is list and get_args(annotation) == (str,)
+
+
+def _is_list_of_dicts_annotation(annotation: Any) -> bool:
+    return get_origin(annotation) is list and get_args(annotation) == (dict,)
 
 
 class TechnologyReadinessOutputBase(BaseModel):
     @model_validator(mode="before")
     @classmethod
-    def _coerce_technology_readiness_string_lists(cls, data):
+    def _coerce_technology_readiness_lists(cls, data):
         if not isinstance(data, dict):
             return data
         normalized = dict(data)
         for field_name, field_info in cls.model_fields.items():
-            if field_name in normalized and _is_list_of_strings_annotation(field_info.annotation):
+            if field_name not in normalized:
+                continue
+            if _is_list_of_strings_annotation(field_info.annotation):
                 normalized[field_name] = _technology_readiness_string_list(normalized[field_name])
+            elif _is_list_of_dicts_annotation(field_info.annotation):
+                normalized[field_name] = _technology_readiness_dict_list(normalized[field_name])
         return normalized
 
 

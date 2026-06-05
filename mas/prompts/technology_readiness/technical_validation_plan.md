@@ -23,5 +23,6 @@ Required JSON keys:
 
 Rules:
 - Validation tests should state purpose, method, environment, required sample or run count if known, owner role, and evidence output.
+- `validation_tests` must be an array of objects, not strings. Each object should include `summary` plus method, environment, owner, and evidence output when known.
 - Acceptance criteria must be defensible and mark operator confirmation where thresholds are unknown.
 - Include reproducibility and controlled-validation evidence when the target is TRL 4 or higher.
