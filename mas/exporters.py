@@ -61,6 +61,7 @@ from technology_readiness_workbook import (
     TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
     technology_readiness_workbook_xlsx_bytes,
 )
+from workflow_templates import TECHNOLOGY_READINESS_PHASE_LABELS, TECHNOLOGY_READINESS_PHASE_SEQUENCE
 
 
 def build_export_filename(state: ProjectState, ext: str) -> str:
@@ -240,6 +241,18 @@ HUMAN_REVIEW_NOTE = (
 CLIENT_DELIVERY_VALIDATION_BANNER = (
     "Validate before client delivery. This is a hypothesis-driven diagnostic memo, not a measured audit."
 )
+TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER = (
+    "Validate before client delivery. This is an operator-reviewed technology readiness assessment, "
+    "not TRL certification, not legal patentability advice, not freedom-to-operate advice, not regulatory "
+    "approval, not safety approval, not investment readiness, not production readiness, not commercial "
+    "viability, and not a guarantee of commercial transfer."
+)
+TECHNOLOGY_READINESS_BOUNDARY_NOTE = (
+    "Operator-reviewed readiness assessment based on supplied evidence only. It is not TRL certification, "
+    "not legal patentability advice, not freedom-to-operate advice, not regulatory approval, not safety "
+    "approval, not investment readiness, not production readiness, not commercial viability, and not a "
+    "guarantee of commercial transfer."
+)
 
 SPARSE_GROWTH_DECISION_GATES = """| Gate | Proceed | Extend | Stop / Escalate |
 |---|---|---|---|
@@ -405,9 +418,14 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
 
     current_version = report_freshness.current_code_version()
     if profile_name == "report":
+        report_markdown = (
+            _technology_readiness_report_markdown(state)
+            if _is_technology_readiness_state(state)
+            else _safe_report_markdown(state)
+        )
         markdown = _finalize_export_markdown(
             _prepend_report_freshness_warning(
-                _safe_report_markdown(state),
+                report_markdown,
                 state,
                 current_code_version=current_version,
             ),
@@ -437,6 +455,12 @@ def build_client_dossier_markdown(
     *,
     current_code_version: str | None = None,
 ) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_client_dossier_markdown(
+            state,
+            current_code_version=current_code_version,
+        )
+
     quality = assess_report_quality_context(state)
     sections = _extract_report_sections(state.report or "")
     lines = [
@@ -567,6 +591,13 @@ def build_operator_dossier_markdown(
     current_code_version: str | None = None,
     include_freshness: bool = True,
 ) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_operator_dossier_markdown(
+            state,
+            current_code_version=current_code_version,
+            include_freshness=include_freshness,
+        )
+
     quality = assess_report_quality_context(state)
     lines = [
         "# Operator Dossier",
@@ -615,6 +646,444 @@ def build_operator_dossier_markdown(
         audience="operator",
         quality=quality,
     )
+
+
+def _is_technology_readiness_state(state: ProjectState) -> bool:
+    return str(getattr(state, "project_type", "") or "").strip().lower() == "technology_readiness"
+
+
+def _technology_readiness_report_markdown(state: ProjectState) -> str:
+    if str(getattr(state, "report", "") or "").strip():
+        return _apply_technology_readiness_client_delivery_banner(_safe_report_markdown(state))
+
+    quality = assess_report_quality_context(state)
+    lines = [
+        "# Technology Readiness & Transfer Report",
+        _client_project_metadata_line(state),
+    ]
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=True))
+    lines.extend(_quality_warning_blocks(state, quality, client=True))
+    lines.extend([
+        "## What technology we reviewed",
+        _technology_readiness_scope_summary(state),
+        "## Current defensible TRL",
+        _technology_readiness_trl_summary(state),
+        "## Why higher TRL is not yet justified",
+        _technology_readiness_why_not_higher(state),
+        "## Evidence gaps",
+        _technology_readiness_evidence_gaps_summary(state),
+        "## Sprint 0 validation package",
+        _technology_readiness_sprint0_validation_package(state),
+        "## IP/disclosure review note",
+        _technology_readiness_ip_review_note(state),
+        "## Transfer-readiness note",
+        _technology_readiness_transfer_note(state),
+        "## Readiness roadmap",
+        _technology_readiness_roadmap_summary(state),
+        "## What to do next",
+        _technology_readiness_next_step_summary(state),
+        "## Human review note",
+        TECHNOLOGY_READINESS_BOUNDARY_NOTE,
+    ])
+    markdown = _finalize_export_markdown(
+        normalize_export_text("\n\n".join(part for part in lines if str(part).strip()), audience="client"),
+        state,
+        audience="client",
+        quality=quality,
+    )
+    return _apply_technology_readiness_client_delivery_banner(markdown)
+
+
+def _technology_readiness_client_dossier_markdown(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+) -> str:
+    quality = assess_report_quality_context(state)
+    lines = [
+        "# Technology Readiness Client Dossier",
+        _client_project_metadata_line(state),
+    ]
+    warning = _report_freshness_warning(state, current_code_version=current_code_version)
+    if warning:
+        lines.append(warning)
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=True))
+    lines.extend(_quality_warning_blocks(state, quality, client=True))
+    lines.extend([
+        "## What technology we reviewed",
+        _technology_readiness_scope_summary(state),
+        "## Current defensible TRL",
+        _technology_readiness_trl_summary(state),
+        "## Why higher TRL is not yet justified",
+        _technology_readiness_why_not_higher(state),
+        "## Evidence gaps",
+        _technology_readiness_evidence_gaps_summary(state),
+        "## Sprint 0 validation package",
+        _technology_readiness_sprint0_validation_package(state),
+        "## IP/disclosure review note",
+        _technology_readiness_ip_review_note(state),
+        "## Transfer-readiness note",
+        _technology_readiness_transfer_note(state),
+        "## Readiness roadmap",
+        _technology_readiness_roadmap_summary(state),
+        "## What to do next",
+        _technology_readiness_next_step_summary(state),
+        "## Human review note",
+        TECHNOLOGY_READINESS_BOUNDARY_NOTE,
+    ])
+    markdown = _finalize_export_markdown(
+        normalize_export_text("\n\n".join(part for part in lines if str(part).strip()), audience="client"),
+        state,
+        audience="client",
+        quality=quality,
+    )
+    return _apply_technology_readiness_client_delivery_banner(markdown)
+
+
+def _technology_readiness_operator_dossier_markdown(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+    include_freshness: bool = True,
+) -> str:
+    quality = assess_report_quality_context(state)
+    lines = ["# Technology Readiness Operator Dossier"]
+    if include_freshness:
+        warning = _operator_report_freshness_warning(state, current_code_version=current_code_version)
+        if warning:
+            lines.append(warning)
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=False))
+    lines.extend(_quality_warning_blocks(state, quality, client=False))
+    sections = [
+        ("Cover / project metadata", operator_project_metadata(state)),
+        ("Technology readiness executive summary", _technology_readiness_operator_summary(state)),
+        ("TRL diagnosis", _technology_readiness_trl_summary(state)),
+        ("Readiness verdict", _technology_readiness_verdict_summary(state)),
+        ("Top evidence gaps", _technology_readiness_evidence_gaps_summary(state)),
+        ("Next-level recommendation", _technology_readiness_next_step_summary(state)),
+        ("Validation plan", _technology_readiness_validation_plan_summary(state)),
+        ("Transfer plan", _technology_readiness_transfer_note(state)),
+        ("Readiness roadmap", _technology_readiness_roadmap_summary(state)),
+        ("Phase completion status", summarize_phase_outputs(state)),
+        ("Evidence and source summary", operator_evidence_summary(state)),
+        ("Human review / safety boundary", TECHNOLOGY_READINESS_BOUNDARY_NOTE),
+        ("Report appendix", operator_report_appendix(state)),
+        ("Technical appendix", operator_technical_appendix(state)),
+    ]
+    for heading, body in sections:
+        lines.extend([f"## {heading}", body or "No technology-readiness summary is available yet."])
+    return _finalize_export_markdown(
+        "\n\n".join(part for part in lines if str(part).strip()),
+        state,
+        audience="operator",
+        quality=quality,
+    )
+
+
+def _technology_readiness_scope_summary(state: ProjectState) -> str:
+    scope = _technology_readiness_phase_data(state, "scope")
+    rows = [
+        ["Field", "Value"],
+        ["Technology", _technology_readiness_name(state)],
+        ["Assessment boundary", _tr_field(scope, "assessment_boundary", "Not supplied.")],
+        ["Target environment", _tr_field(scope, "target_environment", "Not supplied.")],
+        ["Intended next milestone", _tr_field(scope, "intended_next_milestone", "Not supplied.")],
+        ["Stakeholders", _tr_join(scope.get("stakeholders"), "Not supplied.")],
+        ["Constraints", _tr_join(scope.get("constraints"), "Not supplied.")],
+        ["Assumptions", _tr_join(scope.get("assumptions"), "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_trl_summary(state: ProjectState) -> str:
+    diagnosis = _technology_readiness_phase_data(state, "trl_diagnosis")
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    rows = [
+        ["Field", "Value"],
+        ["Current defensible TRL", _tr_field(executive, "current_trl") or _tr_field(diagnosis, "current_trl", "Not assessed.")],
+        ["Target TRL", _tr_field(executive, "target_trl") or _tr_field(diagnosis, "target_trl", "Not supplied.")],
+        ["Current phase name", _tr_field(diagnosis, "current_phase_name", "Not supplied.")],
+        ["Readiness verdict", _tr_field(executive, "readiness_verdict", "Not supplied.")],
+        ["Confidence", _tr_field(executive, "confidence") or _tr_field(diagnosis, "confidence", "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_why_not_higher(state: ProjectState) -> str:
+    diagnosis = _technology_readiness_phase_data(state, "trl_diagnosis")
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    parts = [
+        _tr_field(diagnosis, "why_not_higher"),
+        _tr_bullets(executive.get("top_blockers"), ""),
+    ]
+    body = "\n\n".join(part for part in parts if str(part).strip())
+    return body or "A higher TRL is not justified until the missing evidence is reviewed by the operator."
+
+
+def _technology_readiness_evidence_gaps_summary(state: ProjectState) -> str:
+    gaps = []
+    for phase, field in (
+        ("executive_summary", "top_blockers"),
+        ("trl_diagnosis", "evidence_gaps"),
+        ("scientific_inventory", "missing_evidence"),
+        ("next_level_recommendations", "required_evidence"),
+    ):
+        gaps.extend(_tr_list(_technology_readiness_phase_data(state, phase).get(field)))
+    unique = _unique_nonempty(gaps)
+    if not unique:
+        return "No evidence gaps were recorded in the structured Technology Readiness output."
+    return "\n".join(f"- {item}" for item in unique)
+
+
+def _technology_readiness_sprint0_validation_package(state: ProjectState) -> str:
+    next_level = _technology_readiness_phase_data(state, "next_level_recommendations")
+    validation = _technology_readiness_phase_data(state, "technical_validation_plan")
+    lines = [
+        "Sprint 0 validation required before treating the roadmap, transfer discussion, or readiness verdict as validated.",
+        "### Required tests",
+        _tr_bullets(next_level.get("required_tests") or validation.get("validation_tests")),
+        "### Required evidence",
+        _tr_bullets(next_level.get("required_evidence") or validation.get("evidence_to_collect")),
+        "### Acceptance criteria",
+        _tr_bullets(validation.get("acceptance_criteria") or next_level.get("advancement_criteria")),
+    ]
+    return "\n\n".join(part for part in lines if str(part).strip())
+
+
+def _technology_readiness_ip_review_note(state: ProjectState) -> str:
+    ip = _technology_readiness_phase_data(state, "ip_protection_axis")
+    rows = [
+        ["Field", "Value"],
+        ["Specialist review required", _tr_field(ip, "specialist_review_required", "Not supplied.")],
+        ["IP risk notes", _tr_join(ip.get("ip_risk_notes"), "No IP/disclosure notes recorded.")],
+        ["Material composition", _tr_field(ip, "material_composition", "Not supplied.")],
+        ["Synthesis method", _tr_field(ip, "synthesis_method", "Not supplied.")],
+        ["Specific use", _tr_field(ip, "specific_use", "Not supplied.")],
+        ["Device or system", _tr_field(ip, "device_or_system", "Not supplied.")],
+        ["Critical parameters", _tr_field(ip, "critical_parameters", "Not supplied.")],
+        ["Know-how", _tr_field(ip, "know_how", "Not supplied.")],
+    ]
+    return "\n\n".join([
+        "Treat IP and disclosure conclusions as preliminary. A qualified specialist should review before publication, external demos, or transfer negotiation.",
+        _markdown_table(rows),
+    ])
+
+
+def _technology_readiness_transfer_note(state: ProjectState) -> str:
+    transfer = _technology_readiness_phase_data(state, "industrial_transfer_plan")
+    rows = [
+        ["Field", "Value"],
+        ["Ideal industrial partner", _tr_field(transfer, "ideal_industrial_partner", "Not supplied.")],
+        ["Partner validation needed", _tr_join(transfer.get("partner_validation_needed"), "Not supplied.")],
+        ["Minimum transfer package", _tr_join(transfer.get("minimum_transfer_package"), "Not supplied.")],
+        ["Transfer model options", _tr_join(transfer.get("transfer_model_options"), "Not supplied.")],
+        ["Negotiation risks", _tr_join(transfer.get("negotiation_risks"), "Not supplied.")],
+        ["Evidence required before transfer", _tr_join(transfer.get("evidence_required_before_transfer"), "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_roadmap_summary(state: ProjectState) -> str:
+    roadmap = _technology_readiness_phase_data(state, "readiness_roadmap")
+    phase_rows = [["TRL", "Phase", "Time range", "Objective", "Evidence needed", "Decision gate"]]
+    for item in _tr_items(roadmap.get("roadmap_phases")):
+        if isinstance(item, dict):
+            phase_rows.append([
+                _tr_display_text(item.get("trl")),
+                _tr_display_text(item.get("phase_name")),
+                _tr_display_text(item.get("time_range")),
+                _tr_display_text(item.get("objective")),
+                _tr_join(item.get("evidence_needed"), ""),
+                _tr_display_text(item.get("decision_gate")),
+            ])
+        else:
+            phase_rows.append(["", _tr_display_text(item), "", "", "", ""])
+    parts = []
+    if len(phase_rows) > 1:
+        parts.append(_markdown_table(phase_rows))
+    else:
+        parts.append("No readiness roadmap phases were recorded.")
+    parts.extend([
+        "### Timeline",
+        _tr_bullets(roadmap.get("timeline")),
+        "### Decision gates",
+        _tr_bullets(roadmap.get("decision_gates")),
+        "### Resources needed",
+        _tr_bullets(roadmap.get("resources_needed")),
+        "### Go/no-go criteria",
+        _tr_bullets(roadmap.get("go_no_go_criteria")),
+    ])
+    return "\n\n".join(part for part in parts if str(part).strip())
+
+
+def _technology_readiness_next_step_summary(state: ProjectState) -> str:
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    next_level = _technology_readiness_phase_data(state, "next_level_recommendations")
+    rows = [
+        ["Field", "Value"],
+        ["Recommended next step", _tr_field(executive, "recommended_next_step", "Not supplied.")],
+        ["Main gap to next level", _tr_field(next_level, "main_gap_to_next_level", "Not supplied.")],
+        ["Next target TRL", _tr_field(next_level, "next_target_trl", "Not supplied.")],
+        ["Next phase name", _tr_field(next_level, "next_phase_name", "Not supplied.")],
+        ["Estimated time range", _tr_field(next_level, "estimated_time_range", "Not supplied.")],
+        ["Recommended actions", _tr_join(next_level.get("recommended_actions"), "Not supplied.")],
+        ["Expected deliverables", _tr_join(next_level.get("expected_deliverables"), "Not supplied.")],
+        ["Risks to reduce", _tr_join(next_level.get("risks_to_reduce"), "Not supplied.")],
+        ["Suggested owners", _tr_join(next_level.get("suggested_owners"), "Not supplied.")],
+        ["Advancement criteria", _tr_join(next_level.get("advancement_criteria"), "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_validation_plan_summary(state: ProjectState) -> str:
+    validation = _technology_readiness_phase_data(state, "technical_validation_plan")
+    rows = [
+        ["Field", "Value"],
+        ["Validation tests", _tr_join(validation.get("validation_tests"), "Not supplied.")],
+        ["Acceptance criteria", _tr_join(validation.get("acceptance_criteria"), "Not supplied.")],
+        ["Measurement plan", _tr_join(validation.get("measurement_plan"), "Not supplied.")],
+        ["Failure modes", _tr_join(validation.get("failure_modes"), "Not supplied.")],
+        ["Evidence to collect", _tr_join(validation.get("evidence_to_collect"), "Not supplied.")],
+        ["Confidence", _tr_field(validation, "confidence", "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_verdict_summary(state: ProjectState) -> str:
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    rows = [
+        ["Field", "Value"],
+        ["Readiness verdict code", _tr_field(executive, "readiness_verdict_code", "Not supplied.")],
+        ["Readiness verdict", _tr_field(executive, "readiness_verdict", "Not supplied.")],
+        ["Top blockers", _tr_join(executive.get("top_blockers"), "Not supplied.")],
+        ["Operator summary", _tr_field(executive, "operator_summary", "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_operator_summary(state: ProjectState) -> str:
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    if executive:
+        return _markdown_table([
+            ["Field", "Value"],
+            ["Technology", _technology_readiness_name(state)],
+            ["Current defensible TRL", _tr_field(executive, "current_trl", "Not assessed.")],
+            ["Target TRL", _tr_field(executive, "target_trl", "Not supplied.")],
+            ["Readiness verdict", _tr_field(executive, "readiness_verdict", "Not supplied.")],
+            ["Recommended next step", _tr_field(executive, "recommended_next_step", "Not supplied.")],
+            ["Operator summary", _tr_field(executive, "operator_summary", "Not supplied.")],
+        ])
+    return _technology_readiness_report_markdown(state)
+
+
+def _technology_readiness_name(state: ProjectState) -> str:
+    scope = _technology_readiness_phase_data(state, "scope")
+    for candidate in (scope.get("technology_name"), getattr(state, "project_name", ""), getattr(state, "brief", "")):
+        text = _tr_display_text(candidate).strip()
+        if text:
+            return text
+    return "Technology under review"
+
+
+def _technology_readiness_phase_data(state: ProjectState, phase: str) -> dict[str, Any]:
+    value = _model_dump(getattr(state, phase, None))
+    return value if isinstance(value, dict) else {}
+
+
+def _tr_field(data: dict[str, Any], key: str, fallback: str = "") -> str:
+    value = data.get(key) if isinstance(data, dict) else None
+    text = _tr_display_text(value).strip()
+    return text if text else fallback
+
+
+def _tr_join(value: Any, fallback: str = "") -> str:
+    items = _tr_list(value)
+    return "; ".join(items) if items else fallback
+
+
+def _tr_bullets(value: Any, fallback: str = "Not supplied.") -> str:
+    items = _tr_list(value)
+    if not items:
+        return fallback
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _tr_items(value: Any) -> list[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _tr_list(value: Any) -> list[str]:
+    return [text for text in (_tr_display_text(item).strip() for item in _tr_items(value)) if text]
+
+
+def _tr_display_text(value: Any) -> str:
+    value = _model_dump(value)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _redact_unsafe_string(value)
+    if isinstance(value, (int, float, bool)):
+        return _fmt_value(value)
+    if isinstance(value, list):
+        return "; ".join(text for text in (_tr_display_text(item).strip() for item in value) if text)
+    if isinstance(value, dict):
+        clean = {str(key): item for key, item in value.items() if _tr_display_text(item).strip()}
+        if not clean:
+            return ""
+        primary = _first_nonempty_tr_value(clean, ("technology_name", "phase_name", "name", "title", "role", "owner", "trl", "phase", "gate"))
+        secondary = _first_nonempty_tr_value(clean, ("note", "summary", "action", "objective", "range", "time_range", "decision_gate", "gap", "recommendation"))
+        if primary and secondary and primary != secondary:
+            return f"{primary} - {secondary}"
+        return "; ".join(
+            f"{_humanize_key(key)}: {_tr_display_text(item)}"
+            for key, item in clean.items()
+            if _tr_display_text(item).strip()
+        )
+    return _redact_unsafe_string(str(value))
+
+
+def _first_nonempty_tr_value(data: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        if key in data:
+            value = _tr_display_text(data.get(key)).strip()
+            if value:
+                return value
+    return ""
+
+
+def _unique_nonempty(values: list[str]) -> list[str]:
+    result = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            result.append(text)
+    return result
+
+
+def _humanize_key(value: str) -> str:
+    return str(value or "").replace("_", " ").strip().capitalize()
+
+
+def _apply_technology_readiness_client_delivery_banner(markdown: str) -> str:
+    value = str(markdown or "").replace(
+        CLIENT_DELIVERY_VALIDATION_BANNER,
+        TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER,
+    )
+    value = re.sub(
+        rf"(?:{re.escape(TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER)}\s*){{2,}}",
+        TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER + "\n\n",
+        value,
+    )
+    return _collapse_markdown_blank_lines(value)
 
 
 def _finalize_export_markdown(
@@ -688,7 +1157,10 @@ def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> st
 def _finalize_client_runtime_render_markdown(markdown: str, state: ProjectState) -> str:
     quality = assess_report_quality_context(state)
     value = _finalize_export_markdown(markdown, state, audience="client", quality=quality)
-    return _polish_client_report_citation_rendering(value)
+    value = _polish_client_report_citation_rendering(value)
+    if _is_technology_readiness_state(state):
+        value = _apply_technology_readiness_client_delivery_banner(value)
+    return value
 
 
 def _polish_client_report_citation_rendering(markdown: str) -> str:
@@ -2242,6 +2714,8 @@ def operator_clarifications_summary(state: ProjectState) -> str:
 
 
 def operator_report_appendix(state: ProjectState) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_report_markdown(state)
     return _redact_unsafe_string(state.report or "") if state.report else "No report is available yet."
 
 
@@ -2272,9 +2746,14 @@ def _project_status_value(state: ProjectState) -> str:
 
 def build_machine_archive_payload(state: ProjectState) -> dict[str, Any]:
     decision_objects = _decision_objects_payload(state)
+    report_markdown = (
+        _technology_readiness_report_markdown(state)
+        if _is_technology_readiness_state(state)
+        else _redact_unsafe_string(state.report or "No report available.")
+    )
     files: dict[str, Any] = {
         "project_state.json": sanitize_for_export(state, "machine_archive", mode="redact"),
-        "report.md": _redact_unsafe_string(state.report or "No report available."),
+        "report.md": report_markdown,
         "phase_outputs.json": sanitize_for_export(_phase_outputs_payload(state), "machine_archive", mode="redact"),
         "decision_objects.json": sanitize_for_export(decision_objects, "machine_archive", mode="redact"),
         "clarifications.json": sanitize_for_export(_clarifications_payload(state), "machine_archive", mode="redact"),
@@ -2341,10 +2820,17 @@ def sanitize_for_export(value, profile, mode: str = "redact"):
 
 def summarize_phase_outputs(state: ProjectState) -> str:
     rows = [["Phase", "Status", "Confidence", "Completed at", "Summary"]]
-    for phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"):
+    phases = (
+        TECHNOLOGY_READINESS_PHASE_SEQUENCE
+        if _is_technology_readiness_state(state)
+        else ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report")
+    )
+    for phase in phases:
         status = state.phase_status.get(phase, "")
+        if not status and _phase_has_output(state, phase):
+            status = "completed"
         rows.append([
-            phase,
+            TECHNOLOGY_READINESS_PHASE_LABELS.get(phase, phase),
             _enum_value(status),
             _fmt_value(state.phase_confidence.get(phase)),
             state.phase_run_completed_at.get(phase, ""),
@@ -2354,6 +2840,8 @@ def summarize_phase_outputs(state: ProjectState) -> str:
 
 
 def _phase_output_digest(state: ProjectState, phase: str) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_phase_output_digest(state, phase)
     if phase == "classify" and state.classify:
         return _short_text(f"{state.classify.domain}: {state.classify.justification}", 240)
     if phase == "hypotheses" and state.hypotheses:
@@ -2375,6 +2863,57 @@ def _phase_output_digest(state: ProjectState, phase: str) -> str:
     if phase == "report" and state.report:
         return _short_text(state.report, 240)
     return ""
+
+
+def _phase_has_output(state: ProjectState, phase: str) -> bool:
+    value = getattr(state, phase, None)
+    if isinstance(value, (list, tuple, set, dict, str)):
+        return bool(value)
+    return value is not None
+
+
+def _technology_readiness_phase_output_digest(state: ProjectState, phase: str) -> str:
+    data = _technology_readiness_phase_data(state, phase)
+    if not data:
+        return ""
+    if phase == "scope":
+        return _short_text(f"{_technology_readiness_name(state)}: {_tr_field(data, 'assessment_boundary')}", 240)
+    if phase == "scientific_inventory":
+        basis_count = len(_tr_list(data.get("scientific_basis")))
+        missing = _tr_join(data.get("missing_evidence"), "")
+        return _short_text(f"{basis_count} scientific basis item(s); missing evidence: {missing}", 240)
+    if phase == "trl_diagnosis":
+        return _short_text(
+            f"Current TRL {_tr_field(data, 'current_trl')}; target TRL {_tr_field(data, 'target_trl')}; {_tr_field(data, 'why_not_higher')}",
+            240,
+        )
+    if phase == "research_industry_alignment":
+        return _short_text(
+            f"Overall alignment score {_tr_field(data, 'overall_alignment_score')}; gaps: {_tr_join(data.get('top_alignment_gaps'), '')}",
+            240,
+        )
+    if phase == "ip_protection_axis":
+        return _short_text(
+            f"Specialist review required: {_tr_field(data, 'specialist_review_required')}; notes: {_tr_join(data.get('ip_risk_notes'), '')}",
+            240,
+        )
+    if phase == "next_level_recommendations":
+        return _short_text(
+            f"Next target TRL {_tr_field(data, 'next_target_trl')}; main gap: {_tr_field(data, 'main_gap_to_next_level')}",
+            240,
+        )
+    if phase == "technical_validation_plan":
+        return _short_text(f"Validation tests: {_tr_join(data.get('validation_tests'), '')}", 240)
+    if phase == "industrial_transfer_plan":
+        return _short_text(f"Partner: {_tr_field(data, 'ideal_industrial_partner')}; risks: {_tr_join(data.get('negotiation_risks'), '')}", 240)
+    if phase == "readiness_roadmap":
+        return _short_text(f"{len(_tr_items(data.get('roadmap_phases')))} roadmap phase(s); gates: {_tr_join(data.get('decision_gates'), '')}", 240)
+    if phase == "executive_summary":
+        return _short_text(
+            f"Verdict: {_tr_field(data, 'readiness_verdict')}; next step: {_tr_field(data, 'recommended_next_step')}",
+            240,
+        )
+    return _short_text(json.dumps(data, ensure_ascii=False, default=str), 240)
 
 
 def summarize_hypotheses(state: ProjectState) -> str:

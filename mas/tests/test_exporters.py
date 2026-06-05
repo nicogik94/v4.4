@@ -51,6 +51,7 @@ from technology_readiness_workbook import (  # noqa: E402
     TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
     TECHNOLOGY_READINESS_WORKBOOK_SHEETS,
 )
+from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE  # noqa: E402
 from monitoring_templates import (  # noqa: E402
     CLIENT_MONITORING_TEMPLATE_HEADERS,
     OPERATOR_MONITORING_TEMPLATE_HEADERS,
@@ -681,6 +682,30 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
     return state
 
 
+def make_completed_technology_readiness_surface_state(project_id: str = "technology-readiness-surfaces"):
+    state = make_technology_readiness_export_state(project_id)
+    state.project_name = "NanoSeal-H2 transfer readiness"
+    state.brief = "Assess NanoSeal-H2 for transfer readiness."
+    state.scope = {
+        "technology_name": "NanoSeal-H2",
+        "assessment_boundary": "lab coating chemistry through controlled validation planning",
+        "target_environment": "pilot coating line",
+        "intended_next_milestone": "Sprint 0 validation package",
+        "stakeholders": ["research lead", "technology transfer office"],
+        "constraints": ["no external demo before IP/disclosure review"],
+        "assumptions": ["bench-scale results are directional only"],
+        "validation_questions": ["Can repeatability be shown under controlled protocol?"],
+        "evidence_gaps": ["source locators", "controlled validation"],
+        "confidence": "medium",
+    }
+    state.report = ""
+    state.current_phase = "executive_summary"
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        state.phase_status[phase] = PhaseStatus.COMPLETED
+        state.phase_confidence[phase] = 0.8
+    return state
+
+
 def make_client_language_polish_state(project_id: str = "client-language-polish"):
     return ProjectState(
         project_id=project_id,
@@ -1188,6 +1213,110 @@ Stop if baseline data access is unavailable.
         self.assertIn("Controlled validation and reproducibility are missing.", workbook_text)
         self.assertIn("non_confidential_summary", workbook_text)
         self.assertIn("Specialist review required", workbook_text)
+
+    def test_technology_readiness_report_profile_generates_structured_report_without_markdown_report(self):
+        state = make_completed_technology_readiness_surface_state("tech-report-surfaces")
+
+        payload, media_type, filename = export_project_profile_bytes(state, "report", "docx")
+        text = _docx_text(payload)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertIn("tech-report-surfaces-report-", filename)
+        self.assertIn("Technology Readiness & Transfer Report", text)
+        self.assertIn("NanoSeal-H2", text)
+        self.assertIn("Current defensible TRL", text)
+        self.assertIn("Readiness roadmap", text)
+        self.assertIn("Sprint 0 validation required", text)
+        self.assertNotIn("No report available", text)
+        self.assertNotIn("NanoSeal-the automation architecture assumption", text)
+        for forbidden in ("strategy phase", "classify phase", "gauntlet", "SQI", "monitor phase", "0/8 phases"):
+            self.assertNotIn(forbidden.lower(), text.lower())
+
+    def test_technology_readiness_client_dossier_uses_tr_sections_and_preserves_name(self):
+        state = make_completed_technology_readiness_surface_state("tech-client-surfaces")
+
+        markdown = build_client_dossier_markdown(state)
+
+        for expected in (
+            "Technology Readiness Client Dossier",
+            "What technology we reviewed",
+            "Current defensible TRL",
+            "Why higher TRL is not yet justified",
+            "Evidence gaps",
+            "Sprint 0 validation package",
+            "IP/disclosure review note",
+            "Transfer-readiness note",
+            "Readiness roadmap",
+            "What to do next",
+            "NanoSeal-H2",
+            "not TRL certification",
+            "not legal patentability advice",
+        ):
+            self.assertIn(expected, markdown)
+        self.assertNotIn("NanoSeal-the automation architecture assumption", markdown)
+        for forbidden in (
+            "Recommended path",
+            "Why this is recommended",
+            "What should happen next",
+            "Timeline / 7-30-60-90 roadmap",
+            "strategy phase",
+            "classify phase",
+            "hypotheses",
+            "gauntlet",
+            "SQI",
+            "monitor phase",
+            "0/8 phases",
+        ):
+            self.assertNotIn(forbidden.lower(), markdown.lower())
+
+    def test_technology_readiness_operator_dossier_uses_tr_sequence_and_diagnostics(self):
+        state = make_completed_technology_readiness_surface_state("tech-operator-surfaces")
+
+        markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Technology Readiness Operator Dossier", markdown)
+        self.assertIn("Technology readiness executive summary", markdown)
+        self.assertIn("Phase completion status", markdown)
+        self.assertIn("Evidence and source summary", markdown)
+        self.assertIn("citation_marker_count", markdown)
+        for phase in (
+            "Scope",
+            "Scientific Inventory",
+            "TRL Diagnosis",
+            "Research-Industry Alignment",
+            "IP Protection Axis",
+            "Next-Level Recommendations",
+            "Technical Validation Plan",
+            "Industrial Transfer Plan",
+            "Readiness Roadmap",
+            "Executive Summary",
+        ):
+            self.assertIn(phase, markdown)
+        for forbidden in ("strategy phase", "classify phase", "hypotheses", "gauntlet", "SQI", "monitor phase", "0/8 phases"):
+            self.assertNotIn(forbidden.lower(), markdown.lower())
+
+    def test_technology_readiness_client_and_operator_profiles_are_separated(self):
+        state = make_completed_technology_readiness_surface_state("tech-profile-separation")
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertNotIn("citation_marker_count", client_markdown)
+        self.assertNotIn("Phase completion status", client_markdown)
+        self.assertNotIn("Threshold section classification", client_markdown)
+        self.assertIn("citation_marker_count", operator_markdown)
+        self.assertIn("Phase completion status", operator_markdown)
+        self.assertIn("Technology Readiness Operator Dossier", operator_markdown)
+
+    def test_technology_readiness_machine_archive_uses_generated_report_shell(self):
+        state = make_completed_technology_readiness_surface_state("tech-archive-surfaces")
+
+        payload = build_machine_archive_payload(state)
+        report = payload["report.md"]
+
+        self.assertIn("Technology Readiness & Transfer Report", report)
+        self.assertIn("NanoSeal-H2", report)
+        self.assertNotIn("No report available", report)
 
     def test_technology_readiness_workbook_profile_requires_matching_project_type(self):
         state = make_export_state("non-tech-workbook")
