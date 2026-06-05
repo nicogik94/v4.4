@@ -24,5 +24,6 @@ Required JSON keys:
 
 Rules:
 - `evidence_items` must describe available evidence with category, source or locator if available, and what it supports.
+- `evidence_items` must be an array of objects, not strings. Each object should include at least `category`, `source`, and `supports` when known.
 - Use these evidence categories when possible: scientific_basis, proof_of_concept, reproducibility, controlled_validation, relevant_environment, industrial_validation, cost_scalability, regulatory_review, ip_review, partner_feedback.
 - If evidence is not supplied, mark the item as missing instead of inventing results.

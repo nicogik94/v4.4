@@ -19,6 +19,7 @@ from orchestrator import (
 )
 from state import (
     ProjectState,
+    TechnologyReadinessNextLevelRecommendationsOutput,
     TechnologyReadinessResearchIndustryAlignmentOutput,
     TechnologyReadinessScopeOutput,
 )
@@ -212,6 +213,18 @@ def test_all_technology_readiness_prompts_require_plain_string_arrays():
         assert "arrays of objects" in text, prompt_file.name
 
 
+def test_object_array_prompts_require_objects_not_strings():
+    expected = {
+        "scientific_inventory.md": "`evidence_items` must be an array of objects, not strings.",
+        "next_level_recommendations.md": "`recommended_actions` must be an array of objects, not strings.",
+        "technical_validation_plan.md": "`validation_tests` must be an array of objects, not strings.",
+        "readiness_roadmap.md": "`timeline` and `decision_gates` must be arrays of objects, not strings.",
+    }
+
+    for prompt_name, required_text in expected.items():
+        assert required_text in (PROMPT_DIR / prompt_name).read_text(encoding="utf-8")
+
+
 def test_research_industry_alignment_normalizes_prioritized_application_objects():
     state = ProjectState(project_id="research-application-objects", project_type="technology_readiness", brief="x")
     payload = {
@@ -266,11 +279,51 @@ def test_research_industry_alignment_normalizes_prioritized_application_objects(
     ]
 
 
+def test_next_level_recommendations_normalizes_recommended_action_strings():
+    state = ProjectState(project_id="next-level-action-strings", project_type="technology_readiness", brief="x")
+    payload = {
+        "current_trl": 3,
+        "next_target_trl": 4,
+        "current_phase_name": "Protection and proof of concept",
+        "next_phase_name": "Controlled technical validation",
+        "main_gap_to_next_level": "Controlled validation evidence is not yet supplied.",
+        "recommended_actions": [
+            "Run reproducibility tests on three independently prepared coating batches.",
+            "Route disclosure package to IP specialist before partner demonstrations.",
+        ],
+        "required_tests": ["Reproducibility test"],
+        "required_evidence": ["Batch-level reproducibility evidence"],
+        "expected_deliverables": ["Validation protocol"],
+        "risks_to_reduce": ["Unconfirmed repeatability"],
+        "suggested_owners": ["Principal investigator"],
+        "estimated_time_range": "6-12 months",
+        "advancement_criteria": ["Operator-reviewed controlled validation package"],
+        "confidence": "preliminary",
+    }
+
+    _store_phase_output(state, "next_level_recommendations", payload)
+
+    assert isinstance(state.next_level_recommendations, TechnologyReadinessNextLevelRecommendationsOutput)
+    assert state.next_level_recommendations.recommended_actions == [
+        {"summary": "Run reproducibility tests on three independently prepared coating batches."},
+        {"summary": "Route disclosure package to IP specialist before partner demonstrations."},
+    ]
+    assert state.next_level_recommendations.required_tests == ["Reproducibility test"]
+
+
 def _technology_readiness_list_string_fields(model_class):
     return [
         field_name
         for field_name, field_info in model_class.model_fields.items()
         if get_origin(field_info.annotation) is list and get_args(field_info.annotation) == (str,)
+    ]
+
+
+def _technology_readiness_list_dict_fields(model_class):
+    return [
+        field_name
+        for field_name, field_info in model_class.model_fields.items()
+        if get_origin(field_info.annotation) is list and get_args(field_info.annotation) == (dict,)
     ]
 
 
@@ -299,6 +352,39 @@ def test_all_technology_readiness_list_string_fields_normalize_object_values():
     assert "TechnologyReadinessResearchIndustryAlignmentOutput.prioritized_industrial_applications" in covered_fields
     assert "TechnologyReadinessScopeOutput.stakeholders" in covered_fields
     assert "RoadmapPhase.evidence_needed" in covered_fields
+
+
+def test_all_technology_readiness_list_dict_fields_accept_string_values():
+    model_classes = set(state_models.TECHNOLOGY_READINESS_OUTPUT_MODELS.values())
+    string_summary = {"summary": "Model supplied a plain string for an object-list field."}
+    single_summary = {"summary": "Single string for object-list field."}
+
+    covered_fields = []
+    for model_class in sorted(model_classes, key=lambda cls: cls.__name__):
+        for field_name in _technology_readiness_list_dict_fields(model_class):
+            instance = model_class(**{field_name: ["Model supplied a plain string for an object-list field."]})
+            assert getattr(instance, field_name) == [string_summary], f"{model_class.__name__}.{field_name}"
+
+            instance = model_class(**{field_name: "Single string for object-list field."})
+            assert getattr(instance, field_name) == [single_summary], f"{model_class.__name__}.{field_name}"
+
+            proper = {"summary": "Already structured", "owner": "operator"}
+            instance = model_class(**{field_name: proper})
+            assert getattr(instance, field_name) == [proper], f"{model_class.__name__}.{field_name}"
+
+            proper_list = [{"summary": "Already structured list", "owner": "operator"}]
+            instance = model_class(**{field_name: proper_list})
+            assert getattr(instance, field_name) == proper_list, f"{model_class.__name__}.{field_name}"
+
+            covered_fields.append(f"{model_class.__name__}.{field_name}")
+
+    assert set(covered_fields) == {
+        "TechnologyReadinessNextLevelRecommendationsOutput.recommended_actions",
+        "TechnologyReadinessReadinessRoadmapOutput.timeline",
+        "TechnologyReadinessReadinessRoadmapOutput.decision_gates",
+        "TechnologyReadinessScientificInventoryOutput.evidence_items",
+        "TechnologyReadinessTechnicalValidationPlanOutput.validation_tests",
+    }
 
 
 def test_technology_readiness_helpers_are_deterministic():

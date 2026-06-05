@@ -33,4 +33,5 @@ Rules:
 - Do not recommend advancement without explicit evidence requirements.
 - Explain why current evidence is insufficient for the next level.
 - Separate technical, IP, industrial, regulatory, and commercial actions in `recommended_actions`.
+- `recommended_actions` must be an array of objects, not strings. Each object should include `summary` plus the relevant action type, owner, evidence dependency, or risk when known.
 - Include concrete `required_tests`, `required_evidence`, and `advancement_criteria`.
