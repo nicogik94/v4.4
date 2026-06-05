@@ -2,6 +2,8 @@ from pathlib import Path
 import sys
 from typing import get_args, get_origin
 
+from pydantic import BaseModel
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -19,7 +21,9 @@ from orchestrator import (
 )
 from state import (
     ProjectState,
+    RoadmapPhase,
     TechnologyReadinessNextLevelRecommendationsOutput,
+    TechnologyReadinessReadinessRoadmapOutput,
     TechnologyReadinessResearchIndustryAlignmentOutput,
     TechnologyReadinessScopeOutput,
 )
@@ -215,14 +219,19 @@ def test_all_technology_readiness_prompts_require_plain_string_arrays():
 
 def test_object_array_prompts_require_objects_not_strings():
     expected = {
-        "scientific_inventory.md": "`evidence_items` must be an array of objects, not strings.",
-        "next_level_recommendations.md": "`recommended_actions` must be an array of objects, not strings.",
-        "technical_validation_plan.md": "`validation_tests` must be an array of objects, not strings.",
-        "readiness_roadmap.md": "`timeline` and `decision_gates` must be arrays of objects, not strings.",
+        "scientific_inventory.md": ["`evidence_items` must be an array of objects, not strings."],
+        "next_level_recommendations.md": ["`recommended_actions` must be an array of objects, not strings."],
+        "technical_validation_plan.md": ["`validation_tests` must be an array of objects, not strings."],
+        "readiness_roadmap.md": [
+            "`roadmap_phases` must be an array of objects, not strings.",
+            "`timeline` and `decision_gates` must be arrays of objects, not strings.",
+        ],
     }
 
-    for prompt_name, required_text in expected.items():
-        assert required_text in (PROMPT_DIR / prompt_name).read_text(encoding="utf-8")
+    for prompt_name, required_texts in expected.items():
+        text = (PROMPT_DIR / prompt_name).read_text(encoding="utf-8")
+        for required_text in required_texts:
+            assert required_text in text
 
 
 def test_research_industry_alignment_normalizes_prioritized_application_objects():
@@ -311,6 +320,47 @@ def test_next_level_recommendations_normalizes_recommended_action_strings():
     assert state.next_level_recommendations.required_tests == ["Reproducibility test"]
 
 
+def test_readiness_roadmap_normalizes_roadmap_phase_strings():
+    state = ProjectState(project_id="roadmap-phase-strings", project_type="technology_readiness", brief="x")
+    payload = {
+        "roadmap_phases": [
+            "Pre-TRL 3: Diagnosis, 1-2 months",
+            "TRL 4: Controlled technical validation, 6-12 months",
+        ],
+        "timeline": [{"summary": "1-12 months"}],
+        "decision_gates": [{"summary": "Operator-reviewed go/no-go before TRL 4"}],
+        "resources_needed": ["validation lead"],
+        "go_no_go_criteria": ["controlled validation evidence collected"],
+        "confidence": "preliminary",
+    }
+
+    _store_phase_output(state, "readiness_roadmap", payload)
+
+    assert isinstance(state.readiness_roadmap, TechnologyReadinessReadinessRoadmapOutput)
+    assert [phase.phase_name for phase in state.readiness_roadmap.roadmap_phases] == [
+        "Pre-TRL 3: Diagnosis, 1-2 months",
+        "TRL 4: Controlled technical validation, 6-12 months",
+    ]
+
+
+def test_roadmap_phase_nested_evidence_needed_preserves_object_detail():
+    phase = RoadmapPhase(
+        trl="TRL 4",
+        phase_name="Controlled technical validation",
+        evidence_needed=[
+            {
+                "name": "Reproducibility package",
+                "note": "three independent batches",
+                "custom_key": "operator review required",
+            }
+        ],
+    )
+
+    assert phase.evidence_needed == [
+        "Reproducibility package — three independent batches; custom_key: operator review required"
+    ]
+
+
 def _technology_readiness_list_string_fields(model_class):
     return [
         field_name
@@ -325,6 +375,20 @@ def _technology_readiness_list_dict_fields(model_class):
         for field_name, field_info in model_class.model_fields.items()
         if get_origin(field_info.annotation) is list and get_args(field_info.annotation) == (dict,)
     ]
+
+
+def _technology_readiness_list_model_fields(model_class):
+    fields = []
+    for field_name, field_info in model_class.model_fields.items():
+        args = get_args(field_info.annotation)
+        if (
+            get_origin(field_info.annotation) is list
+            and args
+            and isinstance(args[0], type)
+            and issubclass(args[0], BaseModel)
+        ):
+            fields.append((field_name, args[0]))
+    return fields
 
 
 def test_all_technology_readiness_list_string_fields_normalize_object_values():
@@ -385,6 +449,158 @@ def test_all_technology_readiness_list_dict_fields_accept_string_values():
         "TechnologyReadinessScientificInventoryOutput.evidence_items",
         "TechnologyReadinessTechnicalValidationPlanOutput.validation_tests",
     }
+
+
+def test_all_technology_readiness_list_model_fields_accept_loose_values():
+    model_classes = set(state_models.TECHNOLOGY_READINESS_OUTPUT_MODELS.values())
+    covered_fields = []
+
+    for model_class in sorted(model_classes, key=lambda cls: cls.__name__):
+        for field_name, item_model in _technology_readiness_list_model_fields(model_class):
+            instance = model_class(**{field_name: ["String phase"]})
+            items = getattr(instance, field_name)
+            assert len(items) == 1, f"{model_class.__name__}.{field_name}"
+            assert isinstance(items[0], item_model), f"{model_class.__name__}.{field_name}"
+            assert getattr(items[0], "phase_name") == "String phase"
+
+            instance = model_class(**{field_name: "Single string phase"})
+            assert getattr(instance, field_name)[0].phase_name == "Single string phase"
+
+            proper = {
+                "trl": "TRL 4",
+                "phase_name": "Controlled technical validation",
+                "evidence_needed": [{"name": "Controlled validation", "note": "operator-reviewed"}],
+            }
+            instance = model_class(**{field_name: proper})
+            assert getattr(instance, field_name)[0].phase_name == "Controlled technical validation"
+            assert getattr(instance, field_name)[0].evidence_needed == [
+                "Controlled validation — operator-reviewed"
+            ]
+
+            proper_list = [{"phase_name": "Already structured list"}]
+            instance = model_class(**{field_name: proper_list})
+            assert getattr(instance, field_name)[0].phase_name == "Already structured list"
+
+            covered_fields.append(f"{model_class.__name__}.{field_name}")
+
+    assert set(covered_fields) == {
+        "TechnologyReadinessReadinessRoadmapOutput.roadmap_phases",
+    }
+
+
+def _minimal_technology_readiness_payloads() -> dict[str, dict]:
+    return {
+        "scope": {
+            "technology_name": "Lab coating",
+            "assessment_boundary": "prototype chemistry only",
+            "target_environment": "pilot manufacturing line",
+            "intended_next_milestone": "proof of concept",
+            "stakeholders": [{"role": "Principal investigator", "note": "operator supplied"}],
+            "constraints": [],
+            "assumptions": ["operator-reviewed evidence only"],
+            "confidence": "preliminary",
+        },
+        "scientific_inventory": {
+            "scientific_basis": ["Published corrosion resistance mechanism"],
+            "critical_components": ["polymer matrix"],
+            "current_experiments": [],
+            "known_limitations": [],
+            "evidence_items": ["bench test summary"],
+            "missing_evidence": ["independent replication"],
+            "confidence": "preliminary",
+        },
+        "trl_diagnosis": {
+            "current_trl": 3,
+            "target_trl": 4,
+            "confidence": "preliminary",
+            "current_phase_name": "Protection and proof of concept",
+            "evidence_supporting_current_trl": ["bench proof of concept"],
+            "why_not_higher": "Controlled validation is not supplied.",
+            "evidence_gaps": ["reproducibility"],
+            "legal_or_certification_disclaimer": "This is not TRL certification.",
+        },
+        "research_industry_alignment": {
+            "criteria_scores": {
+                "technical_novelty": {"score": 4, "evidence": "bench data", "gap": "", "recommendation": ""}
+            },
+            "overall_alignment_score": 3.5,
+            "top_alignment_strengths": ["corrosion exposure fit"],
+            "top_alignment_gaps": ["partner requirements missing"],
+            "prioritized_industrial_applications": [
+                {
+                    "application": "Marine structures",
+                    "rationale": "high corrosion exposure",
+                    "gap": "partner requirements not confirmed",
+                }
+            ],
+            "confidence": "preliminary",
+        },
+        "ip_protection_axis": {
+            "ip_risk_notes": ["Specialist review required."],
+            "specialist_review_required": True,
+            "confidence": "preliminary",
+        },
+        "next_level_recommendations": {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "current_phase_name": "Protection and proof of concept",
+            "next_phase_name": "Controlled technical validation",
+            "main_gap_to_next_level": "controlled validation",
+            "recommended_actions": ["Run controlled validation protocol."],
+            "required_tests": ["reproducibility"],
+            "required_evidence": ["controlled validation evidence"],
+            "expected_deliverables": ["validation protocol"],
+            "risks_to_reduce": ["unconfirmed repeatability"],
+            "suggested_owners": ["PI"],
+            "estimated_time_range": "6-12 months",
+            "advancement_criteria": ["operator-reviewed evidence package"],
+            "confidence": "preliminary",
+        },
+        "technical_validation_plan": {
+            "validation_tests": ["controlled coupon test"],
+            "acceptance_criteria": ["operator-confirmed threshold"],
+            "measurement_plan": ["measure adhesion"],
+            "failure_modes": ["delamination"],
+            "evidence_to_collect": ["test report"],
+            "confidence": "preliminary",
+        },
+        "industrial_transfer_plan": {
+            "ideal_industrial_partner": "coatings manufacturer",
+            "partner_validation_needed": ["pilot line fit"],
+            "minimum_transfer_package": ["non-confidential summary"],
+            "transfer_model_options": ["sponsored validation"],
+            "negotiation_risks": ["unclear exclusivity"],
+            "evidence_required_before_transfer": ["controlled validation"],
+            "confidence": "preliminary",
+        },
+        "readiness_roadmap": {
+            "roadmap_phases": ["TRL 4: Controlled technical validation, 6-12 months"],
+            "timeline": ["6-12 months"],
+            "decision_gates": ["Operator go/no-go before TRL 4"],
+            "resources_needed": ["validation lab"],
+            "go_no_go_criteria": ["controlled validation passed"],
+            "confidence": "preliminary",
+        },
+        "executive_summary": {
+            "current_trl": 3,
+            "target_trl": 4,
+            "readiness_verdict_code": "ready_for_controlled_validation",
+            "readiness_verdict": "Ready only for operator-reviewed validation planning.",
+            "top_blockers": ["controlled validation missing"],
+            "recommended_next_step": "Run controlled validation protocol.",
+            "operator_summary": "Preliminary, evidence-backed assessment.",
+            "confidence": "preliminary",
+        },
+    }
+
+
+def test_representative_technology_readiness_phase_sequence_storage():
+    state = ProjectState(project_id="tech-sequence-storage", project_type="technology_readiness", brief="x")
+    payloads = _minimal_technology_readiness_payloads()
+
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        _store_phase_output(state, phase, payloads[phase])
+        assert getattr(state, phase) is not None, phase
 
 
 def test_technology_readiness_helpers_are_deterministic():

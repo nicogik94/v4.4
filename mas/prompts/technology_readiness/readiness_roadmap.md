@@ -31,5 +31,6 @@ Required roadmap ranges:
 Rules:
 - Include evidence needed at each gate.
 - Each `roadmap_phases` item should include trl, phase_name, time_range, objective, evidence_needed, and decision_gate.
+- `roadmap_phases` must be an array of objects, not strings. Each object should include trl, phase_name, time_range, objective, evidence_needed, and decision_gate when known.
 - `timeline` and `decision_gates` must be arrays of objects, not strings. Each object should include `summary` plus timing, owner, evidence, or decision criteria when known.
 - State go/no-go criteria conservatively when evidence is missing.
