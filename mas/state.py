@@ -683,12 +683,52 @@ def _technology_readiness_dict_list(value: Any) -> list[dict]:
     return normalized
 
 
+def _technology_readiness_model_string_field(model_class: type[BaseModel]) -> str:
+    for preferred in ("phase_name", "summary", "name", "title", "description"):
+        if preferred in model_class.model_fields:
+            return preferred
+    for field_name, field_info in model_class.model_fields.items():
+        if field_info.annotation is str:
+            return field_name
+    return "summary"
+
+
+def _technology_readiness_model_list(value: Any, model_class: type[BaseModel]) -> list[dict]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [dict(value)]
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [value]
+
+    string_field = _technology_readiness_model_string_field(model_class)
+    normalized: list[dict] = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+        else:
+            normalized.append({string_field: _technology_readiness_item_to_string(item)})
+    return normalized
+
+
 def _is_list_of_strings_annotation(annotation: Any) -> bool:
     return get_origin(annotation) is list and get_args(annotation) == (str,)
 
 
 def _is_list_of_dicts_annotation(annotation: Any) -> bool:
     return get_origin(annotation) is list and get_args(annotation) == (dict,)
+
+
+def _list_model_annotation(annotation: Any) -> type[BaseModel] | None:
+    args = get_args(annotation)
+    if get_origin(annotation) is not list or not args:
+        return None
+    item_type = args[0]
+    if isinstance(item_type, type) and issubclass(item_type, BaseModel):
+        return item_type
+    return None
 
 
 class TechnologyReadinessOutputBase(BaseModel):
@@ -705,6 +745,8 @@ class TechnologyReadinessOutputBase(BaseModel):
                 normalized[field_name] = _technology_readiness_string_list(normalized[field_name])
             elif _is_list_of_dicts_annotation(field_info.annotation):
                 normalized[field_name] = _technology_readiness_dict_list(normalized[field_name])
+            elif model_class := _list_model_annotation(field_info.annotation):
+                normalized[field_name] = _technology_readiness_model_list(normalized[field_name], model_class)
         return normalized
 
 
