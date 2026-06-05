@@ -1,5 +1,8 @@
 from pathlib import Path
+import asyncio
+import json
 import sys
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,15 +10,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import templates.technology_readiness as technology_template
+from llm_client import LLMResponse
 from orchestrator import (
     PROMPT_BUILDERS,
     WORKFLOW_PHASE_SEQUENCE,
     _parsed_json_matches_phase,
     _phase_json_retry_instruction,
     _store_phase_output,
+    run_phase_node,
     workflow_phase_sequence_for_state,
 )
-from state import ProjectState, TechnologyReadinessScopeOutput
+from state import (
+    PhaseStatus,
+    ProjectState,
+    RoadmapPhase,
+    TechnologyReadinessReadinessRoadmapOutput,
+    TechnologyReadinessScopeOutput,
+    validate_technology_readiness_output,
+)
 from tools.technology_readiness import (
     EVIDENCE_CATEGORIES,
     IP_PROTECTION_AXES,
@@ -42,6 +54,17 @@ from workflow_templates import (
 
 PROMPT_DIR = ROOT / "prompts" / "technology_readiness"
 DEMO_RUNBOOK = ROOT / "docs" / "demo" / "technology-readiness" / "RUNBOOK.md"
+
+
+def make_llm_response(text: str, input_tokens: int = 10, output_tokens: int = 5) -> LLMResponse:
+    return LLMResponse(
+        text=text,
+        ok=True,
+        model_used="claude-haiku-4-5-20251001",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=0.01,
+    )
 
 
 def test_technology_readiness_state_uses_template_sequence():
@@ -147,6 +170,147 @@ def test_store_phase_output_validates_technology_readiness_payload():
     assert _parsed_json_matches_phase("scope", payload)
     assert not _parsed_json_matches_phase("scope", [payload])
     assert "legal/certification" in _phase_json_retry_instruction("scope")
+
+
+def test_technology_readiness_normalizes_dict_shaped_string_lists_into_typed_models():
+    state = ProjectState(project_id="store-tech-dict-lists", project_type="technology_readiness", brief="x")
+    payload = {
+        "technology_name": "NanoSeal-H2",
+        "assessment_boundary": "prototype chemistry only",
+        "target_environment": "pilot line",
+        "intended_next_milestone": "controlled validation",
+        "stakeholders": [
+            {"role": "Technology Transfer Office", "note": "not formally engaged"},
+        ],
+        "constraints": [
+            {"constraint": "No external demo", "note": "IP review incomplete"},
+        ],
+        "assumptions": [
+            {"assumption": "Bench result transfers", "status": "unproven"},
+        ],
+        "validation_questions": [
+            {"question": "Can repeatability be shown?", "owner": "technical lead"},
+        ],
+        "evidence_gaps": [
+            {"category": "controlled_validation", "note": "missing"},
+        ],
+        "confidence": "medium",
+    }
+
+    _store_phase_output(state, "scope", payload)
+
+    assert isinstance(state.scope, TechnologyReadinessScopeOutput)
+    assert state.scope.technology_name == "NanoSeal-H2"
+    assert state.scope.stakeholders == ["Technology Transfer Office - not formally engaged"]
+    assert state.scope.constraints == ["constraint: No external demo; note: IP review incomplete"]
+    assert state.scope.assumptions == ["assumption: Bench result transfers; status: unproven"]
+    assert state.scope.validation_questions == ["technical lead - Can repeatability be shown?"]
+    assert state.scope.evidence_gaps == ["controlled_validation - missing"]
+
+
+def test_technology_readiness_normalizes_list_model_fields_from_strings_and_nested_dict_lists():
+    output = validate_technology_readiness_output(
+        "readiness_roadmap",
+        {
+            "roadmap_phases": [
+                "Pre-TRL 3 diagnosis",
+                {
+                    "trl": "TRL 4",
+                    "phase_name": "Controlled technical validation",
+                    "evidence_needed": [
+                        {"category": "controlled_validation", "note": "repeatability protocol"},
+                    ],
+                },
+            ],
+            "timeline": ["6-12 months"],
+            "decision_gates": ["controlled validation gate"],
+            "resources_needed": [{"role": "technical lead"}],
+            "go_no_go_criteria": [{"criterion": "three repeatable runs"}],
+            "confidence": "medium",
+        },
+    )
+
+    assert isinstance(output, TechnologyReadinessReadinessRoadmapOutput)
+    assert all(isinstance(item, RoadmapPhase) for item in output.roadmap_phases)
+    assert output.roadmap_phases[0].phase_name == "Pre-TRL 3 diagnosis"
+    assert output.roadmap_phases[1].evidence_needed == ["controlled_validation - repeatability protocol"]
+    assert output.timeline == [{"value": "6-12 months"}]
+    assert output.decision_gates == [{"value": "controlled validation gate"}]
+    assert output.resources_needed == ["role: technical lead"]
+    assert output.go_no_go_criteria == ["criterion: three repeatable runs"]
+
+
+def test_technology_readiness_schema_invalid_first_response_gets_one_repair_attempt():
+    state = ProjectState(project_id="tr-schema-repair", project_type="technology_readiness", brief="Assess a coating.")
+    invalid = {
+        "technology_name": "NanoSeal-H2",
+        "assessment_boundary": {"invalid": "dict for string field"},
+        "target_environment": "pilot line",
+        "intended_next_milestone": "controlled validation",
+        "stakeholders": ["TTO"],
+        "constraints": [],
+        "assumptions": [],
+        "confidence": "medium",
+    }
+    repaired = {
+        "technology_name": "NanoSeal-H2",
+        "assessment_boundary": "prototype chemistry only",
+        "target_environment": "pilot line",
+        "intended_next_milestone": "controlled validation",
+        "stakeholders": ["TTO"],
+        "constraints": [],
+        "assumptions": [],
+        "confidence": "medium",
+    }
+    call_mock = AsyncMock(
+        side_effect=[
+            make_llm_response(json.dumps(invalid), 10, 5),
+            make_llm_response(json.dumps(repaired), 11, 6),
+        ]
+    )
+
+    with patch("orchestrator.call_llm", new=call_mock):
+        with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+            updated = asyncio.run(run_phase_node(state, "scope"))
+
+    assert call_mock.await_count == 2
+    assert updated.phase_status["scope"] == PhaseStatus.COMPLETED
+    assert isinstance(updated.scope, TechnologyReadinessScopeOutput)
+    assert updated.scope.assessment_boundary == "prototype chemistry only"
+    assert updated.budget_consumed["llm_call_count"] == 2
+
+
+def test_technology_readiness_schema_invalid_retry_fails_after_exactly_one_repair_attempt():
+    state = ProjectState(project_id="tr-schema-repair-fails", project_type="technology_readiness", brief="Assess a coating.")
+    invalid = {
+        "technology_name": "NanoSeal-H2",
+        "assessment_boundary": {"invalid": "dict for string field"},
+        "target_environment": "pilot line",
+        "intended_next_milestone": "controlled validation",
+        "stakeholders": ["TTO"],
+        "constraints": [],
+        "assumptions": [],
+        "confidence": "medium",
+    }
+    still_invalid = {
+        **invalid,
+        "target_environment": {"still": "invalid"},
+    }
+    call_mock = AsyncMock(
+        side_effect=[
+            make_llm_response(json.dumps(invalid), 10, 5),
+            make_llm_response(json.dumps(still_invalid), 11, 6),
+        ]
+    )
+
+    with patch("orchestrator.call_llm", new=call_mock):
+        with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+            updated = asyncio.run(run_phase_node(state, "scope"))
+
+    assert call_mock.await_count == 2
+    assert updated.phase_status["scope"] == PhaseStatus.FAILED
+    assert updated.phase_confidence["scope"] == 0.0
+    assert updated.scope is None
 
 
 def test_technology_readiness_helpers_are_deterministic():

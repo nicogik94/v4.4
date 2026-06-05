@@ -1337,6 +1337,7 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
     # ═══ v4.4.1: Parse and store output (rewritten) ═══
     if is_json:
+        repair_attempted = False
         parsed = parse_json(response.text)
         shape_ok = _parsed_json_matches_phase(phase, parsed)
         if phase == "audit" and not shape_ok:
@@ -1378,6 +1379,7 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 project_id=state.project_id,
                 before_attempt=_pre_attempt_governance,
             )
+            repair_attempted = True
             _log_llm_route(retry_response)
             try:
                 rt_tokens = getattr(retry_response, "total_tokens", 0) or 0
@@ -1429,8 +1431,72 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                     )
                 response = retry_response
 
+        stored_output = False
         if parsed is not None and _parsed_json_matches_phase(phase, parsed):
-            _store_phase_output(state, phase, parsed)
+            try:
+                _store_phase_output(state, phase, parsed)
+                stored_output = True
+            except Exception as store_exc:
+                if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE and not repair_attempted:
+                    logger.warning(
+                        f"Phase {phase}: parsed JSON failed Technology Readiness "
+                        f"schema validation on first attempt; requesting one repair. "
+                        f"Error: {store_exc!r}"
+                    )
+                    retry_response = await call_llm(
+                        phase, system,
+                        prompt + "\n\nCRITICAL: Return ONLY valid JSON. "
+                                 "Do NOT wrap it in markdown fences. Do NOT add any "
+                                 "text before or after. The previous JSON parsed but "
+                                 "failed schema validation. Repair field types to match "
+                                 "the Technology Readiness phase schema. "
+                                 + _phase_json_retry_instruction(phase),
+                        project_id=state.project_id,
+                        before_attempt=_pre_attempt_governance,
+                    )
+                    repair_attempted = True
+                    _log_llm_route(retry_response)
+                    try:
+                        rt_tokens = getattr(retry_response, "total_tokens", 0) or 0
+                        rt_cost = getattr(retry_response, "cost_usd", 0.0) or 0.0
+                        record_consumption_to_state(state, rt_tokens, rt_cost, success=retry_response.ok)
+                    except Exception as e:
+                        logger.debug(f"retry consumption recording failed ({e})")
+
+                    response = retry_response
+                    if retry_response.ok:
+                        parsed = parse_json(retry_response.text)
+                        shape_ok = _parsed_json_matches_phase(phase, parsed)
+                        if parsed is None:
+                            logger.error(
+                                f"Phase {phase}: JSON parse failed on schema repair retry. "
+                                f"Retry response preview: {retry_response.text[:500]!r}"
+                            )
+                        elif not shape_ok:
+                            logger.error(
+                                f"Phase {phase}: schema repair retry returned invalid JSON "
+                                f"shape {type(parsed).__name__}. Retry response preview: "
+                                f"{retry_response.text[:500]!r}"
+                            )
+                        else:
+                            try:
+                                _store_phase_output(state, phase, parsed)
+                                stored_output = True
+                            except Exception as retry_store_exc:
+                                logger.error(
+                                    f"Phase {phase}: Technology Readiness schema validation "
+                                    f"failed after one repair attempt. Error: {retry_store_exc!r}"
+                                )
+                    else:
+                        logger.error(
+                            f"Phase {phase}: schema repair retry failed: {retry_response.error}"
+                        )
+                else:
+                    logger.error(
+                        f"Phase {phase}: structured output failed validation. Error: {store_exc!r}"
+                    )
+
+        if stored_output:
             if (
                 phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "sqi")
                 or phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE
@@ -1664,6 +1730,8 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             f"Failed to parse {phase} output: type={type(data).__name__} "
             f"preview={preview[:500]} error={e}"
         )
+        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            raise
 
 
 # ═══ DETERMINISTIC NODES (no LLM) ═══
