@@ -69,6 +69,54 @@ THRESHOLD_WARNING = (
 )
 THRESHOLD_CONFLICT_UNKNOWN_WARNING = "Possible threshold conflict detected, source unknown."
 THRESHOLD_CONFLICT_BETWEEN_TEMPLATE = "Threshold conflict detected between: {section_a} and {section_b}."
+CONSTRAINT_ADHERENCE_WARNING = (
+    "Constraint adherence warning: generated recommendation may contradict "
+    "explicit operator constraints. Review before client delivery."
+)
+
+CONSTRAINT_SAFE_PREFIX_PATTERN = re.compile(
+    r"(?:^|[\s([{'\";:.,|\-–—])"
+    r"(?:do\s+not(?:\s+(?:do|start|launch|recommend|increase|run|execute|pursue))?|"
+    r"don't|dont|should\s+not|must\s+not|cannot|can't|not|no|never|without|"
+    r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
+    r"pause(?:s|d|ing)?|freeze(?:s|d|ing)?|frozen|park(?:s|ed|ing)?|prohibit(?:s|ed|ing)?|"
+    r"forbid(?:s|den|ding)?|forbidden|out\s+of\s+scope|off[- ]limits)"
+    r"\s*(?:[:\-–—]\s*)?"
+    r"(?:(?:the|a|an|any|all|current|new|full|broad|major|large|paid|"
+    r"acquisition|growth|campaigns?|budgets?|spend|engineering|critical|"
+    r"parallel|three|3)\s+){0,10}$",
+    re.I,
+)
+
+CONSTRAINT_SAFE_SUFFIX_PATTERN = re.compile(
+    r"^\s*(?:[\])}.,:;()|\-–—]\s*)?"
+    r"(?:(?:and|or)\s+"
+    r"(?:(?:the|a|an|any|all|new|full|broad|major|large|paid|growth|"
+    r"engineering|critical|parallel|three|3)\s+){0,8}[\w-]+\s+){0,3}"
+    r"(?:(?:is|are|be|being|remain|remains|stay|stays|should\s+remain|"
+    r"must\s+remain)\s+)?"
+    r"(?:not\s+(?:recommended|allowed|in\s+scope|this\s+month|now)|"
+    r"paused|pausing|deferred|blocked|frozen|parked|out\s+of\s+scope|off[- ]limits|"
+    r"prohibited|forbidden|do\s+not\s+(?:do|start|launch|recommend|increase)|"
+    r"continues?\s+shifting|worsening\s+the\s+cohort)\b",
+    re.I,
+)
+
+CONSTRAINT_SAFE_HEADING_PATTERN = re.compile(
+    r"\b(?:what\s+not\s+to\s+do|do\s+not\s+do|do\s+not\s+start|"
+    r"do\s+not\s+launch|not\s+this\s+month|out\s+of\s+scope|paused|"
+    r"deferred|blocked|risks?|warning|stop[- ]condition|circuit\s+breaker)\b",
+    re.I,
+)
+
+CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN = re.compile(
+    r"(?:^|[\s([{'\";:.,|\-–—])"
+    r"(?:if|when|unless|whether|risk\s+if|risk\s+of|risks?\s+if|"
+    r"warning\s+if|watch\s+if|monitor\s+if|stop\s+if|trigger\s+if|"
+    r"consider\s+pausing|consider\s+pause|consider\s+freezing)"
+    r"(?:(?:\s+|,)[\w%.-]+){0,10}\s*$",
+    re.I,
+)
 
 PRIMARY_THRESHOLD_SECTION_NAMES = {
     "decision gates",
@@ -121,13 +169,15 @@ SUBORDINATE_THRESHOLD_SECTION_NAMES = {
     "report appendix",
 }
 
-RISK_CLASSIFICATION_WARNING = "Risk classification may understate generated risk content."
+RISK_CLASSIFICATION_WARNING = (
+    "Risk classification may understate generated risk content. Review before client delivery."
+)
 CLIENT_BF_CONFIDENCE_CAVEAT = (
     "Current evidence does not meet the confidence threshold for selecting a specific growth lever."
 )
 
 NO_CONCRETE_LOCATORS_CLIENT_NOTE = (
-    "No concrete citation locators were available for this project; evidence "
+    "No concrete source locators were available for this project; evidence "
     "should be validated in Sprint 0."
 )
 
@@ -386,11 +436,51 @@ class EvidenceAccountingProjection:
 
 
 @dataclass(frozen=True)
+class RiskClassificationGateAssessment:
+    warning_applies: bool
+    warning_text: str = ""
+    selected_classification: str = ""
+    normalized_classification: str = ""
+    highest_generated_risk_severity: str = ""
+    high_or_critical_risk_count: int = 0
+    source_counts: dict[str, int] = field(default_factory=dict)
+    high_or_critical_risks: tuple[dict[str, str], ...] = field(default_factory=tuple)
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "selected_classification": self.selected_classification,
+            "normalized_classification": self.normalized_classification,
+            "highest_generated_risk_severity": self.highest_generated_risk_severity,
+            "high_or_critical_risk_count": self.high_or_critical_risk_count,
+            "source_counts": dict(self.source_counts),
+            "high_or_critical_risks": [dict(row) for row in self.high_or_critical_risks],
+        }
+
+
+@dataclass(frozen=True)
 class ThresholdSectionClassification:
     section_name: str
     classification: str
     reason: str
     threshold_like: bool = False
+
+
+@dataclass(frozen=True)
+class ConstraintAdherenceProjection:
+    warning_applies: bool
+    warning_text: str = ""
+    detected_constraints: tuple[str, ...] = field(default_factory=tuple)
+    contradiction_signals: tuple[str, ...] = field(default_factory=tuple)
+    operator_context_preview: str = ""
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "detected_constraints": list(self.detected_constraints),
+            "contradiction_signals": list(self.contradiction_signals),
+            "operator_context_preview": self.operator_context_preview,
+        }
 
 
 def assess_report_quality_context(state: Any) -> ReportQualityContext:
@@ -452,6 +542,176 @@ def assess_report_quality_context(state: Any) -> ReportQualityContext:
         required_clarifications_open=required_clarifications_open,
         telemetry_privacy_required=requires_telemetry_privacy_caveat(text),
     )
+
+
+def assess_risk_classification_gate(state: Any) -> RiskClassificationGateAssessment:
+    """Warn when low operator classification conflicts with structured risks.
+
+    This is a read-only projection: it does not rebuild decision objects, mutate
+    risk classification, or inspect report prose.
+    """
+    selected = _risk_gate_text(_field_get(state, "risk_classification"))
+    normalized = _normalize_risk_classification(selected)
+    rows = _generated_structured_risk_rows(state)
+    highest = _highest_risk_severity(row.get("severity", "") for row in rows)
+    high_or_critical = tuple(
+        row for row in rows if _normalize_risk_severity(row.get("severity")) in {"high", "critical"}
+    )
+    source_counts: dict[str, int] = {}
+    for row in rows:
+        source = row.get("source", "") or "unknown"
+        source_counts[source] = source_counts.get(source, 0) + 1
+
+    warning_applies = normalized in {"minimal_risk", "low", "low_risk"} and bool(high_or_critical)
+    return RiskClassificationGateAssessment(
+        warning_applies=warning_applies,
+        warning_text=RISK_CLASSIFICATION_WARNING if warning_applies else "",
+        selected_classification=selected,
+        normalized_classification=normalized,
+        highest_generated_risk_severity=highest,
+        high_or_critical_risk_count=len(high_or_critical),
+        source_counts=source_counts,
+        high_or_critical_risks=high_or_critical[:20],
+    )
+
+
+def _generated_structured_risk_rows(state: Any) -> tuple[dict[str, str], ...]:
+    rows: list[dict[str, str]] = []
+    decision_objects = _field_get(state, "decision_objects")
+    for risk in _iter_maybe(_field_get(decision_objects, "risks")):
+        source_phase = _risk_gate_text(_field_get(risk, "source_phase"))
+        rows.append(
+            _risk_gate_row(
+                source=f"decision_objects.{source_phase}" if source_phase else "decision_objects",
+                severity=_field_get(risk, "severity"),
+                title=_field_get(risk, "title") or _field_get(risk, "risk_id") or "Decision-object risk",
+                summary=_field_get(risk, "summary"),
+            )
+        )
+
+    audit = _field_get(state, "audit")
+    for item in _iter_maybe(_field_get(audit, "fmea")):
+        component = _risk_gate_text(_field_get(item, "component"))
+        rows.append(
+            _risk_gate_row(
+                source="audit.fmea",
+                severity=_risk_severity_from_rpn(_intish(_field_get(item, "rpn"))),
+                title=f"FMEA: {component}" if component else "FMEA risk",
+                summary=(
+                    _field_get(item, "failure_mode")
+                    or _field_get(item, "effect")
+                    or _field_get(item, "action")
+                    or ""
+                ),
+            )
+        )
+    for item in _iter_maybe(_field_get(audit, "stpa")):
+        control_action = _risk_gate_text(_field_get(item, "control_action"))
+        rows.append(
+            _risk_gate_row(
+                source="audit.stpa",
+                severity="high",
+                title=f"STPA: {control_action}" if control_action else "STPA risk",
+                summary=_field_get(item, "hazard") or _field_get(item, "constraint") or "",
+            )
+        )
+
+    gauntlet = _field_get(state, "gauntlet")
+    for result in _iter_maybe(_field_get(gauntlet, "results")):
+        result_id = _risk_gate_text(_field_get(result, "id")) or "?"
+        rows.append(
+            _risk_gate_row(
+                source="gauntlet",
+                severity=_risk_severity_from_gauntlet(
+                    _intish(_field_get(result, "risk_rank")),
+                    _field_get(result, "top_fmea"),
+                ),
+                title=f"Gauntlet risk {result_id}",
+                summary=_field_get(result, "crux") or _field_get(result, "fta_cut_set") or "Gauntlet-identified risk",
+            )
+        )
+    return tuple(row for row in rows if row.get("severity"))
+
+
+def _risk_gate_row(*, source: str, severity: Any, title: Any, summary: Any) -> dict[str, str]:
+    return {
+        "source": _risk_gate_text(source, limit=80),
+        "severity": _normalize_risk_severity(severity),
+        "title": _risk_gate_text(title),
+        "summary": _risk_gate_text(summary),
+    }
+
+
+def _normalize_risk_classification(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return re.sub(r"[\s\-]+", "_", str(raw or "").strip().lower())
+
+
+def _normalize_risk_severity(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    normalized = re.sub(r"[\s\-]+", "_", str(raw or "").strip().lower())
+    if normalized in {"critical", "crit"}:
+        return "critical"
+    if normalized in {"high", "severe"}:
+        return "high"
+    if normalized in {"medium", "med", "moderate"}:
+        return "medium"
+    if normalized in {"low", "minimal"}:
+        return "low"
+    return normalized
+
+
+def _highest_risk_severity(values: Any) -> str:
+    ranked = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    highest = ""
+    highest_rank = 0
+    for value in values:
+        severity = _normalize_risk_severity(value)
+        rank = ranked.get(severity, 0)
+        if rank > highest_rank:
+            highest = severity
+            highest_rank = rank
+    return highest
+
+
+def _risk_severity_from_rpn(rpn: int) -> str:
+    if rpn >= 200:
+        return "critical"
+    if rpn >= 120:
+        return "high"
+    if rpn >= 60:
+        return "medium"
+    return "low"
+
+
+def _risk_severity_from_gauntlet(risk_rank: int, top_fmea: Any) -> str:
+    rpn = _intish(_field_get(top_fmea, "rpn"))
+    if rpn:
+        return _risk_severity_from_rpn(rpn)
+    if risk_rank <= 1:
+        return "high"
+    if risk_rank == 2:
+        return "medium"
+    return "low"
+
+
+def _intish(value: Any) -> int:
+    raw = getattr(value, "value", value)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return 0
+
+
+def _risk_gate_text(value: Any, limit: int = 180) -> str:
+    raw = getattr(value, "value", value)
+    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def has_required_clarifications_open(state: Any) -> bool:
@@ -740,6 +1000,283 @@ def has_budget_or_spend_evidence(state: Any) -> bool:
     return bool(re.search(r"(\bbudget\b|\bspend\b|\bcost\b|\bfinance\b|\bfinancial\b|\brevenue\b|\bmargin\b|\bsavings?\b|\binvoice\b)", text, re.I))
 
 
+def constraint_adherence_projection(state: Any) -> ConstraintAdherenceProjection:
+    """Detect clear generated-output contradictions against operator constraints.
+
+    This is a read-only advisory projection. It only reads operator-provided
+    context for constraints and only inspects generated strategy/report text for
+    contradiction signals.
+    """
+    operator_text = _operator_constraint_source_text(state)
+    detected_constraints = _detect_operator_hard_constraints(operator_text)
+    if not detected_constraints:
+        return ConstraintAdherenceProjection(warning_applies=False)
+
+    generated_text = _generated_strategy_report_text(state)
+    contradiction_signals = _detect_constraint_contradiction_signals(
+        generated_text,
+        detected_constraints,
+    )
+    warning_applies = bool(contradiction_signals)
+    return ConstraintAdherenceProjection(
+        warning_applies=warning_applies,
+        warning_text=CONSTRAINT_ADHERENCE_WARNING if warning_applies else "",
+        detected_constraints=detected_constraints,
+        contradiction_signals=contradiction_signals,
+        operator_context_preview=_short_constraint_preview(operator_text),
+    )
+
+
+def constraint_adherence_warnings(state: Any) -> list[str]:
+    projection = constraint_adherence_projection(state)
+    if not projection.warning_applies:
+        return []
+    details = []
+    if projection.detected_constraints:
+        details.append("Detected operator constraints: " + ", ".join(projection.detected_constraints) + ".")
+    if projection.contradiction_signals:
+        details.append("Contradiction signals: " + "; ".join(projection.contradiction_signals) + ".")
+    return [" ".join([projection.warning_text, *details]).strip()]
+
+
+def _operator_constraint_source_text(state: Any) -> str:
+    parts = [
+        getattr(state, "brief", ""),
+        getattr(state, "data_context", ""),
+    ]
+    for answer in list(getattr(state, "clarification_answers", []) or []):
+        parts.append(getattr(answer, "answer_text", ""))
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _detect_operator_hard_constraints(text: str) -> tuple[str, ...]:
+    source = str(text or "")
+    detected: list[str] = []
+    if re.search(
+        r"\b(?:limited|constrained|scarce|thin|low)\s+capacity\b|"
+        r"\bcapacity\s+(?:is\s+)?(?:limited|constrained|scarce|thin|low)\b",
+        source,
+        re.I,
+    ):
+        detected.append("limited capacity")
+    if re.search(
+        r"\b(?:only\s+)?(?:one|1)\s+(?:focused\s+)?initiative\b.*\b(?:one|1)\s+(?:small\s+)?experiment\b|"
+        r"\b(?:only\s+)?(?:one|1)\s+(?:small\s+)?experiment\b.*\b(?:one|1)\s+(?:focused\s+)?initiative\b|"
+        r"\bonly\s+(?:one|1)\s+(?:focused\s+)?initiative\b",
+        source,
+        re.I | re.S,
+    ):
+        detected.append("one focused initiative plus one small experiment")
+    if re.search(
+        r"\b(?:no|avoid|defer|without)\s+major\s+engineering\b|"
+        r"\bmajor\s+engineering\s+(?:project|work|initiative|track)\s+(?:is\s+)?(?:not\s+allowed|prohibited|off[- ]limits)\b",
+        source,
+        re.I,
+    ):
+        detected.append("no major engineering project")
+    if re.search(
+        r"\b(?:budget|spend)\s+(?:is\s+)?(?:limited|capped|frozen)\b|"
+        r"\bbudget\s+limited\s+to\b|"
+        r"\b(?:avoid|defer|freeze|no)\s+broad\s+growth\s+spend\b|"
+        r"\bspend\s+freeze\b|"
+        r"\bno\s+(?:new\s+)?(?:paid\s+acquisition|growth)\s+spend\b",
+        source,
+        re.I,
+    ):
+        detected.append("spend or budget limit")
+    return tuple(_unique(detected))
+
+
+def _generated_strategy_report_text(state: Any) -> str:
+    parts = [getattr(state, "report", "")]
+    strategy = getattr(state, "strategy", None)
+    if strategy:
+        parts.extend([
+            getattr(strategy, "executive_strategy", ""),
+            getattr(strategy, "implementation_sequence", ""),
+            getattr(strategy, "monitoring_plan", ""),
+        ])
+        for action in list(getattr(strategy, "strategies", []) or []):
+            parts.extend([
+                getattr(action, "priority", ""),
+                getattr(action, "action", ""),
+                getattr(action, "justification", ""),
+                getattr(action, "expected_impact", ""),
+                getattr(action, "risk_if_ignored", ""),
+                getattr(action, "timeline", ""),
+            ])
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _detect_constraint_contradiction_signals(
+    generated_text: str,
+    detected_constraints: tuple[str, ...],
+) -> tuple[str, ...]:
+    constraints = set(detected_constraints)
+    signals: list[str] = []
+    capacity_limited = bool(
+        constraints
+        & {
+            "limited capacity",
+            "one focused initiative plus one small experiment",
+        }
+    )
+    if capacity_limited and _has_non_negated_constraint_match(
+        generated_text,
+        re.compile(
+            r"\b(?:three|3)\s+parallel\s+critical(?:-priority)?\s+tracks\b|"
+            r"\b(?:run|execute|launch|pursue)\s+(?:three|3)\s+critical\s+tracks\s+in\s+parallel\b|"
+            r"\bmultiple\s+critical\s+tracks\b|"
+            r"\bparallel\s+critical(?:-priority)?\s+tracks\b",
+            re.I,
+        ),
+    ):
+        signals.append("multiple parallel critical tracks despite constrained capacity")
+
+    if "no major engineering project" in constraints and _has_non_negated_constraint_match(
+        generated_text,
+        re.compile(
+            r"\b(?:major|large|full)\s+engineering\s+(?:project|initiative|track|work|build)\b|"
+            r"\bengineering\s+(?:project|initiative|track|work|build)\b.{0,40}\b(?:major|large|full)\b",
+            re.I,
+        ),
+    ):
+        signals.append("major engineering work despite explicit no-major-engineering constraint")
+
+    if "spend or budget limit" in constraints and _has_non_negated_constraint_match(
+        generated_text,
+        re.compile(
+            r"\b(?:increase|increased|scale|expand|raise|ramp(?:\s+up)?)\s+(?:broad\s+)?(?:paid\s+acquisition|growth)\s+spend\b|"
+            r"\b(?:increase|increased|scale|expand|raise|ramp(?:\s+up)?)\s+paid\s+(?:spend|budget|budgets)\b|"
+            r"\b(?:scale|expand|ramp(?:\s+up)?)\s+paid\s+acquisition\b|"
+            r"\b(?:launch|start|run|execute)\s+(?:new\s+)?paid\s+campaigns?\b|"
+            r"\b(?:paid\s+acquisition|paid)\s+budgets?\s+(?:increase|increased|expansion|scale-up)\b|"
+            r"\b(?:broad|large|major)\s+(?:paid\s+acquisition|growth)\s+spend\b|"
+            r"\b(?:paid\s+acquisition|growth|paid)\s+spend\s+(?:increase|increases|increased|expansion|scale-up)\b|"
+            r"\blarge\s+acquisition\s+spend\s+increase\b",
+            re.I,
+        ),
+    ):
+        signals.append("broad or increased growth spend despite explicit spend constraint")
+
+    return tuple(_unique(signals))
+
+
+def _has_non_negated_constraint_match(text: str, pattern: re.Pattern[str]) -> bool:
+    for segment in _constraint_scan_segments(text):
+        for match in pattern.finditer(segment):
+            if _constraint_match_is_negated(segment, match.start(), match.end(), match.group(0)):
+                continue
+            return True
+    return False
+
+
+def _constraint_scan_segments(text: str) -> list[str]:
+    segments: list[str] = []
+    safe_heading = ""
+    for line in re.split(r"\n+", str(text or "")):
+        stripped = line.strip()
+        if not stripped:
+            safe_heading = ""
+            continue
+        if stripped.startswith("#"):
+            safe_heading = ""
+        if CONSTRAINT_SAFE_HEADING_PATTERN.search(stripped):
+            safe_heading = stripped
+        for segment in re.split(r"(?<=[.!?])\s+", stripped):
+            segment = segment.strip()
+            if not segment:
+                continue
+            if safe_heading and re.match(r"^(?:[-*]|\d+[.)])\s+", segment):
+                segments.append(f"{safe_heading} {segment}")
+            else:
+                segments.append(segment)
+    return segments
+
+
+def _constraint_match_is_negated(segment: str, match_start: int, match_end: int, match_text: str = "") -> bool:
+    prefix = segment[max(0, match_start - 180):match_start]
+    suffix = segment[match_end:match_end + 180]
+    if re.search(r"\bwhat\s+not\s+to\s+do\b.{0,160}$", prefix, re.I):
+        return True
+    if _constraint_markdown_row_has_safe_verdict(segment, match_end):
+        return True
+    if _constraint_prefix_has_shared_safe_list(prefix):
+        return True
+    if _constraint_match_is_conditional_risk_context(prefix, match_text):
+        return True
+    if CONSTRAINT_SAFE_PREFIX_PATTERN.search(prefix):
+        return True
+    return bool(CONSTRAINT_SAFE_SUFFIX_PATTERN.search(suffix))
+
+
+def _constraint_markdown_row_has_safe_verdict(segment: str, match_end: int) -> bool:
+    if "|" not in segment:
+        return False
+    suffix = segment[match_end:]
+    return bool(
+        re.search(
+            r"\|\s*(?:\*\*)?\s*(?:do\s+not\s+do(?:\s+this\s+month)?|"
+            r"do\s+not\s+start|not\s+recommended|deferred|blocked|"
+            r"out\s+of\s+scope|paused|parked)(?:\s*(?:\*\*)?)\s*\|",
+            suffix,
+            re.I,
+        )
+    )
+
+
+def _constraint_match_is_conditional_risk_context(prefix: str, match_text: str) -> bool:
+    if not (
+        CONSTRAINT_SAFE_CONDITIONAL_PREFIX_PATTERN.search(prefix)
+        or re.search(
+            r"\b(?:if|when|unless|whether|risk\s+if|risk\s+of|risks?\s+if|"
+            r"warning\s+if|watch\s+if|monitor\s+if|stop\s+if|trigger\s+if)\b.{0,120}$",
+            prefix,
+            re.I,
+        )
+    ):
+        return False
+    if re.search(r"\brecommended\s+path\b|\brecommend(?:ed|s)?\b", prefix, re.I):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:paid\s+)?spend\s+increase(?:s|d)?\b|"
+            r"\bpaid\s+acquisition\s+mix\s+continues?\s+shifting\b",
+            match_text,
+            re.I,
+        )
+    )
+
+
+def _constraint_prefix_has_shared_safe_list(prefix: str) -> bool:
+    match = re.search(
+        r"\b(?:do\s+not|don't|dont|should\s+not|must\s+not|cannot|can't|"
+        r"avoid(?:s|ed|ing)?|defer(?:s|red|ring)?|block(?:s|ed|ing)?|"
+        r"pause(?:s|d|ing)?|freeze(?:s|d|ing)?|frozen|park(?:s|ed|ing)?|no|never|without|"
+        r"prohibit(?:s|ed|ing)?|forbid(?:s|den|ding)?|forbidden)\b"
+        r"(?P<body>.{0,140})\b(?:and|or)\s*$",
+        prefix,
+        re.I,
+    )
+    if not match:
+        return False
+    return not bool(
+        re.search(
+            r"\b(?:then|but|however|recommend(?:ed)?|launch|run|execute|"
+            r"increase|scale|expand|raise|ramp(?:\s+up)?|start)\b",
+            match.group("body"),
+            re.I,
+        )
+    )
+
+
+def _short_constraint_preview(text: str, limit: int = 240) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 3)].rstrip() + "..."
+
+
 def requires_telemetry_privacy_caveat(text: str) -> bool:
     return bool(TELEMETRY_PATTERN.search(text or ""))
 
@@ -816,7 +1353,10 @@ def normalize_export_text(text: str, audience: str = "client") -> str:
             continue
         output.append(_normalize_export_line(line, mode))
         index += 1
-    return "\n".join(output)
+    value = "\n".join(output)
+    if mode == "client":
+        value = _remove_client_citation_placeholder_noise(value)
+    return value
 
 
 def suppress_client_raw_evidence_ids(text: str) -> str:
@@ -829,21 +1369,80 @@ def suppress_client_raw_evidence_ids(text: str) -> str:
             in_code_block = not in_code_block
             lines.append(line)
             continue
-        if in_code_block or _looks_like_json_line(stripped):
+        if _explicit_operator_or_machine_context(line) and (
+            in_code_block
+            or _looks_like_json_line(stripped)
+            or _explicit_protected_client_context_line(line)
+        ):
             lines.append(line)
             continue
-        value = _remove_marker_orphan_fragments(line)
-        value = re.sub(
-            r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
-            "",
-            value,
-            flags=re.I,
-        )
-        value = re.sub(r"\s*\[#\d+\]", "", value)
-        value = re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
-        value = _remove_subjectless_evidence_fragments(value)
-        lines.append(value)
+        lines.append(_suppress_client_raw_evidence_line(line))
     return "\n".join(lines)
+
+
+def _suppress_client_raw_evidence_line(line: str) -> str:
+    had_raw_evidence_token = bool(
+        re.search(
+            r"\[Evidence:\s*|\bknowledge[_-][A-Za-z0-9_.:-]+\b|\b(?:ev|evidence|src)[-_][A-Za-z0-9_.:-]+\b|"
+            r"\bupload:[^\s|,)>\]]+|\bstorage_ref\s*[:=]|\bsource_ref\s*[:=]",
+            str(line or ""),
+            re.I,
+        )
+    )
+    value = _remove_marker_orphan_fragments(line)
+    value = re.sub(
+        r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
+        "",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\s*\[#\d+\]", "", value)
+    value = re.sub(r"\b(?:ev|evidence|src)[-_][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+    value = re.sub(r"\bknowledge[_-][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+    value = re.sub(r"\bupload:[^\s|,)>\]]+", "uploaded project document", value, flags=re.I)
+    value = re.sub(r"\bstorage_ref\s*[:=]\s*[^\s|,)>\]]+", "evidence source unavailable", value, flags=re.I)
+    value = re.sub(r"\bsource_ref\s*[:=]\s*[^\s|,)>\]]+", "evidence source unavailable", value, flags=re.I)
+    value = re.sub(r"(?i)(api[_-]?key|token|password|secret|credential)\s*[:=]\s*[^,\s|;]+", r"\1=[REDACTED]", value)
+    value = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", value)
+    value = re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}\b", "[REDACTED]", value)
+    value = re.sub(r"(?i)\b[A-Z]:[\\/][^\s|]+", "local path redacted", value)
+    value = re.sub(r"\\\\[A-Za-z0-9_.-]+\\[^\s|]+", "local path redacted", value)
+    value = re.sub(r"file://[^\s|]+", "local path redacted", value, flags=re.I)
+    value = re.sub(
+        r"\b(?:evidence source unavailable|uploaded project document|project evidence)"
+        r"(?:\s+(?:uploaded project document|project document|source))*\s+"
+        r"provides evidence interpretation context\b[^.?!]*(?:[.?!]|$)",
+        "Evidence source unavailable.",
+        value,
+        flags=re.I,
+    )
+    if had_raw_evidence_token:
+        value = re.sub(r"\bconfirms\b", "supports", value, flags=re.I)
+        value = re.sub(r"\bis confirmed\b", "requires validation", value, flags=re.I)
+        value = re.sub(r"\bwas confirmed\b", "requires validation", value, flags=re.I)
+    value = _remove_subjectless_evidence_fragments(value)
+    return value
+
+
+def _explicit_operator_or_machine_context(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:operator[-\s]?only|operator\s+diagnostic|operator\s+trace|machine[_\s-]?archive|"
+            r"project_state\.json|phase_outputs\.json|decision_objects\.json|export_manifest\.json)\b",
+            str(line or ""),
+            re.I,
+        )
+    )
+
+
+def _explicit_protected_client_context_line(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:source\s+excerpt|source\s+text|raw\s+source|quoted\s+source|machine[_\s-]?archive)\b",
+            str(line or ""),
+            re.I,
+        )
+    )
 
 
 def _remove_marker_orphan_fragments(line: str) -> str:
@@ -1591,7 +2190,7 @@ def _simplify_sparse_precision(value: str) -> str:
             simplified,
         )
         simplified = re.sub(
-            r"\b\d+(?:\.\d+)?\s*(?:person-hours?|hours?)\b",
+            r"\b\d+(?:\.\d+)?\s*person[- ]hours?\b",
             "provisional effort estimate",
             simplified,
             flags=re.I,
@@ -1638,6 +2237,8 @@ def _cleanup_client_replacement_artifacts(value: str) -> str:
 
 
 def _normalize_export_line(line: str, audience: str) -> str:
+    if _line_has_protected_export_reference(line) or re.search(r"https?://|file://|\b[A-Za-z]:[\\/]|\\\\", str(line or "")):
+        return str(line or "")
     protected, fragments = _protect_export_fragments(str(line or ""))
     value = _normalize_common_export_text(protected)
     if audience == "client":
@@ -1799,7 +2400,8 @@ def _normalize_client_export_text(value: str) -> str:
         (r"\bevidence quality diagnostic\b", "evidence quality signal"),
         (r"\bstructured risk priority\b", "risk priority score"),
         (r"\boperator-confirmed threshold required\b", "provisional threshold"),
-        (r"\bcitation unavailable\b", "No citation available"),
+        (r"\bcitation unavailable\b", ""),
+        (r"\bNo citation available\b", ""),
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.I)
@@ -1807,7 +2409,149 @@ def _normalize_client_export_text(value: str) -> str:
     text = re.sub(r"\bstructural prior\.\s*\d+\b", "structural prior", text, flags=re.I)
     text = re.sub(r"\brisk priority score\s+\d+(?:\.\d+)?\b", "risk priority score", text, flags=re.I)
     text = _normalize_client_legal_review_effort_placeholder(text)
+    text = _normalize_client_operator_placeholder_language(text)
     return text
+
+
+def _normalize_client_operator_placeholder_language(value: str) -> str:
+    text = str(value or "")
+    if _line_has_protected_export_reference(text) or re.search(r"https?://|file://|\b[A-Za-z]:[\\/]|\\\\", text):
+        return text
+    if _has_concrete_client_timing_value(text):
+        return _strip_client_operator_placeholder_labels(text)
+    replacements: list[tuple[str, str]] = [
+        (
+            r"\boperator-defined effort estimate\s+or\s+less\b",
+            "planning estimate to validate in Sprint 0",
+        ),
+        (r"\boperator-defined effort estimate\b", "planning estimate to validate in Sprint 0"),
+        (r"\boperator-defined planning estimate\b", "planning estimate to validate in Sprint 0"),
+        (
+            r"\boperator-defined share threshold of ([^.;,\n|]+)",
+            r"\1 share threshold to validate in Sprint 0",
+        ),
+        (
+            r"\boperator-defined threshold for ([^.;,\n|]+)",
+            r"threshold for \1 to validate in Sprint 0",
+        ),
+        (
+            r"\boperator-defined threshold week over week\b",
+            "week-over-week threshold to validate in Sprint 0",
+        ),
+        (r"\boperator-defined margin\b", "margin to validate in Sprint 0"),
+        (r"\boperator-defined threshold\b", "threshold to validate in Sprint 0"),
+        (r"\boperator-defined\b", "to validate in Sprint 0"),
+        (r"\bprovisional threshold\b", "threshold to validate in Sprint 0"),
+        (r"\bprovisional planning estimate\b", "planning estimate to validate in Sprint 0"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text
+
+
+def _has_concrete_client_timing_value(value: str) -> bool:
+    text = str(value or "")
+    patterns = [
+        r"\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
+        r"\b\d+(?:\.\d+)?[- ](?:hour|day|week|month)\b",
+        r"\b\d+(?:\.\d+)?[- ]day\s+rolling\b",
+        r"\bday\s+\d+\b",
+        r"\bwithin\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?|weeks?|months?)\b",
+    ]
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def _strip_client_operator_placeholder_labels(value: str) -> str:
+    text = str(value or "")
+    replacements: list[tuple[str, str]] = [
+        (r"\btarget threshold:\s*>\s*provisional threshold\b", "target threshold: above the threshold"),
+        (r"\btarget threshold:\s*<\s*provisional threshold\b", "target threshold: below the threshold"),
+        (r"\btarget threshold\s*<\s*provisional threshold\b", "target threshold below the threshold"),
+        (r"\bexceeds crux threshold by provisional threshold\b", "exceeds the crux threshold by the margin"),
+        (r"\bless than provisional threshold\b", "below the threshold"),
+        (r"\bmore than provisional threshold\b", "above the threshold"),
+        (r"\boperator-defined share threshold of ([^.;,\n|]+)", r"\1 share threshold"),
+        (r"\boperator-defined threshold for ([^.;,\n|]+)", r"threshold for \1"),
+        (r"\boperator-defined threshold week over week\b", "week-over-week threshold"),
+        (r"\boperator-defined effort estimate\s+or\s+less\b", "planning estimate"),
+        (r"\boperator-defined effort estimate\b", "planning estimate"),
+        (r"\boperator-defined planning estimate\b", "planning estimate"),
+        (r"\boperator-defined margin\b", "margin"),
+        (r"\boperator-defined threshold\b", "threshold"),
+        (r"\bprovisional threshold\b", "threshold"),
+        (r"\bprovisional planning estimate\b", "planning estimate"),
+        (r"\boperator-defined\b", ""),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([,.;:])", r"\1", text)
+    return text.strip()
+
+
+def _remove_client_citation_placeholder_noise(value: str) -> str:
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(value or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if not stripped:
+            lines.append(line)
+            continue
+        if in_code_block or _looks_like_json_line(stripped) or _line_has_protected_export_reference(line):
+            lines.append(line)
+            continue
+        cleaned = _strip_client_citation_placeholder_text(line)
+        if not cleaned.strip():
+            continue
+        if _is_client_citation_placeholder_line(cleaned):
+            continue
+        lines.append(cleaned)
+    return "\n".join(lines)
+
+
+def _strip_client_citation_placeholder_text(value: str) -> str:
+    text = str(value or "")
+    if not re.search(
+        r"\b(?:Citation|No citation available|citation unavailable|Evidence source unavailable)\b",
+        text,
+        re.I,
+    ):
+        return text
+    text = re.sub(r"\b(?:No citation available|citation unavailable|Evidence source unavailable)\b\.?", "", text, flags=re.I)
+    text = re.sub(r"\bCitation\s*:\s*(?=$|[|])", "", text, flags=re.I)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([|,.;:])", r"\1", text)
+    return text.strip()
+
+
+def _is_client_citation_placeholder_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return False
+    normalized = _normalize_heading(stripped)
+    if normalized in {
+        "citation",
+        "citations",
+        "citation marker",
+        "citation markers",
+        "citation locator",
+        "citation locators",
+        "source locator",
+        "source locators",
+    }:
+        return True
+    if re.fullmatch(r"citation\s*:?", stripped, re.I):
+        return True
+    if _looks_like_markdown_table_line(stripped):
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        nonempty = [cell for cell in cells if cell]
+        if nonempty and all(_normalize_heading(cell).startswith("citation") for cell in nonempty):
+            return True
+    return False
 
 
 def _normalize_client_legal_review_effort_placeholder(value: str) -> str:

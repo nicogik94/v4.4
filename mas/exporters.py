@@ -1,4 +1,4 @@
-"""Project dossier exporters for DOCX and PDF downloads."""
+"""Project dossier exporters for DOCX, PDF, ZIP, and XLSX downloads."""
 from __future__ import annotations
 
 import json
@@ -36,9 +36,11 @@ from report_quality import (
     UPLOADED_KNOWLEDGE_NO_IMPORTED_EVIDENCE_NOTE,
     UNSUPPORTED_EVIDENCE_FILES_WARNING,
     WAVE2_GRADUATION_MATRIX,
+    assess_risk_classification_gate,
     assess_report_quality_context,
     client_simplify_text,
     commitment_score_text,
+    constraint_adherence_projection,
     evidence_accounting_projection,
     evidence_maturity_projection,
     guard_client_bf_confidence,
@@ -52,7 +54,14 @@ from report_quality import (
     threshold_section_classification,
 )
 import report_freshness
+from hypothesis_coverage import assess_hypothesis_variable_coverage
+from monitoring_templates import monitoring_template_xlsx_bytes
 from state import ProjectState
+from technology_readiness_workbook import (
+    TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
+    technology_readiness_workbook_xlsx_bytes,
+)
+from workflow_templates import TECHNOLOGY_READINESS_PHASE_LABELS, TECHNOLOGY_READINESS_PHASE_SEQUENCE
 
 
 def build_export_filename(state: ProjectState, ext: str) -> str:
@@ -229,6 +238,21 @@ HUMAN_REVIEW_NOTE = (
     "It should not replace expert judgment where legal, financial, medical, "
     "safety, or compliance stakes are involved."
 )
+CLIENT_DELIVERY_VALIDATION_BANNER = (
+    "Validate before client delivery. This is a hypothesis-driven diagnostic memo, not a measured audit."
+)
+TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER = (
+    "Validate before client delivery. This is an operator-reviewed technology readiness assessment, "
+    "not TRL certification, not legal patentability advice, not freedom-to-operate advice, not regulatory "
+    "approval, not safety approval, not investment readiness, not production readiness, not commercial "
+    "viability, and not a guarantee of commercial transfer."
+)
+TECHNOLOGY_READINESS_BOUNDARY_NOTE = (
+    "Operator-reviewed readiness assessment based on supplied evidence only. It is not TRL certification, "
+    "not legal patentability advice, not freedom-to-operate advice, not regulatory approval, not safety "
+    "approval, not investment readiness, not production readiness, not commercial viability, and not a "
+    "guarantee of commercial transfer."
+)
 
 SPARSE_GROWTH_DECISION_GATES = """| Gate | Proceed | Extend | Stop / Escalate |
 |---|---|---|---|
@@ -314,17 +338,26 @@ EMPTY_EVIDENCE = "No imported evidence is available yet."
 EMPTY_TRACE = "No decision trace is available yet."
 EMPTY_CLARIFICATIONS = "No clarification answers have been submitted yet."
 EMPTY_AUDIT = "No audit findings are available yet."
+MONITORING_TEMPLATE_OPERATOR_NOTE = (
+    "Monitoring template exports are available via "
+    "profile=client_monitoring_template&format=xlsx and "
+    "profile=operator_monitoring_template&format=xlsx."
+)
 
 EXPORT_PROFILE_FORMATS = {
     "report": {"pdf", "docx"},
     "client_dossier": {"pdf", "docx"},
+    "client_monitoring_template": {"xlsx"},
     "operator_dossier": {"pdf", "docx"},
+    "operator_monitoring_template": {"xlsx"},
+    TECHNOLOGY_READINESS_WORKBOOK_PROFILE: {"xlsx"},
     "machine_archive": {"zip"},
 }
 
 PROFILE_MEDIA_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "zip": "application/zip",
 }
 
@@ -367,7 +400,7 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
     if profile_name not in EXPORT_PROFILE_FORMATS:
         raise ValueError(f"profile must be one of {sorted(EXPORT_PROFILE_FORMATS)}")
     if fmt not in PROFILE_MEDIA_TYPES:
-        raise ValueError("format must be pdf, docx, or zip")
+        raise ValueError("format must be pdf, docx, xlsx, or zip")
     if fmt not in EXPORT_PROFILE_FORMATS[profile_name]:
         raise ValueError(f"profile={profile_name} does not support format={fmt}")
 
@@ -375,12 +408,24 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
     if profile_name == "machine_archive":
         archive_payload = build_machine_archive_payload(state)
         return _zip_archive_bytes(archive_payload), PROFILE_MEDIA_TYPES[fmt], filename
+    if profile_name in {"client_monitoring_template", "operator_monitoring_template"}:
+        audience = "operator" if profile_name.startswith("operator") else "client"
+        return monitoring_template_xlsx_bytes(state, audience=audience), PROFILE_MEDIA_TYPES[fmt], filename
+    if profile_name == TECHNOLOGY_READINESS_WORKBOOK_PROFILE:
+        if getattr(state, "project_type", "") != "technology_readiness":
+            raise ValueError("profile=technology_readiness_workbook requires project_type=technology_readiness")
+        return technology_readiness_workbook_xlsx_bytes(state), PROFILE_MEDIA_TYPES[fmt], filename
 
     current_version = report_freshness.current_code_version()
     if profile_name == "report":
+        report_markdown = (
+            _technology_readiness_report_markdown(state)
+            if _is_technology_readiness_state(state)
+            else _safe_report_markdown(state)
+        )
         markdown = _finalize_export_markdown(
             _prepend_report_freshness_warning(
-                _safe_report_markdown(state),
+                report_markdown,
                 state,
                 current_code_version=current_version,
             ),
@@ -392,9 +437,17 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
     else:
         markdown = build_operator_dossier_markdown(state, current_code_version=current_version)
 
+    client_visible_profile = profile_name in {"report", "client_dossier"}
+    if client_visible_profile:
+        markdown = _finalize_client_runtime_render_markdown(markdown, state)
+
     if fmt == "docx":
         return _export_markdown_docx_bytes(markdown, title=filename), PROFILE_MEDIA_TYPES[fmt], filename
-    return _export_markdown_pdf_bytes(markdown, title=filename), PROFILE_MEDIA_TYPES[fmt], filename
+    return _export_markdown_pdf_bytes(
+        markdown,
+        title=filename,
+        client_visible=client_visible_profile,
+    ), PROFILE_MEDIA_TYPES[fmt], filename
 
 
 def build_client_dossier_markdown(
@@ -402,11 +455,17 @@ def build_client_dossier_markdown(
     *,
     current_code_version: str | None = None,
 ) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_client_dossier_markdown(
+            state,
+            current_code_version=current_code_version,
+        )
+
     quality = assess_report_quality_context(state)
     sections = _extract_report_sections(state.report or "")
     lines = [
         "# Client Dossier",
-        _project_metadata_line(state),
+        _client_project_metadata_line(state),
     ]
     warning = _report_freshness_warning(state, current_code_version=current_code_version)
     if warning:
@@ -532,6 +591,13 @@ def build_operator_dossier_markdown(
     current_code_version: str | None = None,
     include_freshness: bool = True,
 ) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_operator_dossier_markdown(
+            state,
+            current_code_version=current_code_version,
+            include_freshness=include_freshness,
+        )
+
     quality = assess_report_quality_context(state)
     lines = [
         "# Operator Dossier",
@@ -582,6 +648,444 @@ def build_operator_dossier_markdown(
     )
 
 
+def _is_technology_readiness_state(state: ProjectState) -> bool:
+    return str(getattr(state, "project_type", "") or "").strip().lower() == "technology_readiness"
+
+
+def _technology_readiness_report_markdown(state: ProjectState) -> str:
+    if str(getattr(state, "report", "") or "").strip():
+        return _apply_technology_readiness_client_delivery_banner(_safe_report_markdown(state))
+
+    quality = assess_report_quality_context(state)
+    lines = [
+        "# Technology Readiness & Transfer Report",
+        _client_project_metadata_line(state),
+    ]
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=True))
+    lines.extend(_quality_warning_blocks(state, quality, client=True))
+    lines.extend([
+        "## What technology we reviewed",
+        _technology_readiness_scope_summary(state),
+        "## Current defensible TRL",
+        _technology_readiness_trl_summary(state),
+        "## Why higher TRL is not yet justified",
+        _technology_readiness_why_not_higher(state),
+        "## Evidence gaps",
+        _technology_readiness_evidence_gaps_summary(state),
+        "## Sprint 0 validation package",
+        _technology_readiness_sprint0_validation_package(state),
+        "## IP/disclosure review note",
+        _technology_readiness_ip_review_note(state),
+        "## Transfer-readiness note",
+        _technology_readiness_transfer_note(state),
+        "## Readiness roadmap",
+        _technology_readiness_roadmap_summary(state),
+        "## What to do next",
+        _technology_readiness_next_step_summary(state),
+        "## Human review note",
+        TECHNOLOGY_READINESS_BOUNDARY_NOTE,
+    ])
+    markdown = _finalize_export_markdown(
+        normalize_export_text("\n\n".join(part for part in lines if str(part).strip()), audience="client"),
+        state,
+        audience="client",
+        quality=quality,
+    )
+    return _apply_technology_readiness_client_delivery_banner(markdown)
+
+
+def _technology_readiness_client_dossier_markdown(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+) -> str:
+    quality = assess_report_quality_context(state)
+    lines = [
+        "# Technology Readiness Client Dossier",
+        _client_project_metadata_line(state),
+    ]
+    warning = _report_freshness_warning(state, current_code_version=current_code_version)
+    if warning:
+        lines.append(warning)
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=True))
+    lines.extend(_quality_warning_blocks(state, quality, client=True))
+    lines.extend([
+        "## What technology we reviewed",
+        _technology_readiness_scope_summary(state),
+        "## Current defensible TRL",
+        _technology_readiness_trl_summary(state),
+        "## Why higher TRL is not yet justified",
+        _technology_readiness_why_not_higher(state),
+        "## Evidence gaps",
+        _technology_readiness_evidence_gaps_summary(state),
+        "## Sprint 0 validation package",
+        _technology_readiness_sprint0_validation_package(state),
+        "## IP/disclosure review note",
+        _technology_readiness_ip_review_note(state),
+        "## Transfer-readiness note",
+        _technology_readiness_transfer_note(state),
+        "## Readiness roadmap",
+        _technology_readiness_roadmap_summary(state),
+        "## What to do next",
+        _technology_readiness_next_step_summary(state),
+        "## Human review note",
+        TECHNOLOGY_READINESS_BOUNDARY_NOTE,
+    ])
+    markdown = _finalize_export_markdown(
+        normalize_export_text("\n\n".join(part for part in lines if str(part).strip()), audience="client"),
+        state,
+        audience="client",
+        quality=quality,
+    )
+    return _apply_technology_readiness_client_delivery_banner(markdown)
+
+
+def _technology_readiness_operator_dossier_markdown(
+    state: ProjectState,
+    *,
+    current_code_version: str | None = None,
+    include_freshness: bool = True,
+) -> str:
+    quality = assess_report_quality_context(state)
+    lines = ["# Technology Readiness Operator Dossier"]
+    if include_freshness:
+        warning = _operator_report_freshness_warning(state, current_code_version=current_code_version)
+        if warning:
+            lines.append(warning)
+    lines.extend(_evidence_maturity_badge_markdown(state, quality, client=False))
+    lines.extend(_quality_warning_blocks(state, quality, client=False))
+    sections = [
+        ("Cover / project metadata", operator_project_metadata(state)),
+        ("Technology readiness executive summary", _technology_readiness_operator_summary(state)),
+        ("TRL diagnosis", _technology_readiness_trl_summary(state)),
+        ("Readiness verdict", _technology_readiness_verdict_summary(state)),
+        ("Top evidence gaps", _technology_readiness_evidence_gaps_summary(state)),
+        ("Next-level recommendation", _technology_readiness_next_step_summary(state)),
+        ("Validation plan", _technology_readiness_validation_plan_summary(state)),
+        ("Transfer plan", _technology_readiness_transfer_note(state)),
+        ("Readiness roadmap", _technology_readiness_roadmap_summary(state)),
+        ("Phase completion status", summarize_phase_outputs(state)),
+        ("Evidence and source summary", operator_evidence_summary(state)),
+        ("Human review / safety boundary", TECHNOLOGY_READINESS_BOUNDARY_NOTE),
+        ("Report appendix", operator_report_appendix(state)),
+        ("Technical appendix", operator_technical_appendix(state)),
+    ]
+    for heading, body in sections:
+        lines.extend([f"## {heading}", body or "No technology-readiness summary is available yet."])
+    return _finalize_export_markdown(
+        "\n\n".join(part for part in lines if str(part).strip()),
+        state,
+        audience="operator",
+        quality=quality,
+    )
+
+
+def _technology_readiness_scope_summary(state: ProjectState) -> str:
+    scope = _technology_readiness_phase_data(state, "scope")
+    rows = [
+        ["Field", "Value"],
+        ["Technology", _technology_readiness_name(state)],
+        ["Assessment boundary", _tr_field(scope, "assessment_boundary", "Not supplied.")],
+        ["Target environment", _tr_field(scope, "target_environment", "Not supplied.")],
+        ["Intended next milestone", _tr_field(scope, "intended_next_milestone", "Not supplied.")],
+        ["Stakeholders", _tr_join(scope.get("stakeholders"), "Not supplied.")],
+        ["Constraints", _tr_join(scope.get("constraints"), "Not supplied.")],
+        ["Assumptions", _tr_join(scope.get("assumptions"), "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_trl_summary(state: ProjectState) -> str:
+    diagnosis = _technology_readiness_phase_data(state, "trl_diagnosis")
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    rows = [
+        ["Field", "Value"],
+        ["Current defensible TRL", _tr_field(executive, "current_trl") or _tr_field(diagnosis, "current_trl", "Not assessed.")],
+        ["Target TRL", _tr_field(executive, "target_trl") or _tr_field(diagnosis, "target_trl", "Not supplied.")],
+        ["Current phase name", _tr_field(diagnosis, "current_phase_name", "Not supplied.")],
+        ["Readiness verdict", _tr_field(executive, "readiness_verdict", "Not supplied.")],
+        ["Confidence", _tr_field(executive, "confidence") or _tr_field(diagnosis, "confidence", "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_why_not_higher(state: ProjectState) -> str:
+    diagnosis = _technology_readiness_phase_data(state, "trl_diagnosis")
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    parts = [
+        _tr_field(diagnosis, "why_not_higher"),
+        _tr_bullets(executive.get("top_blockers"), ""),
+    ]
+    body = "\n\n".join(part for part in parts if str(part).strip())
+    return body or "A higher TRL is not justified until the missing evidence is reviewed by the operator."
+
+
+def _technology_readiness_evidence_gaps_summary(state: ProjectState) -> str:
+    gaps = []
+    for phase, field in (
+        ("executive_summary", "top_blockers"),
+        ("trl_diagnosis", "evidence_gaps"),
+        ("scientific_inventory", "missing_evidence"),
+        ("next_level_recommendations", "required_evidence"),
+    ):
+        gaps.extend(_tr_list(_technology_readiness_phase_data(state, phase).get(field)))
+    unique = _unique_nonempty(gaps)
+    if not unique:
+        return "No evidence gaps were recorded in the structured Technology Readiness output."
+    return "\n".join(f"- {item}" for item in unique)
+
+
+def _technology_readiness_sprint0_validation_package(state: ProjectState) -> str:
+    next_level = _technology_readiness_phase_data(state, "next_level_recommendations")
+    validation = _technology_readiness_phase_data(state, "technical_validation_plan")
+    lines = [
+        "Sprint 0 validation required before treating the roadmap, transfer discussion, or readiness verdict as validated.",
+        "### Required tests",
+        _tr_bullets(next_level.get("required_tests") or validation.get("validation_tests")),
+        "### Required evidence",
+        _tr_bullets(next_level.get("required_evidence") or validation.get("evidence_to_collect")),
+        "### Acceptance criteria",
+        _tr_bullets(validation.get("acceptance_criteria") or next_level.get("advancement_criteria")),
+    ]
+    return "\n\n".join(part for part in lines if str(part).strip())
+
+
+def _technology_readiness_ip_review_note(state: ProjectState) -> str:
+    ip = _technology_readiness_phase_data(state, "ip_protection_axis")
+    rows = [
+        ["Field", "Value"],
+        ["Specialist review required", _tr_field(ip, "specialist_review_required", "Not supplied.")],
+        ["IP risk notes", _tr_join(ip.get("ip_risk_notes"), "No IP/disclosure notes recorded.")],
+        ["Material composition", _tr_field(ip, "material_composition", "Not supplied.")],
+        ["Synthesis method", _tr_field(ip, "synthesis_method", "Not supplied.")],
+        ["Specific use", _tr_field(ip, "specific_use", "Not supplied.")],
+        ["Device or system", _tr_field(ip, "device_or_system", "Not supplied.")],
+        ["Critical parameters", _tr_field(ip, "critical_parameters", "Not supplied.")],
+        ["Know-how", _tr_field(ip, "know_how", "Not supplied.")],
+    ]
+    return "\n\n".join([
+        "Treat IP and disclosure conclusions as preliminary. A qualified specialist should review before publication, external demos, or transfer negotiation.",
+        _markdown_table(rows),
+    ])
+
+
+def _technology_readiness_transfer_note(state: ProjectState) -> str:
+    transfer = _technology_readiness_phase_data(state, "industrial_transfer_plan")
+    rows = [
+        ["Field", "Value"],
+        ["Ideal industrial partner", _tr_field(transfer, "ideal_industrial_partner", "Not supplied.")],
+        ["Partner validation needed", _tr_join(transfer.get("partner_validation_needed"), "Not supplied.")],
+        ["Minimum transfer package", _tr_join(transfer.get("minimum_transfer_package"), "Not supplied.")],
+        ["Transfer model options", _tr_join(transfer.get("transfer_model_options"), "Not supplied.")],
+        ["Negotiation risks", _tr_join(transfer.get("negotiation_risks"), "Not supplied.")],
+        ["Evidence required before transfer", _tr_join(transfer.get("evidence_required_before_transfer"), "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_roadmap_summary(state: ProjectState) -> str:
+    roadmap = _technology_readiness_phase_data(state, "readiness_roadmap")
+    phase_rows = [["TRL", "Phase", "Time range", "Objective", "Evidence needed", "Decision gate"]]
+    for item in _tr_items(roadmap.get("roadmap_phases")):
+        if isinstance(item, dict):
+            phase_rows.append([
+                _tr_display_text(item.get("trl")),
+                _tr_display_text(item.get("phase_name")),
+                _tr_display_text(item.get("time_range")),
+                _tr_display_text(item.get("objective")),
+                _tr_join(item.get("evidence_needed"), ""),
+                _tr_display_text(item.get("decision_gate")),
+            ])
+        else:
+            phase_rows.append(["", _tr_display_text(item), "", "", "", ""])
+    parts = []
+    if len(phase_rows) > 1:
+        parts.append(_markdown_table(phase_rows))
+    else:
+        parts.append("No readiness roadmap phases were recorded.")
+    parts.extend([
+        "### Timeline",
+        _tr_bullets(roadmap.get("timeline")),
+        "### Decision gates",
+        _tr_bullets(roadmap.get("decision_gates")),
+        "### Resources needed",
+        _tr_bullets(roadmap.get("resources_needed")),
+        "### Go/no-go criteria",
+        _tr_bullets(roadmap.get("go_no_go_criteria")),
+    ])
+    return "\n\n".join(part for part in parts if str(part).strip())
+
+
+def _technology_readiness_next_step_summary(state: ProjectState) -> str:
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    next_level = _technology_readiness_phase_data(state, "next_level_recommendations")
+    rows = [
+        ["Field", "Value"],
+        ["Recommended next step", _tr_field(executive, "recommended_next_step", "Not supplied.")],
+        ["Main gap to next level", _tr_field(next_level, "main_gap_to_next_level", "Not supplied.")],
+        ["Next target TRL", _tr_field(next_level, "next_target_trl", "Not supplied.")],
+        ["Next phase name", _tr_field(next_level, "next_phase_name", "Not supplied.")],
+        ["Estimated time range", _tr_field(next_level, "estimated_time_range", "Not supplied.")],
+        ["Recommended actions", _tr_join(next_level.get("recommended_actions"), "Not supplied.")],
+        ["Expected deliverables", _tr_join(next_level.get("expected_deliverables"), "Not supplied.")],
+        ["Risks to reduce", _tr_join(next_level.get("risks_to_reduce"), "Not supplied.")],
+        ["Suggested owners", _tr_join(next_level.get("suggested_owners"), "Not supplied.")],
+        ["Advancement criteria", _tr_join(next_level.get("advancement_criteria"), "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_validation_plan_summary(state: ProjectState) -> str:
+    validation = _technology_readiness_phase_data(state, "technical_validation_plan")
+    rows = [
+        ["Field", "Value"],
+        ["Validation tests", _tr_join(validation.get("validation_tests"), "Not supplied.")],
+        ["Acceptance criteria", _tr_join(validation.get("acceptance_criteria"), "Not supplied.")],
+        ["Measurement plan", _tr_join(validation.get("measurement_plan"), "Not supplied.")],
+        ["Failure modes", _tr_join(validation.get("failure_modes"), "Not supplied.")],
+        ["Evidence to collect", _tr_join(validation.get("evidence_to_collect"), "Not supplied.")],
+        ["Confidence", _tr_field(validation, "confidence", "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_verdict_summary(state: ProjectState) -> str:
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    rows = [
+        ["Field", "Value"],
+        ["Readiness verdict code", _tr_field(executive, "readiness_verdict_code", "Not supplied.")],
+        ["Readiness verdict", _tr_field(executive, "readiness_verdict", "Not supplied.")],
+        ["Top blockers", _tr_join(executive.get("top_blockers"), "Not supplied.")],
+        ["Operator summary", _tr_field(executive, "operator_summary", "Not supplied.")],
+    ]
+    return _markdown_table(rows)
+
+
+def _technology_readiness_operator_summary(state: ProjectState) -> str:
+    executive = _technology_readiness_phase_data(state, "executive_summary")
+    if executive:
+        return _markdown_table([
+            ["Field", "Value"],
+            ["Technology", _technology_readiness_name(state)],
+            ["Current defensible TRL", _tr_field(executive, "current_trl", "Not assessed.")],
+            ["Target TRL", _tr_field(executive, "target_trl", "Not supplied.")],
+            ["Readiness verdict", _tr_field(executive, "readiness_verdict", "Not supplied.")],
+            ["Recommended next step", _tr_field(executive, "recommended_next_step", "Not supplied.")],
+            ["Operator summary", _tr_field(executive, "operator_summary", "Not supplied.")],
+        ])
+    return _technology_readiness_report_markdown(state)
+
+
+def _technology_readiness_name(state: ProjectState) -> str:
+    scope = _technology_readiness_phase_data(state, "scope")
+    for candidate in (scope.get("technology_name"), getattr(state, "project_name", ""), getattr(state, "brief", "")):
+        text = _tr_display_text(candidate).strip()
+        if text:
+            return text
+    return "Technology under review"
+
+
+def _technology_readiness_phase_data(state: ProjectState, phase: str) -> dict[str, Any]:
+    value = _model_dump(getattr(state, phase, None))
+    return value if isinstance(value, dict) else {}
+
+
+def _tr_field(data: dict[str, Any], key: str, fallback: str = "") -> str:
+    value = data.get(key) if isinstance(data, dict) else None
+    text = _tr_display_text(value).strip()
+    return text if text else fallback
+
+
+def _tr_join(value: Any, fallback: str = "") -> str:
+    items = _tr_list(value)
+    return "; ".join(items) if items else fallback
+
+
+def _tr_bullets(value: Any, fallback: str = "Not supplied.") -> str:
+    items = _tr_list(value)
+    if not items:
+        return fallback
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _tr_items(value: Any) -> list[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _tr_list(value: Any) -> list[str]:
+    return [text for text in (_tr_display_text(item).strip() for item in _tr_items(value)) if text]
+
+
+def _tr_display_text(value: Any) -> str:
+    value = _model_dump(value)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _redact_unsafe_string(value)
+    if isinstance(value, (int, float, bool)):
+        return _fmt_value(value)
+    if isinstance(value, list):
+        return "; ".join(text for text in (_tr_display_text(item).strip() for item in value) if text)
+    if isinstance(value, dict):
+        clean = {str(key): item for key, item in value.items() if _tr_display_text(item).strip()}
+        if not clean:
+            return ""
+        primary = _first_nonempty_tr_value(clean, ("technology_name", "phase_name", "name", "title", "role", "owner", "trl", "phase", "gate"))
+        secondary = _first_nonempty_tr_value(clean, ("note", "summary", "action", "objective", "range", "time_range", "decision_gate", "gap", "recommendation"))
+        if primary and secondary and primary != secondary:
+            return f"{primary} - {secondary}"
+        return "; ".join(
+            f"{_humanize_key(key)}: {_tr_display_text(item)}"
+            for key, item in clean.items()
+            if _tr_display_text(item).strip()
+        )
+    return _redact_unsafe_string(str(value))
+
+
+def _first_nonempty_tr_value(data: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        if key in data:
+            value = _tr_display_text(data.get(key)).strip()
+            if value:
+                return value
+    return ""
+
+
+def _unique_nonempty(values: list[str]) -> list[str]:
+    result = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            result.append(text)
+    return result
+
+
+def _humanize_key(value: str) -> str:
+    return str(value or "").replace("_", " ").strip().capitalize()
+
+
+def _apply_technology_readiness_client_delivery_banner(markdown: str) -> str:
+    value = str(markdown or "").replace(
+        CLIENT_DELIVERY_VALIDATION_BANNER,
+        TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER,
+    )
+    value = re.sub(
+        rf"(?:{re.escape(TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER)}\s*){{2,}}",
+        TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER + "\n\n",
+        value,
+    )
+    return _collapse_markdown_blank_lines(value)
+
+
 def _finalize_export_markdown(
     markdown: str,
     state: ProjectState,
@@ -592,12 +1096,26 @@ def _finalize_export_markdown(
     mode = "operator" if str(audience or "").lower() == "operator" else "client"
     quality = quality or assess_report_quality_context(state)
     value = _apply_pricing_placeholder_cleanup(str(markdown or ""), state)
+    metric_fragments: list[str] = []
+    if mode == "client":
+        value, metric_fragments = _protect_client_concrete_metric_values(value)
     value = normalize_export_text(value, audience=mode)
     if mode == "client":
+        value = _redact_unsafe_string(value)
+        value = _remove_empty_client_citation_marker_columns(value)
+        value = suppress_client_raw_evidence_ids(value)
+        value = _finalize_client_visible_artifacts(value, state)
         value = _normalize_client_evidence_count_language(value, state, quality)
         value = _label_client_bf_trace_language(value)
         value = _soften_unvalidated_confirmed_language(value, state, quality)
         value = normalize_export_text(value, audience=mode)
+        value = _remove_empty_client_citation_marker_columns(value)
+        value = suppress_client_raw_evidence_ids(value)
+        value = _finalize_client_visible_artifacts(value, state)
+        value = _ensure_single_client_source_locator_note(value, quality)
+        value = _ensure_client_delivery_validation_banner(value)
+        value = _restore_client_concrete_metric_values(value, metric_fragments)
+        value = _polish_client_report_citation_rendering(value)
     return value
 
 
@@ -608,11 +1126,721 @@ def _apply_pricing_placeholder_cleanup(markdown: str, state: ProjectState) -> st
         else "Starter tier based on the supplied pricing notes."
     )
     return re.sub(
-        r"\bStarter tier at provisional planning estimate\b",
+        r"\bStarter tier at (?:provisional planning estimate|planning estimate to validate in Sprint 0)\b",
         replacement,
         str(markdown or ""),
         flags=re.I,
     )
+
+
+def _finalize_client_visible_artifacts(markdown: str, state: ProjectState) -> str:
+    value = _drop_client_operator_diagnostic_lines(str(markdown or ""))
+    value = _drop_client_operator_only_locator_lines(value)
+    value = _fix_client_generated_duplicate_words(value)
+    value = _remove_empty_client_citation_marker_columns(value)
+    value = _strip_client_citation_placeholder_noise(value)
+    value = _remove_standalone_client_citation_rows(value)
+    value = _rename_client_citation_table_headers(value)
+    value = _suppress_client_internal_locator_tokens(value)
+    value = _fix_client_generated_duplicate_words(value)
+    value = _remove_empty_client_citation_marker_columns(value)
+    value = _strip_client_citation_placeholder_noise(value)
+    value = _remove_standalone_client_citation_rows(value)
+    value = _rename_client_citation_table_headers(value)
+    value = _clean_client_orphan_markdown_table_rows(value)
+    value = _replace_client_threshold_placeholders(value, state)
+    value = _polish_client_report_citation_rendering(value)
+    value = _drop_client_operator_diagnostic_lines(value)
+    return _collapse_markdown_blank_lines(value)
+
+
+def _finalize_client_runtime_render_markdown(markdown: str, state: ProjectState) -> str:
+    quality = assess_report_quality_context(state)
+    value = _finalize_export_markdown(markdown, state, audience="client", quality=quality)
+    value = _polish_client_report_citation_rendering(value)
+    if _is_technology_readiness_state(state):
+        value = _apply_technology_readiness_client_delivery_banner(value)
+    return value
+
+
+def _polish_client_report_citation_rendering(markdown: str) -> str:
+    value = str(markdown or "")
+    value = re.sub(
+        r"(?im)\b(Sprint 0\.)[ \t]*(#{1,6}\s+Evidence maturity\b)",
+        r"\1\n\n\2",
+        value,
+    )
+    value = re.sub(
+        r"(?im)\b(Sprint 0\.)[ \t]*(#{1,6}\s+Client Dossier\b)",
+        r"\1\n\n\2",
+        value,
+    )
+    value = re.sub(r"\bCitation\s+(?:citation unavailable|no citation available)\b\.?", "", value, flags=re.I)
+    value = re.sub(r"(?mi)^\s*Citation\s*$", "", value)
+    value = re.sub(r"\bThreshold not yet confirmed\b", "validation threshold to confirm", value, flags=re.I)
+    value = re.sub(r"\bOperator to define\b", "decision owner to confirm", value, flags=re.I)
+    value = re.sub(
+        r"\bthreshold probability that above\s+(\d+(?:\.\d+)?\s*pp)\s+divergence\b",
+        r"validation signal that divergence above \1",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\bthreshold probability that above\b", "validation signal that", value, flags=re.I)
+    value = re.sub(r"\bthreshold probability\b", "validation signal", value, flags=re.I)
+    value = _polish_client_metric_comparator_phrasing(value)
+    value = re.sub(
+        r"\b(?:What It Suggests|Why It Is Needed|Why it is needed|Upside)\s+supports\s+whether\b",
+        "This helps determine whether",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\b(?:What It Suggests|Why It Is Needed|Why it is needed|Upside)\s+supports\s+which\b",
+        "This helps identify which",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\bWhat It Suggests supports\b", "This supports", value, flags=re.I)
+    value = re.sub(r"\b(?:Why It Is Needed|Why it is needed|Upside)\s+supports\b", "This supports", value, flags=re.I)
+    value = re.sub(r"\bsupports\s+whether\b", "helps determine whether", value, flags=re.I)
+    value = re.sub(r"\bsupports\s+which\b", "helps identify which", value, flags=re.I)
+    return _polish_client_language_artifacts(value)
+
+
+def _polish_client_language_artifacts(markdown: str) -> str:
+    value = str(markdown or "")
+    value = re.sub(r"\bWhy it is needed\s+indicates?\s+that\b", "This indicates that", value, flags=re.I)
+    value = re.sub(
+        r"\bThis supports\s+(the\s+[^.;,\n]+?)\s+(is|are|was|were|has|have|can|will|should|must)\b",
+        lambda match: f"This helps indicate that {match.group(1)} {match.group(2)}",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\b([A-Z][A-Za-z&/ -]{1,80})\s+supports\s+output\s+is\s+trustworthy\b",
+        r"\1 indicates the output is trustworthy",
+        value,
+    )
+    value = re.sub(r"\babove\s+(\d+(?:\.\d+)?\s*%)\s+over\b", r"more than \1 over", value, flags=re.I)
+    value = re.sub(r"\barchitecture hypothesis\b", "the automation architecture assumption", value, flags=re.I)
+    value = re.sub(r"\bhypothesis\s+5\b", "the technical feasibility check", value, flags=re.I)
+    value = re.sub(r"\bhypothesis\s+9\b", "the momentum assumption", value, flags=re.I)
+    return value
+
+
+def _polish_client_metric_comparator_phrasing(markdown: str) -> str:
+    lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        if re.search(r"\bproposed planning gate\b", line, re.I):
+            lines.append(line)
+            continue
+        value = re.sub(r"\bmore than\s+(\d+(?:\.\d+)?\s*%)", r"above \1", line, flags=re.I)
+        value = re.sub(r"\bless than\s+(\d+(?:\.\d+)?\s*%)", r"below \1", value, flags=re.I)
+        lines.append(value)
+    return "\n".join(lines)
+
+
+def _protect_client_concrete_metric_values(markdown: str) -> tuple[str, list[str]]:
+    fragments: list[str] = []
+    patterns = [
+        r"(?<![A-Za-z0-9_])(?:[<>]=?|≥|≤)\s*\d+(?:\.\d+)?\s*(?:%|pp|h|hrs?|hours?|days?|weeks?|months?)\b",
+        r"\b\d+(?:\.\d+)?\s*%",
+        r"\b\d+(?:\.\d+)?\s*percentage[- ]points?\b",
+        r"\b\d+(?:\.\d+)?\s*(?:h|hrs?|hours?|days?|weeks?|months?)\b",
+    ]
+    value = str(markdown or "")
+
+    def repl(match: re.Match[str]) -> str:
+        line_start = value.rfind("\n", 0, match.start()) + 1
+        line_end = value.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(value)
+        line_context = value[line_start:line_end]
+        if re.search(
+            r"\b(?:probability|scenario[_ -]?probability|structural probability|prior|likelihood|chance|failure probability|predicted failure probability)\b",
+            line_context,
+            re.I,
+        ):
+            return match.group(0)
+        fragments.append(match.group(0))
+        return f"CLIENTMETRICVALUE{len(fragments) - 1}MARKER"
+
+    for pattern in patterns:
+        value = re.sub(pattern, repl, value, flags=re.I)
+    return value, fragments
+
+
+def _restore_client_concrete_metric_values(markdown: str, fragments: list[str]) -> str:
+    value = str(markdown or "")
+    for index, fragment in enumerate(fragments):
+        value = value.replace(f"CLIENTMETRICVALUE{index}MARKER", fragment)
+        value = value.replace(f"CLIENTMETRICVALUE{index}TOKEN", fragment)
+    return value
+
+
+def _ensure_client_delivery_validation_banner(markdown: str) -> str:
+    source = str(markdown or "")
+    banner_pattern = re.compile(
+        r"(?:\*\*)?\s*Validate before client delivery\.\s+"
+        r"This is a hypothesis-driven diagnostic memo, not a measured audit\.\s*(?:\*\*)?",
+        re.I,
+    )
+    cleaned = banner_pattern.sub("", source)
+    cleaned = _collapse_markdown_blank_lines(cleaned)
+    if not cleaned:
+        return CLIENT_DELIVERY_VALIDATION_BANNER
+    return _collapse_markdown_blank_lines("\n\n".join([CLIENT_DELIVERY_VALIDATION_BANNER, cleaned]))
+
+
+def _fix_client_generated_duplicate_words(markdown: str) -> str:
+    value = str(markdown or "")
+    value = re.sub(r"\bThe\s+The\s+problem\b", "The problem", value, flags=re.I)
+    return value
+
+
+def _drop_client_operator_only_locator_lines(markdown: str) -> str:
+    lines: list[str] = []
+    raw_reference = re.compile(
+        r"\[Evidence:\s*|\bknowledge[_-][A-Za-z0-9_.:-]+\b|"
+        r"\b(?:ev|src)[-_][A-Za-z0-9_.:-]+\b|"
+        r"\bevidence[_-](?!based\b|backed\b|driven\b|quality\b|maturity\b|source\b|used\b)[A-Za-z0-9_.:-]+\b|"
+        r"\bupload:[^\s|,)>\]]+|\bstorage_ref\s*[:=]|\bsource_ref\s*[:=]",
+        re.I,
+    )
+    for line in str(markdown or "").splitlines():
+        if re.search(r"\boperator[-\s]?only\b", line, re.I) and raw_reference.search(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _drop_client_operator_diagnostic_lines(markdown: str) -> str:
+    return "\n".join(
+        line
+        for line in str(markdown or "").splitlines()
+        if not _is_client_operator_diagnostic_line(line)
+    )
+
+
+def _is_client_operator_diagnostic_line(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:constraint adherence warning|telemetry privacy note|policy_audit_log|"
+            r"raw_provider_payload|raw_prompt|raw\s+prompt|runtime\s*/\s*preflight\s+metadata|"
+            r"runtime\s+metadata|preflight\s+metadata)\b|project_state\s*\.\s*json",
+            str(line or ""),
+            flags=re.I,
+        )
+    )
+
+
+def _strip_client_citation_placeholder_noise(markdown: str) -> str:
+    lines: list[str] = []
+    in_code_block = False
+    for line in str(markdown or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            lines.append(line)
+            continue
+        if not stripped:
+            lines.append(line)
+            continue
+        if _looks_like_json_line(stripped):
+            lines.append(_strip_client_citation_placeholder_text(line))
+            continue
+        cleaned = _strip_client_citation_placeholder_text(line)
+        if _is_standalone_client_citation_placeholder_line(cleaned):
+            continue
+        if in_code_block and cleaned.strip():
+            lines.append(cleaned)
+            continue
+        if cleaned.strip():
+            lines.append(cleaned)
+    return "\n".join(lines)
+
+
+def _strip_client_citation_placeholder_text(value: str) -> str:
+    text = str(value or "")
+    if not re.search(
+        r"\b(?:Citation|No citation available|citation unavailable|Evidence source unavailable)\b",
+        text,
+        re.I,
+    ):
+        return text.rstrip()
+    text = re.sub(r"\b(?:No citation available|citation unavailable|Evidence source unavailable)\b\.?", "", text, flags=re.I)
+    text = re.sub(r"\bCitation\s*:\s*(?=$|[|,.;])", "", text, flags=re.I)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([|,.;:])", r"\1", text)
+    text = re.sub(r"\|\s+\|", "| |", text)
+    return text.rstrip()
+
+
+def _remove_standalone_client_citation_rows(markdown: str) -> str:
+    source_lines = str(markdown or "").splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(source_lines):
+        line = source_lines[index]
+        if _looks_like_markdown_table_line(line):
+            block: list[str] = []
+            while index < len(source_lines) and _looks_like_markdown_table_line(source_lines[index]):
+                block.append(source_lines[index])
+                index += 1
+            cleaned = [row for row in block if not _is_client_citation_noise_table_line(row)]
+            if _client_table_block_has_meaningful_rows(cleaned):
+                output.extend(cleaned)
+            continue
+        if not _is_standalone_client_citation_placeholder_line(line):
+            output.append(line)
+        index += 1
+    return "\n".join(output)
+
+
+def _client_table_block_has_meaningful_rows(block: list[str]) -> bool:
+    for row in block:
+        cells = _split_markdown_table_row(row)
+        if not cells:
+            continue
+        if _is_client_markdown_separator_cells(cells):
+            continue
+        if any(cell.strip() for cell in cells):
+            return True
+    return False
+
+
+def _rename_client_citation_table_headers(markdown: str) -> str:
+    source_lines = str(markdown or "").splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(source_lines):
+        line = source_lines[index]
+        if not _looks_like_markdown_table_line(line):
+            output.append(line)
+            index += 1
+            continue
+        block: list[str] = []
+        while index < len(source_lines) and _looks_like_markdown_table_line(source_lines[index]):
+            block.append(source_lines[index])
+            index += 1
+        if len(block) < 2:
+            output.extend(block)
+            continue
+        rows = [_split_markdown_table_row(row) for row in block]
+        if not rows or not rows[0] or not _is_client_markdown_separator_cells(rows[1]):
+            output.extend(block)
+            continue
+        header = [
+            "Citation status" if _is_client_citation_column_header(cell) else cell
+            for cell in rows[0]
+        ]
+        output.append(_format_markdown_table_row(header))
+        output.append(_format_markdown_table_row(["---"] * len(header)))
+        for row in rows[2:]:
+            output.append(_format_markdown_table_row(row))
+    return "\n".join(output)
+
+
+def _is_client_citation_noise_table_line(value: str) -> bool:
+    cells = _split_markdown_table_row(value)
+    if not cells:
+        return False
+    nonempty = [cell for cell in cells if cell.strip()]
+    if not nonempty:
+        return True
+    if not any(
+        _is_client_citation_column_header(cell)
+        or _normalize_heading(cell) in {"citation unavailable", "no citation available"}
+        for cell in nonempty
+    ):
+        return False
+    return all(
+        _is_client_citation_column_header(cell)
+        or _is_empty_client_citation_cell(cell)
+        for cell in nonempty
+    )
+
+
+def _is_standalone_client_citation_placeholder_line(value: str) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return False
+    stripped = re.sub(r"^\s*(?:[-*•]|\d+\.)\s+", "", stripped)
+    stripped = stripped.strip("|*_` ")
+    if not stripped:
+        return False
+    if _is_client_citation_column_header(stripped.rstrip(":")):
+        return True
+    return bool(re.fullmatch(r"citation\s*:?", stripped, re.I))
+
+
+def _suppress_client_internal_locator_tokens(markdown: str) -> str:
+    lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        value = str(line or "")
+        value = re.sub(
+            r"\s*\[Evidence:\s*[A-Za-z0-9_.:-]+\s*(?:\|[^\]]*)?\]",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\s*\[#\d+\]", "", value)
+        value = re.sub(r"\bknowledge[_-][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+        value = re.sub(r"\b(?:ev|src)[-_][A-Za-z0-9_.:-]+\b", "project evidence", value, flags=re.I)
+        value = re.sub(
+            r"\bevidence[_-](?!based\b|backed\b|driven\b|quality\b|maturity\b|source\b|used\b)[A-Za-z0-9_.:-]+\b",
+            "project evidence",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\bupload:[^\s|,)>\]]+", "uploaded project document", value, flags=re.I)
+        value = re.sub(r"\bstorage_ref\s*[:=]\s*[^\s|,)>\]]+", "", value, flags=re.I)
+        value = re.sub(r"\bsource_ref\s*[:=]\s*[^\s|,)>\]]+", "", value, flags=re.I)
+        value = re.sub(
+            r"\bproject evidence\s+(?:provides evidence interpretation context|suggests|indicates)\b[^.?!]*(?:[.?!]|$)",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"[ \t]{2,}", " ", value)
+        value = re.sub(r"\s+([,.;:])", r"\1", value)
+        lines.append(value.rstrip())
+    return "\n".join(lines)
+
+
+def _replace_client_threshold_placeholders(markdown: str, state: ProjectState) -> str:
+    catalog = _client_threshold_catalog(state)
+    lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        lines.append(_replace_client_threshold_placeholders_in_line(line, catalog))
+    return "\n".join(lines)
+
+
+def _replace_client_threshold_placeholders_in_line(line: str, catalog: list[dict[str, Any]]) -> str:
+    value = str(line or "")
+    if not re.search(
+        r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|"
+        r"\bexpand\s+to\s+threshold\b|\bthreshold\s+of\s+[^.;,\n|]+|"
+        r"\bfalls\s+below\s+threshold\b|\btarget\s+of\s+threshold\b|"
+        r"\b(?:activation|baseline)\s+validation\s+gate\b|"
+        r"\b(?:above|below)\s+the\s+threshold\b|\bmargin\s+to validate in Sprint 0\b",
+        value,
+        re.I,
+    ):
+        return value
+
+    def candidate_for(metric: str | None = None, *, prefer_positive: bool = False) -> dict[str, Any] | None:
+        preferred = tuple(filter(None, [metric]))
+        return _select_client_threshold_candidate(catalog, value, preferred=preferred, prefer_positive=prefer_positive)
+
+    def target_repl(_: re.Match[str]) -> str:
+        return "target " + _client_threshold_at_least_phrase(candidate_for(prefer_positive=True))
+
+    def comparator_repl(_: re.Match[str]) -> str:
+        return _client_threshold_at_least_phrase(candidate_for(prefer_positive=True))
+
+    def threshold_of_repl(match: re.Match[str]) -> str:
+        metric = match.group(1).strip()
+        return _client_threshold_of_phrase(metric, candidate_for(metric))
+
+    def falls_below_repl(_: re.Match[str]) -> str:
+        return "falls " + _client_threshold_below_phrase(candidate_for())
+
+    def target_of_repl(_: re.Match[str]) -> str:
+        return _client_threshold_target_phrase(candidate_for(prefer_positive=True) or candidate_for())
+
+    def above_threshold_repl(_: re.Match[str]) -> str:
+        return _client_threshold_above_phrase(candidate_for(prefer_positive=True) or candidate_for())
+
+    def below_threshold_repl(_: re.Match[str]) -> str:
+        return _client_threshold_below_phrase(candidate_for())
+
+    value = re.sub(r"\btarget\s*(?:≥|>=)\s*threshold\b", target_repl, value, flags=re.I)
+    value = re.sub(r"(?<![\w-])(?:≥|>=)\s*threshold\b", comparator_repl, value, flags=re.I)
+    value = re.sub(r"\bthreshold\s+of\s+([^.;,\n|]+)", threshold_of_repl, value, flags=re.I)
+    value = re.sub(r"\bfalls\s+below\s+threshold\b", falls_below_repl, value, flags=re.I)
+    value = re.sub(r"\btarget\s+of\s+threshold\b", target_of_repl, value, flags=re.I)
+    value = re.sub(
+        r"\bthreshold\s+activation\s+rate\b",
+        lambda _: _client_threshold_metric_phrase("activation rate", candidate_for("activation rate")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bthreshold\s+activation\b",
+        lambda _: _client_threshold_metric_phrase("activation", candidate_for("activation")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bthreshold\s+conversion\b",
+        lambda _: _client_threshold_metric_phrase("conversion", candidate_for("conversion")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bthreshold\s+baseline\b",
+        lambda _: _client_threshold_metric_phrase("baseline", candidate_for("baseline")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bactivation\s+validation\s+gate\b",
+        lambda _: _client_threshold_metric_phrase("activation", candidate_for("activation")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bbaseline\s+validation\s+gate\b",
+        lambda _: _client_threshold_metric_phrase("baseline", candidate_for("baseline")),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        r"\bexpand\s+to\s+threshold\b",
+        lambda _: _client_threshold_expand_phrase(candidate_for(prefer_positive=True)),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\babove\s+the\s+threshold\b", above_threshold_repl, value, flags=re.I)
+    value = re.sub(r"\bbelow\s+the\s+threshold\b", below_threshold_repl, value, flags=re.I)
+    value = re.sub(
+        r"\b(above|below)\s+(\d+(?:\.\d+)?\s*(?:%|pp|h|hrs?|hours?|d|days?|weeks?|months?))\s+to validate in Sprint 0\s+([^.;,\n|]+)",
+        lambda match: f"{match.group(1)} {match.group(2)} {match.group(3).strip()}",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\bvalidated gate to validate in Sprint 0\b", "validated gate", value, flags=re.I)
+    value = re.sub(r"\bmargin to validate in Sprint 0\b", "validation margin", value, flags=re.I)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    return re.sub(r"\s+([,.;:])", r"\1", value)
+
+
+def _client_threshold_catalog(state: ProjectState) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for text in _client_threshold_source_texts(state):
+        candidate = _client_threshold_candidate(text)
+        if not candidate:
+            continue
+        key = str(candidate["phrase"]).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def _client_threshold_source_texts(state: ProjectState) -> list[str]:
+    parts: list[str] = []
+    strategy = getattr(state, "strategy", None)
+    if strategy:
+        parts.extend(str(item) for item in list(getattr(strategy, "success_metrics", []) or []))
+        parts.extend([
+            getattr(strategy, "monitoring_plan", ""),
+            getattr(strategy, "implementation_sequence", ""),
+            getattr(strategy, "reentry_check", ""),
+        ])
+        for verdict in list(getattr(strategy, "preliminary_verdicts", []) or []):
+            parts.extend([getattr(verdict, "evidence", ""), getattr(verdict, "monitoring_plan", "")])
+        for action in list(getattr(strategy, "strategies", []) or []):
+            parts.extend([
+                getattr(action, "action", ""),
+                getattr(action, "justification", ""),
+                getattr(action, "expected_impact", ""),
+                getattr(action, "risk_if_ignored", ""),
+            ])
+    monitor = getattr(state, "monitor", None)
+    if monitor:
+        for breaker in list(getattr(monitor, "circuit_breakers", []) or []):
+            parts.extend([getattr(breaker, "strategy_ref", ""), getattr(breaker, "trip", ""), getattr(breaker, "reset", "")])
+        for canary in list(getattr(monitor, "canaries", []) or []):
+            parts.extend([getattr(canary, "signal", ""), getattr(canary, "direction", ""), getattr(canary, "window", ""), getattr(canary, "meaning", "")])
+        schedule = getattr(monitor, "ooda_schedule", None)
+        if schedule:
+            for cadence in ("daily", "weekly", "monthly"):
+                for item in list(getattr(schedule, cadence, []) or []):
+                    parts.extend([getattr(item, "metric", ""), getattr(item, "source", "")])
+        parts.extend(str(item) for item in list(getattr(monitor, "reentry_watch", []) or []))
+    for hypothesis in list(getattr(state, "hypotheses", []) or []):
+        parts.extend([
+            getattr(hypothesis, "signal", ""),
+            getattr(hypothesis, "confirm", ""),
+            getattr(hypothesis, "reject", ""),
+        ])
+    parts.extend(str(line) for line in str(getattr(state, "report", "") or "").splitlines())
+    return [part for part in parts if str(part or "").strip()]
+
+
+def _client_threshold_candidate(text: str) -> dict[str, Any] | None:
+    phrase = _redact_unsafe_string(_strip_inline_markdown(str(text or ""))).strip()
+    if not phrase or not re.search(r"\d", phrase):
+        return None
+    if re.search(
+        r"(?:≥|>=)\s*threshold|\bthreshold\s+(?:activation(?:\s+rate)?|conversion|baseline)\b|"
+        r"\bexpand\s+to\s+threshold\b|\bthreshold\s+of\s+[^.;,\n|]+|"
+        r"\bfalls\s+below\s+threshold\b|\btarget\s+of\s+threshold\b|"
+        r"\b(?:activation|baseline)\s+validation\s+gate\b",
+        phrase,
+        re.I,
+    ):
+        return None
+    value, direction = _extract_client_threshold_value(phrase)
+    if not value:
+        return None
+    return {
+        "phrase": phrase.rstrip(". "),
+        "value": value,
+        "direction": direction,
+        "keywords": _client_threshold_keywords(phrase),
+    }
+
+
+def _extract_client_threshold_value(text: str) -> tuple[str, str]:
+    unit = r"(?:%|pp|h|hrs?|hours?|d|days?|weeks?|months?)"
+    patterns = [
+        (r"\b(\d+(?:\.\d+)?\s*%\s+of\s+[^.;,\n|]+)", "positive", ""),
+        (rf"(?:≥|>=|>|at\s+least|greater\s+than|more\s+than|above|reaches?|exceeds?)\s*(\d+(?:\.\d+)?\s*{unit})", "positive", "at least"),
+        (rf"(?:≤|<=|<|below|under|less\s+than|falls?\s+below)\s*(\d+(?:\.\d+)?\s*{unit})", "negative", "below"),
+        (rf"\bdown\s+(\d+(?:\.\d+)?\s*{unit})", "negative", "down"),
+    ]
+    for pattern, direction, label in patterns:
+        match = re.search(pattern, text, re.I)
+        if not match:
+            continue
+        value = _client_threshold_value_with_tail(match.group(1).strip(), text[match.end():])
+        return f"{label} {value}".strip(), direction
+    rolling = re.search(r"\b\d+(?:\.\d+)?[- ]day\s+rolling(?:\s+baseline)?\b", text, re.I)
+    if rolling:
+        return rolling.group(0), "neutral"
+    day = re.search(r"\bby\s+Day\s+\d+\b", text, re.I)
+    if day:
+        return day.group(0), "neutral"
+    return "", "neutral"
+
+
+def _client_threshold_value_with_tail(value: str, tail: str) -> str:
+    tail_match = re.match(
+        r"\s*((?:by|within|for)\s+[^.;,\n|]{1,60})",
+        str(tail or ""),
+        re.I,
+    )
+    if tail_match:
+        return f"{value} {tail_match.group(1).strip()}"
+    return value
+
+
+def _client_threshold_keywords(text: str) -> set[str]:
+    normalized = str(text or "").lower()
+    keys: set[str] = set()
+    keyword_patterns = {
+        "activation rate": r"\bactivation\s+rate\b",
+        "activation": r"\bactivation\b",
+        "conversion": r"\bconversion\b",
+        "baseline": r"\bbaseline\b",
+        "retention": r"\bretention\b",
+        "churn": r"\bchurn\b",
+        "cac": r"\bcac\b",
+        "nrr": r"\bnrr\b",
+        "pipeline": r"\bpipeline\b",
+        "time-to-value": r"\btime[-\s]to[-\s]value\b",
+        "new trials": r"\bnew\s+trials\b",
+        "trials": r"\btrials?\b",
+    }
+    for key, pattern in keyword_patterns.items():
+        if re.search(pattern, normalized, re.I):
+            keys.add(key)
+    return keys
+
+
+def _select_client_threshold_candidate(
+    catalog: list[dict[str, Any]],
+    line: str,
+    *,
+    preferred: tuple[str, ...] = (),
+    prefer_positive: bool = False,
+) -> dict[str, Any] | None:
+    def direction_ok(candidate: dict[str, Any]) -> bool:
+        return not prefer_positive or candidate.get("direction") == "positive"
+
+    if "baseline" in preferred:
+        for candidate in catalog:
+            keys = candidate.get("keywords", set())
+            if "baseline" in keys and re.search(r"\bbaseline\b", str(candidate.get("value", "")), re.I) and direction_ok(candidate):
+                return candidate
+    for candidate in catalog:
+        keys = candidate.get("keywords", set())
+        if preferred and any(key in keys for key in preferred) and direction_ok(candidate):
+            return candidate
+    line_keys = _client_threshold_keywords(line)
+    for candidate in catalog:
+        keys = candidate.get("keywords", set())
+        if line_keys.intersection(keys) and direction_ok(candidate):
+            return candidate
+    for candidate in catalog:
+        if direction_ok(candidate):
+            return candidate
+    return catalog[0] if catalog else None
+
+
+def _client_threshold_at_least_phrase(candidate: dict[str, Any] | None) -> str:
+    if not candidate:
+        return "at the validated gate"
+    value = str(candidate.get("value", "")).strip()
+    if not value:
+        return "at the validated gate"
+    if value.lower().startswith("at least "):
+        return value
+    return f"at the validation gate ({value})"
+
+
+def _client_threshold_metric_phrase(metric: str, candidate: dict[str, Any] | None) -> str:
+    label = metric.replace("-", " ")
+    if candidate and candidate.get("value"):
+        return f"{label} target ({candidate['value']})"
+    return f"{label} target"
+
+
+def _client_threshold_plain_value(candidate: dict[str, Any] | None) -> str:
+    if not candidate:
+        return ""
+    value = str(candidate.get("value", "")).strip()
+    value = re.sub(r"^(?:at\s+least|below|down)\s+", "", value, flags=re.I).strip()
+    return value
+
+
+def _client_threshold_of_phrase(metric: str, candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return plain
+    return f"validated gate for {metric.strip()}"
+
+
+def _client_threshold_above_phrase(candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return f"above {plain}"
+    return "above the validated gate"
+
+
+def _client_threshold_below_phrase(candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return f"below {plain}"
+    return "below the validated gate"
+
+
+def _client_threshold_target_phrase(candidate: dict[str, Any] | None) -> str:
+    plain = _client_threshold_plain_value(candidate)
+    if plain:
+        return f"target of {plain}"
+    return "target of the validated gate"
+
+
+def _client_threshold_expand_phrase(candidate: dict[str, Any] | None) -> str:
+    if candidate and candidate.get("phrase"):
+        return f"expand after the validation gate is met ({candidate['phrase']})"
+    return "expand after the validation gate is met"
 
 
 def _state_contains_starter_price(state: ProjectState) -> bool:
@@ -691,7 +1919,10 @@ def _normalize_client_evidence_count_language(markdown: str, state: ProjectState
                 table_lines.append(source_lines[index])
                 index += 1
             if _is_protected_client_cleanup_table_block(table_lines):
-                lines.extend(table_lines)
+                if count_pattern.search("\n".join(table_lines)):
+                    lines.extend(normalize_line(table_line) for table_line in table_lines)
+                else:
+                    lines.extend(table_lines)
             else:
                 lines.extend(normalize_line(table_line) for table_line in table_lines)
             continue
@@ -749,7 +1980,6 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
             in_code_block
             or _looks_like_json_line(stripped)
             or stripped.startswith(">")
-            or stripped.startswith("|")
             or _line_has_quoted_confirmed(line)
             or _line_looks_like_operator_label(line)
             or _line_looks_like_future_confirmation_gate(line)
@@ -778,6 +2008,36 @@ def _soften_unvalidated_confirmed_language(markdown: str, state: ProjectState, q
         value = re.sub(
             r"\bconfirmed (driver|cause|bottleneck|friction|finding|growth lever|lever)\b",
             lambda match: f"{support_phrase} {match.group(1)}",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanically explained ([^.|]+)",
+            lambda match: f"best-supported working diagnosis for {match.group(1).strip()} pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanically explained\b",
+            "is a best-supported working diagnosis pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanically explains\b",
+            "is the best-supported working diagnosis for",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bmechanical explanation\b",
+            "working diagnosis pending validation",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"\bconfirmed root cause\b",
+            "working diagnosis pending validation",
             value,
             flags=re.I,
         )
@@ -945,11 +2205,19 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
             ]),
         ])
     if client and not quality.has_concrete_locators:
-        blocks.extend(["## Citation locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
-    if quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state)):
+        blocks.extend(["## Source locator note", NO_CONCRETE_LOCATORS_CLIENT_NOTE])
+    if not client and (quality.telemetry_privacy_required or requires_telemetry_privacy_caveat(_quality_content_text(state))):
         blocks.extend(["## Telemetry privacy note", TELEMETRY_PRIVACY_CAVEAT])
-    if _risk_classification_may_understate_generated_content(state):
-        blocks.extend(["## Risk classification note", RISK_CLASSIFICATION_WARNING])
+    if not client:
+        risk_gate = assess_risk_classification_gate(state)
+        if risk_gate.warning_applies:
+            blocks.extend(["## Risk classification note", _risk_classification_gate_markdown(risk_gate)])
+        constraint_projection = constraint_adherence_projection(state)
+        if constraint_projection.warning_applies:
+            blocks.extend([
+                "## Constraint adherence warning",
+                _constraint_adherence_warning_markdown(constraint_projection),
+            ])
     warnings = threshold_consistency_warnings(state, quality)
     if client and warnings:
         blocks.extend(["## Threshold note", "\n".join(f"- {warning}" for warning in warnings)])
@@ -957,6 +2225,19 @@ def _quality_warning_blocks(state: ProjectState, quality, *, client: bool) -> li
         if warnings:
             blocks.extend(["## Threshold warnings", "\n".join(f"- {warning}" for warning in warnings)])
     return blocks
+
+
+def _constraint_adherence_warning_markdown(projection) -> str:
+    lines = [projection.warning_text]
+    if getattr(projection, "detected_constraints", None):
+        lines.append("")
+        lines.append("Detected operator constraints:")
+        lines.extend(f"- {item}" for item in projection.detected_constraints)
+    if getattr(projection, "contradiction_signals", None):
+        lines.append("")
+        lines.append("Generated contradiction signals:")
+        lines.extend(f"- {item}" for item in projection.contradiction_signals)
+    return "\n".join(lines)
 
 
 def _quality_content_text(state: ProjectState) -> str:
@@ -981,29 +2262,30 @@ def _quality_content_text(state: ProjectState) -> str:
     return "\n".join(str(part) for part in parts if part)
 
 
-def _risk_classification_may_understate_generated_content(state: ProjectState) -> bool:
-    if str(getattr(state, "risk_classification", "") or "").lower() != "minimal_risk":
-        return False
-    generated_text = "\n".join(
-        part
-        for part in [
-            getattr(state, "report", "") or "",
-            getattr(getattr(state, "strategy", None), "executive_strategy", "") or "",
-            getattr(getattr(state, "strategy", None), "monitoring_plan", "") or "",
-            getattr(getattr(state, "audit", None), "summary", "") or "",
-            "\n".join(getattr(getattr(state, "audit", None), "top_findings", []) or []),
-            "\n".join(getattr(getattr(state, "audit", None), "observation_needs", []) or []),
-        ]
-        if part
-    )
-    return bool(
-        re.search(
-            r"\b(high risk|critical risk|severe risk|circuit breaker|kill criteria|"
-            r"stop/escalate|escalate|major spend|headcount|compliance|safety|legal)\b",
-            generated_text,
-            re.I,
-        )
-    )
+def _risk_classification_gate_markdown(risk_gate) -> str:
+    source_counts = ", ".join(
+        f"{source}: {count}" for source, count in sorted((risk_gate.source_counts or {}).items())
+    ) or "none"
+    rows = [
+        ["Diagnostic", "Value"],
+        ["Selected classification", risk_gate.selected_classification or "unavailable"],
+        ["Normalized classification", risk_gate.normalized_classification or "unavailable"],
+        ["Highest generated risk severity", risk_gate.highest_generated_risk_severity or "none"],
+        ["High/critical structured risk count", str(risk_gate.high_or_critical_risk_count)],
+        ["Source counts", source_counts],
+    ]
+    parts = [risk_gate.warning_text or RISK_CLASSIFICATION_WARNING, _markdown_table(rows)]
+    risk_rows = [["Source", "Severity", "Title", "Summary"]]
+    for row in list(risk_gate.high_or_critical_risks or [])[:12]:
+        risk_rows.append([
+            row.get("source", ""),
+            row.get("severity", ""),
+            row.get("title", ""),
+            row.get("summary", ""),
+        ])
+    if len(risk_rows) > 1:
+        parts.extend(["### High/critical structured risk diagnostics", _markdown_table(risk_rows)])
+    return "\n\n".join(parts)
 
 
 def _client_decision_reviewed(state: ProjectState) -> str:
@@ -1213,7 +2495,30 @@ def operator_hypotheses_table(state: ProjectState) -> str:
             hypothesis.portfolio_cluster,
             ", ".join(hypothesis.evidence_ids or []),
         ])
-    return _markdown_table(rows) if len(rows) > 1 else EMPTY_HYPOTHESES
+    if len(rows) <= 1:
+        return EMPTY_HYPOTHESES
+    coverage = _operator_variable_coverage_summary(state)
+    return "\n\n".join(part for part in (_markdown_table(rows), coverage) if part)
+
+
+def _operator_variable_coverage_summary(state: ProjectState) -> str:
+    coverage = assess_hypothesis_variable_coverage(state)
+    if not coverage.has_hypotheses:
+        return ""
+    covered = ", ".join(coverage.covered_categories) or "None detected."
+    missing = ", ".join(coverage.missing_critical_categories) or "No decision-critical gaps flagged."
+    lines = [
+        "### Variable coverage summary",
+        f"Covered categories: {covered}",
+        f"Missing decision-critical categories: {missing}",
+    ]
+    if coverage.evidence_needs:
+        lines.append("Evidence needs:")
+        lines.extend(
+            f"- {need.category}: {need.evidence_need}"
+            for need in coverage.evidence_needs[:8]
+        )
+    return "\n".join(lines)
 
 
 def operator_gauntlet_summary(state: ProjectState) -> str:
@@ -1338,11 +2643,27 @@ def operator_sqi_summary(state: ProjectState) -> str:
         rows.append([f"Dimension: {dimension.name}", f"{_fmt_value(dimension.score)} ({dimension.grade}) - {dimension.finding}"])
     if state.sqi.improvement_actions:
         rows.append(["Improvement actions", "; ".join(state.sqi.improvement_actions)])
+    strategy_metrics = getattr(getattr(state, "strategy", None), "success_metrics", None) or []
+    if not strategy_metrics and monitor_has_signals(getattr(state, "monitor", None)):
+        monitor_lines = monitor_success_metric_lines(state.monitor)
+        metrics_note = "Strategy-level metrics not populated; monitoring metrics available separately."
+        if monitor_lines:
+            metrics_note += " " + "; ".join(monitor_lines)
+        rows.append(["Metrics source", metrics_note])
+    coverage = assess_hypothesis_variable_coverage(state)
+    if coverage.missing_critical_categories:
+        rows.append([
+            "Variable coverage limitation",
+            "Hypothesis set may under-cover: " + ", ".join(coverage.missing_critical_categories[:6]),
+        ])
     return _markdown_table(rows)
 
 
 def operator_monitoring_summary(state: ProjectState) -> str:
-    return summarize_monitoring(state) if state.monitor else EMPTY_MONITORING
+    summary = summarize_monitoring(state) if state.monitor else EMPTY_MONITORING
+    if MONITORING_TEMPLATE_OPERATOR_NOTE in summary:
+        return summary
+    return "\n\n".join([summary, f"Operator note: {MONITORING_TEMPLATE_OPERATOR_NOTE}"])
 
 
 def operator_workspace_summary(state: ProjectState) -> str:
@@ -1393,6 +2714,8 @@ def operator_clarifications_summary(state: ProjectState) -> str:
 
 
 def operator_report_appendix(state: ProjectState) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_report_markdown(state)
     return _redact_unsafe_string(state.report or "") if state.report else "No report is available yet."
 
 
@@ -1423,9 +2746,14 @@ def _project_status_value(state: ProjectState) -> str:
 
 def build_machine_archive_payload(state: ProjectState) -> dict[str, Any]:
     decision_objects = _decision_objects_payload(state)
+    report_markdown = (
+        _technology_readiness_report_markdown(state)
+        if _is_technology_readiness_state(state)
+        else _redact_unsafe_string(state.report or "No report available.")
+    )
     files: dict[str, Any] = {
         "project_state.json": sanitize_for_export(state, "machine_archive", mode="redact"),
-        "report.md": _redact_unsafe_string(state.report or "No report available."),
+        "report.md": report_markdown,
         "phase_outputs.json": sanitize_for_export(_phase_outputs_payload(state), "machine_archive", mode="redact"),
         "decision_objects.json": sanitize_for_export(decision_objects, "machine_archive", mode="redact"),
         "clarifications.json": sanitize_for_export(_clarifications_payload(state), "machine_archive", mode="redact"),
@@ -1492,10 +2820,17 @@ def sanitize_for_export(value, profile, mode: str = "redact"):
 
 def summarize_phase_outputs(state: ProjectState) -> str:
     rows = [["Phase", "Status", "Confidence", "Completed at", "Summary"]]
-    for phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"):
+    phases = (
+        TECHNOLOGY_READINESS_PHASE_SEQUENCE
+        if _is_technology_readiness_state(state)
+        else ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report")
+    )
+    for phase in phases:
         status = state.phase_status.get(phase, "")
+        if not status and _phase_has_output(state, phase):
+            status = "completed"
         rows.append([
-            phase,
+            TECHNOLOGY_READINESS_PHASE_LABELS.get(phase, phase),
             _enum_value(status),
             _fmt_value(state.phase_confidence.get(phase)),
             state.phase_run_completed_at.get(phase, ""),
@@ -1505,6 +2840,8 @@ def summarize_phase_outputs(state: ProjectState) -> str:
 
 
 def _phase_output_digest(state: ProjectState, phase: str) -> str:
+    if _is_technology_readiness_state(state):
+        return _technology_readiness_phase_output_digest(state, phase)
     if phase == "classify" and state.classify:
         return _short_text(f"{state.classify.domain}: {state.classify.justification}", 240)
     if phase == "hypotheses" and state.hypotheses:
@@ -1526,6 +2863,57 @@ def _phase_output_digest(state: ProjectState, phase: str) -> str:
     if phase == "report" and state.report:
         return _short_text(state.report, 240)
     return ""
+
+
+def _phase_has_output(state: ProjectState, phase: str) -> bool:
+    value = getattr(state, phase, None)
+    if isinstance(value, (list, tuple, set, dict, str)):
+        return bool(value)
+    return value is not None
+
+
+def _technology_readiness_phase_output_digest(state: ProjectState, phase: str) -> str:
+    data = _technology_readiness_phase_data(state, phase)
+    if not data:
+        return ""
+    if phase == "scope":
+        return _short_text(f"{_technology_readiness_name(state)}: {_tr_field(data, 'assessment_boundary')}", 240)
+    if phase == "scientific_inventory":
+        basis_count = len(_tr_list(data.get("scientific_basis")))
+        missing = _tr_join(data.get("missing_evidence"), "")
+        return _short_text(f"{basis_count} scientific basis item(s); missing evidence: {missing}", 240)
+    if phase == "trl_diagnosis":
+        return _short_text(
+            f"Current TRL {_tr_field(data, 'current_trl')}; target TRL {_tr_field(data, 'target_trl')}; {_tr_field(data, 'why_not_higher')}",
+            240,
+        )
+    if phase == "research_industry_alignment":
+        return _short_text(
+            f"Overall alignment score {_tr_field(data, 'overall_alignment_score')}; gaps: {_tr_join(data.get('top_alignment_gaps'), '')}",
+            240,
+        )
+    if phase == "ip_protection_axis":
+        return _short_text(
+            f"Specialist review required: {_tr_field(data, 'specialist_review_required')}; notes: {_tr_join(data.get('ip_risk_notes'), '')}",
+            240,
+        )
+    if phase == "next_level_recommendations":
+        return _short_text(
+            f"Next target TRL {_tr_field(data, 'next_target_trl')}; main gap: {_tr_field(data, 'main_gap_to_next_level')}",
+            240,
+        )
+    if phase == "technical_validation_plan":
+        return _short_text(f"Validation tests: {_tr_join(data.get('validation_tests'), '')}", 240)
+    if phase == "industrial_transfer_plan":
+        return _short_text(f"Partner: {_tr_field(data, 'ideal_industrial_partner')}; risks: {_tr_join(data.get('negotiation_risks'), '')}", 240)
+    if phase == "readiness_roadmap":
+        return _short_text(f"{len(_tr_items(data.get('roadmap_phases')))} roadmap phase(s); gates: {_tr_join(data.get('decision_gates'), '')}", 240)
+    if phase == "executive_summary":
+        return _short_text(
+            f"Verdict: {_tr_field(data, 'readiness_verdict')}; next step: {_tr_field(data, 'recommended_next_step')}",
+            240,
+        )
+    return _short_text(json.dumps(data, ensure_ascii=False, default=str), 240)
 
 
 def summarize_hypotheses(state: ProjectState) -> str:
@@ -1865,8 +3253,6 @@ def _safe_report_markdown(state: ProjectState) -> str:
             quality.provisional_clarification_next_action,
         ])
         markdown = "\n\n".join([provisional_warning, markdown.strip()])
-    if _risk_classification_may_understate_generated_content(state) and RISK_CLASSIFICATION_WARNING not in markdown:
-        markdown = "\n\n".join([RISK_CLASSIFICATION_WARNING, markdown])
     if _requires_sparse_growth_decision_package(quality):
         markdown = _with_sparse_growth_decision_package(markdown)
     if requires_productization_wave_matrix(state, quality) and "Wave 2 Graduation Matrix" not in markdown:
@@ -2028,8 +3414,33 @@ def _collapse_markdown_blank_lines(value: str) -> str:
     return "\n".join(collapsed).strip()
 
 
+def _ensure_single_client_source_locator_note(markdown: str, quality) -> str:
+    source = str(markdown or "")
+    note_pattern = re.compile(
+        r"(?:\n{0,2}#{1,6}\s+(?:Citation|Source)\s+locator\s+note\s*\n+)?"
+        r"No concrete (?:citation|source) locators were available for this project; "
+        r"evidence should be validated in Sprint 0\.",
+        re.I,
+    )
+    cleaned = note_pattern.sub("\n", source)
+    cleaned = _collapse_markdown_blank_lines(cleaned)
+    if getattr(quality, "has_concrete_locators", False):
+        return cleaned
+
+    note_block = f"## Source locator note\n\n{NO_CONCRETE_LOCATORS_CLIENT_NOTE}"
+    lines = cleaned.splitlines()
+    insert_at = 0
+    if lines and lines[0].startswith("# "):
+        insert_at = 1
+        if len(lines) > 1 and lines[1].strip() and not lines[1].startswith("#"):
+            insert_at = 2
+    lines[insert_at:insert_at] = ["", note_block, ""]
+    return _collapse_markdown_blank_lines("\n".join(lines))
+
+
 def _client_safe_text(text: str, quality) -> str:
-    value = client_simplify_text(text, sparse_evidence=quality.sparse_evidence or quality.evidence_warning)
+    protected_text, metric_fragments = _protect_client_concrete_metric_values(str(text or ""))
+    value = client_simplify_text(protected_text, sparse_evidence=quality.sparse_evidence or quality.evidence_warning)
     if quality.decision_domain == "growth":
         replacements = {
             "Search Console": "growth analytics",
@@ -2053,7 +3464,7 @@ def _client_safe_text(text: str, quality) -> str:
         }
         for unsafe, safe in replacements.items():
             value = re.sub(re.escape(unsafe), safe, value, flags=re.I)
-    return value
+    return _polish_client_report_citation_rendering(_restore_client_concrete_metric_values(value, metric_fragments))
 
 
 def _remove_empty_client_citation_marker_columns(markdown: str) -> str:
@@ -2113,6 +3524,44 @@ def _clean_client_citation_table_block(block: list[str]) -> list[str]:
     return cleaned
 
 
+def _clean_client_orphan_markdown_table_rows(markdown: str) -> str:
+    source_lines = str(markdown or "").splitlines()
+    output: list[str] = []
+    index = 0
+    in_code_block = False
+    while index < len(source_lines):
+        line = source_lines[index]
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            output.append(line)
+            index += 1
+            continue
+        if in_code_block or not _looks_like_markdown_table_line(line):
+            output.append(line)
+            index += 1
+            continue
+        block: list[str] = []
+        while index < len(source_lines) and _looks_like_markdown_table_line(source_lines[index]):
+            block.append(source_lines[index])
+            index += 1
+        output.extend(_clean_client_orphan_markdown_table_block(block))
+    return "\n".join(output)
+
+
+def _clean_client_orphan_markdown_table_block(block: list[str]) -> list[str]:
+    rows = [_split_markdown_table_row(line) for line in block]
+    if len(rows) >= 2 and rows[0] and not _is_client_markdown_separator_cells(rows[0]) and _is_client_markdown_separator_cells(rows[1]):
+        return block
+    cleaned: list[str] = []
+    for row in rows:
+        if not row or _is_client_markdown_separator_cells(row):
+            continue
+        cells = [cell.strip() for cell in row if cell.strip()]
+        if cells:
+            cleaned.append("- " + "; ".join(cells))
+    return cleaned
+
+
 def _split_markdown_table_row(line: str) -> list[str]:
     text = line.strip()
     if not text.startswith("|"):
@@ -2140,6 +3589,8 @@ def _is_client_citation_column_header(value: str) -> bool:
         "citation",
         "citation marker",
         "citation markers",
+        "citation status",
+        "citation statuses",
         "citation locator",
         "citation locators",
         "locator",
@@ -2165,6 +3616,7 @@ def _is_empty_client_citation_cell(value: str) -> bool:
         "no concrete locator registered",
         "no concrete citation locator registered",
         "no concrete citation locators available",
+        "evidence source unavailable",
         "no locator",
         "no locators",
     } or bool(re.fullmatch(r"[-]+", text))
@@ -2187,6 +3639,17 @@ def _project_metadata_line(state: ProjectState) -> str:
             f"Project name: {_redact_unsafe_string(state.project_name or '')}",
             f"Generated: {_utc_now()}",
             f"Risk: {_redact_unsafe_string(state.risk_classification or '')}",
+        ]
+        if part.strip()
+    )
+
+
+def _client_project_metadata_line(state: ProjectState) -> str:
+    return " | ".join(
+        part
+        for part in [
+            f"Project name: {_redact_unsafe_string(state.project_name or '')}",
+            f"Generated: {_utc_now()}",
         ]
         if part.strip()
     )
@@ -2286,6 +3749,8 @@ def _client_clarifications_markdown(state: ProjectState) -> str:
     questions = []
     for cycle in state.clarification_cycles or []:
         for question in cycle.questions or []:
+            if not _clarification_question_client_visible(question):
+                continue
             status = _enum_value(question.status)
             if status in {"open", "unavailable"}:
                 questions.append([
@@ -2297,6 +3762,47 @@ def _client_clarifications_markdown(state: ProjectState) -> str:
     if not questions:
         return ""
     return _markdown_table([["Open question", "Why it matters", "Affected phase", "Status"], *questions])
+
+
+def _clarification_question_client_visible(question: Any) -> bool:
+    if _client_visible_flag_is_false(getattr(question, "client_visible", None)):
+        return False
+
+    metadata = getattr(question, "metadata", None)
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            normalized_key = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+            if normalized_key == "client_visible" and _client_visible_flag_is_false(value):
+                return False
+            if normalized_key in {"visibility", "audience", "audience_scope", "classification", "sensitivity", "access", "scope"}:
+                if _client_restricted_metadata_value(value):
+                    return False
+
+    for attr in ("visibility", "audience", "audience_scope", "classification", "sensitivity", "access", "scope"):
+        if _client_restricted_metadata_value(getattr(question, attr, None)):
+            return False
+    return True
+
+
+def _client_visible_flag_is_false(value: Any) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "no", "0", "hidden"}
+    return False
+
+
+def _client_restricted_metadata_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return any(_client_restricted_metadata_value(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_client_restricted_metadata_value(item) for item in value)
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
+    parts = {part for part in normalized.split("_") if part}
+    restricted_values = {"restricted", "operator", "internal", "sensitive", "confidential"}
+    return normalized in {"operator_only", "operator_internal"} or bool(parts & restricted_values)
 
 
 def _operator_clarifications_markdown(state: ProjectState) -> str:
@@ -2646,7 +4152,7 @@ def _export_markdown_docx_bytes(markdown: str, *, title: str) -> bytes:
     return buf.getvalue()
 
 
-def _export_markdown_pdf_bytes(markdown: str, *, title: str) -> bytes:
+def _export_markdown_pdf_bytes(markdown: str, *, title: str, client_visible: bool = False) -> bytes:
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -2664,7 +4170,8 @@ def _export_markdown_pdf_bytes(markdown: str, *, title: str) -> bytes:
     body = ParagraphStyle("ProfileBody", parent=styles["BodyText"], fontSize=9.5, leading=13, spaceAfter=4)
 
     story = []
-    for block in _markdown_to_blocks(markdown):
+    render_markdown = _polish_client_report_citation_rendering(markdown) if client_visible else markdown
+    for block in _markdown_to_blocks(render_markdown):
         if block["type"] == "heading":
             style = heading1 if block["level"] == 1 else heading2 if block["level"] == 2 else heading3
             story.append(Paragraph(_as_pdf_text(_strip_inline_markdown(block["text"])), style))
@@ -2687,7 +4194,14 @@ def _export_markdown_pdf_bytes(markdown: str, *, title: str) -> bytes:
                 )
             )
         elif block["type"] == "table":
-            story.extend(_pdf_table_flowables(block["rows"], body, doc.width))
+            story.extend(
+                _pdf_table_flowables(
+                    block["rows"],
+                    body,
+                    doc.width,
+                    client_visible=client_visible,
+                )
+            )
         elif block["type"] == "divider":
             story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CBD5E1"), spaceBefore=4, spaceAfter=4))
         story.append(Spacer(1, 2))
@@ -2762,9 +4276,7 @@ def _consume_table(lines: list[str], start: int) -> tuple[list[list[str]], int] 
             break
         rows.append(_split_table_row(line))
         idx += 1
-    width = max(len(row) for row in rows)
-    rows = [row + [""] * (width - len(row)) for row in rows]
-    return rows, idx
+    return _normalize_render_table_rows(rows), idx
 
 
 def _normalize_markdown_line(line: str) -> str:
@@ -2782,7 +4294,27 @@ def _is_markdown_divider(line: str) -> bool:
 
 def _is_markdown_separator_row(line: str) -> bool:
     cells = _split_table_row(line)
-    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+    return _is_markdown_separator_cells(cells)
+
+
+def _is_markdown_separator_cells(cells: list[str]) -> bool:
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", str(cell).strip().replace(" ", "")) for cell in cells)
+
+
+def _normalize_render_table_rows(rows: list[list[str]]) -> list[list[str]]:
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    header = rows[0] + [""] * (width - len(rows[0]))
+    normalized = [header]
+    for row in rows[1:]:
+        if _is_markdown_separator_cells(row):
+            continue
+        padded = row + [""] * (width - len(row))
+        if not any(str(cell).strip() for cell in padded):
+            continue
+        normalized.append(padded)
+    return normalized
 
 
 def _split_table_row(line: str) -> list[str]:
@@ -2791,6 +4323,7 @@ def _split_table_row(line: str) -> list[str]:
 
 
 def _add_docx_table(document: Document, rows: list[list[str]]) -> None:
+    rows = _normalize_render_table_rows(rows)
     if not rows:
         return
     table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
@@ -2806,10 +4339,19 @@ def _add_docx_divider(document: Document) -> None:
     paragraph.paragraph_format.space_after = Pt(4)
 
 
-def _pdf_table_flowables(rows: list[list[str]], body_style: ParagraphStyle, available_width: float) -> list[Any]:
+def _pdf_table_flowables(
+    rows: list[list[str]],
+    body_style: ParagraphStyle,
+    available_width: float,
+    *,
+    client_visible: bool = False,
+) -> list[Any]:
+    rows = _normalize_render_table_rows(rows)
+    if not rows:
+        return []
     column_count = max(len(row) for row in rows) if rows else 1
     if column_count > 4:
-        return _pdf_wide_table_cards(rows, body_style, available_width)
+        return _pdf_wide_table_cards(rows, body_style, available_width, client_visible=client_visible)
     return [_pdf_table(rows, body_style, available_width)]
 
 
@@ -2838,7 +4380,13 @@ def _pdf_table(rows: list[list[str]], body_style: ParagraphStyle, available_widt
     return table
 
 
-def _pdf_wide_table_cards(rows: list[list[str]], body_style: ParagraphStyle, available_width: float) -> list[Any]:
+def _pdf_wide_table_cards(
+    rows: list[list[str]],
+    body_style: ParagraphStyle,
+    available_width: float,
+    *,
+    client_visible: bool = False,
+) -> list[Any]:
     if not rows:
         return []
     width = max(len(row) for row in rows)
@@ -2856,6 +4404,8 @@ def _pdf_wide_table_cards(rows: list[list[str]], body_style: ParagraphStyle, ava
         card_rows = []
         for header, value in zip(headers, row):
             if not str(header).strip() and not str(value).strip():
+                continue
+            if client_visible and _is_client_citation_column_header(str(header)) and not str(value).strip():
                 continue
             card_rows.append([
                 Paragraph(_as_pdf_text(_strip_inline_markdown(str(header or f"Field {row_index}"))), label_style),

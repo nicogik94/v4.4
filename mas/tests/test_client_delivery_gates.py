@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -72,19 +73,24 @@ def test_manifest_carries_validation_status(tmp_path):
     assert manifest["validation_status"] == "awaiting_side_by_side_defense_test"
 
 
-def test_worked_example_script_runs():
+def test_worked_example_script_runs(tmp_path):
+    env = os.environ.copy()
+    env["CLIENT_DELIVERY_OUTPUT_DIR"] = str(tmp_path / "client_delivery")
     completed = subprocess.run(
         [sys.executable, "-m", "scripts.render_example"],
         cwd=REPO_ROOT,
         check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
 
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
     outputs = result["outputs"]
 
+    for output in outputs.values():
+        assert Path(output).is_relative_to(tmp_path)
     assert Document(outputs["board_memo_docx"])
     workbook = load_workbook(outputs["execution_tracker_xlsx"])
     assert set(workbook.sheetnames) == EXPECTED_SHEETS
@@ -92,6 +98,19 @@ def test_worked_example_script_runs():
     assert manifest["quality_warnings"] == []
     assert _docx_action_owners(outputs["board_memo_docx"]) == EXPECTED_ACTION_OWNERS
     assert _xlsx_action_owners(outputs["execution_tracker_xlsx"]) == EXPECTED_ACTION_OWNERS
+
+
+def test_generated_delivery_artifacts_are_not_tracked():
+    completed = subprocess.run(
+        ["git", "ls-files", "exports"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == ""
 
 
 def test_example_input_exercises_all_fields():

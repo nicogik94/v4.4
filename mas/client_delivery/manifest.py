@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import DeliveryPackage
+from .utils import display_text
 
 
 VALIDATION_STATUS = "awaiting_side_by_side_defense_test"
@@ -22,8 +23,8 @@ def write_delivery_manifest(package: DeliveryPackage, output_path, files, warnin
         "requires_human_review": True,
         "validation_status": VALIDATION_STATUS,
         "artifact_type": ARTIFACT_TYPE,
-        "files": {str(role): str(file_path) for role, file_path in files.items()},
-        "quality_warnings": list(warnings or []),
+        "files": {str(role): _display_file_name(file_path) for role, file_path in files.items()},
+        "quality_warnings": [display_text(warning) for warning in list(warnings or [])],
         "counts": {
             "critical_assumptions": int(len(package.critical_assumptions)),
             "execution_actions": int(len(package.execution_plan)),
@@ -37,3 +38,7 @@ def write_delivery_manifest(package: DeliveryPackage, output_path, files, warnin
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _display_file_name(file_path) -> str:
+    return display_text(Path(file_path).name)

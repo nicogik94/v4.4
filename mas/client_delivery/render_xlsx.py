@@ -12,7 +12,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .models import DeliveryPackage
-from .utils import safe_join, safe_text
+from .utils import display_join, display_text, safe_text, spreadsheet_text
 
 
 SHEET_NAMES = [
@@ -67,8 +67,8 @@ def _render_actions(ws, package: DeliveryPackage) -> None:
                 action.phase,
                 action.action,
                 action.owner,
-                safe_join(action.dependencies),
-                safe_join(action.evidence),
+                display_join(action.dependencies),
+                display_join(action.evidence),
                 action.notes,
                 action.status,
                 action.success_criteria,
@@ -111,7 +111,7 @@ def _render_assumptions(ws, package: DeliveryPackage) -> None:
                 assumption.falsification_trigger,
                 assumption.owner,
                 assumption.confidence,
-                safe_join(assumption.evidence),
+                display_join(assumption.evidence),
                 assumption.notes,
             ]
         )
@@ -121,13 +121,16 @@ def _render_assumptions(ws, package: DeliveryPackage) -> None:
 def _render_review_triggers(ws, package: DeliveryPackage) -> None:
     rows = [["cadence", "owner", "trigger", "notes"]]
     for trigger in package.review.reentry_triggers:
-        rows.append([package.review.cadence, package.review.owner, safe_text(trigger), package.review.notes])
+        rows.append([package.review.cadence, package.review.owner, display_text(trigger), package.review.notes])
     _append_rows(ws, rows)
 
 
 def _append_rows(ws, rows: list[list[Any]]) -> None:
     for row in rows:
-        ws.append([value if isinstance(value, (int, float)) and not isinstance(value, bool) else safe_text(value) for value in row])
+        ws.append([
+            value if isinstance(value, (int, float)) and not isinstance(value, bool) else spreadsheet_text(value)
+            for value in row
+        ])
 
 
 def _style_sheet(ws) -> None:
@@ -164,7 +167,7 @@ def _numeric_or_text(value: Any) -> float | str:
     parsed = _parse_number(value)
     if parsed is not None:
         return parsed
-    return safe_text(value)
+    return display_text(value)
 
 
 def _parse_number(value: Any) -> float | None:

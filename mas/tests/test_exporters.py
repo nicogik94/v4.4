@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, patch
 
 from docx import Document
 from fastapi import HTTPException
+from openpyxl import load_workbook
+from pypdf import PdfReader
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,20 +36,37 @@ from clarifications import (  # noqa: E402
     ClarificationStatus,
 )
 from exporters import (  # noqa: E402
+    CLIENT_DELIVERY_VALIDATION_BANNER,
+    MONITORING_TEMPLATE_OPERATOR_NOTE,
     _safe_report_markdown,
     build_client_dossier_markdown,
     build_export_manifest,
     build_machine_archive_payload,
     build_operator_dossier_markdown,
     export_project_profile_bytes,
+    operator_monitoring_summary,
     sanitize_for_export,
+)
+from technology_readiness_workbook import (  # noqa: E402
+    TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
+    TECHNOLOGY_READINESS_WORKBOOK_SHEETS,
+)
+from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE  # noqa: E402
+from monitoring_templates import (  # noqa: E402
+    CLIENT_MONITORING_TEMPLATE_HEADERS,
+    OPERATOR_MONITORING_TEMPLATE_HEADERS,
+    OPERATOR_TRACE_HEADERS,
+    SHEET_NAME,
+    monitoring_template_cell_rows,
 )
 from state import (  # noqa: E402
     AuditOutput,
     ClassifyOutput,
+    Evidence,
     FileParseStatus,
     FileParseSummary,
     FMEAItem,
+    Hypothesis,
     KnowledgeItem,
     KnowledgeLayerState,
     MonitorCanary,
@@ -56,9 +75,13 @@ from state import (  # noqa: E402
     MonitorOutput,
     MonitorScheduleItem,
     PhaseStatus,
+    PreliminaryVerdict,
     ProjectState,
+    StrategyAction,
     StrategyOutput,
     UploadedFileManifest,
+    Verdict,
+    validate_technology_readiness_output,
 )
 from tests.test_decision_objects import make_state  # noqa: E402
 
@@ -72,8 +95,49 @@ def _docx_text(payload: bytes) -> str:
     return "\n".join(parts)
 
 
+def _pdf_text(payload: bytes) -> str:
+    reader = PdfReader(BytesIO(payload))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
 def _docx_table_count(payload: bytes) -> int:
     return len(Document(BytesIO(payload)).tables)
+
+
+def _xlsx_rows(payload: bytes) -> tuple[tuple[str, ...], ...]:
+    workbook = load_workbook(BytesIO(payload), data_only=False)
+    worksheet = workbook[SHEET_NAME]
+    rows = []
+    for row in worksheet.iter_rows(values_only=True):
+        rows.append(tuple("" if value is None else str(value) for value in row))
+    return tuple(rows)
+
+
+def _xlsx_workbook(payload: bytes):
+    return load_workbook(BytesIO(payload), data_only=False)
+
+
+def _xlsx_sheet_rows(workbook, sheet_name: str) -> tuple[tuple[str, ...], ...]:
+    worksheet = workbook[sheet_name]
+    rows = []
+    for row in worksheet.iter_rows(values_only=True):
+        rows.append(tuple("" if value is None else str(value) for value in row))
+    return tuple(rows)
+
+
+def _xlsx_visible_text(workbook) -> str:
+    parts: list[str] = []
+    for worksheet in workbook.worksheets:
+        for row in worksheet.iter_rows(values_only=True):
+            parts.extend(str(value) for value in row if value not in (None, ""))
+    return "\n".join(parts)
+
+
+def _assert_sheet_has_usability_polish(testcase: unittest.TestCase, workbook, sheet_name: str) -> None:
+    worksheet = workbook[sheet_name]
+    testcase.assertEqual(worksheet.freeze_panes, "A2")
+    testcase.assertTrue(any((dimension.width or 0) > 14 for dimension in worksheet.column_dimensions.values()))
+    testcase.assertTrue(any(cell.alignment.wrap_text for row in worksheet.iter_rows() for cell in row))
 
 
 def _attach_report_generation_metadata(
@@ -246,6 +310,149 @@ Technical notes stay here.
     return state
 
 
+def make_constraint_violation_export_state(project_id: str = "constraint-warning"):
+    state = make_export_state(project_id)
+    state.brief = (
+        "Limited capacity this month. Only one focused initiative plus one small experiment. "
+        "No major engineering project this month. Budget is limited to one small experiment. "
+        "Avoid broad growth spend until the cause is clearer."
+    )
+    state.report = """# Executive Summary
+Recommendation: execute three parallel critical-priority tracks this month.
+
+# The Decision
+Decide how to act with constrained capacity.
+
+# Recommended Path
+Run three critical tracks in parallel, including a major engineering project and increased paid acquisition spend.
+
+# Why This Is Recommended
+The generated report claims parallel execution will move faster.
+
+# Options Considered
+| Option | Verdict |
+|---|---|
+| Three tracks | Recommended |
+
+# Evidence Used
+| Evidence | What it suggests |
+|---|---|
+| Capacity note | Capacity is constrained. |
+
+# Key Risks
+Capacity overload.
+
+# Assumptions and Open Questions
+Whether capacity can support parallel work is unresolved.
+
+# Roadmap
+This month: run three tracks.
+
+# Next Steps
+- Start all tracks.
+
+# Monitoring and Kill Criteria
+Stop if capacity overload appears.
+
+# Appendix: Technical Analysis
+Technical notes.
+"""
+    state.strategy = StrategyOutput(
+        executive_strategy="Execute three parallel critical-priority tracks.",
+        strategies=[
+            StrategyAction(
+                priority="CRITICAL",
+                action="Run three critical tracks in parallel.",
+                justification="Generated contradiction for exporter warning test.",
+            )
+        ],
+        implementation_sequence="Run three critical tracks in parallel.",
+    )
+    return state
+
+
+def make_constraint_compliant_export_state(project_id: str = "constraint-compliant"):
+    state = make_export_state(project_id)
+    state.brief = (
+        "Limited capacity this month. Only one focused initiative plus one small experiment. "
+        "No major engineering project this month. Budget is limited to one small experiment. "
+        "Avoid broad growth spend until the cause is clearer."
+    )
+    state.report = """# Executive Summary
+Recommendation: run one focused retention initiative and one small onboarding experiment.
+
+# The Decision
+Decide how to act with constrained capacity.
+
+# Recommended Path
+Run one focused initiative and one small experiment this month.
+
+# Why This Is Recommended
+What not to do this month: no major engineering work, no broad growth spend, and do not increase paid acquisition spend.
+All growth spend and major engineering are paused until Sprint 0 resolves the cause.
+Freeze paid acquisition budgets at current levels for 30 days; do not launch new paid campaigns.
+If rate drops below 10%, consider pausing all paid acquisition spend.
+Paid acquisition mix continues shifting during the sprint, worsening the cohort being measured.
+Risk if paid spend increases: the measured cohort becomes harder to interpret.
+If paid spend increased and H1 is confirmed, continue diagnosis before any scale-up.
+
+# Options Considered
+| Option | Verdict |
+|---|---|
+| Focused initiative plus small experiment | Recommended |
+| Broad paid acquisition spend | DO NOT DO this month |
+
+# Evidence Used
+| Evidence | What it suggests |
+|---|---|
+| Capacity note | Capacity is constrained. |
+
+# Key Risks
+Starting blocked work would violate the operator constraint.
+
+# Assumptions and Open Questions
+Deferred / blocked / do not do: broad paid acquisition spend remains out of scope.
+
+# Roadmap
+This month: one focused initiative and one small experiment.
+
+# Next Steps
+- Start the focused initiative.
+- Start the small experiment.
+
+# Monitoring and Kill Criteria
+Stop if the experiment cannot be measured.
+
+# Appendix: Technical Analysis
+Major engineering work is not recommended this month.
+"""
+    state.strategy = StrategyOutput(
+        executive_strategy="Run one focused initiative and one small experiment.",
+        strategies=[
+            StrategyAction(
+                priority="CRITICAL",
+                action="Run the focused retention initiative.",
+                justification="Fits the capacity constraint.",
+            ),
+            StrategyAction(
+                priority="LOW",
+                action="Broad paid acquisition spend (DO NOT DO this month).",
+                justification=(
+                    "BLOCKED until measurement is repaired and the spend constraint changes. "
+                    "Freeze paid acquisition budgets; do not launch new paid campaigns."
+                ),
+            ),
+            StrategyAction(
+                priority="LOW",
+                action="Major engineering redesign (DEFERRED).",
+                justification="DEFERRED because major engineering work is out of scope this month.",
+            ),
+        ],
+        implementation_sequence="Focused initiative -> small experiment. Do not launch major engineering work.",
+    )
+    return state
+
+
 def make_sparse_growth_state(project_id: str = "sparse-growth"):
     state = ProjectState(
         project_id=project_id,
@@ -276,6 +483,417 @@ Run Sprint 0 first.
 """,
     )
     return state
+
+
+def make_runtime_pdf_polish_state(project_id: str = "runtime-pdf-polish"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Runtime PDF polish",
+        brief="Decide whether Sprint 0 evidence is sufficient before scale.",
+        report=r"""# Executive Summary
+Run Sprint 0.## Evidence maturity
+Citation citation unavailable.
+Raw trace knowledge_runtime and evidence_runtime with source_ref=upload:file-9:notes.md#chunk=2 storage_ref=C:\Users\operator\secret.xlsx should not ship.
+[Inference] [Hypothesis] [Unknown]
+
+# Evidence Used
+| Evidence | What It Suggests | Why It Is Needed | Decision It Validates | Citation status |
+|---|---|---|---|---|
+| Activation note | What It Suggests supports the scale recommendation. | Why It Is Needed supports which owner approves scale-up. | Scale gate | |
+| Measurement note | What It Suggests supports whether telemetry is usable. | Why It Is Needed supports whether to continue Sprint 0. | Measurement gate | |
+""",
+    )
+
+
+def make_runtime_pdf_polish_state_with_table_artifacts(project_id: str = "runtime-pdf-polish-artifacts"):
+    state = make_runtime_pdf_polish_state(project_id)
+    state.project_name = "Automation ROI export polish"
+    state.brief = "Decide whether the automation ROI pilot is ready to scale."
+    state.report = state.report.replace(
+        "| Activation note | What It Suggests supports the scale recommendation. |",
+        "|---|---|---|---|---|\n"
+        "| | | | | |\n"
+        "| Activation note | What It Suggests supports the scale recommendation. |",
+    )
+    return state
+
+
+def make_orphan_evidence_separator_state(project_id: str = "orphan-evidence-separator"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Automation ROI orphan evidence separator",
+        brief="Decide whether the automation ROI pilot is ready to scale.",
+        report="""# Executive Summary
+Run Sprint 0 first.
+
+# Evidence Used
+|---|---|---|---|---|
+| Tool budget and capacity assumptions | evidence strength: directional | caveat: needs validation | Scale decision | [Hypothesis] |
+| Queue timing notes | evidence strength: partial | caveat: sampled logs only | Staffing decision | [Inference] |
+""",
+    )
+
+
+def make_technology_readiness_export_state(project_id: str = "technology-readiness-workbook"):
+    state = ProjectState(
+        project_id=project_id,
+        project_name="Lab coating readiness",
+        project_type="technology_readiness",
+        brief="Assess a lab coating for transfer readiness.",
+    )
+    state.imported_evidence = [
+        Evidence(
+            evidence_id="ev-science",
+            title="Scientific basis note",
+            summary="Bench chemistry supports the proposed mechanism.",
+            category="scientific_basis",
+            source_phase="scientific_inventory",
+        ),
+        Evidence(
+            evidence_id="ev-poc",
+            title="Proof-of-concept result",
+            summary="Small batch proof of concept was observed.",
+            category="proof_of_concept",
+            source_phase="trl_diagnosis",
+        ),
+    ]
+    state.scientific_inventory = validate_technology_readiness_output("scientific_inventory", {
+        "scientific_basis": ["published chemistry analogy"],
+        "critical_components": ["coating precursor"],
+        "current_experiments": ["small batch trial"],
+        "known_limitations": ["repeatability not demonstrated"],
+        "evidence_items": [{"evidence_id": "ev-science", "category": "scientific_basis"}],
+        "missing_evidence": ["controlled validation"],
+        "confidence": "preliminary",
+    })
+    state.trl_diagnosis = validate_technology_readiness_output("trl_diagnosis", {
+        "current_trl": 3,
+        "target_trl": 4,
+        "confidence": "medium",
+        "current_phase_name": "Protection and proof of concept",
+        "evidence_supporting_current_trl": ["ev-science", "ev-poc"],
+        "why_not_higher": "Controlled validation and reproducibility are missing.",
+        "evidence_gaps": ["reproducibility", "controlled_validation", "ip_review"],
+        "legal_or_certification_disclaimer": "This is not TRL certification.",
+    })
+    state.research_industry_alignment = validate_technology_readiness_output("research_industry_alignment", {
+        "criteria_scores": {
+            criterion: {
+                "score": 3,
+                "evidence": "planning evidence",
+                "gap": "validation gap",
+                "recommendation": "collect targeted evidence",
+            }
+            for criterion in (
+                "technical_novelty",
+                "patentable_potential",
+                "industrial_application",
+                "functional_advantage",
+                "reproducibility",
+                "scalability",
+                "potential_cost",
+                "industrial_interest",
+                "regulatory_barriers",
+                "trl_4_6_compatibility",
+            )
+        },
+        "overall_alignment_score": 3.0,
+        "top_alignment_strengths": ["clear industrial use case"],
+        "top_alignment_gaps": ["no partner feedback"],
+        "prioritized_industrial_applications": ["pilot coating line"],
+        "confidence": "medium",
+    })
+    state.ip_protection_axis = validate_technology_readiness_output("ip_protection_axis", {
+        "material_composition": {
+            "preliminary_assessment": "Promising but uncertain.",
+            "evidence": ["ev-science"],
+            "gap": "specialist review missing",
+            "disclosure_risk": "Review before external demos.",
+            "recommended_review": "Specialist review required.",
+        },
+        "synthesis_method": {},
+        "specific_use": {},
+        "device_or_system": {},
+        "critical_parameters": {},
+        "know_how": {},
+        "ip_risk_notes": ["Do not claim legal patentability."],
+        "specialist_review_required": True,
+        "confidence": "low",
+    })
+    state.next_level_recommendations = validate_technology_readiness_output("next_level_recommendations", {
+        "current_trl": 3,
+        "next_target_trl": 4,
+        "current_phase_name": "Protection and proof of concept",
+        "next_phase_name": "Controlled technical validation",
+        "main_gap_to_next_level": "Repeatable controlled validation is missing.",
+        "recommended_actions": [{"owner": "Technical lead", "action": "run repeatability protocol"}],
+        "required_tests": ["repeatability test"],
+        "required_evidence": ["reproducibility", "controlled_validation", "ip_review"],
+        "expected_deliverables": ["validation report"],
+        "risks_to_reduce": ["false-positive lab result"],
+        "suggested_owners": ["Technical lead", "IP specialist"],
+        "estimated_time_range": "6-12 months",
+        "advancement_criteria": ["repeatable result under controlled protocol"],
+        "confidence": "medium",
+    })
+    state.technical_validation_plan = validate_technology_readiness_output("technical_validation_plan", {
+        "validation_tests": [{"name": "repeatability protocol", "owner": "Technical lead"}],
+        "acceptance_criteria": ["three repeatable runs"],
+        "measurement_plan": ["capture batch variance"],
+        "failure_modes": ["coating instability"],
+        "evidence_to_collect": ["controlled_validation"],
+        "confidence": "medium",
+    })
+    state.industrial_transfer_plan = validate_technology_readiness_output("industrial_transfer_plan", {
+        "ideal_industrial_partner": "Pilot manufacturing partner",
+        "partner_validation_needed": ["partner feedback"],
+        "minimum_transfer_package": ["non-confidential brief", "validation protocol"],
+        "transfer_model_options": ["sponsored validation"],
+        "negotiation_risks": ["premature disclosure"],
+        "evidence_required_before_transfer": ["ip_review", "partner_feedback"],
+        "confidence": "low",
+    })
+    state.readiness_roadmap = validate_technology_readiness_output("readiness_roadmap", {
+        "roadmap_phases": [
+            {
+                "trl": "TRL 4",
+                "phase_name": "Controlled technical validation",
+                "time_range": "6-12 months",
+                "objective": "validate repeatability",
+                "evidence_needed": ["controlled_validation"],
+                "decision_gate": "repeatability gate",
+            }
+        ],
+        "timeline": [{"phase": "TRL 4", "range": "6-12 months"}],
+        "decision_gates": [{"gate": "repeatability gate"}],
+        "resources_needed": ["technical lead"],
+        "go_no_go_criteria": ["controlled validation completed"],
+        "confidence": "medium",
+    })
+    state.executive_summary = validate_technology_readiness_output("executive_summary", {
+        "current_trl": 3,
+        "target_trl": 4,
+        "readiness_verdict_code": "ready_for_proof_of_concept",
+        "readiness_verdict": "Ready for controlled validation planning, not advancement.",
+        "top_blockers": ["reproducibility", "IP review"],
+        "recommended_next_step": "Run controlled validation protocol.",
+        "operator_summary": "Evidence-backed estimate requires operator review.",
+        "confidence": "medium",
+    })
+    return state
+
+
+def make_completed_technology_readiness_surface_state(project_id: str = "technology-readiness-surfaces"):
+    state = make_technology_readiness_export_state(project_id)
+    state.project_name = "NanoSeal-H2 transfer readiness"
+    state.brief = "Assess NanoSeal-H2 for transfer readiness."
+    state.scope = validate_technology_readiness_output("scope", {
+        "technology_name": "NanoSeal-H2",
+        "assessment_boundary": "lab coating chemistry through controlled validation planning",
+        "target_environment": "pilot coating line",
+        "intended_next_milestone": "Sprint 0 validation package",
+        "stakeholders": ["research lead", "technology transfer office"],
+        "constraints": ["no external demo before IP/disclosure review"],
+        "assumptions": ["bench-scale results are directional only"],
+        "validation_questions": ["Can repeatability be shown under controlled protocol?"],
+        "evidence_gaps": ["source locators", "controlled validation"],
+        "confidence": "medium",
+    })
+    state.report = ""
+    state.current_phase = "executive_summary"
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        state.phase_status[phase] = PhaseStatus.COMPLETED
+        state.phase_confidence[phase] = 0.8
+    return state
+
+
+def make_client_language_polish_state(project_id: str = "client-language-polish"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Automation ROI client language polish",
+        brief="Decide whether the Automation ROI pilot is ready for client rollout.",
+        report="""# Executive Summary
+Run Sprint 0 first.
+
+# Evidence Used
+| Evidence | What it suggests | Caveat |
+|---|---|---|
+| Tool budget and capacity assumptions | Why it is needed supports the tool and staff time budget is approved and available | caveat: budget assumptions need validation |
+| Control readiness note | Why it is needed indicate that minimum controls are in place before go-live | caveat: control owner must confirm |
+| Operations Lead note | Operations Lead supports output is trustworthy | caveat: sampled workflow only |
+
+# Monitoring and Kill Criteria
+Track output trust metric weekly. Stop if spend is above 20% over approved budget.
+Escalate hypothesis 5 if queue lag persists. Watch hypothesis 9 momentum risk.
+If architecture hypothesis fails, pause rollout.
+""",
+        knowledge_layer=KnowledgeLayerState(
+            uploaded_files=[
+                UploadedFileManifest(
+                    file_id="file-1",
+                    filename="automation-roi-notes.md",
+                    parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                )
+            ]
+        ),
+        monitor=MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                daily=[MonitorScheduleItem(metric="output trust metric", owner="Operations Lead", source="pilot dashboard")]
+            ),
+            canaries=[
+                MonitorCanary(
+                    signal="automation architecture assumption drift",
+                    direction="down",
+                    window="7d",
+                    meaning="momentum assumption check",
+                )
+            ],
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="S5",
+                    trip="more than 20% over approved budget",
+                    reset="two stable weeks",
+                )
+            ],
+        ),
+    )
+
+
+def make_monitoring_xlsx_polish_state(project_id: str = "monitoring-xlsx-polish"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Automation ROI monitoring XLSX polish",
+        brief="Decide whether the Automation ROI pilot is ready for rollout.",
+        report="""# Executive Summary
+Run the monitored pilot before rollout.
+
+# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source | Notes |
+|---|---|---|---|---|---|---|---|---|
+| Output trust metric | Trust score improves above 85% | Trust score below 70% | stop if more than 20% over approved budget | Operations Lead | Weekly | pause rollout and review controls | Pilot dashboard | caveat: budget assumptions need validation |
+
+# Monitoring and Kill Criteria
+Watch hypothesis 5 queue risk, hypothesis 9 momentum risk, and architecture hypothesis drift.
+""",
+        knowledge_layer=KnowledgeLayerState(
+            uploaded_files=[
+                UploadedFileManifest(
+                    file_id="file-1",
+                    filename="monitoring-plan.md",
+                    parse_summary=FileParseSummary(status=FileParseStatus.COMPLETED),
+                )
+            ]
+        ),
+        hypotheses=[
+            Hypothesis(
+                id="H5",
+                text="Technical feasibility depends on trustworthy automation outputs.",
+                signal="output trust metric",
+                confirm="trust score above 85%",
+                reject="spend more than 20% over approved budget",
+                evidence_ids=["evidence_monitoring_notes"],
+            ),
+            Hypothesis(
+                id="H9",
+                text="Momentum depends on weekly adoption.",
+                signal="momentum assumption adoption",
+                confirm="weekly adoption improves",
+                reject="weekly adoption stalls",
+            ),
+        ],
+        strategy=StrategyOutput(
+            preliminary_verdicts=[
+                PreliminaryVerdict(
+                    id="H5",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    evidence="evidence_monitoring_notes",
+                    monitoring_plan="Track output trust metric weekly and pause if budget is more than 20% over approved budget.",
+                )
+            ],
+            success_metrics=["Output trust metric above 85% by Day 30."],
+            review_date="Day 30",
+        ),
+        monitor=MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                weekly=[
+                    MonitorScheduleItem(
+                        metric="Output trust metric",
+                        owner="Operations Lead",
+                        source="Pilot dashboard above 85%",
+                    )
+                ]
+            ),
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="H5 technical feasibility",
+                    trip="more than 20% over approved budget",
+                    reset="below 10% over budget for two reviews",
+                )
+            ],
+            canaries=[
+                MonitorCanary(
+                    signal="architecture hypothesis drift",
+                    direction="down",
+                    window="7-day rolling",
+                    meaning="hypothesis 9 momentum risk",
+                )
+            ],
+        ),
+    )
+
+
+def _assert_client_language_polished(testcase: unittest.TestCase, compact: str) -> None:
+    lower = compact.lower()
+    for forbidden in (
+        "why it is needed supports",
+        "why it is needed indicate",
+        "supports output is trustworthy",
+        "hypothesis 5",
+        "hypothesis 9",
+        "architecture hypothesis",
+        "above 20% over",
+    ):
+        testcase.assertNotIn(forbidden, lower)
+    for preserved in (
+        CLIENT_DELIVERY_VALIDATION_BANNER,
+        "Evidence maturity: Partial evidence",
+        "output trust metric",
+        "more than 20% over approved budget",
+        "caveat: budget assumptions need validation",
+    ):
+        testcase.assertIn(preserved, compact)
+    testcase.assertIn("This helps indicate that the tool and staff time budget is approved and available", compact)
+    testcase.assertIn("This indicates that minimum controls are in place before go-live", compact)
+    testcase.assertIn("Operations Lead indicates the output is trustworthy", compact)
+    testcase.assertIn("the technical feasibility check", compact)
+    testcase.assertIn("the momentum assumption", compact)
+    testcase.assertIn("the automation architecture assumption", compact)
+
+
+def make_client_value_preservation_state(project_id: str = "client-value-preservation"):
+    return ProjectState(
+        project_id=project_id,
+        project_name="Client value preservation",
+        brief="Improve trial conversion and activation without losing metric values.",
+        report=r"""# Executive Summary
+Source locator note evidence should be validated in Sprint 0.# Client Dossier
+Trial-to-paid conversion moved from 18% to 12%, while activation moved from 46% to 29%.
+Median time to first value moved from 2.4 days to 5.9 days, a 6 percentage-point activation gap.
+The recovery guardrail is 12% to 35%, with follow-up inside 72 hours and 48 hours.
+Within 7 days: reconcile Stripe trial counts against CRM records before the go/no-go.
+Day 5 and Day 7 reviews preserve normal timeline wording.
+The threshold probability that above 2pp divergence persists should trigger review.
+Threshold not yet confirmed and Operator to define are placeholders, but 18% to 12% and 46% to 29% are real metrics.
+Remove provisional threshold, target of threshold, and threshold of new trials without changing real values.
+
+# Evidence Used
+| Evidence | Why it is needed | Upside | Citation status |
+|---|---|---|---|
+| Conversion snapshot | Why it is needed supports whether the conversion change is real. | Upside supports whether recovery is worth pursuing. | [Inference] |
+| Activation snapshot | Why it is needed supports which funnel step broke. | Upside supports which team should own the fix. | [Hypothesis] |
+| Coverage note | Coverage remains incomplete. | Treat this as directional. | [Unknown] |
+""",
+    )
 
 
 class TestCodeVersionFreshness(unittest.TestCase):
@@ -348,6 +966,186 @@ class TestProfileExporterHelpers(unittest.TestCase):
         self.assertNotIn("Executive Summary", text)
         self.assertNotIn("classify summary", text)
 
+    def test_operator_dossier_surfaces_constraint_adherence_warning(self):
+        markdown = build_operator_dossier_markdown(make_constraint_violation_export_state("operator-constraint-warning"))
+
+        self.assertIn("Constraint adherence warning", markdown)
+        self.assertIn("Detected operator constraints", markdown)
+        self.assertIn("limited capacity", markdown)
+        self.assertIn("Generated contradiction signals", markdown)
+        self.assertIn("multiple parallel critical tracks", markdown)
+
+    def test_operator_dossier_omits_constraint_warning_for_compliant_constrained_output(self):
+        markdown = build_operator_dossier_markdown(
+            make_constraint_compliant_export_state("operator-constraint-compliant")
+        )
+
+        self.assertNotIn("Constraint adherence warning", markdown)
+        self.assertNotIn("Detected operator constraints", markdown)
+        self.assertNotIn("Generated contradiction signals", markdown)
+        self.assertIn("DO NOT DO this month", markdown)
+        self.assertIn("DEFERRED", markdown)
+
+    def test_client_exports_do_not_surface_operator_constraint_warning(self):
+        state = make_constraint_violation_export_state("client-constraint-warning")
+
+        client_dossier = build_client_dossier_markdown(state)
+        client_report = _safe_report_markdown(state)
+
+        self.assertNotIn("Constraint adherence warning", client_dossier)
+        self.assertNotIn("Detected operator constraints", client_dossier)
+        self.assertNotIn("Generated contradiction signals", client_dossier)
+        self.assertNotIn("Constraint adherence warning", client_report)
+        self.assertNotIn("Detected operator constraints", client_report)
+        self.assertNotIn("Generated contradiction signals", client_report)
+
+    def test_client_report_and_dossier_strip_operator_diagnostic_boundaries(self):
+        state = make_constraint_violation_export_state("client-boundary-diagnostics")
+        state.report = r"""# Executive Summary
+Run a bounded pilot before scaling.
+Constraint adherence warning: operator-only diagnostic.
+Telemetry privacy note: operator-only logging caveat.
+policy_audit_log records raw_provider_payload, raw_prompt, raw prompt, and runtime/preflight metadata.
+Runtime metadata references project_state.json and C:\Users\operator\private\project_state.json.
+
+# The Decision
+Decide whether to fund the pilot.
+
+# Recommended Path
+Run a bounded pilot.
+
+# Why This Is Recommended
+The pilot limits irreversible commitment.
+
+# Assumptions and Open Questions
+Confirm pilot owner.
+
+# Monitoring and Kill Criteria
+Stop if baseline data access is unavailable.
+"""
+
+        client_report = _safe_report_markdown(state)
+        client_dossier = build_client_dossier_markdown(state)
+        report_docx = _docx_text(export_project_profile_bytes(state, "report", "docx")[0])
+        dossier_docx = _docx_text(export_project_profile_bytes(state, "client_dossier", "docx")[0])
+
+        for output in (client_report, client_dossier, report_docx, dossier_docx):
+            self.assertIn("Run a bounded pilot", output)
+            for forbidden in (
+                "Constraint adherence warning",
+                "Telemetry privacy note",
+                "policy_audit_log",
+                "raw_provider_payload",
+                "raw_prompt",
+                "raw prompt",
+                "project_state",
+                "runtime/preflight metadata",
+                "Runtime metadata",
+                r"C:\Users",
+            ):
+                self.assertNotIn(forbidden, output)
+
+    def test_operator_dossier_preserves_operator_diagnostics_after_unsafe_redaction(self):
+        state = make_constraint_violation_export_state("operator-boundary-diagnostics")
+        state.report = "# Executive Summary\nRecommend dashboard telemetry, product analytics, session replay, and regeneration-event logging."
+        _attach_report_generation_metadata(state, code_version="old123")
+
+        with patch("report_freshness.current_code_version", return_value="new456"):
+            markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Constraint adherence warning", markdown)
+        self.assertIn("Detected operator constraints", markdown)
+        self.assertIn("Telemetry privacy note", markdown)
+        self.assertIn("Policy event count", markdown)
+        self.assertIn("policy_gate_blocked=1", markdown)
+        self.assertIn("Freshness metadata", markdown)
+        self.assertIn("Generated code version", markdown)
+        for forbidden in (
+            "sk-test-secret",
+            "provider-token",
+            "hidden prompt",
+            "hidden reasoning",
+            r"C:\Users\nicoc",
+        ):
+            self.assertNotIn(forbidden, markdown)
+
+    def test_restricted_clarifications_are_hidden_from_client_but_open_questions_remain(self):
+        state = make_export_state("restricted-clarifications")
+        visible = ClarificationQuestion(
+            question_id="visible-client-question",
+            text="Who owns the client-visible pilot decision?",
+            why_it_matters="Ownership controls follow-through.",
+            priority=ClarificationPriority.HIGH,
+            affected_phase="strategy",
+            source_gap="owner",
+            status=ClarificationStatus.OPEN,
+        )
+        restricted_questions = [
+            ClarificationQuestion(
+                question_id="restricted-visibility-question",
+                text="Restricted acquisition term sheet detail",
+                why_it_matters="Contains restricted commercial terms.",
+                priority=ClarificationPriority.CRITICAL,
+                affected_phase="strategy",
+                source_gap="restricted_terms",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"visibility": "restricted"}}),
+            ClarificationQuestion(
+                question_id="operator-audience-question",
+                text="Operator-only pricing override",
+                why_it_matters="Only the operator should review this.",
+                priority=ClarificationPriority.HIGH,
+                affected_phase="audit",
+                source_gap="operator_override",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"audience": "operator"}}),
+            ClarificationQuestion(
+                question_id="internal-classification-question",
+                text="Internal margin sensitivity",
+                why_it_matters="Internal financial sensitivity.",
+                priority=ClarificationPriority.HIGH,
+                affected_phase="classify",
+                source_gap="internal_margin",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"classification": "internal"}}),
+            ClarificationQuestion(
+                question_id="sensitive-question",
+                text="Sensitive customer escalation",
+                why_it_matters="Sensitive customer context.",
+                priority=ClarificationPriority.MEDIUM,
+                affected_phase="monitor",
+                source_gap="sensitive_customer",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"sensitivity": "sensitive"}}),
+            ClarificationQuestion(
+                question_id="client-hidden-question",
+                text="Client hidden legal memo note",
+                why_it_matters="Explicitly hidden from client output.",
+                priority=ClarificationPriority.MEDIUM,
+                affected_phase="audit",
+                source_gap="legal_memo",
+                status=ClarificationStatus.OPEN,
+            ).model_copy(update={"metadata": {"client_visible": False}}),
+        ]
+        state.clarification_cycles = [
+            ClarificationCycle(
+                cycle_id="visibility-cycle",
+                project_id=state.project_id,
+                questions=[visible, *restricted_questions],
+            )
+        ]
+
+        client_markdown = build_client_dossier_markdown(state)
+        client_report = _safe_report_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Who owns the client-visible pilot decision?", client_markdown)
+        self.assertIn("Who owns the client-visible pilot decision?", operator_markdown)
+        for question in restricted_questions:
+            self.assertNotIn(question.text, client_markdown)
+            self.assertNotIn(question.text, client_report)
+            self.assertIn(question.text, operator_markdown)
+
     def test_all_profiles_export_valid_formats(self):
         state = make_export_state("all-profiles")
         expected = {
@@ -355,14 +1153,22 @@ class TestProfileExporterHelpers(unittest.TestCase):
             ("report", "pdf"): "application/pdf",
             ("client_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ("client_dossier", "pdf"): "application/pdf",
+            ("client_monitoring_template", "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ("operator_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ("operator_dossier", "pdf"): "application/pdf",
+            ("operator_monitoring_template", "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            (TECHNOLOGY_READINESS_WORKBOOK_PROFILE, "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ("machine_archive", "zip"): "application/zip",
         }
 
         for (profile, fmt), media_type in expected.items():
             with self.subTest(profile=profile, format=fmt):
-                payload, actual_media_type, filename = export_project_profile_bytes(state, profile, fmt)
+                export_state = (
+                    make_technology_readiness_export_state("all-profiles-tech")
+                    if profile == TECHNOLOGY_READINESS_WORKBOOK_PROFILE
+                    else state
+                )
+                payload, actual_media_type, filename = export_project_profile_bytes(export_state, profile, fmt)
                 self.assertGreater(len(payload), 100)
                 self.assertEqual(actual_media_type, media_type)
                 self.assertIn(f"{profile}-", filename)
@@ -371,6 +1177,1135 @@ class TestProfileExporterHelpers(unittest.TestCase):
                 if fmt == "zip":
                     with zipfile.ZipFile(BytesIO(payload)) as archive:
                         self.assertNotIn("raw_project_state.json", archive.namelist())
+                if profile == TECHNOLOGY_READINESS_WORKBOOK_PROFILE:
+                    workbook = _xlsx_workbook(payload)
+                    self.assertEqual(tuple(workbook.sheetnames), TECHNOLOGY_READINESS_WORKBOOK_SHEETS)
+                elif fmt == "xlsx":
+                    self.assertEqual(_xlsx_rows(payload)[0], (
+                        tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS)
+                        if profile.startswith("operator")
+                        else tuple(CLIENT_MONITORING_TEMPLATE_HEADERS)
+                    ))
+
+    def test_technology_readiness_workbook_profile_exports_expected_sheets_and_safety_language(self):
+        state = make_technology_readiness_export_state("tech-workbook-profile")
+
+        payload, media_type, filename = export_project_profile_bytes(state, TECHNOLOGY_READINESS_WORKBOOK_PROFILE, "xlsx")
+        workbook = _xlsx_workbook(payload)
+        workbook_text = _xlsx_visible_text(workbook)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("tech-workbook-profile-technology_readiness_workbook-", filename)
+        self.assertEqual(tuple(workbook.sheetnames), TECHNOLOGY_READINESS_WORKBOOK_SHEETS)
+        self.assertIn("This workbook is an operator-reviewed readiness assessment.", workbook_text)
+        self.assertIn("not TRL certification", workbook_text)
+        self.assertIn("legal patentability advice", workbook_text)
+        self.assertIn("guarantee of commercial transfer", workbook_text)
+        self.assertIn("Evidence Register", workbook.sheetnames)
+        self.assertIn("Next-Level Recommendations", workbook.sheetnames)
+        self.assertIn("Stage-Gate Decisions", workbook.sheetnames)
+        self.assertIn("Claim Ledger", workbook.sheetnames)
+        self.assertIn("TTO Handoff", workbook.sheetnames)
+        self.assertIn("scientific_basis", workbook_text)
+        self.assertIn("proof_of_concept", workbook_text)
+        self.assertIn("reproducibility", workbook_text)
+        self.assertIn("controlled_validation", workbook_text)
+        self.assertIn("hold", workbook_text)
+        self.assertIn("Controlled validation and reproducibility are missing.", workbook_text)
+        self.assertIn("non_confidential_summary", workbook_text)
+        self.assertIn("Specialist review required", workbook_text)
+
+    def test_technology_readiness_report_profile_generates_structured_report_without_markdown_report(self):
+        state = make_completed_technology_readiness_surface_state("tech-report-surfaces")
+
+        payload, media_type, filename = export_project_profile_bytes(state, "report", "docx")
+        text = _docx_text(payload)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertIn("tech-report-surfaces-report-", filename)
+        self.assertIn("Technology Readiness & Transfer Report", text)
+        self.assertIn("NanoSeal-H2", text)
+        self.assertIn("Current defensible TRL", text)
+        self.assertIn("Readiness roadmap", text)
+        self.assertIn("Sprint 0 validation required", text)
+        self.assertNotIn("No report available", text)
+        self.assertNotIn("NanoSeal-the automation architecture assumption", text)
+        for forbidden in ("strategy phase", "classify phase", "gauntlet", "SQI", "monitor phase", "0/8 phases"):
+            self.assertNotIn(forbidden.lower(), text.lower())
+
+    def test_technology_readiness_client_dossier_uses_tr_sections_and_preserves_name(self):
+        state = make_completed_technology_readiness_surface_state("tech-client-surfaces")
+
+        markdown = build_client_dossier_markdown(state)
+
+        for expected in (
+            "Technology Readiness Client Dossier",
+            "What technology we reviewed",
+            "Current defensible TRL",
+            "Why higher TRL is not yet justified",
+            "Evidence gaps",
+            "Sprint 0 validation package",
+            "IP/disclosure review note",
+            "Transfer-readiness note",
+            "Readiness roadmap",
+            "What to do next",
+            "NanoSeal-H2",
+            "not TRL certification",
+            "not legal patentability advice",
+        ):
+            self.assertIn(expected, markdown)
+        self.assertNotIn("NanoSeal-the automation architecture assumption", markdown)
+        for forbidden in (
+            "Recommended path",
+            "Why this is recommended",
+            "What should happen next",
+            "Timeline / 7-30-60-90 roadmap",
+            "strategy phase",
+            "classify phase",
+            "hypotheses",
+            "gauntlet",
+            "SQI",
+            "monitor phase",
+            "0/8 phases",
+        ):
+            self.assertNotIn(forbidden.lower(), markdown.lower())
+
+    def test_technology_readiness_operator_dossier_uses_tr_sequence_and_diagnostics(self):
+        state = make_completed_technology_readiness_surface_state("tech-operator-surfaces")
+
+        markdown = build_operator_dossier_markdown(state)
+
+        self.assertIn("Technology Readiness Operator Dossier", markdown)
+        self.assertIn("Technology readiness executive summary", markdown)
+        self.assertIn("Phase completion status", markdown)
+        self.assertIn("Evidence and source summary", markdown)
+        self.assertIn("citation_marker_count", markdown)
+        for phase in (
+            "Scope",
+            "Scientific Inventory",
+            "TRL Diagnosis",
+            "Research-Industry Alignment",
+            "IP Protection Axis",
+            "Next-Level Recommendations",
+            "Technical Validation Plan",
+            "Industrial Transfer Plan",
+            "Readiness Roadmap",
+            "Executive Summary",
+        ):
+            self.assertIn(phase, markdown)
+        for forbidden in ("strategy phase", "classify phase", "hypotheses", "gauntlet", "SQI", "monitor phase", "0/8 phases"):
+            self.assertNotIn(forbidden.lower(), markdown.lower())
+
+    def test_technology_readiness_client_and_operator_profiles_are_separated(self):
+        state = make_completed_technology_readiness_surface_state("tech-profile-separation")
+
+        client_markdown = build_client_dossier_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        self.assertNotIn("citation_marker_count", client_markdown)
+        self.assertNotIn("Phase completion status", client_markdown)
+        self.assertNotIn("Threshold section classification", client_markdown)
+        self.assertIn("citation_marker_count", operator_markdown)
+        self.assertIn("Phase completion status", operator_markdown)
+        self.assertIn("Technology Readiness Operator Dossier", operator_markdown)
+
+    def test_technology_readiness_machine_archive_uses_generated_report_shell(self):
+        state = make_completed_technology_readiness_surface_state("tech-archive-surfaces")
+
+        payload = build_machine_archive_payload(state)
+        report = payload["report.md"]
+
+        self.assertIn("Technology Readiness & Transfer Report", report)
+        self.assertIn("NanoSeal-H2", report)
+        self.assertNotIn("No report available", report)
+
+    def test_technology_readiness_workbook_profile_requires_matching_project_type(self):
+        state = make_export_state("non-tech-workbook")
+
+        with self.assertRaises(ValueError):
+            export_project_profile_bytes(state, TECHNOLOGY_READINESS_WORKBOOK_PROFILE, "xlsx")
+
+    def test_monitoring_template_profiles_export_xlsx_with_stable_headers(self):
+        state = make_export_state("monitor-template")
+        state.report = """# Executive Summary
+Proceed with the pilot.
+
+# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source |
+|---|---|---|---|---|---|---|---|
+| Activation quality | at least 12 qualified pilots | fewer than 6 qualified pilots | stop if data access is unavailable | Product Lead | Weekly | pause rollout | Market note |
+
+# Monitoring and Kill Criteria
+This section is narrative only and should not replace Decision Gates.
+"""
+
+        payload, media_type, filename = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("monitor-template-client_monitoring_template-", filename)
+        self.assertTrue(filename.endswith(".xlsx"))
+        self.assertEqual(rows[0], tuple(CLIENT_MONITORING_TEMPLATE_HEADERS))
+        self.assertEqual(rows[1][0], "Activation quality")
+        self.assertEqual(rows[1][7], "stop if data access is unavailable")
+        self.assertEqual(rows[1][8], "pause rollout")
+        self.assertGreaterEqual(len(rows), 2)
+
+    def test_client_monitoring_workbook_has_demo_ready_sheets_and_client_safe_text(self):
+        state = make_monitoring_xlsx_polish_state("client-monitor-workbook-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        workbook = _xlsx_workbook(payload)
+        expected_sheets = {
+            "README",
+            SHEET_NAME,
+            "Stop - Change Criteria",
+            "Canaries",
+            "Review Log",
+        }
+        workbook_text = _xlsx_visible_text(workbook)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertTrue(expected_sheets.issubset(set(workbook.sheetnames)))
+        for sheet_name in expected_sheets:
+            self.assertGreaterEqual(len(_xlsx_sheet_rows(workbook, sheet_name)), 1, sheet_name)
+        self.assertEqual(_xlsx_sheet_rows(workbook, SHEET_NAME)[0], tuple(CLIENT_MONITORING_TEMPLATE_HEADERS))
+        self.assertIn("Metric / signal", _xlsx_sheet_rows(workbook, "Stop - Change Criteria")[0])
+        self.assertIn("Output trust metric", workbook_text)
+        self.assertIn("more than 20% over approved budget", workbook_text)
+        self.assertIn("Operations Lead", workbook_text)
+        self.assertIn("Weekly", workbook_text)
+        self.assertIn("Pilot dashboard", workbook_text)
+        self.assertIn("caveat: budget assumptions need validation", workbook_text)
+        self.assertIn("Human review required before client delivery.", workbook_text)
+        self.assertIn("To be confirmed", workbook_text)
+        self.assertIn("Not supplied", workbook_text)
+        for forbidden in ("hypothesis 5", "hypothesis 9", "architecture hypothesis", "H5", "H9"):
+            self.assertNotIn(forbidden, workbook_text)
+        for sheet_name in (SHEET_NAME, "Stop - Change Criteria", "Canaries", "Review Log"):
+            _assert_sheet_has_usability_polish(self, workbook, sheet_name)
+
+    def test_operator_monitoring_workbook_has_demo_ready_sheets_and_trace_context(self):
+        state = make_monitoring_xlsx_polish_state("operator-monitor-workbook-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        workbook = _xlsx_workbook(payload)
+        expected_sheets = {
+            "README",
+            SHEET_NAME,
+            "OODA Schedule",
+            "Circuit Breakers",
+            "Canaries",
+            "Re-entry Watch - Risks",
+            "Review Log",
+            "Metadata - Evidence Maturity",
+        }
+        workbook_text = _xlsx_visible_text(workbook)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertTrue(expected_sheets.issubset(set(workbook.sheetnames)))
+        for sheet_name in expected_sheets:
+            self.assertGreaterEqual(len(_xlsx_sheet_rows(workbook, sheet_name)), 1, sheet_name)
+        self.assertEqual(_xlsx_sheet_rows(workbook, SHEET_NAME)[0], tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
+        for header in OPERATOR_TRACE_HEADERS:
+            self.assertIn(header, _xlsx_sheet_rows(workbook, SHEET_NAME)[0])
+        self.assertIn("Output trust metric", workbook_text)
+        self.assertIn("more than 20% over approved budget", workbook_text)
+        self.assertIn("H5", workbook_text)
+        self.assertIn("Row source", workbook_text)
+        self.assertIn("monitor.circuit_breakers[0]", workbook_text)
+        self.assertIn("Evidence maturity", workbook_text)
+        self.assertIn("Human review required before client delivery.", workbook_text)
+        for sheet_name in (SHEET_NAME, "OODA Schedule", "Circuit Breakers", "Canaries", "Re-entry Watch - Risks", "Review Log"):
+            _assert_sheet_has_usability_polish(self, workbook, sheet_name)
+
+    def test_monitoring_template_uses_safe_placeholders_for_missing_values(self):
+        state = ProjectState(project_id="monitor-placeholders", project_name="Monitor placeholders", brief="Brief")
+
+        payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+        combined = "\n".join("\t".join(row) for row in rows)
+
+        self.assertIn("To be confirmed", combined)
+        self.assertIn("Not supplied", combined)
+        self.assertNotIn("Operator to define", combined)
+        self.assertNotIn("Threshold not yet confirmed", combined)
+        self.assertNotIn("Validation required", combined)
+        self.assertNotIn("Evidence source unavailable", combined)
+
+    def test_client_monitoring_template_uses_concrete_values_and_direction_fidelity(self):
+        state = ProjectState(
+            project_id="monitor-fidelity",
+            project_name="Monitor fidelity",
+            brief="Decide whether activation and lead-quality remediation are ready to scale.",
+        )
+        state.report = """# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source |
+|---|---|---|---|---|---|---|---|
+| Activation rate | >= 40% by Day 7 | below 30% by Day 10 | stop if under 30% within 14 days | Growth Lead | 7-day rolling | pause rollout | Product telemetry |
+
+# Monitoring and Kill Criteria
+Decision Gates remain the threshold source of truth.
+"""
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Lead quality controls activation-to-conversion lag.",
+                signal="Lead quality conversion",
+                confirm="lead quality improves 1.5pp within 14 days",
+                reject="time-to-value stays above 72 hours",
+                evidence_ids=["ev-market"],
+            )
+        ]
+        state.strategy = StrategyOutput(
+            preliminary_verdicts=[
+                PreliminaryVerdict(
+                    id="H1",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    evidence="ev-market",
+                    monitoring_plan="Track activation-to-conversion lag down 0.5pp by Day 10.",
+                )
+            ],
+            success_metrics=[
+                "Time-to-value down 24 hours",
+                "Activation-to-conversion lag down 1.5pp within 14 days",
+            ],
+            review_date="Day 10",
+        )
+        state.monitor = MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                weekly=[
+                    MonitorScheduleItem(
+                        metric="Activation rate",
+                        owner="Growth Lead",
+                        source="Product telemetry 40% by Day 7",
+                    )
+                ]
+            ),
+            canaries=[
+                MonitorCanary(
+                    signal="activation-to-conversion lag",
+                    direction="up",
+                    window="14-day rolling",
+                    meaning="lag should not increase",
+                )
+            ],
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="H1 lead-quality follow-up",
+                    trip="time-to-value above 72 hours",
+                    reset="below 48 hours for 7-day rolling",
+                )
+            ],
+        )
+
+        client_payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        client_rows = _xlsx_rows(client_payload)
+        client_combined = "\n".join("\t".join(row) for row in client_rows)
+
+        for weak_placeholder in ("Validation required", "Threshold not yet confirmed", "Operator to define"):
+            self.assertNotIn(weak_placeholder, client_combined)
+        for concrete in (
+            "72 hours",
+            "24 hours",
+            "48 hours",
+            "7-day rolling",
+            "14-day rolling",
+            "Day 7",
+            "Day 10",
+            "within 14 days",
+            "40%",
+            "30%",
+            "1.5pp",
+            "0.5pp",
+        ):
+            self.assertIn(concrete, client_combined)
+        self.assertNotRegex(client_combined, r"\bH(10|[1-9])\b")
+        self.assertIn("hypothesis 1", client_combined)
+        self.assertIn("Expected trend under remediation: down", client_combined)
+        self.assertIn("Expected trend under remediation: up", client_combined)
+        self.assertNotIn("Direction: up", client_combined)
+        self.assertNotIn("Signal direction: up", client_combined)
+
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        operator_combined = "\n".join("\t".join(row) for row in _xlsx_rows(operator_payload))
+        self.assertRegex(operator_combined, r"\bH1\b")
+        self.assertIn("72 hours", operator_combined)
+        self.assertIn("1.5pp", operator_combined)
+
+    def test_monitoring_template_ambiguous_decision_gate_uses_placeholder(self):
+        state = make_export_state("ambiguous-gates")
+        state.report = """# Decision Gates
+| Topic | Comment |
+|---|---|
+| Pilot | Needs discussion |
+
+# Evidence Used
+| Evidence | What it suggests |
+|---|---|
+| ev-market | Should remain unrelated to gate parsing |
+"""
+
+        payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+
+        self.assertEqual(rows[1][0], "Decision Gate")
+        self.assertEqual(rows[1][7], "To be confirmed")
+        self.assertIn("not parsed into a clear gate table", "\n".join(rows[1]))
+        self.assertNotIn("ev-market", rows[1])
+
+    def test_monitoring_template_smoke_cleans_placeholders_and_keeps_operator_evidence_trace_columns(self):
+        state = ProjectState(
+            project_id="monitor-smoke-cleanup",
+            project_name="Monitoring smoke cleanup",
+            brief="Repair activation, data quality, and billing/CRM discrepancy monitoring.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Data quality controls activation recovery.",
+                signal="Data quality completion rate",
+                confirm="completion rate >=80% within 10 business days",
+                reject="completion rate <=30% after 48h",
+                evidence_ids=["evidence_84a1a979a567"],
+            ),
+            Hypothesis(
+                id="H2",
+                text="Qualitative readiness needs an owner.",
+                signal="Qualitative launch readiness",
+                confirm="Leadership review complete",
+                reject="No decision meeting scheduled",
+            ),
+        ]
+        state.strategy = StrategyOutput(
+            preliminary_verdicts=[
+                PreliminaryVerdict(
+                    id="H1",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    evidence="evidence_84a1a979a567",
+                    monitoring_plan="Track data quality from 0% to 100% within 10 business days.",
+                ),
+                PreliminaryVerdict(
+                    id="H2",
+                    verdict=Verdict.NEEDS_MONITORING,
+                    monitoring_plan="Confirm launch readiness with the decision owner.",
+                ),
+            ],
+            success_metrics=[
+                "Activation recovery reaches 40% after 48h.",
+                "Data quality coverage moves from 0% to 100% within 10 business days.",
+                "Calibration target <0.20.",
+                "Qualitative launch readiness review.",
+            ],
+        )
+        state.monitor = MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                daily=[
+                    MonitorScheduleItem(
+                        metric="Activation completion rate reaches 40% within 48h",
+                        source="source_ref=upload:file-2:metrics.csv#row=3 knowledge_alpha storage_ref=C:\\Users\\operator\\private.xlsx",
+                    )
+                ]
+            ),
+            canaries=[
+                MonitorCanary(
+                    signal="billing/CRM delta discrepancy",
+                    window="48h",
+                    meaning="delta should fall below <0.20",
+                )
+            ],
+        )
+
+        client_payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        client_rows = _xlsx_rows(client_payload)
+        client_combined = "\n".join("\t".join(row) for row in client_rows)
+
+        for forbidden in (
+            "Threshold not yet confirmed",
+            "Operator to define",
+            "knowledge_",
+            "source_ref",
+            "upload:",
+            "storage_ref",
+        ):
+            self.assertNotIn(forbidden, client_combined)
+        self.assertNotRegex(client_combined, r"\bevidence_[A-Za-z0-9_.:-]+\b")
+        for expected in (
+            "40%",
+            "0%",
+            "100%",
+            "10 business days",
+            "48h",
+            "<0.20",
+            "To be confirmed",
+        ):
+            self.assertIn(expected, client_combined)
+
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        operator_rows = _xlsx_rows(operator_payload)
+        operator_combined = "\n".join("\t".join(row) for row in operator_rows)
+
+        self.assertNotIn("Threshold not yet confirmed", operator_combined)
+        self.assertNotIn("Operator to define", operator_combined)
+        self.assertIn("To be confirmed", operator_combined)
+
+        operator_header = operator_rows[0]
+        evidence_column = operator_header.index("Evidence IDs")
+        evidence_hits = 0
+        for row in operator_rows[1:]:
+            for index, value in enumerate(row):
+                if re.search(r"\bevidence_[A-Za-z0-9_.:-]+\b", value):
+                    evidence_hits += 1
+                    self.assertEqual(index, evidence_column)
+        self.assertGreater(evidence_hits, 0)
+
+    def test_monitoring_template_client_redacts_internal_ids_refs_and_formula_cells(self):
+        state = make_export_state("client-monitor-safe")
+        state.report = r"""# Decision Gates
+| Signal to watch | Good sign | Warning sign | Stop/change-course threshold | Owner / role | Review cadence | Action if triggered | Evidence source | Notes |
+|---|---|---|---|---|---|---|---|---|
+| =Activation | +good | @warning | -stop if BF 12 or RPN 90 worsens | @Owner | Weekly | =HYPERLINK("http://bad") | upload:file-1:metrics.csv#row=2 | ev-market knowledge_alpha storage_ref=C:\Users\nicoc\secret.xlsx operator trace policy_audit_log raw_provider_payload raw prompt raw_prompt project_state.json machine_archive runtime/preflight metadata upload_store=/Users/nicoc/uploads |
+"""
+        state.monitor = MonitorOutput(
+            ooda_schedule=MonitorOODASchedule(
+                daily=[MonitorScheduleItem(metric="=CTR", owner="+Owner", source="source_ref=upload:file-2:private.csv#row=1")]
+            ),
+            circuit_breakers=[MonitorCircuitBreaker(strategy_ref="S1", trip="-stop now", reset="@reset")],
+            canaries=[MonitorCanary(signal="@canary", direction="up", window="7d", meaning="+lift")],
+        )
+
+        payload, _, _ = export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+        combined = "\n".join("\t".join(row) for row in rows)
+
+        self.assertIn("'=Activation", combined)
+        self.assertIn("'+good", combined)
+        self.assertIn("'@warning", combined)
+        self.assertIn("'-stop if internal diagnostic redacted", combined)
+        self.assertIn("Uploaded project document", combined)
+        for forbidden in (
+            "ev-market",
+            "knowledge_alpha",
+            "upload:",
+            "storage_ref",
+            "source_ref",
+            r"C:\Users\nicoc",
+            "/Users/nicoc",
+            "BF 12",
+            "RPN 90",
+            "operator trace",
+            "policy_audit_log",
+            "raw_provider_payload",
+            "raw prompt",
+            "raw_prompt",
+            "project_state.json",
+            "machine_archive",
+            "runtime/preflight metadata",
+            "upload_store",
+        ):
+            self.assertNotIn(forbidden, combined)
+
+        operator_payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        operator_rows = _xlsx_rows(operator_payload)
+        operator_combined = "\n".join("\t".join(row) for row in operator_rows)
+
+        self.assertEqual(operator_rows[0], tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
+        for header in OPERATOR_TRACE_HEADERS:
+            self.assertIn(header, operator_rows[0])
+        for retained in (
+            "policy_audit_log",
+            "raw_provider_payload",
+            "raw prompt",
+            "project_state.json",
+            "machine_archive",
+            "runtime/preflight metadata",
+        ):
+            self.assertIn(retained, operator_combined)
+        self.assertNotIn(r"C:\Users\nicoc", operator_combined)
+        self.assertNotIn("/Users/nicoc", operator_combined)
+
+    def test_monitoring_template_operator_retains_allowed_trace_after_redaction(self):
+        state = make_export_state("operator-monitor-trace")
+        state.report = r"""# Decision Gates
+| Signal to watch | Stop/change-course threshold | Action if triggered | Evidence source |
+|---|---|---|---|
+| Pipeline quality | stop if below target [Evidence: ev-market] | Escalate | upload:file-1:metrics.csv#row=2 C:\Users\nicoc\secret.xlsx |
+"""
+
+        payload, _, _ = export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        rows = _xlsx_rows(payload)
+        header = rows[0]
+        data = rows[1]
+
+        self.assertEqual(header, tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
+        self.assertIn("ev-market", data[header.index("Evidence IDs")])
+        self.assertIn("upload:file-1:metrics.csv#row=2", data[header.index("Internal source refs")])
+        self.assertNotIn(r"C:\Users\nicoc", "\n".join(data))
+
+    def test_monitoring_template_cell_content_is_deterministic(self):
+        state = make_export_state("deterministic-monitor")
+
+        first = _xlsx_rows(export_project_profile_bytes(state, "client_monitoring_template", "xlsx")[0])
+        second = _xlsx_rows(export_project_profile_bytes(state, "client_monitoring_template", "xlsx")[0])
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, monitoring_template_cell_rows(state, audience="client"))
+
+    def test_client_quality_gate_cleans_raw_ids_sources_and_unsupported_certainty(self):
+        state = ProjectState(
+            project_id="client-quality-gate",
+            project_name="Client quality gate",
+            brief="Evaluate a growth pilot with partial evidence.",
+            report=r"""# Executive Summary
+Direct project evidence: Moderate — three supplied documents (GTM plan, market research, web proposal, social calendar)
+BF=12.0 says the confirmed causal hypothesis is retention. RPN 90 remains high.
+
+# The Decision
+Decide whether to scale.
+
+# Recommended Path
+Proceed only after validation.
+
+# Why This Is Recommended
+knowledge_alpha suggests the pilot is promising.
+evidence_alpha and source_ref=upload:file-9:source.md#chunk=7 mechanically explained the slowdown.
+source_ref=upload:file-1:metrics.md#chunk=2 provides evidence interpretation context.
+target threshold <provisional threshold.
+secret=supersecret C:\Users\operator\project.txt
+
+# Evidence Used
+| Evidence | What it suggests | Citation |
+|---|---|---|
+| knowledge_table | knowledge_cell confirms traction | No citation available |
+| evidence_table | mechanically explained demand | citation unavailable |
+
+# Monitoring and Kill Criteria
+Stop if knowledge_monitor deteriorates.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        for forbidden in (
+            "knowledge_alpha",
+            "knowledge_table",
+            "knowledge_cell",
+            "knowledge_monitor",
+            "evidence_alpha",
+            "evidence_table",
+            "source_ref=",
+            "upload:file",
+            r"C:\Users",
+            "supersecret",
+            "BF=12.0",
+            "RPN 90",
+            "owner_decision_authority",
+            "variable_coverage",
+            "provisional threshold",
+            "operator-defined",
+            "No citation available",
+            "Evidence source unavailable",
+            "Citation |",
+            "three supplied documents",
+            "confirmed causal hypothesis",
+            "confirms traction",
+            "mechanically explained",
+            "provides evidence interpretation context",
+        ):
+            self.assertNotIn(forbidden, markdown)
+        self.assertEqual(markdown.count("No concrete source locators were available for this project"), 1)
+        self.assertIn("project evidence", markdown)
+        self.assertIn("working diagnosis", markdown)
+        self.assertIn("Evidence maturity: Hypothesis-only", markdown)
+
+    def test_client_metadata_and_report_omit_internal_ids_and_operator_notes(self):
+        state = make_sparse_growth_state("d07ade65-f9d3-462d-b7c0-23bf6c505a6e")
+        state.project_name = "Mini Test — Activation Bottleneck Decision"
+        state.risk_classification = "minimal_risk"
+        state.report = (
+            "# Executive Summary\n"
+            "Recommend dashboard telemetry, product analytics, legal review, circuit breaker, and regeneration-event logging.\n"
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+
+        for markdown in (client_markdown, report_markdown):
+            self.assertNotIn("Telemetry privacy note", markdown)
+            self.assertNotIn("Risk classification may understate", markdown)
+            self.assertNotIn("minimal_risk", markdown)
+            self.assertNotRegex(
+                markdown,
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            )
+        self.assertIn("Project name: Mini Test", client_markdown)
+        self.assertIn("Generated:", client_markdown)
+        self.assertNotIn("Project ID:", client_markdown)
+        self.assertNotIn("Risk:", client_markdown)
+
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+        self.assertNotIn("Telemetry privacy note", report_text)
+        self.assertNotIn("Risk classification may understate", report_text)
+        self.assertNotIn("minimal_risk", report_text)
+        self.assertNotRegex(
+            report_text,
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        )
+
+    def test_client_exports_remove_citation_noise_but_preserve_concrete_timing_values(self):
+        state = ProjectState(
+            project_id="client-citation-timing",
+            project_name="Client citation timing",
+            brief="Decide whether to continue an activation pilot with sparse evidence.",
+            report="""# Executive Summary
+Use a legal-review SLA of 24 hours or less, a 72 hours escalation window, and a 48 hours support follow-up.
+
+# Evidence Used
+| Evidence | What it suggests | Citation |
+|---|---|---|
+| Activation note | Keep response inside 72 hours. | No citation available |
+| Cadence note | Compare 7-day rolling and 14-day rolling activation by Day 7 and Day 10. | Evidence source unavailable |
+
+# Monitoring and Kill Criteria
+Stop if activation falls below provisional threshold of 7-day rolling baseline.
+Resolve blockers within 14 days.
+""",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+
+        for markdown in (client_markdown, report_markdown):
+            for concrete in (
+                "24 hours or less",
+                "72 hours",
+                "48 hours",
+                "7-day rolling",
+                "14-day rolling",
+                "Day 7",
+                "Day 10",
+                "within 14 days",
+            ):
+                self.assertIn(concrete, markdown)
+            self.assertNotIn("No citation available", markdown)
+            self.assertNotIn("Evidence source unavailable", markdown)
+            self.assertNotIn("Citation |", markdown)
+            self.assertNotRegex(markdown, r"(?mi)^\s*Citation\s*:?\s*$")
+            self.assertNotIn("planning estimate to validate in Sprint 0", markdown)
+            self.assertNotIn("threshold to validate in Sprint 0", markdown)
+            self.assertNotIn("operator-defined", markdown)
+            self.assertNotIn("provisional threshold", markdown)
+        self.assertEqual(client_markdown.count("No concrete source locators were available for this project"), 1)
+
+    def test_client_report_and_dossier_finalize_citations_locators_and_threshold_placeholders(self):
+        state = ProjectState(
+            project_id="client-final-citation-threshold",
+            project_name="Client final citation threshold",
+            brief="Decide whether activation and conversion recovery are ready to scale.",
+            report="""# Executive Summary
+Use the pilot target ≥threshold before scale-up.
+The The problem is measurement quality, not ambition.
+Internal locator knowledge_report and [Evidence: knowledge_report | chunk=4] should not ship.
+Operator-only source excerpt: [Evidence: knowledge_operator | chunk=9] remains traceable.
+Concrete values: 25%, 29%, 38%, 40%, 48h, <24h, >48h, 2pp, 3 days, 5%, 10%, 15%, 20%, 30%, 50%.
+
+# Evidence Used
+| Evidence | What it suggests | Citation |
+|---|---|---|
+| Activation note | Keep the pilot bounded. | citation unavailable |
+| Conversion note | Validate the onboarding funnel. | No citation available |
+| Leadership note | Treat this as directional. | [Inference] |
+| Measurement note | Data coverage is incomplete. | [Unknown] |
+
+| Citation |
+|---|
+| citation unavailable |
+
+Citation
+Citation:
+
+# Monitoring and Kill Criteria
+Use ≥threshold before expanding.
+Track threshold activation rate weekly.
+Track threshold conversion from onboarding.
+Compare against threshold baseline.
+Do not expand to threshold until Sprint 0 validates the gate.
+Use threshold of new trials for expansion.
+Stop if the signal falls below threshold.
+Set target of threshold before rollout.
+Check the activation validation gate and baseline validation gate.
+Escalate above the threshold or below the threshold.
+""",
+        )
+        state.strategy = StrategyOutput(
+            success_metrics=[
+                "New trial expansion reaches 20% of new trials.",
+                "Activation rate reaches at least 65%.",
+                "Activation-to-conversion lag down 1.5pp within 14 days.",
+                "Conversion guardrail is below 25%.",
+            ],
+            monitoring_plan="Use the activation baseline only after 7-day rolling telemetry is stable.",
+        )
+        state.monitor = MonitorOutput(
+            circuit_breakers=[
+                MonitorCircuitBreaker(
+                    strategy_ref="activation",
+                    trip="Activation rate below 40% for 7-day rolling baseline.",
+                    reset="Activation rate at least 65% for 14 days.",
+                )
+            ],
+            canaries=[
+                MonitorCanary(
+                    signal="activation-to-conversion lag",
+                    direction="down",
+                    window="14-day rolling",
+                    meaning="Conversion lag should fall by 1.5pp within 14 days.",
+                )
+            ],
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+
+        for output in (client_markdown, report_markdown, report_text):
+            self.assertEqual(output.count(CLIENT_DELIVERY_VALIDATION_BANNER), 1)
+            self.assertEqual(output.splitlines()[0], CLIENT_DELIVERY_VALIDATION_BANNER)
+            self.assertEqual(output.count("No concrete source locators were available for this project"), 1)
+            for forbidden in (
+                "citation unavailable",
+                "No citation available",
+                "Evidence source unavailable",
+                "knowledge_report",
+                "knowledge_operator",
+                "[Evidence:",
+                "| Citation |",
+                "target ≥threshold",
+                "≥threshold",
+                "threshold activation rate",
+                "threshold conversion",
+                "threshold baseline",
+                "expand to threshold",
+                "The The",
+                "threshold of new trials",
+                "falls below threshold",
+                "target of threshold",
+                "activation validation gate",
+                "baseline validation gate",
+                "above the threshold",
+                "below the threshold",
+            ):
+                self.assertNotIn(forbidden, output)
+            self.assertNotRegex(output, r"(?mi)^\s*Citation\s*:?\s*$")
+            self.assertIn("The problem is measurement quality", output)
+            self.assertIn("[Inference]", output)
+            self.assertIn("[Unknown]", output)
+            self.assertIn("65%", output)
+            self.assertIn("1.5pp within 14 days", output)
+            self.assertIn("7-day rolling baseline", output)
+            self.assertIn("20% of new trials", output)
+            for concrete in ("25%", "29%", "38%", "40%", "48h", "<24h", ">48h", "2pp", "3 days", "5%", "10%", "15%", "20%", "30%", "50%"):
+                self.assertIn(concrete, output)
+
+    def test_final_report_polish_fixes_evidence_maturity_boundary_and_blank_citation_status_tables(self):
+        state = ProjectState(
+            project_id="final-pdf-polish-boundary",
+            project_name="Final PDF polish boundary",
+            brief="Decide whether Sprint 0 evidence is enough to proceed.",
+            report="""# Executive Summary
+Run Sprint 0.## Evidence maturity
+This line used to render with a stuck heading.
+
+# Evidence Used
+| Evidence | What It Suggests | Citation status |
+|---|---|---|
+| Activation note | What It Suggests supports the recommendation. | |
+| Discovery note | Why It Is Needed supports Sprint 0. | |
+""",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+
+        for markdown in (client_markdown, report_markdown):
+            self.assertNotIn("Sprint 0.## Evidence maturity", markdown)
+            self.assertRegex(markdown, r"(?m)^## Evidence maturity$")
+            self.assertNotIn("| Evidence | What It Suggests | Citation status |", markdown)
+            self.assertIn("| Evidence | What It Suggests |", markdown)
+            self.assertIn("| Activation note | This supports the recommendation. |", markdown)
+            self.assertIn("| Discovery note | This supports Sprint 0. |", markdown)
+            self.assertNotIn("What It Suggests supports", markdown)
+            self.assertNotIn("Why It Is Needed supports", markdown)
+
+        self.assertNotIn("Sprint 0.## Evidence maturity", report_text)
+        self.assertIn("Evidence maturity", report_text)
+        self.assertIn("Activation note", report_text)
+        self.assertIn("This supports the recommendation.", report_text)
+        self.assertIn("Discovery note", report_text)
+        self.assertIn("This supports Sprint 0.", report_text)
+
+    def test_final_report_polish_preserves_client_safe_citation_status_markers(self):
+        state = ProjectState(
+            project_id="final-pdf-polish-status-markers",
+            project_name="Final PDF polish status markers",
+            brief="Preserve client-safe citation status labels.",
+            report="""# Evidence Used
+| Evidence | What It Suggests | Citation status |
+|---|---|---|
+| Leadership note | Treat this as directional. | [Inference] |
+| Measurement note | Data coverage is incomplete. | [Unknown] |
+| Strategy note | Validate this before acting. | [Hypothesis] |
+| Useful blank note | Keep this row even without a status value. | |
+""",
+        )
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        report_payload, _, _ = export_project_profile_bytes(state, "report", "docx")
+        report_text = _docx_text(report_payload)
+
+        for output in (client_markdown, report_markdown, report_text):
+            self.assertIn("[Inference]", output)
+            self.assertIn("[Hypothesis]", output)
+            self.assertIn("[Unknown]", output)
+            self.assertIn("Useful blank note", output)
+            self.assertIn("Keep this row even without a status value.", output)
+
+    def test_client_dossier_preserves_metric_values_and_repairs_title_boundary(self):
+        state = make_client_value_preservation_state("client-value-preservation-dossier")
+
+        client_markdown = build_client_dossier_markdown(state)
+        report_markdown = _safe_report_markdown(state)
+        operator_markdown = build_operator_dossier_markdown(state)
+
+        for output in (client_markdown, report_markdown):
+            self.assertNotIn("Sprint 0.# Client Dossier", output)
+            self.assertNotIn("threshold to threshold", output)
+            for concrete in (
+                "18%",
+                "12%",
+                "46%",
+                "29%",
+                "2.4",
+                "5.9",
+                "6 percentage-point",
+                "35%",
+                "72 hours",
+                "48 hours",
+                "Within 7 days",
+                "Day 5",
+                "Day 7",
+            ):
+                self.assertIn(concrete, output)
+            for forbidden in (
+                "Threshold not yet confirmed",
+                "Operator to define",
+                "provisional threshold",
+                "target of threshold",
+                "threshold of new trials",
+                "supports whether",
+                "supports which",
+                "Within 7 days=[REDACTED]",
+                "threshold probability that above",
+                "knowledge_",
+                "evidence_",
+                "source_ref",
+                "upload:",
+                "storage_ref",
+                "citation unavailable",
+            ):
+                self.assertNotIn(forbidden, output)
+            self.assertIn("reconcile Stripe trial counts against CRM records", output)
+            self.assertIn("validation signal that divergence above 2pp persists", output)
+            self.assertIn("This helps determine whether the conversion change is real.", output)
+            self.assertIn("This helps determine whether recovery is worth pursuing.", output)
+            self.assertIn("This helps identify which funnel step broke.", output)
+            self.assertIn("This helps identify which team should own the fix.", output)
+            self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, output)
+            self.assertIn("No concrete source locators were available for this project", output)
+            self.assertIn("Evidence maturity", output)
+            self.assertIn("[Inference]", output)
+            self.assertIn("[Hypothesis]", output)
+            self.assertIn("[Unknown]", output)
+
+        self.assertIn("Operator Dossier", operator_markdown)
+        self.assertIn("Technical appendix", operator_markdown)
+
+    def test_report_profile_pdf_applies_runtime_citation_polish(self):
+        state = make_runtime_pdf_polish_state("runtime-report-pdf-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "report", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("No concrete source locators were available for this project", compact)
+        self.assertIn("Evidence maturity", compact)
+        for preserved in ("[Inference]", "[Hypothesis]", "[Unknown]"):
+            self.assertIn(preserved, compact)
+        for forbidden in (
+            "Sprint 0.## Evidence maturity",
+            "Citation status",
+            "citation unavailable",
+            "Citation citation unavailable",
+            "knowledge_",
+            "evidence_",
+            "source_ref",
+            "upload:",
+            "storage_ref",
+            "Why It Is Needed supports",
+            "What It Suggests supports",
+        ):
+            self.assertNotIn(forbidden, compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps identify which owner approves scale-up.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
+        self.assertIn("This helps determine whether to continue Sprint 0.", compact)
+
+    def test_report_profile_pdf_polishes_client_language_artifacts(self):
+        state = make_client_language_polish_state("report-client-language-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "report", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        _assert_client_language_polished(self, compact)
+
+    def test_report_profile_pdf_filters_orphan_evidence_table_separator_artifacts(self):
+        state = make_orphan_evidence_separator_state("report-orphan-evidence-separator")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "report", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("Tool budget and capacity assumptions", compact)
+        self.assertIn("evidence strength: directional", compact)
+        self.assertIn("caveat: needs validation", compact)
+        self.assertIn("[Hypothesis]", compact)
+        self.assertNotIn("|---", compact)
+        self.assertNotIn("| Tool budget and capacity assumptions", compact)
+        self.assertNotIn("Tool budget and capacity assumptions | evidence strength", compact)
+
+    def test_client_dossier_profile_pdf_applies_runtime_citation_polish(self):
+        state = make_runtime_pdf_polish_state("runtime-client-pdf-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("No concrete source locators were available for this project", compact)
+        self.assertIn("Evidence maturity", compact)
+        for preserved in ("[Inference]", "[Hypothesis]", "[Unknown]"):
+            self.assertIn(preserved, compact)
+        for forbidden in (
+            "Sprint 0.## Evidence maturity",
+            "Citation status",
+            "citation unavailable",
+            "Citation citation unavailable",
+            "knowledge_",
+            "evidence_",
+            "source_ref",
+            "upload:",
+            "storage_ref",
+            "Why It Is Needed supports",
+            "What It Suggests supports",
+        ):
+            self.assertNotIn(forbidden, compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps identify which owner approves scale-up.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
+        self.assertIn("This helps determine whether to continue Sprint 0.", compact)
+
+    def test_client_dossier_profile_pdf_polishes_client_language_artifacts(self):
+        state = make_client_language_polish_state("dossier-client-language-polish")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn("What evidence was used", compact)
+        _assert_client_language_polished(self, compact)
+
+    def test_client_dossier_profile_pdf_filters_orphan_evidence_table_separator_artifacts(self):
+        state = make_orphan_evidence_separator_state("client-dossier-orphan-evidence-separator")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("What evidence was used", compact)
+        self.assertIn("Tool budget and capacity assumptions", compact)
+        self.assertIn("evidence strength: directional", compact)
+        self.assertIn("caveat: needs validation", compact)
+        self.assertIn("[Hypothesis]", compact)
+        self.assertNotIn("|---", compact)
+        self.assertNotIn("| Tool budget and capacity assumptions", compact)
+        self.assertNotIn("Tool budget and capacity assumptions | evidence strength", compact)
+
+    def test_client_dossier_profile_pdf_filters_evidence_table_separator_artifacts(self):
+        state = make_runtime_pdf_polish_state_with_table_artifacts("automation-roi-pdf-table-artifacts")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "pdf")
+        text = _pdf_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/pdf")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("Evidence", compact)
+        self.assertIn("What It Suggests", compact)
+        self.assertIn("Why It Is Needed", compact)
+        self.assertIn("Decision It Validates", compact)
+        self.assertIn("Activation note", compact)
+        self.assertIn("Measurement note", compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
+        self.assertNotIn("|---|---|---|---|---|", compact)
+        self.assertNotRegex(compact, r"(?:^|\s)-{3}(?:\s+-{3}){2,}(?:\s|$)")
+
+    def test_client_dossier_profile_docx_filters_evidence_table_separator_artifacts(self):
+        state = make_runtime_pdf_polish_state_with_table_artifacts("automation-roi-docx-table-artifacts")
+
+        payload, media_type, _ = export_project_profile_bytes(state, "client_dossier", "docx")
+        text = _docx_text(payload)
+        compact = re.sub(r"\s+", " ", text)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertIn(CLIENT_DELIVERY_VALIDATION_BANNER, compact)
+        self.assertIn("Evidence maturity", compact)
+        self.assertIn("Activation note", compact)
+        self.assertIn("Measurement note", compact)
+        self.assertIn("This supports the scale recommendation.", compact)
+        self.assertIn("This helps determine whether telemetry is usable.", compact)
+        self.assertNotIn("|---|---|---|---|---|", compact)
+        self.assertNotIn("---", {line.strip() for line in text.splitlines()})
+
+    def test_operator_monitoring_template_note_is_single_and_nonduplicating(self):
+        state = make_export_state("operator-monitor-note")
+
+        first = build_operator_dossier_markdown(state)
+        second = build_operator_dossier_markdown(state)
+        self.assertEqual(first.count(MONITORING_TEMPLATE_OPERATOR_NOTE), 1)
+        self.assertEqual(second.count(MONITORING_TEMPLATE_OPERATOR_NOTE), 1)
+
+        state.monitor.commitment_rationale = MONITORING_TEMPLATE_OPERATOR_NOTE
+        summary = operator_monitoring_summary(state)
+        self.assertEqual(summary.count(MONITORING_TEMPLATE_OPERATOR_NOTE), 1)
 
     def test_report_profile_includes_versioned_freshness_warning_when_stale(self):
         state = make_export_state("stale-report-profile")
@@ -496,6 +2431,10 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "defensibility score",
             "evidence validated",
             "claim proven",
+            "owner_decision_authority",
+            "variable_coverage",
+            "Variable coverage summary",
+            "Missing decision-critical categories",
         ):
             self.assertNotIn(forbidden, markdown)
 
@@ -511,6 +2450,10 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "Technical appendix",
             "policy_gate_blocked=1",
             "Market note",
+            "Variable coverage summary",
+            "Missing decision-critical categories",
+            "Evidence needs:",
+            "Variable coverage limitation",
         ):
             self.assertIn(expected, markdown)
         for forbidden in (
@@ -520,6 +2463,8 @@ class TestProfileExporterHelpers(unittest.TestCase):
             "chain_of_thought",
             "ProjectState",
             r"C:\Users\nicoc",
+            "owner_decision_authority",
+            "coverage-debug",
         ):
             self.assertNotIn(forbidden, markdown)
 
@@ -609,7 +2554,7 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
             "schema overlap score",
             "forecast accuracy check",
             "calibration check",
-            "No concrete citation locators were available for this project",
+            "No concrete source locators were available for this project",
         ):
             self.assertIn(expected, client_markdown)
         self.assertIn("FMEA", operator_markdown)
@@ -638,6 +2583,12 @@ FMEA RPN 336 BF 12 DQ 65 H_norm 0.12 rho 0.45 [#24]
         operator_markdown = build_operator_dossier_markdown(state)
         client_markdown = build_client_dossier_markdown(state)
 
+        self.assertIn("SQI / quality review", operator_markdown)
+        self.assertIn("Metrics source", operator_markdown)
+        self.assertIn("Strategy-level metrics not populated; monitoring metrics available separately.", operator_markdown)
+        self.assertIn("daily monitor: Pilot activation", operator_markdown)
+        self.assertIn("canary: Regeneration failure rate", operator_markdown)
+        self.assertIn("circuit breaker: failure rate more than 15%", operator_markdown)
         self.assertIn("Success metrics are captured in the monitoring plan below.", operator_markdown)
         self.assertIn("Regeneration failure rate", operator_markdown)
         self.assertIn("Pilot activation", client_markdown)
@@ -734,7 +2685,9 @@ The proposed planning gate is more than 20% activation.
         self.assertIn("structural prior", markdown)
         self.assertNotIn("model-generated prior", markdown)
         self.assertIn("high provisional failure risk", markdown)
-        self.assertIn("above the operator-defined threshold", markdown)
+        self.assertIn("above 15% churn", markdown)
+        self.assertNotIn("above the threshold", markdown)
+        self.assertNotIn("operator-defined", markdown)
         self.assertNotIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
 
@@ -1262,18 +3215,20 @@ Starter tier at provisional planning estimate.
         self.assertNotIn("[Evidence: knowledge_z", markdown)
         self.assertIn("Support ticket volume supports an onboarding problem.", markdown)
         self.assertIn("structural BF estimate=12.0 (operator trace, not measured posterior)", markdown)
-        self.assertIn("target threshold below the operator-defined threshold.", markdown)
-        self.assertIn("exceeds the crux threshold by the operator-defined margin.", markdown)
-        self.assertIn("rises above the operator-defined share threshold of new ARR", markdown)
-        self.assertIn("target threshold: above the operator-defined threshold.", markdown)
-        self.assertIn("target threshold: below the operator-defined threshold.", markdown)
-        self.assertIn("crosses the operator-defined threshold.", markdown)
-        self.assertIn("operator-defined planning estimate.", markdown)
+        self.assertIn("target threshold below the validated gate.", markdown)
+        self.assertIn("exceeds the crux threshold by the validation margin.", markdown)
+        self.assertIn("rises above the new ARR share threshold to validate in Sprint 0", markdown)
+        self.assertIn("target threshold: above the validated gate.", markdown)
+        self.assertIn("target threshold: below the validated gate.", markdown)
+        self.assertIn("crosses the threshold to validate in Sprint 0.", markdown)
+        self.assertNotIn("above the threshold", markdown)
+        self.assertNotIn("below the threshold", markdown)
         self.assertIn("If Sprint 0 data confirms that activation exceeds the gate, proceed.", markdown)
         self.assertNotIn("domain complexity confirmed", markdown)
         self.assertNotIn("provisional threshold", markdown)
         self.assertNotIn("provisional threshold threshold", markdown)
         self.assertNotIn("provisional planning estimateK", markdown)
+        self.assertNotIn("operator-defined", markdown)
         self.assertIn('"confirmed by customer interview"', markdown)
         self.assertIn('"confirm that setup is difficult"', markdown)
 
@@ -1330,7 +3285,7 @@ Direct project evidence: Moderate — three supplied documents (GTM plan, market
         self.assertIn("| Legal | Require a legal-review SLA of 24 hours or less before campaign claims ship. |", markdown)
         self.assertNotIn("operator-defined effort estimate or less", markdown)
 
-    def test_client_count_cleanup_preserves_protected_source_excerpt_tables(self):
+    def test_client_count_cleanup_cleans_client_visible_source_excerpt_tables(self):
         state = ProjectState(
             project_id="protected-source-table",
             project_name="Protected source table",
@@ -1357,18 +3312,47 @@ Use the supplied evidence for planning.
         markdown = build_client_dossier_markdown(state)
 
         self.assertIn(
-            "Direct project evidence: Moderate — three supplied documents (GTM plan, market research, web proposal, social calendar)",
+            "Direct project evidence: Moderate — supplied project documents provide planning-level evidence, but validation gaps remain.",
             markdown,
         )
-        self.assertIn("upload:file-1:gtm-plan.pdf#page=2", markdown)
+        self.assertNotIn("three supplied documents", markdown)
+        self.assertNotIn("upload:file-1:gtm-plan.pdf#page=2", markdown)
 
-    def test_risk_classification_warning_only_for_minimal_risk_with_strong_generated_language(self):
+    def test_risk_classification_warning_only_for_minimal_risk_with_structured_high_risk(self):
         minimal = make_sparse_growth_state("risk-minimal")
         limited = make_sparse_growth_state("risk-limited")
+        minimal.audit = AuditOutput(
+            fmea=[
+                FMEAItem(
+                    component="Growth spend",
+                    failure_mode="Scaling spend before measurement repair",
+                    rpn=240,
+                    action="Hold scale-up until Sprint 0 evidence exists.",
+                )
+            ]
+        )
         limited.risk_classification = "limited_risk"
+        limited.audit = AuditOutput(
+            fmea=[
+                FMEAItem(
+                    component="Growth spend",
+                    failure_mode="Scaling spend before measurement repair",
+                    rpn=240,
+                    action="Hold scale-up until Sprint 0 evidence exists.",
+                )
+            ]
+        )
 
-        self.assertIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(minimal))
+        self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(minimal))
+        operator_markdown = build_operator_dossier_markdown(minimal)
+        self.assertIn(RISK_CLASSIFICATION_WARNING, operator_markdown)
+        self.assertIn("Risk classification note", operator_markdown)
+        self.assertIn("High/critical structured risk diagnostics", operator_markdown)
+        self.assertIn("audit.fmea", operator_markdown)
+        self.assertIn("Growth spend", operator_markdown)
+        self.assertIn("critical", operator_markdown)
         self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_client_dossier_markdown(limited))
+        self.assertNotIn(RISK_CLASSIFICATION_WARNING, build_operator_dossier_markdown(limited))
 
     def test_client_dossier_omits_empty_citation_marker_column_without_locators(self):
         state = ProjectState(
@@ -1389,9 +3373,10 @@ Run Sprint 0 first.
         client_markdown = build_client_dossier_markdown(state)
         operator_markdown = build_operator_dossier_markdown(state)
 
-        self.assertIn("No concrete citation locators were available for this project", client_markdown)
+        self.assertEqual(client_markdown.count("No concrete source locators were available for this project"), 1)
         self.assertIn("| Evidence | What it suggests |", client_markdown)
         self.assertNotIn("Citation Marker", client_markdown)
+        self.assertNotIn("No citation available", client_markdown)
         self.assertNotIn("citation unavailable", client_markdown)
         self.assertIn("Citation Marker", operator_markdown)
         self.assertIn("citation unavailable", operator_markdown)
@@ -1441,9 +3426,12 @@ Generated text says editorial evidence and CMS/schema capability.
         client_markdown = build_client_dossier_markdown(state)
         operator_markdown = build_operator_dossier_markdown(state)
 
-        for markdown in (client_markdown, operator_markdown):
-            self.assertIn("Log event metadata by default.", markdown)
-            self.assertIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", markdown)
+        self.assertNotIn("Telemetry privacy note", client_markdown)
+        self.assertNotIn("Log event metadata by default.", client_markdown)
+        self.assertNotIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", client_markdown)
+        self.assertIn("Telemetry privacy note", operator_markdown)
+        self.assertIn("Log event metadata by default.", operator_markdown)
+        self.assertIn("Do not log raw briefs, uploaded content, report text, provider payloads, secrets, local paths, API keys, or sensitive user text", operator_markdown)
         self.assertNotIn("raw_provider_payload", client_markdown)
         self.assertNotIn("raw_prompt", client_markdown)
         self.assertNotIn("sk-test-secret", client_markdown)
@@ -1566,6 +3554,8 @@ Stop if >2 critical assumptions remain unknown.
             self.assertIn("status", manifest["report_freshness"])
             self.assertIn("is_fresh", manifest["report_freshness"])
             self.assertIn("project_state.json", manifest["included_files"])
+            self.assertNotIn("client_monitoring_template", manifest["included_files"])
+            self.assertNotIn("operator_monitoring_template", manifest["included_files"])
 
             uploads = json.loads(archive.read("uploaded_file_manifest.json").decode("utf-8"))
             self.assertEqual(uploads[0]["file_id"], "file-1")
@@ -1573,6 +3563,36 @@ Stop if >2 critical assumptions remain unknown.
             self.assertEqual(uploads[0]["content_type"], "application/pdf")
             self.assertEqual(uploads[0]["size_bytes"], 321)
             self.assertEqual(uploads[0]["storage_ref"], "[REDACTED]")
+
+    def test_monitoring_template_profiles_do_not_mutate_machine_archive_report(self):
+        state = make_export_state("archive-monitor-invariance")
+        original_report = state.report
+        before_payload = build_machine_archive_payload(state)
+        before_report = before_payload["report.md"]
+        before_zip_payload, _, _ = export_project_profile_bytes(state, "machine_archive", "zip")
+        with zipfile.ZipFile(BytesIO(before_zip_payload)) as archive:
+            before_zip_report = archive.read("report.md").decode("utf-8")
+
+        build_client_dossier_markdown(state)
+        build_operator_dossier_markdown(state)
+        export_project_profile_bytes(state, "report", "docx")
+        export_project_profile_bytes(state, "client_dossier", "docx")
+        export_project_profile_bytes(state, "operator_dossier", "docx")
+        export_project_profile_bytes(state, "client_monitoring_template", "xlsx")
+        export_project_profile_bytes(state, "operator_monitoring_template", "xlsx")
+        after_payload = build_machine_archive_payload(state)
+        payload, _, _ = export_project_profile_bytes(state, "machine_archive", "zip")
+
+        self.assertEqual(state.report, original_report)
+        self.assertEqual(after_payload["report.md"], before_report)
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            report_md = archive.read("report.md").decode("utf-8")
+            manifest = json.loads(archive.read("export_manifest.json").decode("utf-8"))
+            self.assertEqual(report_md, before_zip_report)
+            self.assertNotIn("client_monitoring_template", report_md)
+            self.assertNotIn("operator_monitoring_template", report_md)
+            self.assertNotIn("client_monitoring_template", manifest["included_files"])
+            self.assertNotIn("operator_monitoring_template", manifest["included_files"])
 
     def test_invalid_profile_and_format_combinations_raise(self):
         state = make_export_state("invalid-profile")
@@ -1583,6 +3603,8 @@ Stop if >2 critical assumptions remain unknown.
             export_project_profile_bytes(state, "client_dossier", "zip")
         with self.assertRaises(ValueError):
             export_project_profile_bytes(state, "machine_archive", "pdf")
+        with self.assertRaises(ValueError):
+            export_project_profile_bytes(state, "client_monitoring_template", "pdf")
         with self.assertRaises(ValueError):
             export_project_profile_bytes(state, "report", "exe")
 
@@ -1606,6 +3628,62 @@ Stop if >2 critical assumptions remain unknown.
 
         self.assertIn("project_state.json", payload)
         self.assertNotIn("raw_project_state.json", payload)
+
+    def test_machine_archive_payload_shape_is_unchanged(self):
+        payload = build_machine_archive_payload(make_export_state("archive-shape"))
+        expected_files = {
+            "calibration_predictions.json",
+            "clarifications.json",
+            "decision_objects.json",
+            "evidence_locator_register.json",
+            "export_manifest.json",
+            "phase_outputs.json",
+            "policy_summary.json",
+            "project_state.json",
+            "report.md",
+            "risk_summary.json",
+            "uploaded_file_manifest.json",
+        }
+
+        self.assertEqual(set(payload), expected_files)
+        self.assertEqual(
+            payload["export_manifest.json"]["included_files"],
+            ["export_manifest.json", *sorted(expected_files - {"export_manifest.json"})],
+        )
+
+    def test_machine_archive_contract_is_unchanged_with_ingestion_metadata(self):
+        state = make_export_state("archive-ingestion-metadata")
+        state.ingestion_contract_version = "case.v1"
+        state.ingestion_source = "crm"
+        state.ingestion_external_case_id = "case-export"
+        state.ingestion_metadata = {"segment": "enterprise", "priority": "high"}
+        expected_files = {
+            "calibration_predictions.json",
+            "clarifications.json",
+            "decision_objects.json",
+            "evidence_locator_register.json",
+            "export_manifest.json",
+            "phase_outputs.json",
+            "policy_summary.json",
+            "project_state.json",
+            "report.md",
+            "risk_summary.json",
+            "uploaded_file_manifest.json",
+        }
+        expected_included_files = ["export_manifest.json", *sorted(expected_files - {"export_manifest.json"})]
+
+        payload = build_machine_archive_payload(state)
+        zip_payload, _, _ = export_project_profile_bytes(state, "machine_archive", "zip")
+
+        self.assertEqual(set(payload), expected_files)
+        self.assertEqual(payload["export_manifest.json"]["export_schema_version"], "1.0")
+        self.assertEqual(payload["export_manifest.json"]["included_files"], expected_included_files)
+        with zipfile.ZipFile(BytesIO(zip_payload)) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read("export_manifest.json").decode("utf-8"))
+        self.assertEqual(names, expected_files)
+        self.assertEqual(manifest["export_schema_version"], "1.0")
+        self.assertEqual(manifest["included_files"], expected_included_files)
 
 
 class TestProfileExportApi(unittest.IsolatedAsyncioTestCase):

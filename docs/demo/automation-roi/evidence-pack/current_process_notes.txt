@@ -1,0 +1,28 @@
+# Current Process Notes
+
+This file uses synthetic demo data only. It includes no private or client data.
+
+Sales proposal drafting:
+- Manual draft preparation requires repeated lookup of approved language.
+- Legal review is required before any external claims are automated.
+- Current measurement is estimated from team notes, not a measured audit.
+
+Support triage:
+- Triage volume is high, but categories are inconsistent.
+- Escalation quality is a key stop/change-course concern.
+- Current process has manual queue review by the Support Operations Lead.
+
+Finance reconciliation:
+- Rules are clearer than other candidates.
+- Data sensitivity and access controls increase the review burden.
+- Finance review is required before any savings or cost claims are shared.
+
+Customer success renewal preparation:
+- Renewal preparation has strong business value.
+- Source data is fragmented across CRM fields and account notes.
+- Adoption risk is tied to account-owner trust in generated summaries.
+
+Measurement gaps:
+- True baseline time by workflow still needs validation.
+- Rework and escalation rates are estimates.
+- Review-owner capacity must be confirmed before Sprint 0.

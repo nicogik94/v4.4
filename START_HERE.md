@@ -7,6 +7,26 @@ If you want to use the Decision Engine, you only need to know about **two things
 
 Everything else in this bundle is reference material. You don't have to read it to use the engine.
 
+For a v5 runtime foundation demo workflow, see [`docs/v5-DEMO-WORKFLOW.md`](docs/v5-DEMO-WORKFLOW.md).
+
+To compare packaged offers and pick the right intake, example brief, and demo script, see [`docs/v5-PACKAGED-OFFERS.md`](docs/v5-PACKAGED-OFFERS.md).
+
+For the first packaged offer, see [`docs/v5-STRATEGIC-DECISION-AUDIT.md`](docs/v5-STRATEGIC-DECISION-AUDIT.md).
+
+For the Automation ROI Audit packaged offer, see [`docs/v5-AUTOMATION-ROI-AUDIT.md`](docs/v5-AUTOMATION-ROI-AUDIT.md).
+
+For the AI Readiness Audit packaged offer, see [`docs/v5-AI-READINESS-AUDIT.md`](docs/v5-AI-READINESS-AUDIT.md).
+
+For the Real Estate Decision Audit packaged offer, see [`docs/v5-REAL-ESTATE-DECISION-AUDIT.md`](docs/v5-REAL-ESTATE-DECISION-AUDIT.md).
+
+For local launch checks, Docker Desktop / WSL recovery, and smoke export scanning, see [`docs/local-runtime-smoke.md`](docs/local-runtime-smoke.md).
+
+For the project creation API payload contract and request correlation notes, see [`v5 ingestion contract`](docs/v5-INGESTION-CONTRACT.md).
+
+For using deterministic follow-up questions operationally, see [`docs/v5-ICE-OPERATOR-GUIDE.md`](docs/v5-ICE-OPERATOR-GUIDE.md).
+
+Before sharing any export outside the operator team, review [`docs/v5-OUTPUT-BOUNDARIES.md`](docs/v5-OUTPUT-BOUNDARIES.md) for client-safe profiles, operator-only profiles, and machine archive boundaries.
+
 ---
 
 ## The 30-second tour
@@ -25,7 +45,7 @@ That's it. The rest of this document explains what to do if any step is unclear.
 
 ## What the Decision Engine is (one paragraph)
 
-You give it a brief — a paragraph or two describing a hard decision. It walks through 6 phases (classify the problem, generate hypotheses, stress-test them, audit the analysis, build a strategy, score it for quality) and produces a structured report. It is a thinking tool, not a decision-maker. Humans review every report before anything happens with it.
+You give it a brief — a paragraph or two describing a hard decision. It walks through 8 phases (classify the problem, generate hypotheses, stress-test them, audit the analysis, build a strategy, score it for quality, build monitoring, and write the report) and produces a structured report. It is a thinking tool, not a decision-maker. Humans review every report before anything happens with it.
 
 ---
 
@@ -56,7 +76,7 @@ You'll see logs from three services: `postgres`, `mas-api`, and `langfuse` (if e
 
 Open `dashboards/index.html` in any browser. The default API URL is `http://localhost:8000`, which is what `docker-compose up` exposes. If your engine is running somewhere else, change the URL field at the top right of the console.
 
-You should see three green status pills at the top: API ok, store: postgres, tracing: ok (or off, if Langfuse isn't configured — that's fine).
+You should see compact status pills at the top for API, persistence, tracing, preflight, and release readiness. If preflight or release readiness has blockers or warnings, the dashboard shows concise operator-facing details.
 
 If any pill is red, the engine isn't reachable. Check the terminal where Docker is running.
 
@@ -67,7 +87,7 @@ If any pill is red, the engine isn't reachable. Check the terminal where Docker 
 ### Creating a project
 
 1. Open the console (`dashboards/index.html`).
-2. Stay on the **Console** tab (default).
+2. Click **New**.
 3. Fill in the **New project** form:
    - **Project name** — short, descriptive. "Knoxville expansion" not "Project 14".
    - **Brief** — a paragraph or two describing the decision. Be specific. Include numbers if you have them. The engine reads this directly.
@@ -75,11 +95,11 @@ If any pill is red, the engine isn't reachable. Check the terminal where Docker 
    - **Rationale** — one line explaining the classification choice.
 4. Click **Create project**.
 
-The new project appears in the **Projects** table below and the drill-in panel opens automatically.
+The new project appears in the left project list and opens in the main workstation.
 
 ### Running a project
 
-In the drill-in panel, click **▶ Run**. Confirm the dialog. The engine queues the workflow and starts executing.
+Open the project and click **Run**. Confirm the dialog. The engine queues the workflow and starts executing.
 
 Watch the **phase strip** for progress. The 8 phases turn green as they complete:
 - `classify` → understand the problem
@@ -226,7 +246,7 @@ The full API is in `mas/api.py`. Every endpoint is documented in its docstring. 
 ### Added in v4.4
 
 - This `START_HERE.md` document
-- The new operator console (`dashboards/index.html`) with two tabs and full project workflow
+- The canonical v5 operator dashboard (`dashboards/index.html`) with portfolio summary, project workstation, runtime readiness details, and full project workflow
 - `risk_classification` and `risk_rationale` accepted at project create time (no separate API call needed)
 
 ### Not added in v4.4

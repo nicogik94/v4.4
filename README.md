@@ -27,7 +27,7 @@ For tranche-1 baseline review and acceptance, start with:
 
 See [CHANGELOG.md](CHANGELOG.md) for the full diff. The headline items:
 
-1. **New operator console** — `dashboards/index.html` is replaced with a two-tab single-page console. The Console tab handles the full daily workflow (create, classify, run, watch, kill, read report) with buttons. The System tab keeps the v4.2 priors/calibration/framework dashboard for engineering use.
+1. **Canonical operator dashboard** — `dashboards/index.html` is the default v5 dashboard. It handles the daily workflow (create, classify, run, watch, kill, review, export), shows runtime readiness details, and keeps calibration/portfolio views available for operators.
 2. **Combined create + classify** — `POST /projects` now accepts `risk_classification` and `risk_rationale` in the same payload. Backward-compatible with v4.3 callers.
 3. **`START_HERE.md`** — one-page operator entry point at the bundle root. The 80 other files become reference material instead of homework.
 4. **File cleanup proposal** — `docs/v4.4-FILE-CLEANUP-PROPOSAL.md` lists 25 files that could move to `archive/` and `pitch/` subdirectories without breaking anything functional. Not executed until you sign off.
@@ -77,7 +77,8 @@ v4.4/
 ├── CHANGELOG.md                       # v4.0 → v4.4 diff
 │
 ├── dashboards/
-│   └── index.html                     # ⟵ the operator console (v4.4)
+│   ├── index.html                     # ⟵ canonical/default operator dashboard
+│   └── index-v5.html                  # compatibility entry point to index.html
 │
 ├── compliance/
 │   ├── eu-ai-act-classification.md    # per-project risk classification guide (v4.3)
@@ -210,14 +211,14 @@ curl http://localhost:8000/projects/<project_id>
 curl http://localhost:8000/projects/<project_id>/report
 ```
 
-### 6. Open the dashboard (v4.2)
+### 6. Open the dashboard
 
 ```bash
 # Just open the file in any browser — no server needed
 open dashboards/index.html
 ```
 
-The `API base URL` field at the top defaults to `http://localhost:8000`. Change it for staging/prod. The dashboard refreshes every 30s and shows: system status pills, projects table, phase priors grid, calibration deltas, and framework usage. Empty cards mean "no data yet," never "broken."
+The `API base URL` field at the top defaults to `http://localhost:8000` for local file use. Change it when Docker publishes the API on a different host port. The dashboard refreshes automatically and shows project workflow state, runtime health/preflight/release readiness, portfolio signals, calibration, report, and export controls. Empty cards mean "no data yet," never "broken."
 
 ---
 
