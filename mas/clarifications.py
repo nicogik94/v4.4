@@ -56,6 +56,39 @@ class ClarificationCycle(BaseModel):
     summary: str = ""
 
 
+class ClarificationReviewRow(BaseModel):
+    question_id: str = ""
+    text: str = ""
+    why_it_matters: str = ""
+    priority: str = ""
+    affected_phase: str = ""
+    source_gap: str = ""
+    status: str = ""
+    required: bool = False
+    answer_preview: str = ""
+    answered_at: str = ""
+    created_at: str = ""
+    refresh_candidate: bool = False
+    refresh_reason: str = ""
+
+
+class ClarificationSummary(BaseModel):
+    total_cycles: int = 0
+    latest_cycle_id: str = ""
+    total_questions: int = 0
+    open_count: int = 0
+    answered_count: int = 0
+    unavailable_count: int = 0
+    superseded_count: int = 0
+    open_required_count: int = 0
+    resolution_rate: float = 1.0
+    affected_phases: list[str] = Field(default_factory=list)
+    latest_cycle_status: str = "not_generated"
+    next_action: str = "Generate missing-information questions before treating the analysis as fully reviewed."
+    refresh_candidate_phases: list[str] = Field(default_factory=list)
+    review_rows: list[ClarificationReviewRow] = Field(default_factory=list)
+
+
 _QUESTION_SPECS: tuple[dict[str, Any], ...] = (
     {
         "source_gap": "decision_deadline",
@@ -260,6 +293,110 @@ def supersede_open_questions(state: Any) -> None:
         question.status = ClarificationStatus.SUPERSEDED
 
 
+def build_clarification_summary(state: Any) -> ClarificationSummary:
+    """Build a read-only operator summary for clarification review state."""
+    cycles = _read_cycles(state)
+    answers = _read_answers(state)
+    answer_by_question = _latest_answers_by_question(answers)
+    latest = cycles[-1] if cycles else None
+    latest_cycle_id = str(_value(_get(latest, "cycle_id", "")) or "") if latest else ""
+    questions = [
+        question
+        for cycle in cycles
+        for question in _iter_values(_get(cycle, "questions", []))
+    ]
+    latest_questions = list(_iter_values(_get(latest, "questions", []))) if latest else []
+
+    rows: list[ClarificationReviewRow] = []
+    status_counts = {status.value: 0 for status in ClarificationStatus}
+    status_counts["open"] = 0
+    refresh_phases: list[str] = []
+    affected_phases: list[str] = []
+
+    for question in questions:
+        question_id = str(_value(_get(question, "question_id", "")) or "")
+        status = _normalized_status(_get(question, "status", ClarificationStatus.OPEN))
+        if status not in status_counts:
+            status_counts[status] = 0
+        status_counts[status] += 1
+
+        priority = _normalized_text(_get(question, "priority", ""))
+        affected_phase = _normalized_text(_get(question, "affected_phase", ""))
+        if affected_phase and affected_phase not in affected_phases:
+            affected_phases.append(affected_phase)
+        answer = answer_by_question.get(question_id)
+        answer_preview = _answer_preview(_get(answer, "answer_text", "")) if answer is not None else ""
+        answered_at = _datetime_text(_get(answer, "answered_at", "")) if answer is not None else ""
+        created_at = _datetime_text(_get(question, "created_at", ""))
+        required = priority in {ClarificationPriority.CRITICAL.value, ClarificationPriority.HIGH.value}
+        refresh_candidate = _answer_requires_refresh(state, affected_phase, answer)
+        refresh_reason = (
+            f"Answer saved after {affected_phase} last completed; review or rerun that phase when ready."
+            if refresh_candidate and affected_phase
+            else ""
+        )
+        if refresh_candidate and affected_phase and affected_phase not in refresh_phases:
+            refresh_phases.append(affected_phase)
+        rows.append(
+            ClarificationReviewRow(
+                question_id=question_id,
+                text=str(_value(_get(question, "text", "")) or ""),
+                why_it_matters=str(_value(_get(question, "why_it_matters", "")) or ""),
+                priority=priority,
+                affected_phase=affected_phase,
+                source_gap=_normalized_text(_get(question, "source_gap", "")),
+                status=status,
+                required=required,
+                answer_preview=answer_preview,
+                answered_at=answered_at,
+                created_at=created_at,
+                refresh_candidate=refresh_candidate,
+                refresh_reason=refresh_reason,
+            )
+        )
+
+    latest_open_required = sum(
+        1
+        for question in latest_questions
+        if _normalized_status(_get(question, "status", ClarificationStatus.OPEN)) == ClarificationStatus.OPEN.value
+        and _normalized_text(_get(question, "priority", "")) in {ClarificationPriority.CRITICAL.value, ClarificationPriority.HIGH.value}
+    )
+    total_open = int(status_counts.get(ClarificationStatus.OPEN.value, 0) or 0)
+    total_answered = int(status_counts.get(ClarificationStatus.ANSWERED.value, 0) or 0)
+    total_unavailable = int(status_counts.get(ClarificationStatus.UNAVAILABLE.value, 0) or 0)
+    total_superseded = int(status_counts.get(ClarificationStatus.SUPERSEDED.value, 0) or 0)
+    actionable_total = total_open + total_answered + total_unavailable
+    resolution_rate = 1.0 if actionable_total == 0 else round((total_answered + total_unavailable) / actionable_total, 4)
+
+    affected_phases = _phase_ordered(affected_phases)
+    refresh_phases = _phase_ordered(refresh_phases)
+    latest_cycle_status = _latest_cycle_status(latest, latest_questions, latest_open_required)
+    next_action = _clarification_next_action(
+        total_cycles=len(cycles),
+        total_questions=len(questions),
+        open_count=total_open,
+        open_required_count=latest_open_required,
+        refresh_candidate_phases=refresh_phases,
+    )
+
+    return ClarificationSummary(
+        total_cycles=len(cycles),
+        latest_cycle_id=latest_cycle_id,
+        total_questions=len(questions),
+        open_count=total_open,
+        answered_count=total_answered,
+        unavailable_count=total_unavailable,
+        superseded_count=total_superseded,
+        open_required_count=latest_open_required,
+        resolution_rate=resolution_rate,
+        affected_phases=affected_phases,
+        latest_cycle_status=latest_cycle_status,
+        next_action=next_action,
+        refresh_candidate_phases=refresh_phases,
+        review_rows=rows,
+    )
+
+
 def _state_text(state: Any) -> str:
     parts: list[str] = [
         str(getattr(state, "brief", "") or ""),
@@ -322,6 +459,149 @@ def _answers(state: Any) -> list[ClarificationAnswer]:
         answers = []
         setattr(state, "clarification_answers", answers)
     return answers
+
+
+def _read_cycles(state: Any) -> list[Any]:
+    value = getattr(state, "clarification_cycles", []) if state is not None else []
+    return _iter_values(value)
+
+
+def _read_answers(state: Any) -> list[Any]:
+    value = getattr(state, "clarification_answers", []) if state is not None else []
+    return _iter_values(value)
+
+
+def _latest_answers_by_question(answers: list[Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for answer in answers:
+        question_id = str(_value(_get(answer, "question_id", "")) or "").strip()
+        if question_id:
+            result[question_id] = answer
+    return result
+
+
+def _answer_requires_refresh(state: Any, phase: str, answer: Any) -> bool:
+    if not phase or answer is None:
+        return False
+    answer_dt = _parse_datetime(_get(answer, "answered_at", ""))
+    completed_raw = (getattr(state, "phase_run_completed_at", {}) or {}).get(phase, "")
+    completed_dt = _parse_datetime(completed_raw)
+    if answer_dt is None or completed_dt is None:
+        return False
+    return answer_dt > completed_dt
+
+
+def _latest_cycle_status(latest: Any, latest_questions: list[Any], open_required_count: int) -> str:
+    if latest is None:
+        return "not_generated"
+    if not latest_questions:
+        return "no_questions"
+    statuses = [_normalized_status(_get(question, "status", ClarificationStatus.OPEN)) for question in latest_questions]
+    if open_required_count:
+        return "required_open"
+    if any(status == ClarificationStatus.OPEN.value for status in statuses):
+        return "optional_open"
+    if statuses and all(status == ClarificationStatus.SUPERSEDED.value for status in statuses):
+        return "superseded"
+    return "resolved"
+
+
+def _clarification_next_action(
+    *,
+    total_cycles: int,
+    total_questions: int,
+    open_count: int,
+    open_required_count: int,
+    refresh_candidate_phases: list[str],
+) -> str:
+    if total_cycles == 0:
+        return "Generate missing-information questions before treating the analysis as fully reviewed."
+    if total_questions == 0:
+        return "No clarification action needed right now."
+    if open_required_count:
+        return "Answer critical/high clarification questions before regenerating or sharing outputs."
+    if open_count:
+        return "Answer remaining clarification questions or mark them unavailable."
+    if refresh_candidate_phases:
+        return f"Review saved clarification answers and rerun affected phase(s): {', '.join(refresh_candidate_phases)}."
+    return "Review saved clarification answers before final delivery."
+
+
+def _phase_ordered(phases: list[str]) -> list[str]:
+    order = ["classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"]
+    seen = {phase for phase in phases if phase}
+    ordered = [phase for phase in order if phase in seen]
+    ordered.extend(sorted(phase for phase in seen if phase not in order))
+    return ordered
+
+
+def _normalized_status(value: Any) -> str:
+    normalized = _normalized_text(value)
+    return normalized or ClarificationStatus.OPEN.value
+
+
+def _normalized_text(value: Any) -> str:
+    return str(_value(value) or "").strip().lower()
+
+
+def _answer_preview(value: Any, limit: int = 140) -> str:
+    text = re.sub(r"\s+", " ", str(_value(value) or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _datetime_text(value: Any) -> str:
+    raw = _value(value)
+    if raw is None:
+        return ""
+    if isinstance(raw, datetime):
+        return raw.isoformat()
+    return str(raw or "")
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    raw = _value(value)
+    if isinstance(raw, datetime):
+        parsed = raw
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.replace(tzinfo=None)
+    return parsed
+
+
+def _get(item: Any, field_name: str, default: Any = None) -> Any:
+    if item is None:
+        return default
+    if isinstance(item, dict):
+        return item.get(field_name, default)
+    return getattr(item, field_name, default)
+
+
+def _value(value: Any) -> Any:
+    return getattr(value, "value", value)
+
+
+def _iter_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, (str, bytes)):
+        return []
+    try:
+        return list(value)
+    except TypeError:
+        return []
 
 
 def _next_answer_id(state: Any, question_id: str) -> str:

@@ -8,7 +8,7 @@ from docx import Document
 from docx.shared import Pt
 
 from .models import DeliveryPackage
-from .utils import safe_join, safe_text
+from .utils import display_join, display_text
 
 
 HUMAN_REVIEW_OPERATOR_NOTE = (
@@ -34,8 +34,8 @@ def render_board_memo_docx(package: DeliveryPackage, path) -> Path:
     document.add_heading("Board Memo", 0)
 
     document.add_heading("Decision", level=1)
-    document.add_paragraph(safe_text(package.decision_statement, "Decision statement unavailable."))
-    document.add_paragraph(f"Project ID: {safe_text(package.project_id)}")
+    document.add_paragraph(display_text(package.decision_statement, "Decision statement unavailable."))
+    document.add_paragraph(f"Project ID: {display_text(package.project_id)}")
 
     document.add_heading("Recommendation", level=1)
     recommendation_rows = [
@@ -43,7 +43,7 @@ def render_board_memo_docx(package: DeliveryPackage, path) -> Path:
         ["Rationale", package.recommendation.rationale],
         ["Confidence", package.recommendation.confidence],
         ["Evidence strength", package.recommendation.evidence_strength],
-        ["Evidence", safe_join(package.recommendation.evidence)],
+        ["Evidence", display_join(package.recommendation.evidence)],
     ]
     _add_key_value_table(document, recommendation_rows)
 
@@ -56,7 +56,7 @@ def render_board_memo_docx(package: DeliveryPackage, path) -> Path:
                 assumption.assumption,
                 assumption.falsification_trigger,
                 assumption.confidence,
-                safe_join(assumption.evidence),
+                display_join(assumption.evidence),
             ]
             for assumption in package.critical_assumptions
         ],
@@ -72,8 +72,8 @@ def render_board_memo_docx(package: DeliveryPackage, path) -> Path:
                 action.phase,
                 action.action,
                 action.owner,
-                safe_join(action.dependencies),
-                safe_join(action.evidence),
+                display_join(action.dependencies),
+                display_join(action.evidence),
                 action.notes,
             ]
             for action in package.execution_plan
@@ -101,7 +101,7 @@ def render_board_memo_docx(package: DeliveryPackage, path) -> Path:
     )
     document.add_paragraph("Review triggers:")
     for trigger in package.review.reentry_triggers:
-        document.add_paragraph(safe_text(trigger), style="List Bullet")
+        document.add_paragraph(display_text(trigger), style="List Bullet")
 
     document.add_heading("Human Review Required", level=1)
     document.add_paragraph(HUMAN_REVIEW_OPERATOR_NOTE)
@@ -115,8 +115,8 @@ def _add_key_value_table(document: Document, rows: list[list[object]]) -> None:
     table = document.add_table(rows=len(rows), cols=2)
     table.style = "Table Grid"
     for row_idx, row in enumerate(rows):
-        table.cell(row_idx, 0).text = safe_text(row[0])
-        table.cell(row_idx, 1).text = safe_text(row[1])
+        table.cell(row_idx, 0).text = display_text(row[0])
+        table.cell(row_idx, 1).text = display_text(row[1])
 
 
 def _add_table(
@@ -133,9 +133,9 @@ def _add_table(
     table.style = "Table Grid"
     for col_idx, header in enumerate(headers):
         cell = table.cell(0, col_idx)
-        cell.text = safe_text(header)
+        cell.text = display_text(header)
         for run in cell.paragraphs[0].runs:
             run.bold = True
     for row_idx, row in enumerate(rows, start=1):
         for col_idx, value in enumerate(row):
-            table.cell(row_idx, col_idx).text = safe_text(value)
+            table.cell(row_idx, col_idx).text = display_text(value)

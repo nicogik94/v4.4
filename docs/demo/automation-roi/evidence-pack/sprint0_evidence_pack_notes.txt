@@ -1,0 +1,33 @@
+# Sprint 0 Evidence Pack Notes
+
+This file uses synthetic demo data only. It includes no private or client data.
+
+Sprint 0 diligence tasks:
+- Confirm baseline weekly hours for the selected workflow.
+- Confirm monthly volume and representative sample size.
+- Confirm current error, rework, escalation, or quality exception rate.
+- Confirm tool cost, implementation effort, and review-owner capacity.
+- Confirm legal, finance, security, privacy, and operations review scope.
+
+Expected monitoring metrics:
+- Weekly hours saved.
+- Quality exception rate.
+- Review turnaround time.
+- Pilot cost variance against approved budget.
+- Operator trust score for generated output.
+
+Canaries:
+- Review owner misses two consecutive weekly reviews.
+- Quality exceptions increase for two consecutive measurement windows.
+- Input data completeness drops below the agreed threshold.
+- User adoption stalls after the first two weeks.
+
+Circuit breakers:
+- Pilot cost exceeds approved budget by more than 20%.
+- Customer-facing or finance-impacting output is used without human review.
+- Legal, finance, security, or privacy reviewer blocks the selected workflow.
+
+Stop/change-course criteria:
+- Pause or change course when a circuit breaker trips.
+- Defer implementation when evidence remains incomplete after Sprint 0.
+- Preserve the Validate before client delivery boundary for every export.

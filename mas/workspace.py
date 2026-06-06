@@ -6,7 +6,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from clarifications import ClarificationSummary, build_clarification_summary
 from decision_objects import compute_source_state_hash, ensure_decision_objects
+from ingestion_contract import DEFAULT_INGESTION_SOURCE, LEGACY_CONTRACT_VERSION
 from knowledge.freshness import build_knowledge_health
 from knowledge.retrieval import RetrievalPhaseImpactSummary, build_prompt_facing_retrieval_impact
 from state import ApprovalRecord, DecisionObjectStatus, Evidence, ProjectState, Risk
@@ -61,11 +63,27 @@ class KnowledgeHealthSummary(BaseModel):
     last_success_at: str = ""
 
 
+class WorkspaceInputContract(BaseModel):
+    contract_version: str = LEGACY_CONTRACT_VERSION
+    source: str = DEFAULT_INGESTION_SOURCE
+    external_case_id: str = ""
+    metadata_keys: list[str] = Field(default_factory=list)
+
+
+class WorkspaceResponseMetadata(BaseModel):
+    response_schema_version: str = "workspace.summary.v1"
+    generated_by: str = "mas.workspace"
+    provenance: str = "backend_computed"
+    input_contract_version: str = LEGACY_CONTRACT_VERSION
+
+
 class WorkspaceSummary(BaseModel):
     project_id: str
     project_name: str
     current_phase: str
     project_status: str
+    input_contract: WorkspaceInputContract = Field(default_factory=WorkspaceInputContract)
+    response_metadata: WorkspaceResponseMetadata = Field(default_factory=WorkspaceResponseMetadata)
     workflow_running: bool = False
     phase_statuses: dict[str, str] = Field(default_factory=dict)
     blocking_reasons: list[str] = Field(default_factory=list)
@@ -80,6 +98,7 @@ class WorkspaceSummary(BaseModel):
     score_summary: ScoreSummary = Field(default_factory=ScoreSummary)
     decision_object_health: DecisionObjectHealth = Field(default_factory=DecisionObjectHealth)
     knowledge_health: KnowledgeHealthSummary = Field(default_factory=KnowledgeHealthSummary)
+    clarification_summary: ClarificationSummary = Field(default_factory=ClarificationSummary)
     active_risks: list[Risk] = Field(default_factory=list)
     evidence_timeline: list[Evidence] = Field(default_factory=list)
     hypothesis_table: list[WorkspaceHypothesisRow] = Field(default_factory=list)
@@ -92,6 +111,10 @@ class QueueItem(BaseModel):
     project_name: str
     current_phase: str
     project_status: str
+    input_contract: WorkspaceInputContract = Field(default_factory=WorkspaceInputContract)
+    response_metadata: WorkspaceResponseMetadata = Field(
+        default_factory=lambda: WorkspaceResponseMetadata(response_schema_version="workspace.queue_item.v1")
+    )
     workflow_running: bool = False
     blocking_reasons: list[str] = Field(default_factory=list)
     requires_approval: bool = False
@@ -139,8 +162,10 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
     has_stale_downstream = any(status == "stale" for status in phase_statuses.values()) or health_status == "stale"
     import_pending, import_pending_phase, import_pending_message = _import_pending_analysis(state)
     knowledge_health = KnowledgeHealthSummary(**build_knowledge_health(state))
+    clarification_summary = build_clarification_summary(state)
     retrieval_visibility = build_prompt_facing_retrieval_impact(state)
     project_status = _project_status(state, blocking_reasons, requires_approval, has_stale_downstream)
+    input_contract = _input_contract(state)
     active_risks = sorted(
         [risk for risk in decision_objects.risks if risk.status == "active"],
         key=lambda risk: (_severity_rank(risk.severity), risk.title.lower()),
@@ -174,6 +199,8 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         project_name=state.project_name,
         current_phase=state.current_phase,
         project_status=project_status,
+        input_contract=input_contract,
+        response_metadata=_response_metadata("workspace.summary.v1", input_contract),
         workflow_running=workflow_running,
         phase_statuses=phase_statuses,
         blocking_reasons=blocking_reasons,
@@ -193,6 +220,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         ),
         decision_object_health=decision_object_health,
         knowledge_health=knowledge_health,
+        clarification_summary=clarification_summary,
         active_risks=active_risks[:12],
         evidence_timeline=evidence_timeline[:24],
         hypothesis_table=hypothesis_table,
@@ -214,6 +242,8 @@ def build_queue_item(state: ProjectState, *, workflow_running: bool = False) -> 
         project_name=workspace.project_name,
         current_phase=workspace.current_phase,
         project_status=workspace.project_status,
+        input_contract=workspace.input_contract,
+        response_metadata=_response_metadata("workspace.queue_item.v1", workspace.input_contract),
         workflow_running=workspace.workflow_running,
         blocking_reasons=workspace.blocking_reasons,
         requires_approval=workspace.requires_approval,
@@ -224,6 +254,24 @@ def build_queue_item(state: ProjectState, *, workflow_running: bool = False) -> 
         sqi_overall=workspace.score_summary.sqi_overall,
         brier_score=workspace.score_summary.brier_score,
         updated_at=workspace.decision_object_health.rebuilt_at,
+    )
+
+
+def _input_contract(state: ProjectState) -> WorkspaceInputContract:
+    raw_metadata = getattr(state, "ingestion_metadata", None)
+    metadata_keys = sorted(str(key) for key in raw_metadata.keys()) if isinstance(raw_metadata, dict) else []
+    return WorkspaceInputContract(
+        contract_version=getattr(state, "ingestion_contract_version", "") or LEGACY_CONTRACT_VERSION,
+        source=getattr(state, "ingestion_source", "") or DEFAULT_INGESTION_SOURCE,
+        external_case_id=getattr(state, "ingestion_external_case_id", "") or "",
+        metadata_keys=metadata_keys,
+    )
+
+
+def _response_metadata(schema_version: str, input_contract: WorkspaceInputContract) -> WorkspaceResponseMetadata:
+    return WorkspaceResponseMetadata(
+        response_schema_version=schema_version,
+        input_contract_version=input_contract.contract_version,
     )
 
 

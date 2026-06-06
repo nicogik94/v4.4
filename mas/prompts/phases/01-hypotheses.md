@@ -25,32 +25,30 @@ Generate 8–12 testable, MECE, mutually low-correlated hypotheses. Each must co
 5. **Portfolio correlation:** Group hypotheses into clusters (e.g., speed, pricing, trust, distribution). Report ρ between clusters. If ρ > 0.5, shrink to lower correlation.
 6. **EVOI ranking:** For each hypothesis, estimate Expected Value of Information (high / medium / low) — what would we learn that changes our action?
 7. **Seal thresholds:** Set `thresholds_sealed_date` to today. After this, thresholds are immutable.
+8. **Variable coverage:** Use the existing fields to make the causal driver or decision variable explicit. Cover relevant variables such as demand/user segment, channel/acquisition, activation/onboarding, retention/repeat usage, monetization/pricing, operational capacity, data quality/measurement, legal/compliance/claim-safety, competitive dynamics, implementation complexity, owner/decision authority, time horizon/cadence, and evidence required to validate. Do not force irrelevant categories.
+9. **Validation clarity:** State the assumption, validation evidence, owner or approval dependency, timing/cadence, and what would change the recommendation inside the existing `text`, `justification`, `signal`, `confirm`, `reject`, or `portfolio_cluster` fields where relevant. Do not add new output keys.
 
 ## Output schema
 
 ```json
-{
-  "hypotheses": [
-    {
-      "id": "H1",
-      "statement": "We believe X. We will know Y by Z.",
-      "signal": "measurable proxy",
-      "alpha": 6, "beta": 4,
-      "confirm_threshold": "MAU >= 4000 in 6 weeks",
-      "reject_threshold": "MAU < 2500 in 6 weeks",
-      "evoi": "high|medium|low",
-      "portfolio_cluster": "speed|pricing|trust|distribution",
-      "status": "OPEN"
-    }
-  ],
-  "mece_tests_passed": 5,
-  "mece_uncovered": [],
-  "portfolio_correlation": 0.35,
-  "thresholds_sealed_date": "YYYY-MM-DD",
-  "dq_alternatives_score": 75,
-  "dq_information_score": 68
-}
+[
+  {
+    "id": "H1",
+    "text": "We believe X. We will know Y by Z.",
+    "justification": "Brief explanation grounded in the brief, classify output, or available data.",
+    "signal": "measurable proxy",
+    "alpha": 6,
+    "beta": 4,
+    "confirm": "MAU >= 4000 in 6 weeks",
+    "reject": "MAU < 2500 in 6 weeks",
+    "evoi": "high|medium|low",
+    "portfolio_cluster": "speed|pricing|trust|distribution",
+    "status": "OPEN"
+  }
+]
 ```
+
+Do not add keys beyond the schema above.
 
 ## Gauntlet sub-agent
 

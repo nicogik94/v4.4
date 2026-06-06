@@ -7,13 +7,14 @@ if DATABASE_URL is unset. Langfuse tracing wired via observability.py.
 """
 import asyncio
 import json
+import re
 import uuid
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, File, Form, UploadFile
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ValidationError
@@ -22,6 +23,7 @@ from clarifications import (
     ClarificationAnswer,
     ClarificationCycle,
     ClarificationStatus,
+    build_clarification_summary,
     generate_clarification_cycle,
     latest_clarification_cycle,
     mark_clarification_unavailable,
@@ -70,7 +72,8 @@ from scenarios import (
 from state import (
     ProjectState, PhaseStatus,
     ClassifyOutput, Hypothesis, GauntletOutput,
-    AuditOutput, StrategyOutput, MonitorOutput,
+    AuditOutput, StrategyOutput, MonitorOutput, SQIOutput,
+    validate_technology_readiness_output,
     KnowledgeLayerState, SourceRegistryEntry,
 )
 from decision_objects import ensure_decision_objects
@@ -78,6 +81,7 @@ from extensions.connectors import (
     CSVColumnMapping as CSVColumnMappingSpec,
     ConnectorImportRequest,
 )
+from ingestion_contract import IngestionContractError, normalize_project_ingestion
 from ingestion import merge_imported_records
 from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
 from runtime import run_state as workflow_run_state
@@ -95,12 +99,20 @@ from exporters import (
 )
 from config import APP_VERSION
 import store
+from workflow_templates import (
+    TECHNOLOGY_READINESS_PHASE_SEQUENCE,
+    all_editable_phases,
+    get_workflow_phase_sequence,
+    list_workflow_templates,
+)
 import observability
 
 logger = logging.getLogger("v4-api")
 
 running: set[str] = set()
 auto_refresh_jobs: set[str] = set()
+REQUEST_ID_HEADER = "X-Request-ID"
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 @asynccontextmanager
@@ -130,10 +142,25 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = _normalize_request_id(request.headers.get(REQUEST_ID_HEADER))
+    response = await call_next(request)
+    response.headers[REQUEST_ID_HEADER] = request_id
+    return response
+
+
+def _normalize_request_id(value: str | None) -> str:
+    if value and _SAFE_REQUEST_ID.fullmatch(value):
+        return value
+    return str(uuid.uuid4())
+
+
 class CreateProjectRequest(BaseModel):
     name: str = "New Project"
     brief: str
     data: str = ""
+    project_type: str = "strategic_audit"
     # v4.4 — optional combined classification at create time. Backward-compatible:
     # if omitted, project defaults to minimal_risk and operator can set later via
     # POST /projects/{id}/risk-classification.
@@ -220,6 +247,7 @@ class ProjectResponse(BaseModel):
     project_id: str
     name: str
     current_phase: str
+    project_type: str = "strategic_audit"
     phase_status: dict
     classify_domain: str | None = None
     hypothesis_count: int = 0
@@ -268,7 +296,7 @@ class ClarificationAnswerRequest(BaseModel):
     status: str = "answered"
 
 
-EDITABLE_PHASES = {"classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "report"}
+EDITABLE_PHASES = all_editable_phases()
 
 
 @app.get("/health")
@@ -281,6 +309,11 @@ async def health():
         "tracing": "langfuse" if observability.enabled() else "off",
     }
 
+
+
+@app.get("/templates")
+async def list_templates():
+    return {"templates": list_workflow_templates()}
 
 @app.get("/runtime/preflight")
 async def runtime_preflight():
@@ -330,12 +363,22 @@ def _release_readiness_items(checks: dict[str, Any], target_status: str) -> list
 
 
 @app.post("/projects", response_model=ProjectResponse)
-async def create_project(req: CreateProjectRequest):
+async def create_project(payload: dict[str, Any] = Body(...)):
+    try:
+        req = normalize_project_ingestion(payload)
+    except IngestionContractError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
     state = ProjectState(
         project_id=str(uuid.uuid4()),
         project_name=req.name,
         brief=req.brief,
         data=req.data,
+        ingestion_contract_version=req.contract_version,
+        project_type=req.project_type,
+        ingestion_source=req.source,
+        ingestion_external_case_id=req.external_case_id,
+        ingestion_metadata=req.metadata,
         created_at=datetime.now(),
     )
     # v4.4 — apply optional classification at create time
@@ -368,7 +411,7 @@ async def create_project(req: CreateProjectRequest):
             actor_id=req.risk_set_by or "operator",
             payload={
                 "project_name": state.project_name,
-                "project_type": getattr(req, "project_type", ""),
+                "project_type": state.project_type,
                 "risk_classification": state.risk_classification,
             },
         )
@@ -890,12 +933,15 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
         }
 
     invalidated: list[str] = []
+    sequence = get_workflow_phase_sequence(getattr(state, "project_type", "strategic_audit"))
     if any(key in ("brief", "data") for key in changed_keys):
-        invalidated = _invalidate_from_phase(state, "classify", include_self=True)
-        state.current_phase = invalidated[0] if invalidated else "classify"
+        restart_phase = "classify" if "classify" in sequence else sequence[0]
+        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
+        state.current_phase = invalidated[0] if invalidated else restart_phase
     elif any(key in ("observations", "timer_logs") for key in changed_keys):
-        invalidated = _invalidate_from_phase(state, "monitor", include_self=True)
-        state.current_phase = invalidated[0] if invalidated else "monitor"
+        restart_phase = "monitor" if "monitor" in sequence else sequence[0]
+        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
+        state.current_phase = invalidated[0] if invalidated else restart_phase
 
     _log_operator_edit(state, "input", changed_field_paths, invalidated)
     ensure_decision_objects(state, trigger="api.patch_input")
@@ -1498,6 +1544,9 @@ def _clear_phase_output(state: ProjectState, phase: str) -> None:
         state.sqi = None
     elif phase == "report":
         state.report = None
+    elif phase in get_workflow_phase_sequence(getattr(state, "project_type", "strategic_audit")):
+        if hasattr(state, phase):
+            setattr(state, phase, None)
 
 
 def _mark_phase_stale(state: ProjectState, phase: str) -> bool:
@@ -1576,6 +1625,14 @@ def _validate_phase_payload(phase: str, payload: Any):
             data = _require_dict_payload(phase, payload)
             return MonitorOutput(**data), _field_paths_for_payload(phase, data)
 
+        if phase == "sqi":
+            data = _require_dict_payload(phase, payload)
+            return SQIOutput(**data), _field_paths_for_payload(phase, data)
+
+        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            data = _require_dict_payload(phase, payload)
+            return validate_technology_readiness_output(phase, data), _field_paths_for_payload(phase, data)
+
         if phase == "report":
             if isinstance(payload, dict):
                 report_text = payload.get("report")
@@ -1609,6 +1666,10 @@ def _apply_phase_output(state: ProjectState, phase: str, validated) -> None:
         state.det_scores = compute_det_scores(state.strategy)
     elif phase == "monitor":
         state.monitor = validated
+    elif phase == "sqi":
+        state.sqi = validated
+    elif phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        setattr(state, phase, validated)
     elif phase == "report":
         state.report = validated
 
@@ -1639,7 +1700,7 @@ def _log_operator_edit(
 
 
 def _analysis_pending_phase_for_import(state: ProjectState) -> str:
-    for phase in ("report", "monitor", "sqi", "strategy", "audit", "gauntlet", "hypotheses", "classify"):
+    for phase in reversed(get_workflow_phase_sequence(getattr(state, "project_type", "strategic_audit"))):
         if _phase_has_material_output(state, phase):
             return phase
     return ""
@@ -1858,6 +1919,7 @@ def _to_response(s: ProjectState) -> ProjectResponse:
         name=s.project_name,
         current_phase=s.current_phase,
         phase_status={k: v.value if hasattr(v, 'value') else str(v) for k, v in s.phase_status.items()},
+        project_type=s.project_type,
         classify_domain=s.classify.domain if s.classify else None,
         hypothesis_count=len(s.hypotheses or []),
         strategy_count=len(s.strategy.strategies) if s.strategy else 0,
@@ -1875,6 +1937,7 @@ def _clarification_response(
     answer: ClarificationAnswer | None = None,
 ) -> dict[str, Any]:
     latest = latest_clarification_cycle(state)
+    derived_summary = build_clarification_summary(state)
     all_questions = [
         question
         for existing_cycle in state.clarification_cycles
@@ -1899,6 +1962,8 @@ def _clarification_response(
         "answers": [existing_answer.model_dump(mode="json") for existing_answer in state.clarification_answers],
         "status_counts": status_counts,
         "summary": latest.summary if latest else "No clarification cycle generated yet.",
+        "derived_summary": derived_summary.model_dump(mode="json"),
+        "review_rows": [row.model_dump(mode="json") for row in derived_summary.review_rows],
     }
     if cycle is not None:
         payload["cycle"] = cycle.model_dump(mode="json")

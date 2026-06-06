@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from datetime import date, datetime
+from pathlib import Path
 from typing import Awaitable, Callable, Literal
 
 from langgraph.graph import StateGraph, END
@@ -36,6 +37,11 @@ from tools.scoring import (
     check_gate, evaluate_reentry_triggers, invalidate_downstream,
     compute_det_scores, compute_brier_score, summarize_phase_output
 )
+from workflow_templates import (
+    DEFAULT_PROJECT_TYPE,
+    TECHNOLOGY_READINESS_PHASE_SEQUENCE,
+    get_workflow_phase_sequence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,10 @@ ARCHITECTURE: 5-layer VSM (Operations>Coordination via Decision Dossier>Control/
 CONVERGENCE: BF>10, H_norm<0.15, D_KL<0.01, EVSI/ENBS>0, OBF sequential, Futility<15%, Real-options, Thompson BETA.INV, Graduation>0.95/Drop<0.05, Brier, ECE, Portfolio ρ<0.5, MECE 5 tests.
 
 Be specific, quantitative, actionable."""
+
+TECHNOLOGY_READINESS_SYSTEM_PREAMBLE = """You are executing the Technology Readiness & Transfer Audit.
+
+This is an operator-reviewed, evidence-backed assessment. Do not claim legal patentability, TRL certification, guaranteed commercial transfer, or autonomous decision-making. Separate facts, assumptions, and missing evidence. Use preliminary language when evidence is incomplete."""
 
 REPORT_CITATION_DISCIPLINE = """MANDATORY REPORT CITATION DISCIPLINE:
 - Final report project-evidence citations must use concrete markers copied from PROJECT EVIDENCE LOCATORS.
@@ -225,6 +235,9 @@ def build_system_prompt(phase: str, json_mode: bool = True, calibration_hint: st
     Populated from priors.get_prior_hint() at run time. Empty string → identical
     to v4.1 behavior. Non-empty → the LLM sees historical calibration context.
     """
+    if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        mode = "\n\nReturn ONLY valid JSON, no markdown fences, no preamble." if json_mode else "\n\nWrite structured professional output. Markdown."
+        return f"{TECHNOLOGY_READINESS_SYSTEM_PREAMBLE}{mode}{calibration_hint}"
     frameworks = FRAMEWORKS_BY_PHASE.get(phase, [])
     fw_text = "\n".join(f"  {fw}" for fw in frameworks)
     mode = "\n\nReturn ONLY valid JSON, no markdown fences, no preamble." if json_mode else "\n\nWrite structured professional output. Markdown."
@@ -265,7 +278,11 @@ EXAMPLE:
 
 Return JSON array of 8-12 hypotheses.
 Each hypothesis object must include: id, text, justification, signal, alpha, beta, confirm, reject, evoi, portfolio_cluster, status.
+Do not add any other keys to hypothesis objects.
 `justification` must be a short explanation grounded in the brief, classify output, or available data.
+Use only the existing fields to make each hypothesis explicit about the causal driver or decision variable being tested.
+Across the set, cover decision-relevant variables without forcing irrelevant ones: demand/user segment, channel/acquisition, activation/onboarding, retention/repeat usage, monetization/pricing, operational capacity, data quality/measurement, legal/compliance/claim-safety, competitive dynamics, implementation complexity, owner/decision authority, time horizon/cadence, and evidence required to validate.
+Where relevant, express assumptions, validation evidence, owner or approval dependency, timing/cadence, and what result would change the recommendation inside text, justification, signal, confirm, reject, or portfolio_cluster.
 {ctx}
 PROJECT: {state.brief[:1000]}
 {f"DATA: {state.data[:1000]}" if state.data else ""}"""
@@ -315,16 +332,45 @@ Return JSON:
 {f"DATA: {state.data[:2000]}" if state.data else ""}"""
 
 
+def _operator_hard_constraints_prompt_block(state: ProjectState) -> str:
+    """Project operator constraints into phase prompts without mutating state."""
+    parts = [f"Original brief:\n{state.brief[:1800]}"]
+    data_context = getattr(state, "data_context", "")
+    if data_context:
+        parts.append(f"Operator data context:\n{str(data_context)[:1200]}")
+    answers = []
+    for answer in list(getattr(state, "clarification_answers", []) or [])[:12]:
+        answer_text = getattr(answer, "answer_text", "")
+        status = getattr(answer, "status", "")
+        if answer_text:
+            answers.append(f"- {getattr(answer, 'question_id', '')} ({status}): {answer_text[:300]}")
+    if answers:
+        parts.append("Clarification answers:\n" + "\n".join(answers))
+    operator_context = "\n\n".join(part for part in parts if str(part).strip())
+    return f"""OPERATOR HARD CONSTRAINTS:
+The operator-provided context below is the source of truth for capacity, budget, timing, spend, and scope limits.
+{operator_context}
+
+Constraint adherence rules:
+- Explicit capacity, budget, no-major-project, spend-freeze, and "one focused initiative plus one small experiment" constraints dominate recommendation shape.
+- Preserve a constrained plan as one focused initiative plus one small experiment when the operator says that is the available capacity.
+- Do not convert a constrained plan into multiple parallel critical tracks unless the operator explicitly allowed that capacity.
+- Defer major engineering work or broad growth spend when the operator prohibits it or limits the budget to a small experiment."""
+
+
 def build_strategy_prompt(state: ProjectState) -> str:
     ctx_classify = summarize_phase_output("classify", state)
     ctx_hyps = summarize_phase_output("hypotheses", state)
     ctx_audit = summarize_phase_output("audit", state)
     ctx_gauntlet = summarize_phase_output("gauntlet", state)
     retrieval_section, _ = _phase_retrieval_context(state, "strategy")
+    hard_constraints = _operator_hard_constraints_prompt_block(state)
     return f"""PHASE 3: Generate STRATEGY PLAN WITH JUSTIFICATION.
 
 For each hypothesis, give PRELIMINARY VERDICT: LIKELY_CONFIRMED, LIKELY_REJECTED, NEEDS_MONITORING.
 Each strategy action must link to evidence (hypothesis + FMEA + audit finding).
+Respect operator hard constraints before optimizing for ambition or coverage. If the brief limits capacity to one focused initiative plus one small experiment, the strategy must fit that shape. Do not create multiple parallel CRITICAL tracks unless the operator explicitly allowed that capacity.
+The strategy priority field is strict: priority must be exactly one of CRITICAL, HIGH, MEDIUM, LOW. For deferred/blocked/do-not-do items, use priority LOW and put "DEFERRED", "BLOCKED", "DO NOT START", or "DO NOT DO" in the action/title/justification, not in priority.
 
 Return JSON:
 {{"preliminary_verdicts":[{{"id":"H1","verdict":"LIKELY_CONFIRMED","evidence":"","monitoring_plan":""}}],
@@ -341,6 +387,7 @@ Return JSON:
 {ctx_hyps}
 {ctx_gauntlet}
 {ctx_audit}
+{hard_constraints}
 {retrieval_section}
 {f"DATA: {state.data[:500]}" if state.data else ""}"""
 
@@ -434,6 +481,7 @@ def build_report_prompt(state: ProjectState) -> str:
     research_depth_rules = _report_research_depth_rules(quality_context)
     evidence_maturity_rule = _report_evidence_maturity_rule(quality_context)
     sprint0_rule = _report_sprint0_rule(quality_context)
+    hard_constraints = _operator_hard_constraints_prompt_block(state)
     obs_text = _sanitize_report_context("\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations")
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
     return f"""PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers.
@@ -463,9 +511,13 @@ Report writing rules:
 - If ProjectState clarification_cycles or clarification_answers are present in report context, include them only as assumptions, open questions, unavailable context, or operator-provided context.
 - Unanswered clarification questions remain unresolved questions.
 - Clarification answers and questions are not empirical evidence, must not be cited with project evidence markers, and must not be placed in the Evidence Used table as cited facts.
+- Preserve constrained strategy shape. If the operator limited the work to one focused initiative plus one small experiment, do not expand it into several parallel tracks.
+- Defer major engineering work or broad growth spend when the operator prohibits it or limits this period to a small experiment.
 
 REPORT QUALITY CONTEXT:
 {report_quality_rules}
+
+{hard_constraints}
 
 Factual-safety rules:
 {factual_safety_rules}
@@ -515,7 +567,8 @@ Roadmap:
 - If owner, metric, success signal, or threshold is unknown, use: TBD — requires operator confirmation.
 
 Next Steps:
-- Include 5-7 concrete next actions in a table with: action, owner/role, deadline or timeframe, dependency, expected output.
+- Include 5-7 concrete next actions in a table with: action, owner/role, deadline or timeframe, dependency, expected output, unless operator hard constraints require fewer actions.
+- When constraints require fewer actions, include only the action count that fits the explicit constraint and explain the limit.
 - If the report cannot responsibly identify 5 concrete next actions, include fewer and explain what information is needed to complete the list.
 
 Monitoring and Kill Criteria:
@@ -535,6 +588,91 @@ MONITORING: {obs_text}
 TIMER: {timer_text}
 PROJECT: {state.brief[:400]}"""
 
+
+_TECHNOLOGY_READINESS_PROMPT_DIR = Path(__file__).parent / "prompts" / "technology_readiness"
+
+
+def _read_technology_readiness_prompt(phase: str) -> str:
+    return (_TECHNOLOGY_READINESS_PROMPT_DIR / f"{phase}.md").read_text(encoding="utf-8")
+
+
+def _technology_readiness_context(state: ProjectState, phase: str) -> str:
+    sequence = get_workflow_phase_sequence(getattr(state, "project_type", DEFAULT_PROJECT_TYPE))
+    previous = []
+    if phase in sequence:
+        for prior_phase in sequence[: sequence.index(phase)]:
+            summary = state.phase_summaries.get(prior_phase, "")
+            if summary:
+                previous.append(f"{prior_phase}: {summary[:800]}")
+            else:
+                output = getattr(state, prior_phase, None)
+                if output is not None and hasattr(output, "model_dump"):
+                    previous.append(
+                        f"{prior_phase}: "
+                        + json.dumps(output.model_dump(mode="json"), ensure_ascii=False, default=str)[:800]
+                    )
+    prior_context = "\n".join(previous) if previous else "No completed prior technology-readiness phases."
+    data = state.data[:4000] if state.data else "No supplemental project data supplied."
+    return f"""PROJECT TYPE: {getattr(state, "project_type", DEFAULT_PROJECT_TYPE)}
+PROJECT NAME: {state.project_name}
+PROJECT BRIEF:
+{state.brief[:4000]}
+
+SUPPLEMENTAL DATA:
+{data}
+
+PRIOR TECHNOLOGY READINESS CONTEXT:
+{prior_context}"""
+
+
+def build_technology_readiness_prompt(state: ProjectState, phase: str) -> str:
+    phase_prompt = _read_technology_readiness_prompt(phase)
+    return f"""{phase_prompt}
+
+ASSESSMENT CONTEXT:
+{_technology_readiness_context(state, phase)}
+
+Return the requested JSON object only."""
+
+
+def build_scope_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "scope")
+
+
+def build_scientific_inventory_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "scientific_inventory")
+
+
+def build_trl_diagnosis_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "trl_diagnosis")
+
+
+def build_research_industry_alignment_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "research_industry_alignment")
+
+
+def build_ip_protection_axis_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "ip_protection_axis")
+
+
+def build_next_level_recommendations_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "next_level_recommendations")
+
+
+def build_technical_validation_plan_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "technical_validation_plan")
+
+
+def build_industrial_transfer_plan_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "industrial_transfer_plan")
+
+
+def build_readiness_roadmap_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "readiness_roadmap")
+
+
+def build_executive_summary_prompt(state: ProjectState) -> str:
+    return build_technology_readiness_prompt(state, "executive_summary")
 
 def _report_quality_prompt_block(context) -> str:
     lines = [
@@ -722,12 +860,26 @@ PROMPT_BUILDERS = {
     "monitor": build_monitor_prompt,
     "sqi": build_sqi_prompt,
     "report": build_report_prompt,
+    "scope": build_scope_prompt,
+    "scientific_inventory": build_scientific_inventory_prompt,
+    "trl_diagnosis": build_trl_diagnosis_prompt,
+    "research_industry_alignment": build_research_industry_alignment_prompt,
+    "ip_protection_axis": build_ip_protection_axis_prompt,
+    "next_level_recommendations": build_next_level_recommendations_prompt,
+    "technical_validation_plan": build_technical_validation_plan_prompt,
+    "industrial_transfer_plan": build_industrial_transfer_plan_prompt,
+    "readiness_roadmap": build_readiness_roadmap_prompt,
+    "executive_summary": build_executive_summary_prompt,
 }
 
 WORKFLOW_PHASE_SEQUENCE = (
     "classify", "hypotheses", "gauntlet", "audit",
     "strategy", "sqi", "monitor", "report",
 )
+
+
+def workflow_phase_sequence_for_state(state: ProjectState) -> tuple[str, ...]:
+    return get_workflow_phase_sequence(getattr(state, "project_type", DEFAULT_PROJECT_TYPE))
 
 UNFINISHED_PHASE_STATUSES = {
     PhaseStatus.PENDING, PhaseStatus.RUNNING, PhaseStatus.FAILED, PhaseStatus.STALE
@@ -757,7 +909,7 @@ def _phase_has_output(state: ProjectState, phase: str) -> bool:
 
 
 def get_first_unfinished_phase(state: ProjectState) -> str | None:
-    for phase in WORKFLOW_PHASE_SEQUENCE:
+    for phase in workflow_phase_sequence_for_state(state):
         status = _normalized_phase_status(state.phase_status.get(phase, PhaseStatus.PENDING))
         if status in UNFINISHED_PHASE_STATUSES:
             return phase
@@ -780,6 +932,8 @@ def _parsed_json_matches_phase(phase: str, parsed) -> bool:
         return isinstance(parsed, list) or (
             isinstance(parsed, dict) and isinstance(parsed.get("hypotheses"), list)
         )
+    if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        return isinstance(parsed, dict)
     if phase in ("gauntlet", "audit", "strategy", "monitor", "sqi"):
         return isinstance(parsed, dict)
     return True
@@ -1017,6 +1171,14 @@ def _phase_json_retry_instruction(phase: str) -> str:
             "commitment_score must be numeric 0-100. No markdown fences, bullets, "
             "or prose before/after. Start with { and end with }."
         )
+    if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        return (
+            "Return ONLY one JSON object matching the required Technology "
+            "Readiness phase schema from the prompt. Do not return an array, "
+            "markdown, legal/certification claims, or prose outside JSON. "
+            "Use empty arrays, explicit unknown strings, and preliminary language "
+            "when evidence is missing. Start with { and end with }."
+        )
     return "Return ONLY a single JSON object. Do NOT return an array or bullet list."
 
 
@@ -1175,6 +1337,7 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
     # ═══ v4.4.1: Parse and store output (rewritten) ═══
     if is_json:
+        repair_attempted = False
         parsed = parse_json(response.text)
         shape_ok = _parsed_json_matches_phase(phase, parsed)
         if phase == "audit" and not shape_ok:
@@ -1216,6 +1379,7 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 project_id=state.project_id,
                 before_attempt=_pre_attempt_governance,
             )
+            repair_attempted = True
             _log_llm_route(retry_response)
             try:
                 rt_tokens = getattr(retry_response, "total_tokens", 0) or 0
@@ -1267,9 +1431,76 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                     )
                 response = retry_response
 
+        stored_output = False
         if parsed is not None and _parsed_json_matches_phase(phase, parsed):
-            _store_phase_output(state, phase, parsed)
-            if phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "sqi") and not _phase_has_output(state, phase):
+            try:
+                _store_phase_output(state, phase, parsed)
+                stored_output = True
+            except Exception as store_exc:
+                if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE and not repair_attempted:
+                    logger.warning(
+                        f"Phase {phase}: parsed JSON failed Technology Readiness "
+                        f"schema validation on first attempt; requesting one repair. "
+                        f"Error: {store_exc!r}"
+                    )
+                    retry_response = await call_llm(
+                        phase, system,
+                        prompt + "\n\nCRITICAL: Return ONLY valid JSON. "
+                                 "Do NOT wrap it in markdown fences. Do NOT add any "
+                                 "text before or after. The previous JSON parsed but "
+                                 "failed schema validation. Repair field types to match "
+                                 "the Technology Readiness phase schema. "
+                                 + _phase_json_retry_instruction(phase),
+                        project_id=state.project_id,
+                        before_attempt=_pre_attempt_governance,
+                    )
+                    repair_attempted = True
+                    _log_llm_route(retry_response)
+                    try:
+                        rt_tokens = getattr(retry_response, "total_tokens", 0) or 0
+                        rt_cost = getattr(retry_response, "cost_usd", 0.0) or 0.0
+                        record_consumption_to_state(state, rt_tokens, rt_cost, success=retry_response.ok)
+                    except Exception as e:
+                        logger.debug(f"retry consumption recording failed ({e})")
+
+                    response = retry_response
+                    if retry_response.ok:
+                        parsed = parse_json(retry_response.text)
+                        shape_ok = _parsed_json_matches_phase(phase, parsed)
+                        if parsed is None:
+                            logger.error(
+                                f"Phase {phase}: JSON parse failed on schema repair retry. "
+                                f"Retry response preview: {retry_response.text[:500]!r}"
+                            )
+                        elif not shape_ok:
+                            logger.error(
+                                f"Phase {phase}: schema repair retry returned invalid JSON "
+                                f"shape {type(parsed).__name__}. Retry response preview: "
+                                f"{retry_response.text[:500]!r}"
+                            )
+                        else:
+                            try:
+                                _store_phase_output(state, phase, parsed)
+                                stored_output = True
+                            except Exception as retry_store_exc:
+                                logger.error(
+                                    f"Phase {phase}: Technology Readiness schema validation "
+                                    f"failed after one repair attempt. Error: {retry_store_exc!r}"
+                                )
+                    else:
+                        logger.error(
+                            f"Phase {phase}: schema repair retry failed: {retry_response.error}"
+                        )
+                else:
+                    logger.error(
+                        f"Phase {phase}: structured output failed validation. Error: {store_exc!r}"
+                    )
+
+        if stored_output:
+            if (
+                phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "monitor", "sqi")
+                or phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE
+            ) and not _phase_has_output(state, phase):
                 if phase == "audit":
                     state.audit_raw = response.text
                 elif phase == "strategy":
@@ -1351,12 +1582,13 @@ async def run_workflow_sequence(
         )
         ensure_decision_objects(state, trigger=f"workflow_resume:{start_phase}")
 
-    start_index = WORKFLOW_PHASE_SEQUENCE.index(start_phase)
+    sequence = workflow_phase_sequence_for_state(state)
+    start_index = sequence.index(start_phase)
 
     if persist_state:
         await persist_state(state)
 
-    for phase in WORKFLOW_PHASE_SEQUENCE[start_index:]:
+    for phase in sequence[start_index:]:
         status = _normalized_phase_status(state.phase_status.get(phase, PhaseStatus.PENDING))
         if status == PhaseStatus.COMPLETED and _phase_has_output(state, phase):
             continue
@@ -1429,7 +1661,8 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
     """Store parsed LLM output into the appropriate state field."""
     from state import (
         ClassifyOutput, Hypothesis, GauntletOutput, AuditOutput,
-        StrategyOutput, MonitorOutput, SQIOutput
+        StrategyOutput, MonitorOutput, SQIOutput,
+        validate_technology_readiness_output,
     )
 
     try:
@@ -1487,12 +1720,18 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             state.monitor = MonitorOutput(**data)
         elif phase == "sqi":
             state.sqi = SQIOutput(**data)
+        elif phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            if not isinstance(data, dict):
+                raise ValueError(f"{phase} output must be a JSON object")
+            setattr(state, phase, validate_technology_readiness_output(phase, data))
     except Exception as e:
         preview = repr(data)
         logger.error(
             f"Failed to parse {phase} output: type={type(data).__name__} "
             f"preview={preview[:500]} error={e}"
         )
+        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            raise
 
 
 # ═══ DETERMINISTIC NODES (no LLM) ═══

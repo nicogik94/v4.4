@@ -13,11 +13,15 @@ from report_quality import (  # noqa: E402
     EVIDENCE_CATEGORY_COVERAGE_WARNING,
     PROVISIONAL_CLARIFICATION_CAVEAT,
     PROVISIONAL_CLARIFICATION_NEXT_ACTION,
+    RISK_CLASSIFICATION_WARNING,
     SPARSE_CONFIDENCE_RULE,
     THRESHOLD_CONFLICT_UNKNOWN_WARNING,
     UNSUPPORTED_EVIDENCE_FILES_WARNING,
+    assess_risk_classification_gate,
     assess_report_quality_context,
     client_simplify_text,
+    constraint_adherence_projection,
+    constraint_adherence_warnings,
     evidence_accounting_projection,
     evidence_maturity_projection,
     guard_client_bf_confidence,
@@ -34,12 +38,20 @@ from clarifications import (  # noqa: E402
     ClarificationStatus,
 )
 from state import (  # noqa: E402
+    AuditOutput,
     ClassifyOutput,
+    DecisionObjects,
     FileParseStatus,
     FileParseSummary,
+    FMEAItem,
+    GauntletOutput,
+    GauntletResult,
     KnowledgeItem,
     KnowledgeLayerState,
     ProjectState,
+    Risk,
+    STPAItem,
+    StrategyAction,
     StrategyOutput,
     UploadedFileManifest,
 )
@@ -55,6 +67,34 @@ def _question(question_id: str, priority=ClarificationPriority.CRITICAL, status=
         source_gap="test_gap",
         status=status,
     )
+
+
+CONSTRAINED_STRATEGY_BRIEF = (
+    "Limited capacity this month. Only one focused initiative plus one small experiment. "
+    "No major engineering project this month. Budget is limited to one small experiment. "
+    "Avoid broad growth spend until the cause is clearer."
+)
+
+
+def _constrained_strategy_state(project_id: str, generated_text: str) -> ProjectState:
+    state = ProjectState(
+        project_id=project_id,
+        project_name="Constrained strategy",
+        brief=CONSTRAINED_STRATEGY_BRIEF,
+        report=generated_text,
+    )
+    state.strategy = StrategyOutput(
+        executive_strategy=generated_text,
+        strategies=[
+            StrategyAction(
+                priority="CRITICAL",
+                action=generated_text,
+                justification="Generated recommendation text under review.",
+            )
+        ],
+        implementation_sequence=generated_text,
+    )
+    return state
 
 
 class TestReportQualityHelpers(unittest.TestCase):
@@ -110,6 +150,262 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertIn("Moderate confidence in the need for Sprint 0 evidence collection", SPARSE_CONFIDENCE_RULE)
         self.assertIn("low confidence in any specific root cause", SPARSE_CONFIDENCE_RULE)
         self.assertNotIn("High confidence only that evidence collection is required", SPARSE_CONFIDENCE_RULE)
+
+    def test_constraint_warning_for_parallel_critical_tracks(self):
+        state = _constrained_strategy_state(
+            "constraint-parallel-tracks",
+            "Recommended path: execute three parallel critical-priority tracks this month.",
+        )
+
+        warnings = constraint_adherence_warnings(state)
+        projection = constraint_adherence_projection(state)
+
+        self.assertTrue(projection.warning_applies)
+        self.assertTrue(warnings)
+        self.assertIn("limited capacity", warnings[0])
+        self.assertIn("multiple parallel critical tracks", warnings[0])
+
+    def test_constraint_warning_for_major_engineering_contradiction(self):
+        state = _constrained_strategy_state(
+            "constraint-major-engineering",
+            "Recommended path: launch a major engineering project this month.",
+        )
+
+        warnings = constraint_adherence_warnings(state)
+
+        self.assertTrue(warnings)
+        self.assertIn("major engineering", warnings[0])
+        self.assertIn("no-major-engineering", warnings[0])
+
+    def test_constraint_warning_for_broad_paid_acquisition_spend(self):
+        state = _constrained_strategy_state(
+            "constraint-paid-acquisition",
+            "Recommended path: increase paid acquisition spend and scale growth spend immediately.",
+        )
+
+        warnings = constraint_adherence_warnings(state)
+
+        self.assertTrue(warnings)
+        self.assertIn("growth spend", warnings[0])
+        self.assertIn("spend constraint", warnings[0])
+
+    def test_constraint_warning_for_affirmative_paid_campaign_or_scale_recommendation(self):
+        for generated_text in (
+            "Recommended path: Launch new paid campaigns this month.",
+            "Recommended path: Scale paid acquisition before diagnosis.",
+            "Recommended path: Expand broad growth spend.",
+        ):
+            with self.subTest(generated_text=generated_text):
+                state = _constrained_strategy_state("constraint-paid-campaign-scale", generated_text)
+
+                warnings = constraint_adherence_warnings(state)
+
+                self.assertTrue(warnings)
+                self.assertIn("growth spend", warnings[0])
+                self.assertIn("spend constraint", warnings[0])
+
+    def test_constraint_warning_absent_for_compliant_constrained_plan(self):
+        state = _constrained_strategy_state(
+            "constraint-compliant",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding "
+                "experiment. Defer major engineering work and broad growth spend until the cause is clearer."
+            ),
+        )
+
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_negated_forbidden_actions(self):
+        state = _constrained_strategy_state(
+            "constraint-negated",
+            (
+                "Do not run three critical tracks in parallel. Defer the major engineering project. "
+                "Avoid increased paid acquisition spend this month."
+            ),
+        )
+
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_paused_deferred_blocked_do_not_do_items(self):
+        state = _constrained_strategy_state(
+            "constraint-paused-do-not-do",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding experiment.\n"
+                "What not to do this month: no major engineering work; no broad growth spend; "
+                "do not increase paid acquisition spend; do not launch a full onboarding redesign.\n"
+                "All growth spend and major engineering are paused until the cause is clearer.\n"
+                "Deferred / blocked / do not do: broad paid acquisition spend remains out of scope."
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_smoke_style_paid_spend_safe_contexts(self):
+        state = _constrained_strategy_state(
+            "constraint-smoke-paid-spend-safe",
+            (
+                "Recommended path: run one focused retention initiative and one small onboarding experiment.\n"
+                "All growth spend and major engineering are paused pending measurement clarity.\n"
+                "What not to do this month: Increase paid acquisition spend.\n"
+                "Do not increase paid acquisition spend.\n"
+                "Freeze paid acquisition budgets at current levels for 30 days; do not launch new paid campaigns.\n"
+                "If rate drops below 10%, consider pausing all paid acquisition spend.\n"
+                "Paid acquisition mix continues shifting during the sprint, worsening the cohort being measured.\n"
+                "Risk if paid spend increases: the measured cohort becomes harder to interpret.\n"
+                "If paid spend increased and H1 is confirmed, continue diagnosis before any scale-up."
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_warning_absent_for_persisted_paid_spend_table_safe_contexts(self):
+        state = _constrained_strategy_state(
+            "constraint-persisted-paid-spend-safe",
+            (
+                "Recommended path: run one focused initiative and one small experiment.\n"
+                "Increase paid acquisition spend | More trials in pipeline | Compounds lead-quality problem "
+                "if paid mix is already degrading conversion; wastes budget | Only if organic channels are "
+                "saturated and lead quality from paid is confirmed healthy | **Do not do this month** |\n"
+                "| Acting on wrong hypothesis before root cause is confirmed | Wastes limited capacity; may "
+                "worsen conversion if, for example, paid spend increases but lead quality is the problem | "
+                "Focused initiative produces data showing a different primary cause than assumed | Gate all "
+                "implementation decisions on Sprint 0 findings; enforce stop condition | Executive Sponsor |\n"
+                "Operator hard constraint: 'Do not recommend broad growth spend until the cause is clearer.'"
+            ),
+        )
+
+        projection = constraint_adherence_projection(state)
+
+        self.assertFalse(projection.warning_applies)
+        self.assertEqual(projection.contradiction_signals, ())
+        self.assertEqual(constraint_adherence_warnings(state), [])
+
+    def test_constraint_adherence_helper_does_not_mutate_state(self):
+        state = _constrained_strategy_state(
+            "constraint-no-mutation",
+            "Recommended path: execute three parallel critical tracks.",
+        )
+        before = state.model_dump(mode="json")
+
+        constraint_adherence_projection(state)
+        constraint_adherence_warnings(state)
+
+        self.assertEqual(state.model_dump(mode="json"), before)
+
+    def test_risk_classification_gate_warns_for_minimal_with_structured_high_or_critical_risks(self):
+        state = ProjectState(project_id="risk-gate-high", project_name="Risk gate")
+        state.risk_classification = "minimal_risk"
+        state.decision_objects = DecisionObjects(
+            risks=[
+                Risk(
+                    risk_id="risk-critical",
+                    title="Legal exposure",
+                    summary="Launch may trigger compliance review.",
+                    severity="critical",
+                    source_phase="audit",
+                )
+            ]
+        )
+        state.audit = AuditOutput(
+            fmea=[FMEAItem(component="Billing", failure_mode="Chargeback exposure", rpn=140)],
+            stpa=[STPAItem(control_action="Launch automation", hazard="Unsafe escalation")],
+        )
+        state.gauntlet = GauntletOutput(
+            results=[GauntletResult(id="H1", risk_rank=1, crux="Escalation path may fail.")]
+        )
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertTrue(assessment.warning_applies)
+        self.assertEqual(assessment.warning_text, RISK_CLASSIFICATION_WARNING)
+        self.assertEqual(assessment.highest_generated_risk_severity, "critical")
+        self.assertEqual(assessment.high_or_critical_risk_count, 4)
+        self.assertIn("decision_objects.audit", assessment.source_counts)
+        self.assertIn("audit.fmea", assessment.source_counts)
+        self.assertIn("audit.stpa", assessment.source_counts)
+        self.assertIn("gauntlet", assessment.source_counts)
+        self.assertIn("Legal exposure", str(assessment.diagnostics))
+
+    def test_risk_classification_gate_ignores_low_and_medium_generated_risks(self):
+        state = ProjectState(project_id="risk-gate-medium", project_name="Risk gate")
+        state.risk_classification = "minimal_risk"
+        state.audit = AuditOutput(
+            fmea=[
+                FMEAItem(component="Ops", failure_mode="Minor handoff delay", rpn=59),
+                FMEAItem(component="Metrics", failure_mode="Partial lag", rpn=119),
+            ],
+        )
+        state.gauntlet = GauntletOutput(
+            results=[GauntletResult(id="H2", risk_rank=2, crux="Medium ranked uncertainty.")]
+        )
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertFalse(assessment.warning_applies)
+        self.assertEqual(assessment.warning_text, "")
+        self.assertEqual(assessment.highest_generated_risk_severity, "medium")
+        self.assertEqual(assessment.high_or_critical_risk_count, 0)
+
+    def test_risk_classification_gate_does_not_warn_for_non_low_classifications(self):
+        for classification in ("limited_risk", "high_risk", "prohibited"):
+            with self.subTest(classification=classification):
+                state = ProjectState(project_id=f"risk-gate-{classification}", project_name="Risk gate")
+                state.risk_classification = classification
+                state.audit = AuditOutput(
+                    fmea=[FMEAItem(component="Launch", failure_mode="Regulatory escalation", rpn=240)]
+                )
+
+                assessment = assess_risk_classification_gate(state)
+
+                self.assertFalse(assessment.warning_applies)
+                self.assertEqual(assessment.highest_generated_risk_severity, "critical")
+                self.assertEqual(assessment.high_or_critical_risk_count, 1)
+
+    def test_risk_classification_gate_treats_low_aliases_as_minimal(self):
+        for classification in ("low", "low_risk"):
+            with self.subTest(classification=classification):
+                state = ProjectState(project_id=f"risk-gate-{classification}", project_name="Risk gate")
+                state.risk_classification = classification
+                state.audit = AuditOutput(
+                    fmea=[FMEAItem(component="Launch", failure_mode="Severe rollback risk", rpn=120)]
+                )
+
+                assessment = assess_risk_classification_gate(state)
+
+                self.assertTrue(assessment.warning_applies)
+                self.assertEqual(assessment.normalized_classification, classification)
+
+    def test_risk_classification_gate_ignores_report_keyword_matches(self):
+        state = ProjectState(project_id="risk-gate-keywords", project_name="Risk gate")
+        state.risk_classification = "minimal_risk"
+        state.report = "This prose says high risk, critical risk, circuit breaker, legal, and escalate."
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertFalse(assessment.warning_applies)
+        self.assertEqual(assessment.high_or_critical_risk_count, 0)
+        self.assertEqual(assessment.highest_generated_risk_severity, "")
+
+    def test_risk_classification_gate_does_not_mutate_selected_classification(self):
+        state = ProjectState(project_id="risk-gate-readonly", project_name="Risk gate")
+        state.risk_classification = " low_risk "
+        state.audit = AuditOutput(
+            fmea=[FMEAItem(component="Launch", failure_mode="High severity issue", rpn=120)]
+        )
+        before = state.risk_classification
+
+        assessment = assess_risk_classification_gate(state)
+
+        self.assertTrue(assessment.warning_applies)
+        self.assertEqual(state.risk_classification, before)
 
     def test_client_simplification_covers_residual_jargon(self):
         text = (
@@ -709,24 +1005,23 @@ Proceed if DQ >55.
 
         normalized = normalize_export_text(text, audience="client")
 
-        self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
-        self.assertIn("above the operator-defined threshold week over week", normalized)
-        self.assertIn("operator-defined effort estimate", normalized)
+        self.assertIn('below the threshold for "very disappointed" to validate in Sprint 0', normalized)
+        self.assertIn("above the week-over-week threshold to validate in Sprint 0", normalized)
+        self.assertIn("planning estimate to validate in Sprint 0", normalized)
         self.assertIn("structural priors", normalized)
         self.assertIn("system blindness,next item", normalized)
         self.assertIn("reference-class priors", normalized)
         self.assertIn("structural priors", normalized)
         self.assertIn("diagnostic scores", normalized)
         self.assertIn("provisional risk estimates", normalized)
-        self.assertIn("target threshold below the operator-defined threshold", normalized)
-        self.assertIn("exceeds the crux threshold by the operator-defined margin", normalized)
-        self.assertIn("above the operator-defined threshold for activation", normalized)
-        self.assertIn("below the operator-defined threshold for retention", normalized)
-        self.assertIn("rises above the operator-defined share threshold of new ARR", normalized)
-        self.assertIn("target threshold: above the operator-defined threshold", normalized)
-        self.assertIn("target threshold: below the operator-defined threshold", normalized)
-        self.assertIn("crosses the operator-defined threshold", normalized)
-        self.assertIn("operator-defined planning estimate", normalized)
+        self.assertIn("target threshold below the threshold to validate in Sprint 0", normalized)
+        self.assertIn("exceeds the crux threshold by the margin to validate in Sprint 0", normalized)
+        self.assertIn("above the threshold for activation to validate in Sprint 0", normalized)
+        self.assertIn("below the threshold for retention to validate in Sprint 0", normalized)
+        self.assertIn("rises above the new ARR share threshold to validate in Sprint 0", normalized)
+        self.assertIn("target threshold: above the threshold to validate in Sprint 0", normalized)
+        self.assertIn("target threshold: below the threshold to validate in Sprint 0", normalized)
+        self.assertIn("crosses the threshold to validate in Sprint 0", normalized)
         for forbidden in (
             "less than provisional threshold",
             "more than provisional threshold",
@@ -741,6 +1036,7 @@ Proceed if DQ >55.
             "provisional threshold of new ARR",
             "provisional threshold threshold",
             "provisional planning estimateK",
+            "operator-defined",
         ):
             self.assertNotIn(forbidden, normalized)
 
@@ -758,8 +1054,48 @@ Proceed if DQ >55.
 
         self.assertIn("legal-review SLA of 24 hours or less", normalized)
         self.assertIn("legally reviewed approval step of 24 hours or less", normalized)
-        self.assertIn("Planning effort remains operator-defined effort estimate or less", normalized)
+        self.assertIn("Planning effort remains planning estimate to validate in Sprint 0", normalized)
         self.assertIn("| Legal | Require a legal-review SLA of 24 hours or less before launch. |", normalized)
+
+    def test_client_placeholder_cleanup_removes_citation_and_operator_placeholders(self):
+        text = (
+            "Citation: No citation available\n"
+            "No citation available\n"
+            "Citation Evidence source unavailable\n"
+            "Stop if target threshold <provisional threshold.\n"
+            "Use the operator-defined margin for the pilot.\n"
+            "Planning is operator-defined effort estimate or less.\n"
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        self.assertIn("threshold to validate in Sprint 0", normalized)
+        self.assertIn("margin to validate in Sprint 0", normalized)
+        self.assertIn("planning estimate to validate in Sprint 0", normalized)
+        self.assertNotIn("Citation Evidence source unavailable", normalized)
+        self.assertNotIn("Evidence source unavailable", normalized)
+        self.assertNotIn("No citation available", normalized)
+        self.assertNotRegex(normalized, r"(?mi)^\s*Citation\s*:?\s*$")
+        self.assertNotIn("operator-defined", normalized)
+        self.assertNotIn("provisional threshold", normalized)
+
+    def test_client_placeholder_cleanup_preserves_concrete_timing_thresholds(self):
+        text = (
+            "Escalate if cycle time rises above provisional threshold of 72 hours.\n"
+            "Use the operator-defined threshold for 7-day rolling activation.\n"
+            "Require a legal-review SLA of 24 hours or less before claims ship.\n"
+            "Reassess by Day 7, confirm Day 10 onboarding, and resolve within 14 days.\n"
+            "Compare 14-day rolling retention and follow up within 48 hours."
+        )
+
+        normalized = normalize_export_text(text, audience="client")
+
+        for concrete in ("72 hours", "7-day rolling", "24 hours or less", "Day 7", "Day 10", "within 14 days", "14-day rolling", "48 hours"):
+            self.assertIn(concrete, normalized)
+        self.assertNotIn("planning estimate to validate in Sprint 0", normalized)
+        self.assertNotIn("threshold to validate in Sprint 0", normalized)
+        self.assertNotIn("operator-defined", normalized)
+        self.assertNotIn("provisional threshold", normalized)
 
     def test_normalize_export_text_preserves_protected_tables_for_legal_effort_cleanup(self):
         text = (
@@ -834,7 +1170,7 @@ funnel and channel-mix review
             normalized,
         )
         self.assertIn("C:\\data\\legal-review\\operator-defined effort estimate or less\\file.txt", normalized)
-        self.assertIn('below the operator-defined threshold for "very disappointed"', normalized)
+        self.assertIn('below the threshold for "very disappointed" to validate in Sprint 0', normalized)
 
     def test_suppress_client_raw_evidence_ids_removes_orphan_marker_fragments(self):
         text = (
@@ -842,18 +1178,36 @@ funnel and channel-mix review
             "suggests the growth metrics snapshot shows meaningful deceleration. "
             "[Evidence: knowledge_y | chunk=2] provides evidence interpretation context indicating the severity of the trend.\n"
             "The analytics audit suggests instrumentation is degraded [Evidence: knowledge_z | chunk=3].\n"
-            "```text\n[Evidence: knowledge_code | chunk=4] suggests preserved in code.\n```"
+            "Visible prose references knowledge_visible and source_ref=upload:file-1:metrics.md#chunk=2.\n"
+            "Visible prose leaks evidence_visible and secret=supersecret and C:\\Users\\operator\\project.txt.\n"
+            "| Visible table | knowledge_table |\n"
+            "|---|---|\n"
+            "| Metric | knowledge_cell upload:file-2:table.md#chunk=1 |\n"
+            "```text\n[Evidence: knowledge_code | chunk=4] suggests cleaned in client-visible code.\n```\n"
+            "```json\n{\"machine_archive\":\"knowledge_machine\"}\n```\n"
+            "Operator-only source excerpt: [Evidence: knowledge_operator | chunk=9] remains traceable."
         )
 
         cleaned = suppress_client_raw_evidence_ids(text)
 
         self.assertIn('The team asked "in what order?"', cleaned)
         self.assertIn("The analytics audit suggests instrumentation is degraded.", cleaned)
-        self.assertIn("[Evidence: knowledge_code | chunk=4] suggests preserved in code.", cleaned)
+        self.assertIn('{"machine_archive":"knowledge_machine"}', cleaned)
+        self.assertIn("[Evidence: knowledge_operator | chunk=9] remains traceable.", cleaned)
         self.assertNotIn("suggests the growth metrics snapshot", cleaned)
         self.assertNotIn("provides evidence interpretation context", cleaned)
         self.assertNotIn("[Evidence: knowledge_x", cleaned)
         self.assertNotIn("[Evidence: knowledge_y", cleaned)
+        self.assertNotIn("[Evidence: knowledge_code", cleaned)
+        self.assertNotIn("knowledge_visible", cleaned)
+        self.assertNotIn("knowledge_table", cleaned)
+        self.assertNotIn("knowledge_cell", cleaned)
+        self.assertNotIn("evidence_visible", cleaned)
+        self.assertNotIn("supersecret", cleaned)
+        self.assertNotIn("C:\\Users", cleaned)
+        self.assertNotIn("source_ref=", cleaned)
+        self.assertNotIn("upload:file-1", cleaned)
+        self.assertNotIn("upload:file-2", cleaned)
 
 
 if __name__ == "__main__":

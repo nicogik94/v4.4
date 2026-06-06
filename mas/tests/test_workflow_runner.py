@@ -15,7 +15,9 @@ if str(ROOT) not in sys.path:
 
 import api
 import report_freshness
+from hypothesis_coverage import assess_hypothesis_variable_coverage
 from llm_client import LLMResponse
+from monitoring_templates import build_monitoring_template_rows
 from runtime import run_state as workflow_run_state
 from runtime import work_queue as workflow_queue
 from orchestrator import (
@@ -23,8 +25,10 @@ from orchestrator import (
     _build_report_evidence_locator_register,
     _phase_has_output,
     _sanitize_report_context,
+    build_hypotheses_prompt,
     build_monitor_prompt,
     build_report_prompt,
+    build_strategy_prompt,
     get_first_unfinished_phase,
     is_workflow_complete,
     normalize_strategy_payload,
@@ -205,6 +209,164 @@ def make_completed_state(project_id: str = "workflow-complete") -> ProjectState:
     return state
 
 
+class TestHypothesisVariableCoverage(unittest.TestCase):
+    def test_variable_coverage_detects_covered_categories(self):
+        state = ProjectState(
+            project_id="coverage-growth",
+            project_name="Growth coverage",
+            brief=(
+                "Decide whether to expand a B2B pilot. The decision depends on "
+                "segment demand, acquisition channel quality, pricing, D30 retention, "
+                "measurement reliability, and implementation capacity."
+            ),
+            data="Sparse evidence only; validate before scaling.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Segment demand from mid-market buyers is the main driver.",
+                justification="Validate customer segment demand with interviews before scaling.",
+                signal="qualified segment pipeline",
+                confirm=">=20 qualified buyers within 6 weeks",
+                reject="<5 qualified buyers within 6 weeks",
+                portfolio_cluster="demand",
+            ),
+            Hypothesis(
+                id="H2",
+                text="Paid acquisition channel quality can produce efficient pipeline.",
+                justification="CAC and attribution must be measured before paid activation.",
+                signal="channel CAC and conversion attribution",
+                confirm="CAC payback within 90 days",
+                reject="CAC payback above target by D90",
+                portfolio_cluster="channel pricing",
+            ),
+            Hypothesis(
+                id="H3",
+                text="Retention and implementation capacity constrain expansion.",
+                justification="Owner sign-off and support capacity determine rollout feasibility.",
+                signal="D30 retention, support load, accountable owner approval",
+                confirm="D30 retention >= 40% and owner approves rollout",
+                reject="D30 retention < 25% or support SLA fails",
+                portfolio_cluster="retention operations",
+            ),
+        ]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+
+        for label in (
+            "Demand / user segment",
+            "Channel / acquisition",
+            "Retention / repeat usage",
+            "Monetization / pricing",
+            "Operational capacity",
+            "Data quality / measurement",
+            "Owner / decision authority",
+            "Time horizon / cadence",
+            "Evidence required to validate",
+        ):
+            self.assertIn(label, coverage.covered_categories)
+        self.assertNotIn("Channel / acquisition", coverage.missing_critical_categories)
+        self.assertNotIn("Monetization / pricing", coverage.missing_critical_categories)
+
+    def test_missing_critical_categories_are_advisory_and_do_not_mutate_hypotheses(self):
+        state = ProjectState(
+            project_id="coverage-advisory",
+            project_name="Activation coverage",
+            brief="Improve onboarding activation for trial users.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Onboarding friction reduces activation.",
+                justification="[Hypothesis] Sparse brief only.",
+                signal="activation rate",
+                confirm="activation improves",
+                reject="activation remains flat",
+                portfolio_cluster="activation",
+            )
+        ]
+        before = [hypothesis.model_dump(mode="json") for hypothesis in state.hypotheses]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+        after = [hypothesis.model_dump(mode="json") for hypothesis in state.hypotheses]
+
+        self.assertEqual(after, before)
+        self.assertIn("Owner / decision authority", coverage.missing_critical_categories)
+        self.assertIn("Time horizon / cadence", coverage.missing_critical_categories)
+        self.assertTrue(any(need.category == "Owner / decision authority" for need in coverage.evidence_needs))
+        self.assertEqual(state.phase_status["hypotheses"], PhaseStatus.PENDING)
+
+    def test_narrow_non_growth_project_does_not_force_pricing_channel_or_retention(self):
+        state = ProjectState(
+            project_id="coverage-narrow",
+            project_name="Claim safety",
+            brief="Decide whether a legal-review SLA reduces claim-safety approval risk.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Legal review SLA reduces claim-safety approval risk.",
+                justification="Compliance approval is the decision-critical constraint.",
+                signal="approval cycle time measured by compliance owner",
+                confirm="legal approval within 24 hours for 4 weeks",
+                reject="approval exceeds SLA for two weeks",
+                portfolio_cluster="claim-safety compliance",
+            )
+        ]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+
+        for label in ("Monetization / pricing", "Channel / acquisition", "Retention / repeat usage"):
+            self.assertNotIn(label, coverage.missing_critical_categories)
+            self.assertIn(label, coverage.not_relevant_categories)
+        self.assertIn("Legal / compliance / claim-safety", coverage.covered_categories)
+
+    def test_sparse_evidence_creates_validation_needs_not_measured_claims(self):
+        state = ProjectState(
+            project_id="coverage-sparse",
+            project_name="Sparse",
+            brief="Evidence is unknown; evaluate whether onboarding changes matter.",
+        )
+        state.hypotheses = [
+            Hypothesis(
+                id="H1",
+                text="Onboarding changes may improve activation.",
+                justification="[Unknown] No direct evidence supplied.",
+                signal="activation metric",
+                confirm="activation threshold improves within 30 days",
+                reject="activation remains below threshold within 30 days",
+                portfolio_cluster="activation",
+            )
+        ]
+
+        coverage = assess_hypothesis_variable_coverage(state)
+
+        self.assertIn("Evidence required to validate", coverage.covered_categories)
+        combined = " ".join(coverage.assumptions_needing_validation)
+        self.assertNotIn("measured", combined.lower())
+        self.assertNotIn("confirmed", combined.lower())
+
+    def test_hypothesis_prompt_preserves_existing_json_schema(self):
+        prompt = build_hypotheses_prompt(ProjectState(project_id="prompt-schema", project_name="Prompt", brief="Improve activation."))
+
+        self.assertIn(
+            "Each hypothesis object must include: id, text, justification, signal, alpha, beta, confirm, reject, evoi, portfolio_cluster, status.",
+            prompt,
+        )
+        self.assertIn("Do not add any other keys to hypothesis objects.", prompt)
+        self.assertNotIn("variable_coverage", prompt)
+        self.assertNotIn("owner_decision_authority", prompt)
+
+    def test_monitoring_template_rows_do_not_mutate_project_state(self):
+        state = make_completed_state("monitor-template-no-mutation")
+        before = state.model_dump(mode="json")
+
+        rows = build_monitoring_template_rows(state)
+
+        self.assertTrue(rows)
+        self.assertEqual(state.model_dump(mode="json"), before)
+
+
 REPORT_EVIDENCE_MARKER_RE = re.compile(r"\[Evidence: [^\]\n]+ \| [^\]\n]+\]")
 REPORT_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 REPORT_LOAD_BEARING_SECTIONS = {
@@ -356,6 +518,52 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertNotIn("Evidence Gauge", prompt)
         self.assertNotIn("Defense Index", prompt)
         self.assertNotIn("claim cards", prompt.lower())
+
+    def test_strategy_prompt_includes_original_brief_and_hard_constraint_rules(self):
+        state = ProjectState(
+            project_id="strategy-constraints",
+            project_name="Strategy constraints",
+            brief=(
+                "Limited capacity this month. Recommend only one focused initiative plus "
+                "one small experiment. No major engineering project this month. Budget is "
+                "limited to one small experiment. Avoid broad growth spend until the cause is clearer."
+            ),
+        )
+
+        prompt = build_strategy_prompt(state)
+
+        self.assertIn("OPERATOR HARD CONSTRAINTS", prompt)
+        self.assertIn("Limited capacity this month", prompt)
+        self.assertIn("one focused initiative plus one small experiment", prompt)
+        self.assertIn("Explicit capacity, budget, no-major-project, spend-freeze", prompt)
+        self.assertIn("Do not convert a constrained plan into multiple parallel critical tracks", prompt)
+        self.assertIn("unless the operator explicitly allowed that capacity", prompt)
+        self.assertIn("priority must be exactly one of CRITICAL, HIGH, MEDIUM, LOW", prompt)
+        self.assertIn("For deferred/blocked/do-not-do items, use priority LOW", prompt)
+        self.assertIn(
+            "put \"DEFERRED\", \"BLOCKED\", \"DO NOT START\", or \"DO NOT DO\" in the action/title/justification",
+            prompt,
+        )
+
+    def test_report_prompt_preserves_constrained_strategy_shape(self):
+        state = ProjectState(
+            project_id="report-constraints",
+            project_name="Report constraints",
+            brief=(
+                "Limited capacity this month. Only one focused initiative plus one small "
+                "experiment is possible. No major engineering project this month. Avoid broad "
+                "growth spend until the cause is clearer."
+            ),
+        )
+
+        prompt = build_report_prompt(state)
+
+        self.assertIn("Preserve constrained strategy shape", prompt)
+        self.assertIn("one focused initiative plus one small experiment", prompt)
+        self.assertIn("do not expand it into several parallel tracks", prompt)
+        self.assertIn("Defer major engineering work or broad growth spend", prompt)
+        self.assertIn("unless operator hard constraints require fewer actions", prompt)
+        self.assertIn("include only the action count that fits the explicit constraint", prompt)
 
     def test_report_prompt_includes_factual_safety_and_research_depth_rules(self):
         state = make_completed_state("report-factual-safety")
@@ -673,6 +881,19 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertNotIn("`[Evidence: <evidence_id> | <locator>]` is the only canonical project-evidence citation format", prompt_text)
         self.assertNotIn("canonical `[Evidence: ...]` marker", prompt_text)
 
+    def test_prompt_markdown_files_include_constraint_adherence_language(self):
+        strategy_text = Path("prompts/phases/03-strategy.md").read_text(encoding="utf-8")
+        report_text = Path("prompts/phases/05-report.md").read_text(encoding="utf-8")
+
+        self.assertIn("Operator hard constraints", strategy_text)
+        self.assertIn("one focused initiative plus one small experiment", strategy_text)
+        self.assertIn("Do not convert a constrained plan into multiple parallel critical tracks", strategy_text)
+        self.assertIn("priority must be exactly one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`", strategy_text)
+        self.assertIn("For deferred/blocked/do-not-do items, use priority `LOW`", strategy_text)
+        self.assertIn("Operator hard constraints", report_text)
+        self.assertIn("Do not expand constrained recommendations into several parallel tracks", report_text)
+        self.assertIn("Do not force a 5-7 item next-step list", report_text)
+
     def test_report_prompt_raw_markdown_parser_detects_load_bearing_markers(self):
         report = """# EXECUTIVE SUMMARY
 - Market demand increased [Evidence: ev-market | upload:file-market.pdf#page=2].
@@ -815,6 +1036,63 @@ class TestWorkflowHelpers(unittest.TestCase):
         strategy = StrategyOutput(**normalize_strategy_payload(payload))
 
         self.assertEqual(strategy.reentry_check, "")
+
+    def test_strategy_priority_aliases_normalize_to_low_without_losing_semantics(self):
+        payload = make_strategy_payload()
+        payload["strategies"] = [
+            {
+                "priority": "DEFERRED",
+                "action": "Sales follow-up cadence repair (DEFERRED - data dependency)",
+                "justification": "DEFERRED until CRM coverage is measured.",
+                "evidence_chain": "H1 + audit",
+            },
+            {
+                "priority": "BLOCKED",
+                "action": "Analytics instrumentation repair (BLOCKED - owner approval)",
+                "justification": "BLOCKED until RevOps confirms the source of truth.",
+                "evidence_chain": "H1 + audit",
+            },
+            {
+                "priority": "DEFER",
+                "action": "Defer paid acquisition expansion",
+                "justification": "DEFER broad spend until CAC attribution is trusted.",
+                "evidence_chain": "H2 + audit",
+            },
+            {
+                "priority": "DO_NOT_START",
+                "action": "New lifecycle automation (DO NOT START - data dependency)",
+                "justification": "DO NOT START until contact health is repaired.",
+                "evidence_chain": "H3 + audit",
+            },
+            {
+                "priority": "DO_NOT_DO",
+                "action": "Broad growth spend (DO NOT DO this month)",
+                "justification": "DO NOT DO while the operator budget is limited to a small experiment.",
+                "evidence_chain": "H2 + audit",
+            },
+            {
+                "priority": "PARKED",
+                "action": "Parked data warehouse migration",
+                "justification": "PARKED because it would violate the no-major-engineering constraint.",
+                "evidence_chain": "H3 + audit",
+            },
+        ]
+
+        strategy = StrategyOutput(**payload)
+
+        self.assertEqual([item.priority for item in strategy.strategies], [Priority.LOW] * 6)
+        visible_text = "\n".join(
+            f"{item.action}\n{item.justification}" for item in strategy.strategies
+        )
+        for marker in ("DEFERRED", "BLOCKED", "DEFER", "DO NOT START", "DO NOT DO", "PARKED"):
+            self.assertIn(marker, visible_text)
+
+    def test_unknown_strategy_priority_still_fails_validation(self):
+        payload = make_strategy_payload()
+        payload["strategies"][0]["priority"] = "SOMEDAY"
+
+        with self.assertRaises(Exception):
+            StrategyOutput(**payload)
 
     def test_strategy_normalization_does_not_weaken_unrelated_validation(self):
         payload = make_strategy_payload({"target": "monitor"})
@@ -1105,6 +1383,52 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
             updated.strategy.reentry_check,
             '{"target":"monitor","triggers":["R8","R1"]}',
         )
+
+    async def test_strategy_phase_normalizes_deferred_priority_aliases_and_preserves_wording(self):
+        state = make_completed_state("strategy-phase-priority-aliases")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        state.strategy = None
+        state.strategy_raw = "previous raw strategy"
+        payload = make_strategy_payload("Re-evaluate at 30 days")
+        payload["strategies"] = [
+            {
+                "priority": "DEFERRED",
+                "action": "Sales Follow-Up Cadence Repair (DO NOT START - data dependency)",
+                "justification": "DEFERRED until CRM source coverage and owner approval are available.",
+                "evidence_chain": "H1 + audit",
+                "expected_impact": "Prevents premature execution.",
+                "effort": "Low",
+                "timeline": "after data readiness",
+                "risk_if_ignored": "Team starts work before the blocker is resolved.",
+                "framework_source": "PREMORTEM",
+            },
+            {
+                "priority": "BLOCKED",
+                "action": "Lifecycle automation expansion (BLOCKED - attribution gap)",
+                "justification": "BLOCKED until the operator resolves attribution and budget constraints.",
+                "evidence_chain": "H2 + audit",
+                "expected_impact": "Avoids broad spend before measurement is trusted.",
+                "effort": "Low",
+                "timeline": "after attribution repair",
+                "risk_if_ignored": "Budget is spent without a reliable signal.",
+                "framework_source": "EVOI",
+            },
+        ]
+        response = make_response(json.dumps(payload), 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.COMPLETED)
+        self.assertEqual(updated.phase_confidence["strategy"], 1.0)
+        self.assertIsNotNone(updated.strategy)
+        self.assertIsNone(updated.strategy_raw)
+        self.assertEqual([item.priority for item in updated.strategy.strategies], [Priority.LOW, Priority.LOW])
+        self.assertIn("DO NOT START", updated.strategy.strategies[0].action)
+        self.assertIn("DEFERRED", updated.strategy.strategies[0].justification)
+        self.assertIn("BLOCKED", updated.strategy.strategies[1].action)
+        self.assertIn("BLOCKED", updated.strategy.strategies[1].justification)
 
     async def test_malformed_strategy_stores_raw_and_fails_phase(self):
         state = make_completed_state("strategy-phase-malformed")
@@ -1971,6 +2295,36 @@ class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
             WORKFLOW_PHASE_SEQUENCE,
             ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"),
         )
+
+    async def test_ingestion_metadata_does_not_change_run_start_or_phase_sequence(self):
+        state = ProjectState(
+            project_id="ingestion-run-start",
+            project_name="Ingestion run start",
+            brief="Run with versioned ingestion metadata.",
+            data="Supporting signal.",
+            ingestion_contract_version="case.v1",
+            ingestion_source="crm",
+            ingestion_external_case_id="case-456",
+            ingestion_metadata={"segment": "enterprise"},
+        )
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            response = await api.run_full_workflow(state.project_id, BackgroundTasks())
+
+        active = await workflow_run_state.get_active_project_run(state.project_id)
+        record = await workflow_run_state.get_workflow_run(response["run_id"])
+        self.assertEqual(
+            WORKFLOW_PHASE_SEQUENCE,
+            ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"),
+        )
+        self.assertEqual(response["status"], "started")
+        self.assertEqual(response["project_id"], state.project_id)
+        self.assertIn("run_id", response)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.run_id, response["run_id"])
+        self.assertEqual(record.status, "queued")
+        self.assertEqual(record.current_phase, "")
+        self.assertIn(state.project_id, api.running)
 
     async def test_run_rejects_when_workflow_is_process_local_running(self):
         state = make_completed_state("running-project-run")

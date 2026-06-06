@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
@@ -50,6 +51,91 @@ def safe_join(values: Any, sep: str = ", ") -> str:
             if text:
                 parts.append(text)
     return sep.join(parts)
+
+
+def display_text(value: Any, default: str = "") -> str:
+    """Return deterministic client-visible text without JSON/Python object syntax."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return _redact_client_visible(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in sorted(value, key=lambda item: safe_text(item)):
+            text = display_text(value.get(key))
+            if text:
+                parts.append(text)
+        return _redact_client_visible(", ".join(parts) or default)
+    if isinstance(value, (list, tuple)):
+        return display_join(value)
+    if isinstance(value, set):
+        return display_join(sorted(value, key=lambda item: display_text(item)))
+    return _redact_client_visible(safe_text(value, default=default))
+
+
+def display_join(values: Any, sep: str = ", ") -> str:
+    """Join mixed values for client-visible artifacts using display-safe text."""
+    if values is None:
+        return ""
+    if isinstance(values, (str, bytes, dict)) or not _is_iterable(values):
+        return display_text(values)
+    parts: list[str] = []
+    for value in values:
+        text = display_text(value)
+        if text:
+            parts.append(text)
+    return sep.join(parts)
+
+
+def spreadsheet_text(value: Any) -> str:
+    """Return a spreadsheet-safe string for client-visible text cells."""
+    text = display_text(value)
+    if text.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def _redact_client_visible(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"\bpolicy_audit_log\b", "operator audit log redacted", text, flags=re.I)
+    text = re.sub(r"\braw_provider_payload\b", "provider payload redacted", text, flags=re.I)
+    text = re.sub(r"\braw[\s_-]+prompt\b", "prompt redacted", text, flags=re.I)
+    text = re.sub(r"\bproject_state\s*\.\s*json\b", "internal project state redacted", text, flags=re.I)
+    text = re.sub(r"\bmachine_archive\b", "internal machine archive redacted", text, flags=re.I)
+    text = re.sub(
+        r"\bruntime[\s_/-]*preflight(?:[\s_-]+metadata)?\b",
+        "runtime metadata redacted",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\bupload_store\b", "internal upload storage", text, flags=re.I)
+    text = re.sub(
+        r"\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*[^\s,;|)>\]]+",
+        "credential=[redacted]",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\bsource_ref\s*[:=]\s*[^\s|,)>\]]+", "Evidence source unavailable", text, flags=re.I)
+    text = re.sub(r"\bstorage_ref\s*[:=]\s*[^\s|,)>\]]+", "Evidence source unavailable", text, flags=re.I)
+    text = re.sub(r"\bupload:[^\s|,)>\]]+", "Uploaded project document", text, flags=re.I)
+    text = re.sub(r"\bknowledge[_-][A-Za-z0-9_.:-]+\b", "project evidence", text, flags=re.I)
+    text = re.sub(r"\b(?:ev|evidence|src)-[A-Za-z0-9_.:-]+\b", "project evidence", text, flags=re.I)
+    text = re.sub(r"\b[A-Za-z]:[\\/][^\s,;|)>\]]+", "redacted local path", text)
+    text = re.sub(r"\\\\[^\s,;|)>\]]+", "redacted local path", text)
+    text = re.sub(r"file://[^\s,;|)>\]]+", "redacted local path", text, flags=re.I)
+    text = re.sub(
+        r"(?<!https:)(?<!http:)/(Users|home|mnt|var|tmp|root|workspace|Volumes|opt)/[^\s,;|)>\]]+",
+        "redacted local path",
+        text,
+        flags=re.I,
+    )
+    return text
 
 
 def _is_iterable(value: Any) -> bool:
