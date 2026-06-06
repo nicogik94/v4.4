@@ -17,13 +17,20 @@ from orchestrator import (
     _parsed_json_matches_phase,
     _phase_json_retry_instruction,
     _store_phase_output,
+    build_technology_readiness_prompt,
     run_phase_node,
     workflow_phase_sequence_for_state,
 )
+from exporters import (  # noqa: E402
+    _technology_readiness_phase_output_digest,
+    summarize_phase_outputs,
+)
+from prompts.loader import PHASE_MODULE_MAP, build_prompt as build_loader_prompt
 from state import (
     PhaseStatus,
     ProjectState,
     RoadmapPhase,
+    TECHNOLOGY_READINESS_OUTPUT_MODELS,
     TechnologyReadinessReadinessRoadmapOutput,
     TechnologyReadinessScopeOutput,
     validate_technology_readiness_output,
@@ -47,6 +54,7 @@ from tools.technology_readiness import (
 )
 from workflow_templates import (
     STRATEGIC_AUDIT_PHASE_SEQUENCE,
+    TECHNOLOGY_READINESS_PHASE_LABELS,
     TECHNOLOGY_READINESS_PHASE_SEQUENCE,
     get_workflow_phase_sequence,
 )
@@ -65,6 +73,135 @@ def make_llm_response(text: str, input_tokens: int = 10, output_tokens: int = 5)
         output_tokens=output_tokens,
         cost_usd=0.01,
     )
+
+
+def technology_readiness_contract_payloads() -> dict[str, dict]:
+    return {
+        "scope": {
+            "technology_name": "Contract coating",
+            "assessment_boundary": "bench prototype through controlled validation planning",
+            "target_environment": "pilot coating line",
+            "intended_next_milestone": "TRL 4 evidence package",
+            "stakeholders": ["research lead", "technology transfer office"],
+            "constraints": ["IP review before external demos"],
+            "assumptions": ["bench results are directional"],
+            "validation_questions": ["Can repeatability be shown?"],
+            "evidence_gaps": ["controlled_validation"],
+            "confidence": "medium",
+        },
+        "scientific_inventory": {
+            "scientific_basis": ["published chemistry analogy"],
+            "critical_components": ["coating precursor"],
+            "current_experiments": ["small batch proof of concept"],
+            "known_limitations": ["repeatability not demonstrated"],
+            "evidence_items": [{"evidence_id": "ev-science", "category": "scientific_basis"}],
+            "missing_evidence": ["controlled_validation"],
+            "confidence": "preliminary",
+        },
+        "trl_diagnosis": {
+            "current_trl": 3,
+            "target_trl": 4,
+            "confidence": "medium",
+            "current_phase_name": "Protection and proof of concept",
+            "evidence_supporting_current_trl": ["ev-science"],
+            "why_not_higher": "Controlled validation and reproducibility are missing.",
+            "evidence_gaps": ["reproducibility", "controlled_validation"],
+            "legal_or_certification_disclaimer": "This is not TRL certification.",
+        },
+        "research_industry_alignment": {
+            "criteria_scores": {
+                criterion: {
+                    "score": 3,
+                    "evidence": "directional planning evidence",
+                    "gap": "validation gap",
+                    "recommendation": "collect targeted evidence",
+                }
+                for criterion in RESEARCH_INDUSTRY_CRITERIA
+            },
+            "overall_alignment_score": 3.0,
+            "top_alignment_strengths": ["clear industrial use case"],
+            "top_alignment_gaps": ["no partner feedback"],
+            "prioritized_industrial_applications": ["pilot coating line"],
+            "confidence": "medium",
+        },
+        "ip_protection_axis": {
+            "material_composition": {
+                "preliminary_assessment": "Promising but uncertain.",
+                "evidence": ["ev-science"],
+                "gap": "specialist review missing",
+                "disclosure_risk": "Review before external demos.",
+                "recommended_review": "Specialist review required.",
+            },
+            "synthesis_method": {},
+            "specific_use": {},
+            "device_or_system": {},
+            "critical_parameters": {},
+            "know_how": {},
+            "ip_risk_notes": ["Do not claim legal patentability."],
+            "specialist_review_required": True,
+            "confidence": "low",
+        },
+        "next_level_recommendations": {
+            "current_trl": 3,
+            "next_target_trl": 4,
+            "current_phase_name": "Protection and proof of concept",
+            "next_phase_name": "Controlled technical validation",
+            "main_gap_to_next_level": "Repeatable controlled validation is missing.",
+            "recommended_actions": [{"owner": "Technical lead", "action": "run repeatability protocol"}],
+            "required_tests": ["repeatability test"],
+            "required_evidence": ["reproducibility", "controlled_validation", "ip_review"],
+            "expected_deliverables": ["validation report"],
+            "risks_to_reduce": ["false-positive lab result"],
+            "suggested_owners": ["Technical lead", "IP specialist"],
+            "estimated_time_range": "6-12 months",
+            "advancement_criteria": ["repeatable result under controlled protocol"],
+            "confidence": "medium",
+        },
+        "technical_validation_plan": {
+            "validation_tests": [{"name": "repeatability protocol", "owner": "Technical lead"}],
+            "acceptance_criteria": ["three repeatable runs"],
+            "measurement_plan": ["capture batch variance"],
+            "failure_modes": ["coating instability"],
+            "evidence_to_collect": ["controlled_validation"],
+            "confidence": "medium",
+        },
+        "industrial_transfer_plan": {
+            "ideal_industrial_partner": "Pilot manufacturing partner",
+            "partner_validation_needed": ["partner feedback"],
+            "minimum_transfer_package": ["non-confidential brief", "validation protocol"],
+            "transfer_model_options": ["sponsored validation"],
+            "negotiation_risks": ["premature disclosure"],
+            "evidence_required_before_transfer": ["ip_review", "partner_feedback"],
+            "confidence": "low",
+        },
+        "readiness_roadmap": {
+            "roadmap_phases": [
+                {
+                    "trl": "TRL 4",
+                    "phase_name": "Controlled technical validation",
+                    "time_range": "6-12 months",
+                    "objective": "validate repeatability",
+                    "evidence_needed": ["controlled_validation"],
+                    "decision_gate": "repeatability gate",
+                }
+            ],
+            "timeline": [{"phase": "TRL 4", "range": "6-12 months"}],
+            "decision_gates": [{"gate": "repeatability gate"}],
+            "resources_needed": ["technical lead"],
+            "go_no_go_criteria": ["controlled validation completed"],
+            "confidence": "medium",
+        },
+        "executive_summary": {
+            "current_trl": 3,
+            "target_trl": 4,
+            "readiness_verdict_code": "ready_for_proof_of_concept",
+            "readiness_verdict": "Ready for controlled validation planning, not advancement.",
+            "top_blockers": ["reproducibility", "IP review"],
+            "recommended_next_step": "Run controlled validation protocol.",
+            "operator_summary": "Evidence-backed estimate requires operator review.",
+            "confidence": "medium",
+        },
+    }
 
 
 def test_technology_readiness_state_uses_template_sequence():
@@ -87,6 +224,66 @@ def test_existing_project_type_sequences_are_unchanged():
     assert get_workflow_phase_sequence("ai_readiness") == STRATEGIC_AUDIT_PHASE_SEQUENCE
     assert get_workflow_phase_sequence("automation_roi") == STRATEGIC_AUDIT_PHASE_SEQUENCE
     assert ProjectState(project_id="default", brief="x").current_phase == "classify"
+
+
+def test_technology_readiness_phase_contracts_cover_validators_state_and_labels():
+    payloads = technology_readiness_contract_payloads()
+    state = ProjectState(project_id="tech-contracts", project_type="technology_readiness", brief="x")
+
+    assert tuple(TECHNOLOGY_READINESS_OUTPUT_MODELS) == TECHNOLOGY_READINESS_PHASE_SEQUENCE
+    assert tuple(TECHNOLOGY_READINESS_PHASE_LABELS) == TECHNOLOGY_READINESS_PHASE_SEQUENCE
+    assert set(payloads) == set(TECHNOLOGY_READINESS_PHASE_SEQUENCE)
+
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        assert phase in ProjectState.model_fields, f"{phase} missing ProjectState storage field"
+        assert TECHNOLOGY_READINESS_PHASE_LABELS[phase].strip(), f"{phase} missing display label"
+        model = TECHNOLOGY_READINESS_OUTPUT_MODELS[phase]
+        output = validate_technology_readiness_output(phase, payloads[phase])
+        assert isinstance(output, model), f"{phase} validator did not return typed model"
+        setattr(state, phase, output)
+        assert getattr(state, phase) is output
+
+
+def test_technology_readiness_runtime_prompts_are_file_backed_and_loader_aligned():
+    state = ProjectState(project_id="tech-prompt-contracts", project_type="technology_readiness", brief="x")
+
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        prompt_file = PROMPT_DIR / f"{phase}.md"
+        prompt_text = prompt_file.read_text(encoding="utf-8").strip()
+
+        assert phase in PROMPT_BUILDERS, f"{phase} missing runtime prompt builder"
+        assert PHASE_MODULE_MAP.get(phase) == f"technology_readiness/{phase}.md"
+        assert build_loader_prompt(phase, include_router=False).strip() == prompt_text
+
+        # Runtime-active TR prompts are built by orchestrator prompt builders,
+        # which read the same prompt files and add assessment context.
+        built = PROMPT_BUILDERS[phase](state)
+        assert built == build_technology_readiness_prompt(state, phase)
+        assert prompt_text in built
+        assert "ASSESSMENT CONTEXT:" in built
+        assert "Return the requested JSON object only." in built
+
+
+def test_technology_readiness_export_summaries_cover_every_active_phase():
+    payloads = technology_readiness_contract_payloads()
+    state = ProjectState(
+        project_id="tech-export-contracts",
+        project_name="Contract coating",
+        project_type="technology_readiness",
+        brief="Assess contract coating readiness.",
+    )
+
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        setattr(state, phase, validate_technology_readiness_output(phase, payloads[phase]))
+        state.phase_status[phase] = PhaseStatus.COMPLETED
+        state.phase_confidence[phase] = 0.8
+
+    summary = summarize_phase_outputs(state)
+    for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        digest = _technology_readiness_phase_output_digest(state, phase)
+        assert digest.strip(), f"{phase} missing export/report digest"
+        assert TECHNOLOGY_READINESS_PHASE_LABELS[phase] in summary
+        assert digest in summary
 
 
 def test_technology_readiness_prompts_exist_and_have_builders():
