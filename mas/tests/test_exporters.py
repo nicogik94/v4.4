@@ -81,6 +81,7 @@ from state import (  # noqa: E402
     StrategyOutput,
     UploadedFileManifest,
     Verdict,
+    validate_technology_readiness_output,
 )
 from tests.test_decision_objects import make_state  # noqa: E402
 
@@ -556,7 +557,7 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
             source_phase="trl_diagnosis",
         ),
     ]
-    state.scientific_inventory = {
+    state.scientific_inventory = validate_technology_readiness_output("scientific_inventory", {
         "scientific_basis": ["published chemistry analogy"],
         "critical_components": ["coating precursor"],
         "current_experiments": ["small batch trial"],
@@ -564,8 +565,8 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "evidence_items": [{"evidence_id": "ev-science", "category": "scientific_basis"}],
         "missing_evidence": ["controlled validation"],
         "confidence": "preliminary",
-    }
-    state.trl_diagnosis = {
+    })
+    state.trl_diagnosis = validate_technology_readiness_output("trl_diagnosis", {
         "current_trl": 3,
         "target_trl": 4,
         "confidence": "medium",
@@ -574,8 +575,8 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "why_not_higher": "Controlled validation and reproducibility are missing.",
         "evidence_gaps": ["reproducibility", "controlled_validation", "ip_review"],
         "legal_or_certification_disclaimer": "This is not TRL certification.",
-    }
-    state.research_industry_alignment = {
+    })
+    state.research_industry_alignment = validate_technology_readiness_output("research_industry_alignment", {
         "criteria_scores": {
             criterion: {
                 "score": 3,
@@ -601,8 +602,8 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "top_alignment_gaps": ["no partner feedback"],
         "prioritized_industrial_applications": ["pilot coating line"],
         "confidence": "medium",
-    }
-    state.ip_protection_axis = {
+    })
+    state.ip_protection_axis = validate_technology_readiness_output("ip_protection_axis", {
         "material_composition": {
             "preliminary_assessment": "Promising but uncertain.",
             "evidence": ["ev-science"],
@@ -618,8 +619,8 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "ip_risk_notes": ["Do not claim legal patentability."],
         "specialist_review_required": True,
         "confidence": "low",
-    }
-    state.next_level_recommendations = {
+    })
+    state.next_level_recommendations = validate_technology_readiness_output("next_level_recommendations", {
         "current_trl": 3,
         "next_target_trl": 4,
         "current_phase_name": "Protection and proof of concept",
@@ -634,16 +635,16 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "estimated_time_range": "6-12 months",
         "advancement_criteria": ["repeatable result under controlled protocol"],
         "confidence": "medium",
-    }
-    state.technical_validation_plan = {
+    })
+    state.technical_validation_plan = validate_technology_readiness_output("technical_validation_plan", {
         "validation_tests": [{"name": "repeatability protocol", "owner": "Technical lead"}],
         "acceptance_criteria": ["three repeatable runs"],
         "measurement_plan": ["capture batch variance"],
         "failure_modes": ["coating instability"],
         "evidence_to_collect": ["controlled_validation"],
         "confidence": "medium",
-    }
-    state.industrial_transfer_plan = {
+    })
+    state.industrial_transfer_plan = validate_technology_readiness_output("industrial_transfer_plan", {
         "ideal_industrial_partner": "Pilot manufacturing partner",
         "partner_validation_needed": ["partner feedback"],
         "minimum_transfer_package": ["non-confidential brief", "validation protocol"],
@@ -651,8 +652,8 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "negotiation_risks": ["premature disclosure"],
         "evidence_required_before_transfer": ["ip_review", "partner_feedback"],
         "confidence": "low",
-    }
-    state.readiness_roadmap = {
+    })
+    state.readiness_roadmap = validate_technology_readiness_output("readiness_roadmap", {
         "roadmap_phases": [
             {
                 "trl": "TRL 4",
@@ -668,8 +669,8 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "resources_needed": ["technical lead"],
         "go_no_go_criteria": ["controlled validation completed"],
         "confidence": "medium",
-    }
-    state.executive_summary = {
+    })
+    state.executive_summary = validate_technology_readiness_output("executive_summary", {
         "current_trl": 3,
         "target_trl": 4,
         "readiness_verdict_code": "ready_for_proof_of_concept",
@@ -678,7 +679,7 @@ def make_technology_readiness_export_state(project_id: str = "technology-readine
         "recommended_next_step": "Run controlled validation protocol.",
         "operator_summary": "Evidence-backed estimate requires operator review.",
         "confidence": "medium",
-    }
+    })
     return state
 
 
@@ -686,7 +687,7 @@ def make_completed_technology_readiness_surface_state(project_id: str = "technol
     state = make_technology_readiness_export_state(project_id)
     state.project_name = "NanoSeal-H2 transfer readiness"
     state.brief = "Assess NanoSeal-H2 for transfer readiness."
-    state.scope = {
+    state.scope = validate_technology_readiness_output("scope", {
         "technology_name": "NanoSeal-H2",
         "assessment_boundary": "lab coating chemistry through controlled validation planning",
         "target_environment": "pilot coating line",
@@ -697,7 +698,7 @@ def make_completed_technology_readiness_surface_state(project_id: str = "technol
         "validation_questions": ["Can repeatability be shown under controlled protocol?"],
         "evidence_gaps": ["source locators", "controlled validation"],
         "confidence": "medium",
-    }
+    })
     state.report = ""
     state.current_phase = "executive_summary"
     for phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
