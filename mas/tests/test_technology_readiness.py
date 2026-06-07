@@ -14,6 +14,7 @@ from llm_client import LLMResponse
 from orchestrator import (
     PROMPT_BUILDERS,
     WORKFLOW_PHASE_SEQUENCE,
+    _invalid_json_shape_diagnostic,
     _parsed_json_matches_phase,
     _phase_json_retry_instruction,
     _repair_technology_readiness_top_level_payload,
@@ -333,9 +334,11 @@ def test_ip_prompt_requires_specialist_review_and_all_axes():
 def test_next_level_prompt_requires_evidence_and_advancement_criteria():
     text = (PROMPT_DIR / "next_level_recommendations.md").read_text(encoding="utf-8")
 
-    assert "top-level structured JSON object" in text
-    assert "Do not return an array at the top level" in text
+    assert "one top-level JSON object" in text
+    assert "not an array" in text
+    assert "do not return multiple JSON objects" in text
     assert "recommended_actions" in text
+    assert "array field inside the single object" in text
     assert "full phase output must be one object" in text
     assert "required_evidence" in text
     assert "advancement_criteria" in text
@@ -397,6 +400,105 @@ def test_technology_readiness_singleton_list_repair_accepts_only_one_object():
         assert not _parsed_json_matches_phase("next_level_recommendations", repaired)
 
 
+def test_technology_readiness_multi_candidate_repair_selects_one_full_valid_output():
+    payload = technology_readiness_contract_payloads()["next_level_recommendations"]
+    incomplete = {
+        "current_trl": 3,
+        "next_target_trl": 4,
+        "current_phase_name": "Protection and proof of concept",
+    }
+    parsed = [
+        {"foo": "bar"},
+        "noise",
+        incomplete,
+        payload,
+    ]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "next_level_recommendations",
+        parsed,
+    )
+
+    assert changed is True
+    assert repaired == payload
+    assert _parsed_json_matches_phase("next_level_recommendations", repaired)
+
+
+def test_technology_readiness_multi_candidate_repair_rejects_zero_valid_candidates():
+    payload = technology_readiness_contract_payloads()["next_level_recommendations"]
+    incomplete = dict(payload)
+    incomplete.pop("confidence")
+    parsed = [
+        {"foo": "bar"},
+        incomplete,
+        "noise",
+    ]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "next_level_recommendations",
+        parsed,
+    )
+    diagnostic = _invalid_json_shape_diagnostic(
+        "next_level_recommendations",
+        repaired,
+        json.dumps(parsed),
+    )
+
+    assert changed is False
+    assert repaired == parsed
+    assert not _parsed_json_matches_phase("next_level_recommendations", repaired)
+    assert "candidate_dict_count=2" in diagnostic
+    assert "valid_candidate_count=0" in diagnostic
+    assert "reason=no_valid_candidate" in diagnostic
+
+
+def test_technology_readiness_multi_candidate_repair_rejects_ambiguous_candidates():
+    payload = technology_readiness_contract_payloads()["next_level_recommendations"]
+    second_payload = {
+        **payload,
+        "main_gap_to_next_level": "Industrial partner validation is also missing.",
+    }
+    parsed = [payload, second_payload]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "next_level_recommendations",
+        parsed,
+    )
+    diagnostic = _invalid_json_shape_diagnostic(
+        "next_level_recommendations",
+        repaired,
+        json.dumps(parsed),
+    )
+
+    assert changed is False
+    assert repaired == parsed
+    assert not _parsed_json_matches_phase("next_level_recommendations", repaired)
+    assert "candidate_dict_count=2" in diagnostic
+    assert "valid_candidate_count=2" in diagnostic
+    assert "reason=ambiguous_multiple_candidates" in diagnostic
+
+
+def test_technology_readiness_multi_candidate_repair_rejects_list_of_strings():
+    parsed = ["current_trl", "next_target_trl"]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "next_level_recommendations",
+        parsed,
+    )
+    diagnostic = _invalid_json_shape_diagnostic(
+        "next_level_recommendations",
+        repaired,
+        json.dumps(parsed),
+    )
+
+    assert changed is False
+    assert repaired == parsed
+    assert not _parsed_json_matches_phase("next_level_recommendations", repaired)
+    assert "candidate_dict_count=0" in diagnostic
+    assert "valid_candidate_count=0" in diagnostic
+    assert "reason=no_valid_candidate" in diagnostic
+
+
 def test_technology_readiness_singleton_list_repair_does_not_apply_to_strategic_audit():
     payload = {"executive_strategy": "Do not unwrap strategic output."}
 
@@ -405,6 +507,20 @@ def test_technology_readiness_singleton_list_repair_does_not_apply_to_strategic_
     assert changed is False
     assert repaired == [payload]
     assert not _parsed_json_matches_phase("strategy", repaired)
+
+
+def test_technology_readiness_multi_candidate_repair_does_not_apply_to_strategic_audit():
+    payload = {"executive_strategy": "Do not unwrap strategic output."}
+    parsed = [payload, payload]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload("strategy", parsed)
+    diagnostic = _invalid_json_shape_diagnostic("strategy", repaired, json.dumps(parsed))
+
+    assert changed is False
+    assert repaired == parsed
+    assert not _parsed_json_matches_phase("strategy", repaired)
+    assert "candidate_dict_count" not in diagnostic
+    assert "valid_candidate_count" not in diagnostic
 
 
 def test_next_level_recommendations_runtime_unwraps_singleton_list_and_normalizes_actions():
@@ -421,6 +537,48 @@ def test_next_level_recommendations_runtime_unwraps_singleton_list_and_normalize
         ],
     }
     call_mock = AsyncMock(return_value=make_llm_response(json.dumps([payload]), 10, 5))
+
+    with patch("orchestrator.call_llm", new=call_mock):
+        with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+            updated = asyncio.run(run_phase_node(state, "next_level_recommendations"))
+
+    assert call_mock.await_count == 1
+    assert updated.phase_status["next_level_recommendations"] == PhaseStatus.COMPLETED
+    assert isinstance(
+        updated.next_level_recommendations,
+        TechnologyReadinessNextLevelRecommendationsOutput,
+    )
+    assert updated.next_level_recommendations.recommended_actions == [
+        {"value": "Run three repeatability batches under a controlled protocol."},
+        {"value": "Complete preliminary IP specialist review before external demos."},
+    ]
+
+
+def test_next_level_recommendations_runtime_selects_multi_candidate_and_normalizes_actions():
+    state = ProjectState(
+        project_id="tr-next-level-multi-candidate-list",
+        project_type="technology_readiness",
+        brief="Assess a coating for transfer readiness.",
+    )
+    payload = {
+        **technology_readiness_contract_payloads()["next_level_recommendations"],
+        "recommended_actions": [
+            "Run three repeatability batches under a controlled protocol.",
+            "Complete preliminary IP specialist review before external demos.",
+        ],
+    }
+    incomplete = {
+        "current_trl": 3,
+        "next_target_trl": 4,
+        "current_phase_name": "Protection and proof of concept",
+    }
+    parsed_response = [
+        {"foo": "bar"},
+        incomplete,
+        "noise",
+        payload,
+    ]
+    call_mock = AsyncMock(return_value=make_llm_response(json.dumps(parsed_response), 10, 5))
 
     with patch("orchestrator.call_llm", new=call_mock):
         with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):

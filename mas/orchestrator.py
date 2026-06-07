@@ -946,13 +946,60 @@ def _repair_technology_readiness_top_level_payload(phase: str, parsed):
         return parsed, False
     if len(parsed) == 1 and isinstance(parsed[0], dict):
         return parsed[0], True
+    if len(parsed) <= 1:
+        return parsed, False
+    valid_candidates = [
+        item
+        for item in parsed
+        if isinstance(item, dict)
+        and _is_valid_full_technology_readiness_candidate(phase, item)
+    ]
+    if len(valid_candidates) == 1:
+        return valid_candidates[0], True
     return parsed, False
+
+
+def _is_valid_full_technology_readiness_candidate(phase: str, candidate: dict) -> bool:
+    from state import TECHNOLOGY_READINESS_OUTPUT_MODELS, validate_technology_readiness_output
+
+    model = TECHNOLOGY_READINESS_OUTPUT_MODELS.get(phase)
+    if model is None:
+        return False
+    if not set(model.model_fields).issubset(candidate.keys()):
+        return False
+    try:
+        validate_technology_readiness_output(phase, candidate)
+    except Exception:
+        return False
+    return True
+
+
+def _technology_readiness_list_candidate_stats(phase: str, parsed) -> dict[str, int | str]:
+    if phase not in TECHNOLOGY_READINESS_PHASE_SEQUENCE or not isinstance(parsed, list):
+        return {}
+    candidate_dict_count = sum(1 for item in parsed if isinstance(item, dict))
+    valid_candidate_count = sum(
+        1
+        for item in parsed
+        if isinstance(item, dict)
+        and _is_valid_full_technology_readiness_candidate(phase, item)
+    )
+    reason = (
+        "ambiguous_multiple_candidates"
+        if valid_candidate_count > 1
+        else "no_valid_candidate"
+    )
+    return {
+        "candidate_dict_count": candidate_dict_count,
+        "valid_candidate_count": valid_candidate_count,
+        "reason": reason,
+    }
 
 
 def _log_technology_readiness_top_level_payload_repair(phase: str, repaired: bool) -> None:
     if repaired:
         logger.warning(
-            f"Phase {phase}: unwrapped Technology Readiness singleton-list JSON output "
+            f"Phase {phase}: repaired Technology Readiness list-wrapped JSON output "
             "before schema validation"
         )
 
@@ -964,6 +1011,10 @@ def _invalid_json_shape_diagnostic(phase: str, parsed, response_text: str) -> st
     ]
     if isinstance(parsed, list):
         parts.append(f"list_length={len(parsed)}")
+        stats = _technology_readiness_list_candidate_stats(phase, parsed)
+        for key in ("candidate_dict_count", "valid_candidate_count", "reason"):
+            if key in stats:
+                parts.append(f"{key}={stats[key]}")
     parts.append(f"preview={(response_text or '')[:500]!r}")
     return ", ".join(parts)
 
