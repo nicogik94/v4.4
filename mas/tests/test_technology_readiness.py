@@ -16,6 +16,7 @@ from orchestrator import (
     WORKFLOW_PHASE_SEQUENCE,
     _parsed_json_matches_phase,
     _phase_json_retry_instruction,
+    _repair_technology_readiness_top_level_payload,
     _store_phase_output,
     build_technology_readiness_prompt,
     run_phase_node,
@@ -31,6 +32,7 @@ from state import (
     ProjectState,
     RoadmapPhase,
     TECHNOLOGY_READINESS_OUTPUT_MODELS,
+    TechnologyReadinessNextLevelRecommendationsOutput,
     TechnologyReadinessReadinessRoadmapOutput,
     TechnologyReadinessScopeOutput,
     validate_technology_readiness_output,
@@ -331,6 +333,10 @@ def test_ip_prompt_requires_specialist_review_and_all_axes():
 def test_next_level_prompt_requires_evidence_and_advancement_criteria():
     text = (PROMPT_DIR / "next_level_recommendations.md").read_text(encoding="utf-8")
 
+    assert "top-level structured JSON object" in text
+    assert "Do not return an array at the top level" in text
+    assert "recommended_actions" in text
+    assert "full phase output must be one object" in text
     assert "required_evidence" in text
     assert "advancement_criteria" in text
     assert "Do not recommend advancement without explicit evidence requirements" in text
@@ -367,6 +373,69 @@ def test_store_phase_output_validates_technology_readiness_payload():
     assert _parsed_json_matches_phase("scope", payload)
     assert not _parsed_json_matches_phase("scope", [payload])
     assert "legal/certification" in _phase_json_retry_instruction("scope")
+
+
+def test_technology_readiness_singleton_list_repair_accepts_only_one_object():
+    payload = technology_readiness_contract_payloads()["next_level_recommendations"]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "next_level_recommendations",
+        [payload],
+    )
+
+    assert changed is True
+    assert repaired == payload
+    assert _parsed_json_matches_phase("next_level_recommendations", repaired)
+
+    for invalid in ([], ["text"], [payload, payload]):
+        repaired, changed = _repair_technology_readiness_top_level_payload(
+            "next_level_recommendations",
+            invalid,
+        )
+        assert changed is False
+        assert repaired == invalid
+        assert not _parsed_json_matches_phase("next_level_recommendations", repaired)
+
+
+def test_technology_readiness_singleton_list_repair_does_not_apply_to_strategic_audit():
+    payload = {"executive_strategy": "Do not unwrap strategic output."}
+
+    repaired, changed = _repair_technology_readiness_top_level_payload("strategy", [payload])
+
+    assert changed is False
+    assert repaired == [payload]
+    assert not _parsed_json_matches_phase("strategy", repaired)
+
+
+def test_next_level_recommendations_runtime_unwraps_singleton_list_and_normalizes_actions():
+    state = ProjectState(
+        project_id="tr-next-level-singleton-list",
+        project_type="technology_readiness",
+        brief="Assess a coating for transfer readiness.",
+    )
+    payload = {
+        **technology_readiness_contract_payloads()["next_level_recommendations"],
+        "recommended_actions": [
+            "Run three repeatability batches under a controlled protocol.",
+            "Complete preliminary IP specialist review before external demos.",
+        ],
+    }
+    call_mock = AsyncMock(return_value=make_llm_response(json.dumps([payload]), 10, 5))
+
+    with patch("orchestrator.call_llm", new=call_mock):
+        with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+            updated = asyncio.run(run_phase_node(state, "next_level_recommendations"))
+
+    assert call_mock.await_count == 1
+    assert updated.phase_status["next_level_recommendations"] == PhaseStatus.COMPLETED
+    assert isinstance(
+        updated.next_level_recommendations,
+        TechnologyReadinessNextLevelRecommendationsOutput,
+    )
+    assert updated.next_level_recommendations.recommended_actions == [
+        {"value": "Run three repeatability batches under a controlled protocol."},
+        {"value": "Complete preliminary IP specialist review before external demos."},
+    ]
 
 
 def test_technology_readiness_normalizes_dict_shaped_string_lists_into_typed_models():

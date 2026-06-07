@@ -1,6 +1,8 @@
 # Technology Readiness & Transfer Audit: next_level_recommendations
 
-Return ONE structured JSON object for the `next_level_recommendations` phase.
+Return exactly one top-level structured JSON object for the `next_level_recommendations` phase.
+Do not return an array at the top level.
+`recommended_actions` may be an array field inside the object, but the full phase output must be one object.
 
 General controls:
 - Make this an evidence-aware assessment.

@@ -939,6 +939,35 @@ def _parsed_json_matches_phase(phase: str, parsed) -> bool:
     return True
 
 
+def _repair_technology_readiness_top_level_payload(phase: str, parsed):
+    if phase not in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        return parsed, False
+    if not isinstance(parsed, list):
+        return parsed, False
+    if len(parsed) == 1 and isinstance(parsed[0], dict):
+        return parsed[0], True
+    return parsed, False
+
+
+def _log_technology_readiness_top_level_payload_repair(phase: str, repaired: bool) -> None:
+    if repaired:
+        logger.warning(
+            f"Phase {phase}: unwrapped Technology Readiness singleton-list JSON output "
+            "before schema validation"
+        )
+
+
+def _invalid_json_shape_diagnostic(phase: str, parsed, response_text: str) -> str:
+    parts = [
+        f"phase={phase}",
+        f"top_level_type={type(parsed).__name__}",
+    ]
+    if isinstance(parsed, list):
+        parts.append(f"list_length={len(parsed)}")
+    parts.append(f"preview={(response_text or '')[:500]!r}")
+    return ", ".join(parts)
+
+
 def _repair_strategy_payload(text: str) -> dict | None:
     """Recover required strategy fields from a truncated top-level JSON object.
 
@@ -1339,6 +1368,8 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
     if is_json:
         repair_attempted = False
         parsed = parse_json(response.text)
+        parsed, repaired_tr_payload = _repair_technology_readiness_top_level_payload(phase, parsed)
+        _log_technology_readiness_top_level_payload_repair(phase, repaired_tr_payload)
         shape_ok = _parsed_json_matches_phase(phase, parsed)
         if phase == "audit" and not shape_ok:
             repaired = _repair_audit_payload(response.text)
@@ -1367,8 +1398,8 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
             else:
                 logger.warning(
                     f"Phase {phase}: parsed JSON had invalid top-level shape "
-                    f"{type(parsed).__name__}. Response preview (first 500 chars): "
-                    f"{response.text[:500]!r}"
+                    f"{type(parsed).__name__} "
+                    f"({_invalid_json_shape_diagnostic(phase, parsed, response.text)})"
                 )
             retry_response = await call_llm(
                 phase, system,
@@ -1390,6 +1421,8 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
 
             if retry_response.ok:
                 parsed = parse_json(retry_response.text)
+                parsed, repaired_tr_payload = _repair_technology_readiness_top_level_payload(phase, parsed)
+                _log_technology_readiness_top_level_payload_repair(phase, repaired_tr_payload)
                 shape_ok = _parsed_json_matches_phase(phase, parsed)
                 if phase == "audit" and not shape_ok:
                     repaired = _repair_audit_payload(retry_response.text)
@@ -1426,8 +1459,8 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 elif not shape_ok:
                     logger.error(
                         f"Phase {phase}: retry returned invalid JSON shape "
-                        f"{type(parsed).__name__}. Retry response preview: "
-                        f"{retry_response.text[:500]!r}"
+                        f"{type(parsed).__name__} "
+                        f"({_invalid_json_shape_diagnostic(phase, parsed, retry_response.text)})"
                     )
                 response = retry_response
 
@@ -1466,6 +1499,8 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                     response = retry_response
                     if retry_response.ok:
                         parsed = parse_json(retry_response.text)
+                        parsed, repaired_tr_payload = _repair_technology_readiness_top_level_payload(phase, parsed)
+                        _log_technology_readiness_top_level_payload_repair(phase, repaired_tr_payload)
                         shape_ok = _parsed_json_matches_phase(phase, parsed)
                         if parsed is None:
                             logger.error(
@@ -1475,8 +1510,8 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                         elif not shape_ok:
                             logger.error(
                                 f"Phase {phase}: schema repair retry returned invalid JSON "
-                                f"shape {type(parsed).__name__}. Retry response preview: "
-                                f"{retry_response.text[:500]!r}"
+                                f"shape {type(parsed).__name__} "
+                                f"({_invalid_json_shape_diagnostic(phase, parsed, retry_response.text)})"
                             )
                         else:
                             try:
