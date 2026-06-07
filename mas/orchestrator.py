@@ -959,13 +959,34 @@ def _repair_technology_readiness_top_level_payload(phase: str, parsed):
     return parsed, False
 
 
+_TECHNOLOGY_READINESS_PHASE_ANCHOR_FIELDS = {
+    "next_level_recommendations": frozenset(
+        (
+            "current_trl",
+            "next_target_trl",
+            "main_gap_to_next_level",
+            "recommended_actions",
+        )
+    ),
+    "technical_validation_plan": frozenset(("validation_tests",)),
+}
+
+
 def _is_valid_full_technology_readiness_candidate(phase: str, candidate: dict) -> bool:
     from state import TECHNOLOGY_READINESS_OUTPUT_MODELS, validate_technology_readiness_output
 
     model = TECHNOLOGY_READINESS_OUTPUT_MODELS.get(phase)
     if model is None:
         return False
-    if not set(model.model_fields).issubset(candidate.keys()):
+    required_fields = {
+        name
+        for name, field in model.model_fields.items()
+        if field.is_required()
+    }
+    if not required_fields.issubset(candidate.keys()):
+        return False
+    anchor_fields = _TECHNOLOGY_READINESS_PHASE_ANCHOR_FIELDS.get(phase, frozenset())
+    if not anchor_fields.issubset(candidate.keys()):
         return False
     try:
         validate_technology_readiness_output(phase, candidate)

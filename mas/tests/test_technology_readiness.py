@@ -401,7 +401,11 @@ def test_technology_readiness_singleton_list_repair_accepts_only_one_object():
 
 
 def test_technology_readiness_multi_candidate_repair_selects_one_full_valid_output():
-    payload = technology_readiness_contract_payloads()["next_level_recommendations"]
+    payload = {
+        key: value
+        for key, value in technology_readiness_contract_payloads()["next_level_recommendations"].items()
+        if key != "confidence"
+    }
     incomplete = {
         "current_trl": 3,
         "next_target_trl": 4,
@@ -427,7 +431,7 @@ def test_technology_readiness_multi_candidate_repair_selects_one_full_valid_outp
 def test_technology_readiness_multi_candidate_repair_rejects_zero_valid_candidates():
     payload = technology_readiness_contract_payloads()["next_level_recommendations"]
     incomplete = dict(payload)
-    incomplete.pop("confidence")
+    incomplete.pop("recommended_actions")
     parsed = [
         {"foo": "bar"},
         incomplete,
@@ -450,6 +454,71 @@ def test_technology_readiness_multi_candidate_repair_rejects_zero_valid_candidat
     assert "candidate_dict_count=2" in diagnostic
     assert "valid_candidate_count=0" in diagnostic
     assert "reason=no_valid_candidate" in diagnostic
+
+
+def test_technology_readiness_multi_candidate_repair_selects_technical_validation_plan():
+    payload = {"validation_tests": [{"name": "repeatability protocol"}]}
+    parsed = [
+        {"foo": "bar"},
+        {"acceptance_criteria": ["three repeatable runs"]},
+        payload,
+    ]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "technical_validation_plan",
+        parsed,
+    )
+
+    assert changed is True
+    assert repaired == payload
+    assert _parsed_json_matches_phase("technical_validation_plan", repaired)
+
+
+def test_technology_readiness_multi_candidate_repair_rejects_zero_technical_validation_candidates():
+    parsed = [
+        {"foo": "bar"},
+        {"acceptance_criteria": ["three repeatable runs"]},
+    ]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "technical_validation_plan",
+        parsed,
+    )
+    diagnostic = _invalid_json_shape_diagnostic(
+        "technical_validation_plan",
+        repaired,
+        json.dumps(parsed),
+    )
+
+    assert changed is False
+    assert repaired == parsed
+    assert not _parsed_json_matches_phase("technical_validation_plan", repaired)
+    assert "candidate_dict_count=2" in diagnostic
+    assert "valid_candidate_count=0" in diagnostic
+    assert "reason=no_valid_candidate" in diagnostic
+
+
+def test_technology_readiness_multi_candidate_repair_rejects_ambiguous_technical_validation_candidates():
+    first_payload = {"validation_tests": [{"name": "repeatability protocol"}]}
+    second_payload = {"validation_tests": [{"name": "measurement stability protocol"}]}
+    parsed = [first_payload, second_payload]
+
+    repaired, changed = _repair_technology_readiness_top_level_payload(
+        "technical_validation_plan",
+        parsed,
+    )
+    diagnostic = _invalid_json_shape_diagnostic(
+        "technical_validation_plan",
+        repaired,
+        json.dumps(parsed),
+    )
+
+    assert changed is False
+    assert repaired == parsed
+    assert not _parsed_json_matches_phase("technical_validation_plan", repaired)
+    assert "candidate_dict_count=2" in diagnostic
+    assert "valid_candidate_count=2" in diagnostic
+    assert "reason=ambiguous_multiple_candidates" in diagnostic
 
 
 def test_technology_readiness_multi_candidate_repair_rejects_ambiguous_candidates():
