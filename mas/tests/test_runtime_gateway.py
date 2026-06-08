@@ -17,6 +17,7 @@ from runtime.cache import InMemorySemanticCache, NoOpSemanticCache  # noqa: E402
 from runtime.provider_gateway import (  # noqa: E402
     DefaultProviderGateway,
     build_cache_key,
+    safe_provider_error_detail,
     select_model_candidates,
     select_model_config,
     task_profile_for_phase,
@@ -37,6 +38,23 @@ class _BreakerStub:
 
     def record_failure(self, provider: str) -> None:
         self.failure_calls.append(provider)
+
+
+class _FakeAnthropicBadRequest(Exception):
+    status_code = 400
+    request_id = "req_test_123"
+    type = "invalid_request_error"
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+        self.body = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            },
+        }
 
 
 class TestRuntimeRouting(unittest.TestCase):
@@ -160,6 +178,131 @@ class TestSemanticCache(unittest.TestCase):
 
 
 class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
+    def test_safe_provider_error_detail_extracts_bounded_anthropic_fields(self):
+        exc = _FakeAnthropicBadRequest(
+            "thinking.type enabled is not accepted for this model "
+            + ("x" * 900)
+        )
+
+        detail = safe_provider_error_detail(exc)
+
+        self.assertIn("status_code=400", detail)
+        self.assertIn("exception=FakeAnthropicBadRequest", detail)
+        self.assertIn("error_type=invalid_request_error", detail)
+        self.assertIn("request_id=req_test_123", detail)
+        self.assertIn('message="thinking.type enabled is not accepted', detail)
+        self.assertLess(len(detail), 800)
+
+    def test_safe_provider_error_detail_redacts_sensitive_values(self):
+        exc = _FakeAnthropicBadRequest(
+            "Bad request sk-ant-SECRET Authorization: Bearer SECRET "
+            "PROMPT_SENTINEL_DO_NOT_LEAK RAW_RESPONSE_SENTINEL_DO_NOT_LEAK "
+            "C:\\Users\\example\\secret.txt"
+        )
+
+        detail = safe_provider_error_detail(exc)
+
+        self.assertIn("sk-ant-[REDACTED]", detail)
+        self.assertIn("Authorization: Bearer [REDACTED]", detail)
+        self.assertNotIn("sk-ant-SECRET", detail)
+        self.assertNotIn("Bearer SECRET", detail)
+        self.assertNotIn("PROMPT_SENTINEL_DO_NOT_LEAK", detail)
+        self.assertNotIn("RAW_RESPONSE_SENTINEL_DO_NOT_LEAK", detail)
+        self.assertNotIn("C:\\Users\\example\\secret.txt", detail)
+
+    async def test_invalid_request_preserves_safe_provider_detail_without_fallback(self):
+        breaker = _BreakerStub()
+        calls: list[str] = []
+
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            calls.append(model)
+            detail = (
+                'status_code=400 exception=BadRequestError '
+                'error_type=invalid_request_error request_id=req_123 '
+                'message="model is not available"'
+            )
+            return SimpleNamespace(
+                text="",
+                model_used=model,
+                error=(
+                    "Provider call failed: category=invalid_request, "
+                    f"provider=anthropic, model={model}; provider_detail={detail}"
+                ),
+                error_type="invalid_request",
+            )
+
+        async def fake_openai(model, system, prompt, max_tokens, temperature):
+            raise AssertionError("invalid_request should not trigger fallback")
+
+        gateway = DefaultProviderGateway(
+            anthropic_executor=fake_anthropic,
+            openai_executor=fake_openai,
+            cache=NoOpSemanticCache(),
+            breaker=breaker,
+            max_retries=3,
+        )
+
+        response = await gateway.call(
+            GatewayRequest(
+                phase="classify",
+                system_prompt="system",
+                user_prompt="prompt",
+                routing_context=RoutingContext(phase="classify"),
+            )
+        )
+
+        stable_prefix = (
+            "Provider call failed: category=invalid_request, "
+            f"provider=anthropic, model={MODEL_ROUTING['classify'].model}"
+        )
+        self.assertEqual(calls, [MODEL_ROUTING["classify"].model])
+        self.assertTrue(response.error.startswith(stable_prefix))
+        self.assertIn("; provider_detail=status_code=400", response.error)
+        self.assertIn("error_type=invalid_request_error", response.error)
+        self.assertIn("request_id=req_123", response.error)
+        self.assertEqual(response.error_type, "invalid_request")
+        self.assertFalse(response.fallback_used)
+        self.assertEqual(response.attempt_count, 1)
+        self.assertEqual(breaker.failure_calls, [])
+
+    async def test_gateway_exception_provider_detail_is_redacted_in_final_error(self):
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            raise _FakeAnthropicBadRequest(
+                "Bad request sk-ant-SECRET Authorization: Bearer SECRET "
+                "PROMPT_SENTINEL_DO_NOT_LEAK RAW_RESPONSE_SENTINEL_DO_NOT_LEAK "
+                "C:\\Users\\example\\secret.txt"
+            )
+
+        gateway = DefaultProviderGateway(
+            anthropic_executor=fake_anthropic,
+            openai_executor=AsyncMock(),
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            max_retries=1,
+        )
+
+        response = await gateway.call(
+            GatewayRequest(
+                phase="classify",
+                system_prompt="system PROMPT_SENTINEL_DO_NOT_LEAK",
+                user_prompt="prompt sk-ant-SECRET",
+                routing_context=RoutingContext(phase="classify"),
+            )
+        )
+
+        self.assertTrue(response.error.startswith("Provider call failed: category=invalid_request"))
+        self.assertIn("; provider_detail=status_code=400", response.error)
+        self.assertIn("error_type=invalid_request_error", response.error)
+        combined = str(response.__dict__) + str(response.attempts)
+        for sentinel in (
+            "sk-ant-SECRET",
+            "Authorization: Bearer SECRET",
+            "PROMPT_SENTINEL_DO_NOT_LEAK",
+            "RAW_RESPONSE_SENTINEL_DO_NOT_LEAK",
+            "C:\\Users\\example\\secret.txt",
+        ):
+            self.assertNotIn(sentinel, combined)
+
     async def test_gateway_uses_executor_and_returns_runtime_metadata(self):
         async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             return SimpleNamespace(
@@ -522,7 +665,10 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
             latency_ms=5,
         )
 
-        with patch("llm_client._call_anthropic", new=AsyncMock(return_value=fake_response)):
+        with (
+            patch("llm_client.ANTHROPIC_API_KEY", "test-key"),
+            patch("llm_client._call_anthropic", new=AsyncMock(return_value=fake_response)),
+        ):
             response = await llm_client.call_llm("classify", "system", "prompt")
 
         self.assertTrue(response.ok)

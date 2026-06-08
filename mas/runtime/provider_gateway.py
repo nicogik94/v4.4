@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 from typing import Any, Awaitable, Callable
 
 from config import (
@@ -45,6 +46,8 @@ INVALID_REQUEST = "invalid_request"
 TRANSPORT_MALFORMED_RESPONSE = "transport_malformed_response"
 MODEL_SCHEMA_INVALID = "model_schema_invalid"
 UNKNOWN_PROVIDER_ERROR = "unknown_provider_error"
+PROVIDER_DETAIL_MARKER = "; provider_detail="
+_PROVIDER_DETAIL_MESSAGE_MAX_CHARS = 500
 
 RETRYABLE_PROVIDER_ERRORS = {
     RATE_LIMITED,
@@ -61,6 +64,94 @@ FALLBACK_ELIGIBLE_ERRORS = RETRYABLE_PROVIDER_ERRORS | {
 }
 
 GOVERNANCE_ERROR_TYPES = {"kill_switch", "budget", "breaker", "approval", "policy"}
+
+
+def _safe_detail_scalar(value: Any, *, max_chars: int = _PROVIDER_DETAIL_MESSAGE_MAX_CHARS) -> str:
+    text = str(value or "")
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    redactions = [
+        (r"sk-ant-[A-Za-z0-9_\-]+", "sk-ant-[REDACTED]"),
+        (r"sk-[A-Za-z0-9_\-]{8,}", "sk-[REDACTED]"),
+        (r"(?i)authorization\s*:\s*bearer\s+[^,\s;\"']+", "Authorization: Bearer [REDACTED]"),
+        (r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*[^,\s;\"']+", r"\1=[REDACTED]"),
+        (r"PROMPT_SENTINEL_DO_NOT_LEAK", "[REDACTED_PROMPT_SENTINEL]"),
+        (r"RAW_PROMPT_SENTINEL", "[REDACTED_PROMPT_SENTINEL]"),
+        (r"RAW_RESPONSE_SENTINEL_DO_NOT_LEAK", "[REDACTED_RESPONSE_SENTINEL]"),
+        (r"RAW_RESPONSE_SENTINEL", "[REDACTED_RESPONSE_SENTINEL]"),
+        (r"[A-Za-z]:\\[^,\s\"']+", "[REDACTED_PATH]"),
+        (r"/(?:home|Users|tmp|var|etc|mnt)/[^,\s\"']+", "[REDACTED_PATH]"),
+    ]
+    for pattern, replacement in redactions:
+        text = re.sub(pattern, replacement, text)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "..."
+    return text
+
+
+def _safe_detail_token(value: Any, *, max_chars: int = 160) -> str:
+    text = _safe_detail_scalar(value, max_chars=max_chars)
+    return re.sub(r"[^A-Za-z0-9_.:@\-]+", "_", text).strip("_")
+
+
+def _body_path(body: Any, *path: str) -> Any:
+    current = body
+    for key in path:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            current = getattr(current, key, None)
+        if current is None:
+            return None
+    return current
+
+
+def safe_provider_error_detail(exc: Exception) -> str:
+    """Return bounded provider error detail safe for CI logs and artifacts."""
+    body = getattr(exc, "body", None)
+    status_code = getattr(exc, "status_code", None)
+    request_id = getattr(exc, "request_id", None)
+    if not request_id:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            request_id = headers.get("request-id") or headers.get("x-request-id")
+
+    error_type = (
+        getattr(exc, "type", None)
+        or _body_path(body, "error", "type")
+        or _body_path(body, "type")
+    )
+    message = (
+        _body_path(body, "error", "message")
+        or _body_path(body, "message")
+        or getattr(exc, "message", "")
+        or str(exc)
+    )
+
+    fields: list[str] = []
+    if isinstance(status_code, int):
+        fields.append(f"status_code={status_code}")
+    exception_name = _safe_detail_token(exc.__class__.__name__, max_chars=80)
+    if exception_name and (fields or error_type or request_id or message):
+        fields.append(f"exception={exception_name}")
+    safe_error_type = _safe_detail_token(error_type, max_chars=120)
+    if safe_error_type:
+        fields.append(f"error_type={safe_error_type}")
+    safe_request_id = _safe_detail_token(request_id, max_chars=160)
+    if safe_request_id:
+        fields.append(f"request_id={safe_request_id}")
+    safe_message = _safe_detail_scalar(message)
+    if safe_message:
+        fields.append(f'message="{safe_message}"')
+    return " ".join(fields)
+
+
+def provider_error_detail_from_message(message: str) -> str:
+    if PROVIDER_DETAIL_MARKER not in (message or ""):
+        return ""
+    return (message or "").split(PROVIDER_DETAIL_MARKER, 1)[1].strip()
 
 
 def runtime_routing_config() -> RoutingConfig:
@@ -388,8 +479,14 @@ class DefaultProviderGateway:
                 response = await self._execute(config, request)
                 category = normalize_error_type(response.error_type)
                 if response.error:
+                    provider_detail = provider_error_detail_from_message(response.error)
                     response.error_type = category
-                    response.error = _safe_error_message(category, config.provider.value, config.model)
+                    response.error = _safe_error_message(
+                        category,
+                        config.provider.value,
+                        config.model,
+                        provider_detail=provider_detail,
+                    )
 
                 if not response.error:
                     self._breaker.reset(key)
@@ -487,14 +584,24 @@ class DefaultProviderGateway:
                 text="",
                 model_used=config.model,
                 provider_used=config.provider.value,
-                error=_safe_error_message(category, config.provider.value, config.model),
+                error=_safe_error_message(
+                    category,
+                    config.provider.value,
+                    config.model,
+                    provider_detail=safe_provider_error_detail(exc),
+                ),
                 error_type=category,
             )
 
         category = normalize_error_type(getattr(raw, "error_type", ""))
         error = ""
         if getattr(raw, "error", ""):
-            error = _safe_error_message(category, config.provider.value, config.model)
+            error = _safe_error_message(
+                category,
+                config.provider.value,
+                config.model,
+                provider_detail=provider_error_detail_from_message(getattr(raw, "error", "")),
+            )
         return GatewayResponse(
             text=getattr(raw, "text", ""),
             model_used=getattr(raw, "model_used", config.model) or config.model,
@@ -622,6 +729,7 @@ class DefaultProviderGateway:
                 "attempts": response.attempts,
                 "ok": not bool(response.error),
                 "error_type": response.error_type,
+                "provider_detail": provider_error_detail_from_message(response.error),
             },
         )
 
@@ -686,9 +794,18 @@ def normalize_exception_category(exc: Exception) -> str:
     return UNKNOWN_PROVIDER_ERROR
 
 
-def _safe_error_message(category: str, provider: str, model: str) -> str:
+def _safe_error_message(
+    category: str,
+    provider: str,
+    model: str,
+    *,
+    provider_detail: str = "",
+) -> str:
     category = normalize_error_type(category)
-    return f"Provider call failed: category={category}, provider={provider}, model={model}"
+    message = f"Provider call failed: category={category}, provider={provider}, model={model}"
+    if provider_detail:
+        message += f"{PROVIDER_DETAIL_MARKER}{provider_detail}"
+    return message
 
 
 def _candidate_key(config: ModelConfig) -> str:

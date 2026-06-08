@@ -128,6 +128,40 @@ def test_judge_case_reports_malformed_json_response(monkeypatch):
     assert rationale.startswith("judge parse error:")
 
 
+def test_judge_case_preserves_enriched_provider_failure_rationale(monkeypatch):
+    case = load_cases()[0]
+    provider_error = (
+        "Provider call failed: category=invalid_request, provider=anthropic, "
+        "model=claude-sonnet-4-6; provider_detail=status_code=400 "
+        "exception=BadRequestError error_type=invalid_request_error "
+        'request_id=req_123 message="model is not available"'
+    )
+
+    async def fake_call_llm(
+        phase,
+        system,
+        prompt,
+        config_override=None,
+        *,
+        project_id="",
+        before_attempt=None,
+    ):
+        return LLMResponse(text="", ok=False, error=provider_error, error_type="invalid_request")
+
+    monkeypatch.setattr("evals.run_evals.call_llm", fake_call_llm)
+
+    score, rationale = asyncio.run(
+        judge_case(case, {"classify": {"domain": case["expected_domain"]}})
+    )
+
+    assert score == 0
+    assert rationale.startswith("judge error:")
+    assert "Provider call failed: category=invalid_request" in rationale
+    assert "; provider_detail=status_code=400" in rationale
+    assert "error_type=invalid_request_error" in rationale
+    assert "request_id=req_123" in rationale
+
+
 def test_real_pass_fail_still_rejects_missing_framework_coverage():
     case = next(case for case in load_cases() if case.get("must_contain_frameworks"))
     output = {
