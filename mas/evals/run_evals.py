@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from state import ProjectState
 from orchestrator import run_phase_node
-from llm_client import call_llm, LLMResponse
+from llm_client import call_llm, LLMResponse, parse_json
 from config import ModelConfig, Provider
 
 PASS_THRESHOLD = 0.75  # fail CI if <75% of cases pass
@@ -190,8 +190,12 @@ async def judge_case(case: dict, output: dict) -> tuple[int, str]:
     if not resp.ok:
         return 0, f"judge error: {resp.error}"
     try:
-        data = json.loads(resp.text.strip().strip("`"))
-        return int(data.get("score", 0)), data.get("rationale", "")
+        data = parse_json(resp.text)
+        if not isinstance(data, dict):
+            raise ValueError("judge response did not contain a JSON object")
+        if "score" not in data:
+            raise ValueError("judge response missing score")
+        return int(data["score"]), data.get("rationale", "")
     except Exception as e:
         return 0, f"judge parse error: {e}"
 

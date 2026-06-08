@@ -80,6 +80,54 @@ def test_judge_case_calls_current_call_llm_interface(monkeypatch):
     assert call["before_attempt"] is None
 
 
+def _run_judge_case_with_text(monkeypatch, text):
+    case = load_cases()[0]
+
+    async def fake_call_llm(
+        phase,
+        system,
+        prompt,
+        config_override=None,
+        *,
+        project_id="",
+        before_attempt=None,
+    ):
+        return LLMResponse(text=text, ok=True)
+
+    monkeypatch.setattr("evals.run_evals.call_llm", fake_call_llm)
+    return asyncio.run(judge_case(case, {"classify": {"domain": case["expected_domain"]}}))
+
+
+def test_judge_case_parses_fenced_json_response(monkeypatch):
+    score, rationale = _run_judge_case_with_text(
+        monkeypatch,
+        """```json
+{"score": 82, "rationale": "valid fenced judge parse", "critical_failures": []}
+```""",
+    )
+
+    assert (score, rationale) == (82, "valid fenced judge parse")
+
+
+def test_judge_case_parses_prose_wrapped_json_response(monkeypatch):
+    score, rationale = _run_judge_case_with_text(
+        monkeypatch,
+        'Here is the score:\n{"score": 81, "rationale": "valid prose-wrapped judge parse", "critical_failures": []}\nDone.',
+    )
+
+    assert (score, rationale) == (81, "valid prose-wrapped judge parse")
+
+
+def test_judge_case_reports_malformed_json_response(monkeypatch):
+    score, rationale = _run_judge_case_with_text(
+        monkeypatch,
+        "I cannot provide a JSON score for this output.",
+    )
+
+    assert score == 0
+    assert rationale.startswith("judge parse error:")
+
+
 def test_real_pass_fail_still_rejects_missing_framework_coverage():
     case = next(case for case in load_cases() if case.get("must_contain_frameworks"))
     output = {
