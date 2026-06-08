@@ -341,6 +341,7 @@ def test_next_level_prompt_requires_evidence_and_advancement_criteria():
     assert "recommended_actions" in text
     assert "array field inside the single object" in text
     assert "full phase output must be one object" in text
+    assert "gate-critical fields" in text
     assert "required_evidence" in text
     assert "advancement_criteria" in text
     assert "Do not recommend advancement without explicit evidence requirements" in text
@@ -458,7 +459,11 @@ def test_technology_readiness_multi_candidate_repair_rejects_zero_valid_candidat
 
 
 def test_technology_readiness_multi_candidate_repair_selects_technical_validation_plan():
-    payload = {"validation_tests": [{"name": "repeatability protocol"}]}
+    payload = {
+        "validation_tests": [{"name": "repeatability protocol"}],
+        "acceptance_criteria": ["three repeatable runs"],
+        "evidence_to_collect": ["raw hydrogen uptake logs"],
+    }
     parsed = [
         {"foo": "bar"},
         {"acceptance_criteria": ["three repeatable runs"]},
@@ -500,8 +505,16 @@ def test_technology_readiness_multi_candidate_repair_rejects_zero_technical_vali
 
 
 def test_technology_readiness_multi_candidate_repair_rejects_ambiguous_technical_validation_candidates():
-    first_payload = {"validation_tests": [{"name": "repeatability protocol"}]}
-    second_payload = {"validation_tests": [{"name": "measurement stability protocol"}]}
+    first_payload = {
+        "validation_tests": [{"name": "repeatability protocol"}],
+        "acceptance_criteria": ["three repeatable runs"],
+        "evidence_to_collect": ["raw hydrogen uptake logs"],
+    }
+    second_payload = {
+        "validation_tests": [{"name": "measurement stability protocol"}],
+        "acceptance_criteria": ["calibrated instrument variation documented"],
+        "evidence_to_collect": ["gauge repeatability record"],
+    }
     parsed = [first_payload, second_payload]
 
     repaired, changed = _repair_technology_readiness_top_level_payload(
@@ -577,6 +590,12 @@ def test_technology_readiness_truncated_payload_repair_recovers_completed_top_le
   "current_phase_name": "Technology concept",
   "next_phase_name": "Experimental proof of concept",
   "main_gap_to_next_level": "Replication evidence is missing.",
+  "required_evidence": [
+    "replicated hydrogen uptake logs"
+  ],
+  "advancement_criteria": [
+    "operator-reviewed reproducibility package"
+  ],
   "recommended_actions": [
     "Run Sprint 0 replication package."
   ],
@@ -594,6 +613,8 @@ def test_technology_readiness_truncated_payload_repair_recovers_completed_top_le
         "current_phase_name": "Technology concept",
         "next_phase_name": "Experimental proof of concept",
         "main_gap_to_next_level": "Replication evidence is missing.",
+        "required_evidence": ["replicated hydrogen uptake logs"],
+        "advancement_criteria": ["operator-reviewed reproducibility package"],
         "recommended_actions": ["Run Sprint 0 replication package."],
     }
 
@@ -604,6 +625,9 @@ def test_technology_readiness_truncated_payload_repair_requires_phase_anchors():
   "current_trl": 2,
   "next_target_trl": 3,
   "main_gap_to_next_level": "Replication evidence is missing.",
+  "recommended_actions": [
+    "Run Sprint 0 replication package."
+  ],
   "required_tests": [
 """
 
@@ -612,6 +636,24 @@ def test_technology_readiness_truncated_payload_repair_requires_phase_anchors():
         text,
     ) is None
     assert _repair_technology_readiness_truncated_payload("strategy", text) is None
+
+    missing_gate_field = """
+{
+  "current_trl": 2,
+  "next_target_trl": 3,
+  "main_gap_to_next_level": "Replication evidence is missing.",
+  "recommended_actions": [
+    "Run Sprint 0 replication package."
+  ],
+  "required_evidence": [
+    "replicated hydrogen uptake logs"
+  ],
+  "required_tests": [
+"""
+    assert _repair_technology_readiness_truncated_payload(
+        "next_level_recommendations",
+        missing_gate_field,
+    ) is None
 
 
 def test_next_level_recommendations_runtime_repairs_truncated_top_level_object():
@@ -627,6 +669,12 @@ def test_next_level_recommendations_runtime_repairs_truncated_top_level_object()
   "current_phase_name": "Technology concept",
   "next_phase_name": "Experimental proof of concept",
   "main_gap_to_next_level": "Replication evidence is missing.",
+  "required_evidence": [
+    "replicated hydrogen uptake logs"
+  ],
+  "advancement_criteria": [
+    "operator-reviewed reproducibility package"
+  ],
   "recommended_actions": [
     "Run Sprint 0 replication package."
   ],

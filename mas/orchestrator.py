@@ -988,6 +988,10 @@ def _is_valid_full_technology_readiness_candidate(phase: str, candidate: dict) -
     anchor_fields = _TECHNOLOGY_READINESS_PHASE_ANCHOR_FIELDS.get(phase, frozenset())
     if not anchor_fields.issubset(candidate.keys()):
         return False
+    gate_config = GATE_CONFIGS.get(phase)
+    gate_required_fields = set(gate_config.required_fields if gate_config else [])
+    if not gate_required_fields.issubset(candidate.keys()):
+        return False
     try:
         validate_technology_readiness_output(phase, candidate)
     except Exception:
