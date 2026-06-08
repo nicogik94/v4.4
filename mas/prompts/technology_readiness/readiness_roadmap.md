@@ -1,6 +1,10 @@
 # Technology Readiness & Transfer Audit: readiness_roadmap
 
-Return ONE structured JSON object for the `readiness_roadmap` phase.
+Return exactly one top-level JSON object for the `readiness_roadmap` phase.
+The response is not an array; do not return an array at the top level.
+Do not return multiple JSON objects.
+Emit the gate-critical fields `decision_gates` and `go_no_go_criteria` before the long `roadmap_phases` array.
+Keep each array concise and evidence-specific so the single JSON object can close completely.
 
 General controls:
 - Make this an evidence-aware assessment.
@@ -11,11 +15,11 @@ General controls:
 Required JSON keys:
 ```json
 {
+  "decision_gates": [],
+  "go_no_go_criteria": [],
   "roadmap_phases": [],
   "timeline": [],
-  "decision_gates": [],
   "resources_needed": [],
-  "go_no_go_criteria": [],
   "confidence": ""
 }
 ```

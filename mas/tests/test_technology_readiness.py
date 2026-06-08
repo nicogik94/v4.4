@@ -364,6 +364,13 @@ def test_roadmap_and_executive_summary_prompt_controls():
     roadmap = (PROMPT_DIR / "readiness_roadmap.md").read_text(encoding="utf-8")
     summary = (PROMPT_DIR / "executive_summary.md").read_text(encoding="utf-8")
 
+    assert "one top-level JSON object" in roadmap
+    assert "not an array" in roadmap
+    assert "Do not return multiple JSON objects" in roadmap
+    assert "gate-critical fields" in roadmap
+    assert roadmap.index('"decision_gates"') < roadmap.index('"roadmap_phases"')
+    assert roadmap.index('"go_no_go_criteria"') < roadmap.index('"roadmap_phases"')
+
     for phase in TRL_PHASES.values():
         assert phase["trl"] in roadmap
         assert phase["time_range"] in roadmap
