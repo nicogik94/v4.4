@@ -1,6 +1,10 @@
 # Technology Readiness & Transfer Audit: technical_validation_plan
 
-Return ONE structured JSON object for the `technical_validation_plan` phase.
+Return exactly one top-level JSON object for the `technical_validation_plan` phase.
+The response is not an array; do not return an array at the top level.
+Do not return multiple JSON objects.
+Emit the gate-critical fields `acceptance_criteria` and `evidence_to_collect` before the long `validation_tests` array.
+Keep each array concise and evidence-specific so the single JSON object can close completely.
 
 General controls:
 - Make this an evidence-aware assessment.
@@ -11,11 +15,11 @@ General controls:
 Required JSON keys:
 ```json
 {
-  "validation_tests": [],
   "acceptance_criteria": [],
+  "evidence_to_collect": [],
+  "validation_tests": [],
   "measurement_plan": [],
   "failure_modes": [],
-  "evidence_to_collect": [],
   "confidence": ""
 }
 ```

@@ -347,6 +347,19 @@ def test_next_level_prompt_requires_evidence_and_advancement_criteria():
     assert "Do not recommend advancement without explicit evidence requirements" in text
 
 
+def test_technical_validation_prompt_prioritizes_gate_fields_before_long_arrays():
+    text = (PROMPT_DIR / "technical_validation_plan.md").read_text(encoding="utf-8")
+
+    assert "one top-level JSON object" in text
+    assert "not an array" in text
+    assert "Do not return multiple JSON objects" in text
+    assert "gate-critical fields" in text
+    assert "acceptance_criteria" in text
+    assert "evidence_to_collect" in text
+    assert text.index('"acceptance_criteria"') < text.index('"validation_tests"')
+    assert text.index('"evidence_to_collect"') < text.index('"validation_tests"')
+
+
 def test_roadmap_and_executive_summary_prompt_controls():
     roadmap = (PROMPT_DIR / "readiness_roadmap.md").read_text(encoding="utf-8")
     summary = (PROMPT_DIR / "executive_summary.md").read_text(encoding="utf-8")
