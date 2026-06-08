@@ -77,12 +77,20 @@ async def run_case_real(case: dict) -> ProjectState:
 
 
 async def run_case_mock(case: dict) -> dict:
-    """Lightweight mock — exercises plumbing without LLM calls."""
+    """Lightweight mock — exercises plumbing without LLM calls.
+
+    Mock mode is a smoke check for imports, case loading, deterministic
+    scoring, reporting, and CLI threshold handling. It echoes each case's
+    expected framework and must-mention terms into mock-only fields so the
+    normal pass/fail plumbing can run without weakening real eval standards.
+    """
     return {
         "mock": True,
         "brief": case["brief"],
         "classify": {"domain": case["expected_domain"]},
         "hypotheses": [{"id": f"H{i+1}"} for i in range(case.get("min_hypotheses", 0))],
+        "mock_expected_frameworks": case.get("must_contain_frameworks", []),
+        "mock_expected_strategy_terms": case.get("strategy_must_mention", []),
     }
 
 
@@ -101,7 +109,7 @@ def score_deterministic(case: dict, output: dict) -> CaseResult:
     r.hypothesis_count_ok = case["min_hypotheses"] <= n <= case["max_hypotheses"]
 
     # Frameworks covered
-    flat = json.dumps(output).lower()
+    flat = json.dumps(output, ensure_ascii=False).lower()
     required_fw = [fw.lower() for fw in case.get("must_contain_frameworks", [])]
     if required_fw:
         hits = sum(1 for fw in required_fw if fw in flat)
