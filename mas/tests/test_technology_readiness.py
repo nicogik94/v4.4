@@ -18,6 +18,7 @@ from orchestrator import (
     _parsed_json_matches_phase,
     _phase_json_retry_instruction,
     _repair_technology_readiness_top_level_payload,
+    _repair_technology_readiness_truncated_payload,
     _store_phase_output,
     build_technology_readiness_prompt,
     run_phase_node,
@@ -566,6 +567,86 @@ def test_technology_readiness_multi_candidate_repair_rejects_list_of_strings():
     assert "candidate_dict_count=0" in diagnostic
     assert "valid_candidate_count=0" in diagnostic
     assert "reason=no_valid_candidate" in diagnostic
+
+
+def test_technology_readiness_truncated_payload_repair_recovers_completed_top_level_fields():
+    text = """
+{
+  "current_trl": 2,
+  "next_target_trl": 3,
+  "current_phase_name": "Technology concept",
+  "next_phase_name": "Experimental proof of concept",
+  "main_gap_to_next_level": "Replication evidence is missing.",
+  "recommended_actions": [
+    "Run Sprint 0 replication package."
+  ],
+  "required_tests": [
+"""
+
+    repaired = _repair_technology_readiness_truncated_payload(
+        "next_level_recommendations",
+        text,
+    )
+
+    assert repaired == {
+        "current_trl": 2,
+        "next_target_trl": 3,
+        "current_phase_name": "Technology concept",
+        "next_phase_name": "Experimental proof of concept",
+        "main_gap_to_next_level": "Replication evidence is missing.",
+        "recommended_actions": ["Run Sprint 0 replication package."],
+    }
+
+
+def test_technology_readiness_truncated_payload_repair_requires_phase_anchors():
+    text = """
+{
+  "current_trl": 2,
+  "next_target_trl": 3,
+  "main_gap_to_next_level": "Replication evidence is missing.",
+  "required_tests": [
+"""
+
+    assert _repair_technology_readiness_truncated_payload(
+        "next_level_recommendations",
+        text,
+    ) is None
+    assert _repair_technology_readiness_truncated_payload("strategy", text) is None
+
+
+def test_next_level_recommendations_runtime_repairs_truncated_top_level_object():
+    state = ProjectState(
+        project_id="tr-next-level-truncated-object",
+        project_type="technology_readiness",
+        brief="Assess a coating for transfer readiness.",
+    )
+    text = """
+{
+  "current_trl": 2,
+  "next_target_trl": 3,
+  "current_phase_name": "Technology concept",
+  "next_phase_name": "Experimental proof of concept",
+  "main_gap_to_next_level": "Replication evidence is missing.",
+  "recommended_actions": [
+    "Run Sprint 0 replication package."
+  ],
+  "required_tests": [
+"""
+    call_mock = AsyncMock(return_value=make_llm_response(text, 10, 5))
+
+    with patch("orchestrator.call_llm", new=call_mock):
+        with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+            updated = asyncio.run(run_phase_node(state, "next_level_recommendations"))
+
+    assert call_mock.await_count == 1
+    assert updated.phase_status["next_level_recommendations"] == PhaseStatus.COMPLETED
+    assert isinstance(
+        updated.next_level_recommendations,
+        TechnologyReadinessNextLevelRecommendationsOutput,
+    )
+    assert updated.next_level_recommendations.recommended_actions == [
+        {"value": "Run Sprint 0 replication package."}
+    ]
 
 
 def test_technology_readiness_singleton_list_repair_does_not_apply_to_strategic_audit():

@@ -1017,6 +1017,34 @@ def _technology_readiness_list_candidate_stats(phase: str, parsed) -> dict[str, 
     }
 
 
+def _repair_technology_readiness_truncated_payload(phase: str, text: str) -> dict | None:
+    """Recover completed top-level Technology Readiness fields from malformed JSON.
+
+    Some long Technology Readiness responses start with the correct top-level
+    object but are malformed or truncated later. parse_json can then fall back to
+    the first nested array, such as recommended_actions. This repair only
+    returns a payload when top-level phase anchors are recoverable and the
+    existing Technology Readiness validator accepts the recovered object.
+    """
+    if phase not in TECHNOLOGY_READINESS_PHASE_SEQUENCE or not text:
+        return None
+    from state import TECHNOLOGY_READINESS_OUTPUT_MODELS
+
+    model = TECHNOLOGY_READINESS_OUTPUT_MODELS.get(phase)
+    if model is None:
+        return None
+    repaired = {}
+    for key in model.model_fields:
+        value = _extract_top_level_json_value(text, key)
+        if value is not None:
+            repaired[key] = value
+    if not repaired:
+        return None
+    if not _is_valid_full_technology_readiness_candidate(phase, repaired):
+        return None
+    return repaired
+
+
 def _log_technology_readiness_top_level_payload_repair(phase: str, repaired: bool) -> None:
     if repaired:
         logger.warning(
@@ -1443,6 +1471,15 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         parsed, repaired_tr_payload = _repair_technology_readiness_top_level_payload(phase, parsed)
         _log_technology_readiness_top_level_payload_repair(phase, repaired_tr_payload)
         shape_ok = _parsed_json_matches_phase(phase, parsed)
+        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE and (parsed is None or not shape_ok):
+            repaired = _repair_technology_readiness_truncated_payload(phase, response.text)
+            if repaired is not None:
+                logger.warning(
+                    f"Phase {phase}: repaired Technology Readiness truncated JSON object "
+                    "from completed top-level fields"
+                )
+                parsed = repaired
+                shape_ok = True
         if phase == "audit" and not shape_ok:
             repaired = _repair_audit_payload(response.text)
             if repaired is not None:
@@ -1496,6 +1533,15 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 parsed, repaired_tr_payload = _repair_technology_readiness_top_level_payload(phase, parsed)
                 _log_technology_readiness_top_level_payload_repair(phase, repaired_tr_payload)
                 shape_ok = _parsed_json_matches_phase(phase, parsed)
+                if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE and (parsed is None or not shape_ok):
+                    repaired = _repair_technology_readiness_truncated_payload(phase, retry_response.text)
+                    if repaired is not None:
+                        logger.warning(
+                            f"Phase {phase}: repaired Technology Readiness truncated retry JSON object "
+                            "from completed top-level fields"
+                        )
+                        parsed = repaired
+                        shape_ok = True
                 if phase == "audit" and not shape_ok:
                     repaired = _repair_audit_payload(retry_response.text)
                     if repaired is not None:
@@ -1574,6 +1620,15 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                         parsed, repaired_tr_payload = _repair_technology_readiness_top_level_payload(phase, parsed)
                         _log_technology_readiness_top_level_payload_repair(phase, repaired_tr_payload)
                         shape_ok = _parsed_json_matches_phase(phase, parsed)
+                        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE and (parsed is None or not shape_ok):
+                            repaired = _repair_technology_readiness_truncated_payload(phase, retry_response.text)
+                            if repaired is not None:
+                                logger.warning(
+                                    f"Phase {phase}: repaired Technology Readiness truncated schema retry JSON "
+                                    "object from completed top-level fields"
+                                )
+                                parsed = repaired
+                                shape_ok = True
                         if parsed is None:
                             logger.error(
                                 f"Phase {phase}: JSON parse failed on schema repair retry. "
