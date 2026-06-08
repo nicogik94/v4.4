@@ -26,9 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from state import ProjectState
 from orchestrator import run_phase_node
 from llm_client import call_llm, LLMResponse
+from config import ModelConfig, Provider
 
 PASS_THRESHOLD = 0.75  # fail CI if <75% of cases pass
 JUDGE_MODEL = "claude-sonnet-4-6"
+JUDGE_SYSTEM_PROMPT = "You are a harsh but fair evaluator. Return only JSON."
 EVAL_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
 
 
@@ -174,10 +176,16 @@ async def judge_case(case: dict, output: dict) -> tuple[int, str]:
         output=json.dumps(output, default=str)[:8000],
     )
     resp: LLMResponse = await call_llm(
-        phase="eval_judge",
-        user_message=prompt,
-        system_prompt="You are a harsh but fair evaluator. Return only JSON.",
-        model_override=JUDGE_MODEL,
+        "eval_judge",
+        JUDGE_SYSTEM_PROMPT,
+        prompt,
+        config_override=ModelConfig(
+            provider=Provider.ANTHROPIC,
+            model=JUDGE_MODEL,
+            max_tokens=1000,
+            temperature=0.0,
+        ),
+        project_id=f"eval-{case['id']}",
     )
     if not resp.ok:
         return 0, f"judge error: {resp.error}"

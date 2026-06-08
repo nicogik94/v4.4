@@ -1,6 +1,16 @@
 import asyncio
 
-from evals.run_evals import load_cases, pass_fail, run_case_mock, score_deterministic
+from config import Provider
+from evals.run_evals import (
+    JUDGE_MODEL,
+    JUDGE_SYSTEM_PROMPT,
+    judge_case,
+    load_cases,
+    pass_fail,
+    run_case_mock,
+    score_deterministic,
+)
+from llm_client import LLMResponse
 
 
 def _mock_score(case):
@@ -23,6 +33,51 @@ def test_mock_eval_cases_use_explicit_mock_expectations():
         assert output["mock_expected_frameworks"] == case.get("must_contain_frameworks", [])
         assert output["mock_expected_strategy_terms"] == case.get("strategy_must_mention", [])
         assert result.passed, case["id"]
+
+
+def test_judge_case_calls_current_call_llm_interface(monkeypatch):
+    case = load_cases()[0]
+    output = {"classify": {"domain": case["expected_domain"]}}
+    calls = []
+
+    async def fake_call_llm(
+        phase,
+        system,
+        prompt,
+        config_override=None,
+        *,
+        project_id="",
+        before_attempt=None,
+    ):
+        calls.append(
+            {
+                "phase": phase,
+                "system": system,
+                "prompt": prompt,
+                "config_override": config_override,
+                "project_id": project_id,
+                "before_attempt": before_attempt,
+            }
+        )
+        return LLMResponse(
+            text='{"score": 82, "rationale": "valid judge parse", "critical_failures": []}',
+            ok=True,
+        )
+
+    monkeypatch.setattr("evals.run_evals.call_llm", fake_call_llm)
+
+    score, rationale = asyncio.run(judge_case(case, output))
+
+    assert (score, rationale) == (82, "valid judge parse")
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["phase"] == "eval_judge"
+    assert call["system"] == JUDGE_SYSTEM_PROMPT
+    assert "ACTUAL OUTPUT" in call["prompt"]
+    assert call["config_override"].model == JUDGE_MODEL
+    assert call["config_override"].provider == Provider.ANTHROPIC
+    assert call["project_id"] == f"eval-{case['id']}"
+    assert call["before_attempt"] is None
 
 
 def test_real_pass_fail_still_rejects_missing_framework_coverage():
