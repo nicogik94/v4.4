@@ -2,13 +2,18 @@ import asyncio
 
 from config import Provider
 from evals.run_evals import (
+    CaseResult,
     JUDGE_MODEL,
     JUDGE_SYSTEM_PROMPT,
+    aggregate_summaries,
     judge_case,
     load_cases,
     pass_fail,
     run_case_mock,
     score_deterministic,
+    shard_cases,
+    summarize_results,
+    write_summary,
 )
 from llm_client import LLMResponse
 
@@ -33,6 +38,126 @@ def test_mock_eval_cases_use_explicit_mock_expectations():
         assert output["mock_expected_frameworks"] == case.get("must_contain_frameworks", [])
         assert output["mock_expected_strategy_terms"] == case.get("strategy_must_mention", [])
         assert result.passed, case["id"]
+
+
+def test_shard_selection_covers_every_case_exactly_once():
+    cases = load_cases()
+    shard_count = 4
+    shard_ids = [
+        [case["id"] for case in shard_cases(cases, shard_index, shard_count)]
+        for shard_index in range(shard_count)
+    ]
+    flattened = [case_id for ids in shard_ids for case_id in ids]
+
+    assert sorted(flattened) == sorted(case["id"] for case in cases)
+    assert len(flattened) == len(set(flattened))
+    assert all(shard_ids)
+
+
+def _fake_case_result(case_id, passed=True, rationale="mock"):
+    return CaseResult(
+        case_id=case_id,
+        passed=passed,
+        domain_match=passed,
+        hypothesis_count_ok=passed,
+        frameworks_covered=1.0 if passed else 0.0,
+        must_mention_hits=1.0 if passed else 0.0,
+        data_labeling_correct=True,
+        judge_overall=70 if passed else 0,
+        judge_rationale=rationale,
+    )
+
+
+def _write_sharded_summaries(tmp_path, results_by_id, shard_count=4):
+    cases = load_cases()
+    shard_dirs = []
+    for shard_index in range(shard_count):
+        shard_dir = tmp_path / f"eval-shard-{shard_index}"
+        shard_cases_for_index = shard_cases(cases, shard_index, shard_count)
+        shard_results = [results_by_id[case["id"]] for case in shard_cases_for_index]
+        write_summary(
+            shard_dir,
+            summarize_results(
+                shard_results,
+                threshold=0.75,
+                mode="mock",
+                case_ids=[case["id"] for case in shard_cases_for_index],
+                shard_index=shard_index,
+                shard_count=shard_count,
+            ),
+        )
+        shard_dirs.append(str(shard_dir))
+    return shard_dirs
+
+
+def test_aggregate_summary_matches_non_sharded_pass_rate(tmp_path):
+    cases = load_cases()
+    results = [
+        _fake_case_result(case["id"], passed=(index % 3 != 0))
+        for index, case in enumerate(cases)
+    ]
+    results_by_id = {result.case_id: result for result in results}
+    monolithic = summarize_results(
+        results,
+        threshold=0.75,
+        mode="mock",
+        case_ids=[case["id"] for case in cases],
+    )
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.75,
+    )
+
+    assert aggregate["total"] == monolithic["total"] == len(cases)
+    assert aggregate["passed"] == monolithic["passed"]
+    assert aggregate["pass_rate"] == monolithic["pass_rate"]
+    assert aggregate["case_ids"] == [case["id"] for case in cases]
+    assert aggregate["aggregation_errors"] == []
+
+
+def test_aggregate_fails_when_global_pass_rate_below_threshold(tmp_path):
+    cases = load_cases()
+    results_by_id = {
+        case["id"]: _fake_case_result(case["id"], passed=(index < 8))
+        for index, case in enumerate(cases)
+    }
+
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.75,
+    )
+
+    assert aggregate["total"] == len(cases)
+    assert aggregate["passed"] == 8
+    assert aggregate["pass_rate"] < 0.75
+    assert aggregate["ok"] is False
+
+
+def test_aggregate_preserves_provider_failure_rationale(tmp_path):
+    cases = load_cases()
+    provider_rationale = (
+        "judge error: Provider call failed: category=invalid_request, "
+        "provider=anthropic, model=claude-sonnet-4-6; "
+        'provider_detail=status_code=400 error_type=invalid_request_error message="billing blocked"'
+    )
+    results_by_id = {
+        case["id"]: _fake_case_result(case["id"], passed=True)
+        for case in cases
+    }
+    first_id = cases[0]["id"]
+    results_by_id[first_id] = _fake_case_result(
+        first_id,
+        passed=False,
+        rationale=provider_rationale,
+    )
+
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.75,
+    )
+
+    first_case = next(case for case in aggregate["cases"] if case["case_id"] == first_id)
+    assert first_case["judge_rationale"] == provider_rationale
 
 
 def test_judge_case_calls_current_call_llm_interface(monkeypatch):

@@ -8,9 +8,10 @@ Usage:
     python -m evals.run_evals                      # full run
     python -m evals.run_evals --cases G01,G03      # subset
     python -m evals.run_evals --mock               # skip LLM, test plumbing
+    python -m evals.run_evals --shard-index 0 --shard-count 4
+    python -m evals.run_evals --aggregate /tmp/eval-shard-*
     python -m evals.run_evals --report evals/out/  # save per-case JSON
 """
-import os
 import sys
 import json
 import asyncio
@@ -57,6 +58,105 @@ def load_cases(subset: Optional[set[str]] = None) -> list[dict]:
             if subset is None or c["id"] in subset:
                 cases.append(c)
     return cases
+
+
+def shard_cases(cases: list[dict], shard_index: int, shard_count: int) -> list[dict]:
+    if shard_count < 1:
+        raise ValueError("--shard-count must be >= 1")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError("--shard-index must be between 0 and shard-count - 1")
+    return [case for index, case in enumerate(cases) if index % shard_count == shard_index]
+
+
+def _case_ids(cases: list[dict]) -> list[str]:
+    return [case["id"] for case in cases]
+
+
+def summarize_results(
+    results: list[CaseResult],
+    *,
+    threshold: float,
+    mode: str,
+    case_ids: list[str],
+    shard_index: int | None = None,
+    shard_count: int | None = None,
+    aggregation_errors: list[str] | None = None,
+) -> dict:
+    passed = sum(1 for r in results if r.passed)
+    total = len(results)
+    pass_rate = passed / total if total else 0.0
+    errors = aggregation_errors or []
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "mode": mode,
+        "shard_index": shard_index,
+        "shard_count": shard_count,
+        "case_ids": case_ids,
+        "passed": passed,
+        "total": total,
+        "pass_rate": pass_rate,
+        "threshold": threshold,
+        "ok": pass_rate >= threshold and not errors,
+        "aggregation_errors": errors,
+        "cases": [asdict(r) for r in results],
+    }
+
+
+def write_summary(out_dir: Path, summary: dict) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+
+
+def _case_result_from_dict(data: dict) -> CaseResult:
+    allowed = set(CaseResult.__dataclass_fields__)
+    return CaseResult(**{key: value for key, value in data.items() if key in allowed})
+
+
+def aggregate_summaries(report_dirs: list[str], *, threshold: float) -> dict:
+    expected_ids = _case_ids(load_cases())
+    expected_set = set(expected_ids)
+    by_id: dict[str, CaseResult] = {}
+    duplicates: list[str] = []
+    aggregation_errors: list[str] = []
+
+    for report_dir in report_dirs:
+        summary_path = Path(report_dir) / "summary.json"
+        if not summary_path.exists():
+            aggregation_errors.append(f"missing summary.json in {report_dir}")
+            continue
+        try:
+            data = json.loads(summary_path.read_text())
+        except Exception as exc:
+            aggregation_errors.append(f"failed to read {summary_path}: {exc}")
+            continue
+        for case_data in data.get("cases", []):
+            case_id = str(case_data.get("case_id", ""))
+            if not case_id:
+                aggregation_errors.append(f"case without case_id in {summary_path}")
+                continue
+            if case_id in by_id:
+                duplicates.append(case_id)
+                continue
+            by_id[case_id] = _case_result_from_dict(case_data)
+
+    actual_set = set(by_id)
+    unknown = sorted(actual_set - expected_set)
+    missing = [case_id for case_id in expected_ids if case_id not in actual_set]
+    if duplicates:
+        aggregation_errors.append(f"duplicate case IDs: {', '.join(sorted(duplicates))}")
+    if unknown:
+        aggregation_errors.append(f"unknown case IDs: {', '.join(unknown)}")
+    if missing:
+        aggregation_errors.append(f"missing case IDs: {', '.join(missing)}")
+
+    ordered_results = [by_id[case_id] for case_id in expected_ids if case_id in by_id]
+    return summarize_results(
+        ordered_results,
+        threshold=threshold,
+        mode="aggregate",
+        case_ids=[result.case_id for result in ordered_results],
+        aggregation_errors=aggregation_errors,
+    )
 
 
 async def run_case_real(case: dict) -> ProjectState:
@@ -218,11 +318,45 @@ async def main():
     parser.add_argument("--mock", action="store_true", help="Skip real LLM calls")
     parser.add_argument("--report", help="Directory to write per-case JSON reports")
     parser.add_argument("--threshold", type=float, default=PASS_THRESHOLD)
+    parser.add_argument("--shard-index", type=int, help="Zero-based shard index to run")
+    parser.add_argument("--shard-count", type=int, help="Total number of shards")
+    parser.add_argument("--aggregate", nargs="+", help="Shard report directories to aggregate")
     args = parser.parse_args()
+
+    if args.aggregate:
+        summary = aggregate_summaries(args.aggregate, threshold=args.threshold)
+        print(f"Aggregating {len(args.aggregate)} shard report directories")
+        for error in summary.get("aggregation_errors", []):
+            print(f"AGGREGATION ERROR: {error}")
+        print(
+            f"\n=== RESULT: {summary['passed']}/{summary['total']} passed "
+            f"({summary['pass_rate']:.1%}) ==="
+        )
+        if args.report:
+            out_dir = Path(args.report)
+            write_summary(out_dir, summary)
+            print(f"Report written to {out_dir}/summary.json")
+        if not summary["ok"]:
+            if summary.get("aggregation_errors"):
+                print("FAIL: aggregate report is incomplete or invalid")
+            else:
+                print(f"FAIL: pass rate {summary['pass_rate']:.1%} < threshold {args.threshold:.1%}")
+            sys.exit(1)
+        print("PASS")
+        return
+
+    if (args.shard_index is None) != (args.shard_count is None):
+        parser.error("--shard-index and --shard-count must be provided together")
 
     subset = set(args.cases.split(",")) if args.cases else None
     cases = load_cases(subset)
-    print(f"Running {len(cases)} cases ({'MOCK' if args.mock else 'REAL'})")
+    if args.shard_index is not None and args.shard_count is not None:
+        cases = shard_cases(cases, args.shard_index, args.shard_count)
+    mode = "mock" if args.mock else "real"
+    shard_label = ""
+    if args.shard_index is not None and args.shard_count is not None:
+        shard_label = f" shard {args.shard_index}/{args.shard_count}"
+    print(f"Running {len(cases)} cases ({mode.upper()}{shard_label})")
 
     results = []
     for case in cases:
@@ -249,27 +383,28 @@ async def main():
             print(f"     ERROR: {e}")
 
     # Aggregate
-    passed = sum(1 for r in results if r.passed)
-    total = len(results)
-    pass_rate = passed / total if total else 0.0
-    print(f"\n=== RESULT: {passed}/{total} passed ({pass_rate:.1%}) ===")
+    summary = summarize_results(
+        results,
+        threshold=args.threshold,
+        mode=mode,
+        case_ids=_case_ids(cases),
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+    )
+    print(f"\n=== RESULT: {summary['passed']}/{summary['total']} passed ({summary['pass_rate']:.1%}) ===")
 
     if args.report:
         out_dir = Path(args.report)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "summary.json").write_text(json.dumps({
-            "timestamp": datetime.now().isoformat(),
-            "passed": passed,
-            "total": total,
-            "pass_rate": pass_rate,
-            "threshold": args.threshold,
-            "ok": pass_rate >= args.threshold,
-            "cases": [asdict(r) for r in results],
-        }, indent=2, default=str))
+        write_summary(out_dir, summary)
         print(f"Report written to {out_dir}/summary.json")
 
-    if pass_rate < args.threshold:
-        print(f"FAIL: pass rate {pass_rate:.1%} < threshold {args.threshold:.1%}")
+    if args.shard_index is not None and args.shard_count is not None:
+        print("Shard complete; global threshold gate is deferred to aggregation")
+        print("PASS")
+        return
+
+    if summary["pass_rate"] < args.threshold:
+        print(f"FAIL: pass rate {summary['pass_rate']:.1%} < threshold {args.threshold:.1%}")
         sys.exit(1)
     print("PASS")
 
