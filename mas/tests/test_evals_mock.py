@@ -6,6 +6,10 @@ from evals.run_evals import (
     CaseResult,
     JUDGE_MODEL,
     JUDGE_SYSTEM_PROMPT,
+    _case_data_payload,
+    _compact_output_for_judge,
+    _normalize_eval_text,
+    _term_present,
     aggregate_summaries,
     judge_case,
     load_cases,
@@ -331,6 +335,51 @@ def test_deterministic_scoring_normalizes_framework_and_phrase_text():
     assert result.frameworks_covered == 1.0
     assert result.must_mention_hits == 1.0
     assert result.must_not_mention_violations == 0
+
+
+def test_term_matching_allows_non_contiguous_multiword_concepts():
+    text = _normalize_eval_text(
+        "Make LinkedIn the primary channel, track reputational costs, "
+        "segment customers, and run conversion-rate controls."
+    )
+
+    assert _term_present("LinkedIn primary", text)
+    assert _term_present("reputation cost", text)
+    assert _term_present("customer segmentation", text)
+    assert _term_present("conversion rate", text)
+
+
+def test_real_eval_data_payload_uses_brief_facts_only_when_case_expects_data():
+    case_with_data = {
+        "id": "DATA",
+        "brief": "MRR is $4K and growth is 4% MoM.",
+        "data_based_expected": True,
+    }
+    case_without_data = {
+        "id": "NODATA",
+        "brief": "Choose a positioning strategy.",
+        "data_based_expected": False,
+    }
+
+    assert "MRR is $4K" in _case_data_payload(case_with_data)
+    assert _case_data_payload(case_without_data) == ""
+
+
+def test_judge_output_view_keeps_only_completed_eval_phases():
+    compact = _compact_output_for_judge(
+        {
+            "project_id": "eval-GXX",
+            "brief": "long brief",
+            "classify": {"domain": "Complicated"},
+            "hypotheses": [{"id": "H1"}],
+            "strategy": {"executive_strategy": "act"},
+            "report": {"unused": True},
+        }
+    )
+
+    assert set(compact) == {"classify", "hypotheses", "strategy"}
+    assert "project_id" not in compact
+    assert "report" not in compact
 
 
 def test_real_eval_runner_halts_after_confused_classification(monkeypatch):

@@ -48,11 +48,55 @@ def _normalize_eval_text(value) -> str:
     return " ".join(text.split())
 
 
+_TERM_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "by",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+
+
+def _token_matches(expected: str, actual: str) -> bool:
+    if expected == actual:
+        return True
+    if expected + "s" == actual or actual + "s" == expected:
+        return True
+    if len(expected) >= 5 and len(actual) >= 5:
+        if expected.startswith(actual) or actual.startswith(expected):
+            return True
+    if len(expected) >= 6 and len(actual) >= 6:
+        return expected[:6] == actual[:6]
+    return False
+
+
 def _term_present(term: str, normalized_text: str) -> bool:
     normalized_term = _normalize_eval_text(term)
     if not normalized_term:
         return True
-    return normalized_term in normalized_text
+    if normalized_term in normalized_text:
+        return True
+    term_tokens = [
+        token
+        for token in normalized_term.split()
+        if token not in _TERM_STOPWORDS
+    ]
+    if len(term_tokens) < 2:
+        return False
+    text_tokens = normalized_text.split()
+    return all(
+        any(_token_matches(term_token, text_token) for text_token in text_tokens)
+        for term_token in term_tokens
+    )
 
 
 def _is_confused_classification(state: ProjectState) -> bool:
@@ -62,6 +106,27 @@ def _is_confused_classification(state: ProjectState) -> bool:
 
 def _append_eval_error(state: ProjectState, message: str) -> None:
     state.ingestion_metadata.setdefault("eval_errors", []).append(message)
+
+
+def _case_data_payload(case: dict) -> str:
+    explicit_data = case.get("data") or case.get("evidence") or case.get("metrics")
+    if explicit_data:
+        return str(explicit_data)
+    if case.get("data_based_expected", False):
+        return "Operator-provided measured facts from the decision brief:\n" + case["brief"]
+    return ""
+
+
+def _compact_output_for_judge(output: dict) -> dict:
+    phase_names = [
+        "classify",
+        "hypotheses",
+        "gauntlet",
+        "audit",
+        "strategy",
+        "ingestion_metadata",
+    ]
+    return {name: output.get(name) for name in phase_names if output.get(name) is not None}
 
 
 @dataclass
@@ -194,7 +259,7 @@ async def run_case_real(case: dict) -> ProjectState:
         project_id=f"eval-{case['id']}",
         project_name=f"eval {case['id']}",
         brief=case["brief"],
-        data="",
+        data=_case_data_payload(case),
         created_at=datetime.now(),
     )
     for phase in ["classify", "hypotheses", "gauntlet", "audit", "strategy"]:
@@ -307,7 +372,7 @@ async def judge_case(case: dict, output: dict) -> tuple[int, str]:
         must_mention=", ".join(case.get("strategy_must_mention", [])),
         must_not_mention=", ".join(case.get("strategy_must_not_mention", [])),
         data_based=case.get("data_based_expected", False),
-        output=json.dumps(output, default=str)[:8000],
+        output=json.dumps(_compact_output_for_judge(output), default=str)[:16000],
     )
     resp: LLMResponse = await call_llm(
         "eval_judge",

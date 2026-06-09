@@ -421,6 +421,8 @@ class TestWorkflowHelpers(unittest.TestCase):
         self.assertIn("named frameworks", prompt)
         self.assertIn("Do not replace load-bearing concepts with vague synonyms", prompt)
         self.assertIn("Make strategy concepts explicit", prompt)
+        self.assertIn("Use explicit noun phrases for the decision variables", prompt)
+        self.assertIn("Every strategy action's framework_source should name", prompt)
 
     def test_report_prompt_includes_parseable_evidence_locator_register(self):
         state = make_completed_state("report-locator-register")
