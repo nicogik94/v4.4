@@ -134,9 +134,10 @@ class TestScenarioShadowCallLLM(unittest.IsolatedAsyncioTestCase):
             cost_usd=0.01,
         )
 
-        with patch("llm_client._call_anthropic", new=AsyncMock(return_value=fake_response)):
-            with patch("llm_client.run_shadow_evaluation", side_effect=RuntimeError("shadow down")):
-                response = await llm_client.call_llm("classify", "system", "prompt", project_id="shadow-safe")
+        with patch("llm_client.ANTHROPIC_API_KEY", "test-key"):
+            with patch("llm_client._call_anthropic", new=AsyncMock(return_value=fake_response)):
+                with patch("llm_client.run_shadow_evaluation", side_effect=RuntimeError("shadow down")):
+                    response = await llm_client.call_llm("classify", "system", "prompt", project_id="shadow-safe")
 
         self.assertTrue(response.ok)
         self.assertEqual(response.text, "shadow-safe")

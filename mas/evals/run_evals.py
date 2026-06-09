@@ -35,6 +35,35 @@ JUDGE_SYSTEM_PROMPT = "You are a harsh but fair evaluator. Return only JSON."
 EVAL_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
 
 
+def _normalize_eval_text(value) -> str:
+    import re
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.casefold()
+    text = text.replace("β", "beta").replace("α", "alpha").replace("ρ", "rho")
+    text = re.sub(r"[\u2010-\u2015\u2212_/]+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _term_present(term: str, normalized_text: str) -> bool:
+    normalized_term = _normalize_eval_text(term)
+    if not normalized_term:
+        return True
+    return normalized_term in normalized_text
+
+
+def _is_confused_classification(state: ProjectState) -> bool:
+    classify = getattr(state, "classify", None)
+    return _normalize_eval_text(getattr(classify, "domain", "")) == "confused"
+
+
+def _append_eval_error(state: ProjectState, message: str) -> None:
+    state.ingestion_metadata.setdefault("eval_errors", []).append(message)
+
+
 @dataclass
 class CaseResult:
     case_id: str
@@ -171,10 +200,12 @@ async def run_case_real(case: dict) -> ProjectState:
     for phase in ["classify", "hypotheses", "gauntlet", "audit", "strategy"]:
         try:
             state = await run_phase_node(state, phase)
+            if phase == "classify" and _is_confused_classification(state):
+                _append_eval_error(state, "workflow halted after Confused classification")
+                break
         except Exception as e:
             # Log error but continue — judge can still evaluate partial output
-            state.errors = getattr(state, "errors", [])
-            state.errors.append(f"{phase}: {e}")
+            _append_eval_error(state, f"{phase}: {e}")
     return state
 
 
@@ -211,10 +242,11 @@ def score_deterministic(case: dict, output: dict) -> CaseResult:
     r.hypothesis_count_ok = case["min_hypotheses"] <= n <= case["max_hypotheses"]
 
     # Frameworks covered
-    flat = json.dumps(output, ensure_ascii=False).lower()
+    flat = json.dumps(output, ensure_ascii=False)
+    normalized_flat = _normalize_eval_text(flat)
     required_fw = [fw.lower() for fw in case.get("must_contain_frameworks", [])]
     if required_fw:
-        hits = sum(1 for fw in required_fw if fw in flat)
+        hits = sum(1 for fw in required_fw if _term_present(fw, normalized_flat))
         r.frameworks_covered = hits / len(required_fw)
     else:
         r.frameworks_covered = 1.0
@@ -222,13 +254,15 @@ def score_deterministic(case: dict, output: dict) -> CaseResult:
     # Must-mention / must-not-mention
     must = [m.lower() for m in case.get("strategy_must_mention", [])]
     if must:
-        hits = sum(1 for m in must if m in flat)
+        hits = sum(1 for m in must if _term_present(m, normalized_flat))
         r.must_mention_hits = hits / len(must)
     else:
         r.must_mention_hits = 1.0
 
     forbidden = [m.lower() for m in case.get("strategy_must_not_mention", [])]
-    r.must_not_mention_violations = sum(1 for m in forbidden if m in flat)
+    r.must_not_mention_violations = sum(
+        1 for m in forbidden if _term_present(m, normalized_flat)
+    )
 
     # Data labeling honesty (audit phase should mark findings PREDICTED when no data)
     audit = output.get("audit") or {}

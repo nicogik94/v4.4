@@ -1,6 +1,7 @@
 import asyncio
 
 from config import Provider
+from state import ClassifyOutput
 from evals.run_evals import (
     CaseResult,
     JUDGE_MODEL,
@@ -9,6 +10,7 @@ from evals.run_evals import (
     judge_case,
     load_cases,
     pass_fail,
+    run_case_real,
     run_case_mock,
     score_deterministic,
     shard_cases,
@@ -301,3 +303,53 @@ def test_real_pass_fail_still_rejects_missing_framework_coverage():
 
     assert result.frameworks_covered == 0.0
     assert not pass_fail(result)
+
+
+def test_deterministic_scoring_normalizes_framework_and_phrase_text():
+    case = {
+        "id": "NORM",
+        "expected_domain": "Complicated",
+        "min_hypotheses": 1,
+        "max_hypotheses": 1,
+        "must_contain_frameworks": ["SISTÉMICO", "Red Teaming"],
+        "strategy_must_mention": ["Stern-Volmer", "LinkedIn primary"],
+        "strategy_must_not_mention": ["trust your gut"],
+        "data_based_expected": False,
+    }
+    output = {
+        "classify": {"domain": "Complicated"},
+        "hypotheses": [{"id": "H1"}],
+        "gauntlet": {"results": [{"frameworks": [{"fw": "Sistemico"}, {"fw": "Red–Teaming"}]}]},
+        "strategy": {
+            "executive_strategy": "Use Stern–Volmer controls and make LinkedIn-primary outreach the acquisition path."
+        },
+        "audit": {"data_based": False},
+    }
+
+    result = score_deterministic(case, output)
+
+    assert result.frameworks_covered == 1.0
+    assert result.must_mention_hits == 1.0
+    assert result.must_not_mention_violations == 0
+
+
+def test_real_eval_runner_halts_after_confused_classification(monkeypatch):
+    calls = []
+
+    async def fake_run_phase_node(state, phase):
+        calls.append(phase)
+        if phase == "classify":
+            state.classify = ClassifyOutput(domain="Confused", justification="Brief too short.")
+        return state
+
+    monkeypatch.setattr("evals.run_evals.run_phase_node", fake_run_phase_node)
+
+    state = asyncio.run(run_case_real({"id": "GXX", "brief": "hi"}))
+
+    assert calls == ["classify"]
+    assert state.classify.domain == "Confused"
+    assert state.hypotheses is None
+    assert (
+        "workflow halted after Confused classification"
+        in state.ingestion_metadata["eval_errors"]
+    )

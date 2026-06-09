@@ -25,6 +25,7 @@ from orchestrator import (
     _build_report_evidence_locator_register,
     _phase_has_output,
     _sanitize_report_context,
+    build_classify_prompt,
     build_hypotheses_prompt,
     build_monitor_prompt,
     build_report_prompt,
@@ -394,6 +395,32 @@ def report_load_bearing_marker_counts(report: str) -> dict[str, int]:
 
 
 class TestWorkflowHelpers(unittest.TestCase):
+
+    def test_classify_prompt_includes_cynefin_domain_guardrails(self):
+        prompt = build_classify_prompt(
+            ProjectState(project_id="domain-guardrails", brief="hi")
+        )
+
+        for expected in (
+            "Simple:",
+            "Complicated:",
+            "Complex:",
+            "Chaotic:",
+            "Confused:",
+            "brief is too short",
+            "Return `domain` as exactly one of",
+        ):
+            self.assertIn(expected, prompt)
+
+    def test_strategy_prompt_preserves_traceable_operator_terms(self):
+        state = make_completed_state("strategy-traceability")
+        prompt = build_strategy_prompt(state)
+
+        self.assertIn("Preserve material operator terms", prompt)
+        self.assertIn("technical method names", prompt)
+        self.assertIn("named frameworks", prompt)
+        self.assertIn("Do not replace load-bearing concepts with vague synonyms", prompt)
+        self.assertIn("Make strategy concepts explicit", prompt)
 
     def test_report_prompt_includes_parseable_evidence_locator_register(self):
         state = make_completed_state("report-locator-register")

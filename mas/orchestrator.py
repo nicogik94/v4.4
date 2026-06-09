@@ -249,6 +249,15 @@ def build_system_prompt(phase: str, json_mode: bool = True, calibration_hint: st
 def build_classify_prompt(state: ProjectState) -> str:
     return f"""PHASE 0: Classify using Cynefin[#16], Bayes Factor, Requisite Variety[#30], OODA[#17], RPD[#12], Sensemaking[#13], DQ Frame, reference-class.
 
+Cynefin domain rules:
+- Simple: a clear operational choice with known cause/effect and an obvious best-practice response.
+- Complicated: expert analysis can discover the answer through measurement, controls, validation, or technical review.
+- Complex: nonlinear market, strategic, stakeholder, or adoption dynamics where the right move must be probed and learned.
+- Chaotic: an active disruption, sudden collapse, safety incident, or time-critical instability where the first move is stabilize, then sense/respond.
+- Confused: the brief is too short, nonsensical, or lacks a concrete decision. Classify as Confused and request clarification rather than inventing a workflow.
+
+Return `domain` as exactly one of: Simple, Complicated, Complex, Chaotic, Confused.
+
 EXAMPLE OUTPUT:
 {{"domain":"Complicated","justification":"Expert-discoverable cause-effect.","bf":85,"variety_env":"3 user types","variety_sys":"Tutorial system","variety_gaps":"1. No offline mode","variety_decision":"Amplify","ooda":{{"observe":"Usage analytics","orient":"FMEA","decide":"Gate review","act":"Fix","freq":"Weekly"}},"rpd_pattern":"SaaS adoption","sensemaking_anchors":"confusion patterns","expectancy_violations":"if experts also struggle","reference_class":"30-40% adoption in 1 month","dq":[20,15,18,12],"maturity_assessment":"Level 2","spiral_depth":"Spiral 1"}}
 
@@ -369,6 +378,8 @@ def build_strategy_prompt(state: ProjectState) -> str:
 
 For each hypothesis, give PRELIMINARY VERDICT: LIKELY_CONFIRMED, LIKELY_REJECTED, NEEDS_MONITORING.
 Each strategy action must link to evidence (hypothesis + FMEA + audit finding).
+Preserve material operator terms, technical method names, channel names, stakeholder labels, and named frameworks from the brief and upstream outputs. Do not replace load-bearing concepts with vague synonyms when the exact term matters for traceability.
+Make strategy concepts explicit in the JSON strings: name the primary channel or method, the validation/control requirement, the stakeholder or customer segment, the reversible pilot or kill gate, and the measurement concept when those are relevant to the decision.
 Respect operator hard constraints before optimizing for ambition or coverage. If the brief limits capacity to one focused initiative plus one small experiment, the strategy must fit that shape. Do not create multiple parallel CRITICAL tracks unless the operator explicitly allowed that capacity.
 The strategy priority field is strict: priority must be exactly one of CRITICAL, HIGH, MEDIUM, LOW. For deferred/blocked/do-not-do items, use priority LOW and put "DEFERRED", "BLOCKED", "DO NOT START", or "DO NOT DO" in the action/title/justification, not in priority.
 
