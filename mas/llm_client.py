@@ -28,6 +28,7 @@ from runtime.provider_gateway import (
     TRANSPORT_MALFORMED_RESPONSE,
     normalize_exception_category,
     normalize_error_type,
+    safe_provider_error_detail,
     select_model_config,
 )
 from scenarios.engine import run_shadow_evaluation
@@ -199,8 +200,16 @@ def _get_provider_gateway() -> DefaultProviderGateway:
     )
 
 
-def _safe_provider_error(category: str, provider: str, model: str) -> str:
-    return f"Provider call failed: category={category}, provider={provider}, model={model}"
+def _safe_provider_error(
+    category: str,
+    provider: str,
+    model: str,
+    provider_detail: str = "",
+) -> str:
+    message = f"Provider call failed: category={category}, provider={provider}, model={model}"
+    if provider_detail:
+        message += f"; provider_detail={provider_detail}"
+    return message
 
 
 async def _call_anthropic(
@@ -263,7 +272,12 @@ async def _call_anthropic(
         category = normalize_exception_category(exc)
         return LLMResponse(
             ok=False,
-            error=_safe_provider_error(category, Provider.ANTHROPIC.value, model),
+            error=_safe_provider_error(
+                category,
+                Provider.ANTHROPIC.value,
+                model,
+                safe_provider_error_detail(exc),
+            ),
             error_type=category,
             model_used=model,
             latency_ms=(time.time() - start) * 1000,

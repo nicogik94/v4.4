@@ -16,7 +16,7 @@ on:
         default: '0.75'
 
 jobs:
-  run-evals:
+  smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -38,17 +38,83 @@ jobs:
         working-directory: mas
         run: python -m evals.run_evals --mock
 
-      - name: Run evals (real)
+  real-eval-shard:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: mas
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run eval shard
         working-directory: mas
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python -m evals.run_evals \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 6 \
+            --report evals/out/shard-${{ matrix.shard }} \
+            --threshold ${{ github.event.inputs.threshold || '0.75' }}
+
+      - name: Upload shard report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-shard-${{ matrix.shard }}
+          path: mas/evals/out/shard-${{ matrix.shard }}/
+
+  aggregate:
+    needs: real-eval-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: mas
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: eval-report-shard-*
+          path: mas/evals/shards
+
+      - name: Aggregate eval reports
+        working-directory: mas
+        run: |
+          python -m evals.run_evals \
+            --aggregate evals/shards/eval-report-shard-* \
             --report evals/out/ \
             --threshold ${{ github.event.inputs.threshold || '0.75' }}
 
-      - name: Upload eval report
+      - name: Upload aggregate eval report
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -65,6 +131,11 @@ jobs:
           import json
           d = json.load(open('evals/out/summary.json'))
           print(f\"**{d['passed']}/{d['total']} passed** ({d['pass_rate']:.1%})\")
+          if d.get('aggregation_errors'):
+              print()
+              print('Aggregation errors:')
+              for e in d['aggregation_errors']:
+                  print(f'- {e}')
           print()
           print('| Case | Pass | Judge | Domain | FW | Must-mention |')
           print('|------|------|-------|--------|----|--------------|')
