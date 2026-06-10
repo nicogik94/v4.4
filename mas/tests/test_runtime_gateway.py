@@ -15,8 +15,12 @@ from config import MODEL_ROUTING, ModelConfig, Provider  # noqa: E402
 from extensions.runtime import GatewayRequest, ProviderSelection, RoutingConfig, RoutingContext  # noqa: E402
 from runtime.cache import InMemorySemanticCache, NoOpSemanticCache  # noqa: E402
 from runtime.provider_gateway import (  # noqa: E402
+    AUTH_ERROR,
     DefaultProviderGateway,
+    INVALID_REQUEST,
+    QUOTA_EXCEEDED,
     build_cache_key,
+    normalize_exception_category,
     safe_provider_error_detail,
     select_model_candidates,
     select_model_config,
@@ -53,6 +57,28 @@ class _FakeAnthropicBadRequest(Exception):
             "error": {
                 "type": "invalid_request_error",
                 "message": message,
+            },
+        }
+
+
+class _FakeAnthropicLowCreditError(Exception):
+    """Simulates Anthropic HTTP 400 when the account credit balance is exhausted."""
+    status_code = 400
+    request_id = "req_quota_456"
+    type = "invalid_request_error"
+
+    def __init__(self):
+        msg = (
+            "Your credit balance is too low to access the Anthropic API. "
+            "Please go to Plans & Billing to upgrade or purchase credits."
+        )
+        super().__init__(msg)
+        self.message = msg
+        self.body = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": msg,
             },
         }
 
@@ -716,6 +742,211 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertTrue(breaker.is_open(key))
         breaker.reset(key)
         self.assertFalse(breaker.is_open(key))
+
+
+class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
+    """Anthropic credit-balance exhaustion (HTTP 400) must classify as quota_exceeded
+    and trigger the OpenAI fallback chain, not stop as invalid_request."""
+
+    def test_anthropic_credit_balance_low_classifies_as_quota_exceeded(self):
+        exc = _FakeAnthropicLowCreditError()
+        self.assertEqual(normalize_exception_category(exc), QUOTA_EXCEEDED)
+
+    def test_generic_anthropic_400_invalid_request_does_not_classify_as_quota_exceeded(self):
+        exc = _FakeAnthropicBadRequest("model does not support extended thinking")
+        self.assertEqual(normalize_exception_category(exc), INVALID_REQUEST)
+
+    async def test_judge_config_override_falls_back_to_openai_on_quota_exceeded(self):
+        anthropic_calls: list[str] = []
+        openai_calls: list[str] = []
+
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            anthropic_calls.append(model)
+            raise _FakeAnthropicLowCreditError()
+
+        async def fake_openai(model, system, prompt, max_tokens, temperature):
+            openai_calls.append(model)
+            return SimpleNamespace(
+                text="openai judge ok",
+                model_used=model,
+                input_tokens=20,
+                output_tokens=10,
+                cache_read_tokens=0,
+                cost_usd=0.01,
+                latency_ms=5,
+                error="",
+                error_type="",
+            )
+
+        gateway = DefaultProviderGateway(
+            anthropic_executor=fake_anthropic,
+            openai_executor=fake_openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            routing_config=RoutingConfig(
+                task_profile_candidates={"deep_reasoning": ["phase_default", "openai:gpt-5"]}
+            ),
+            provider_availability={"anthropic": True, "openai": True},
+            max_retries=3,
+        )
+
+        response = await gateway.call(
+            GatewayRequest(
+                phase="eval_judge",
+                system_prompt="You are a judge.",
+                user_prompt="Score this output.",
+                routing_context=RoutingContext(phase="eval_judge"),
+            ),
+            config_override=ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model="claude-sonnet-4-6",
+                max_tokens=1000,
+                temperature=0.0,
+            ),
+        )
+
+        self.assertEqual(response.text, "openai judge ok")
+        self.assertFalse(response.error)
+        self.assertTrue(response.fallback_used)
+        self.assertEqual(response.failed_provider, "anthropic")
+        self.assertEqual(response.failed_model, "claude-sonnet-4-6")
+        self.assertEqual(response.failed_error_type, QUOTA_EXCEEDED)
+        self.assertEqual(response.fallback_provider, "openai")
+        self.assertEqual(response.fallback_model, "gpt-5")
+        self.assertEqual(len(anthropic_calls), 1, "quota-exhausted Anthropic must not be retried")
+        self.assertEqual(openai_calls, ["gpt-5"])
+
+    async def test_quota_exhaustion_missing_openai_preserves_clear_error(self):
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            raise _FakeAnthropicLowCreditError()
+
+        gateway = DefaultProviderGateway(
+            anthropic_executor=fake_anthropic,
+            openai_executor=AsyncMock(side_effect=AssertionError("openai should not be called")),
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            routing_config=RoutingConfig(
+                task_profile_candidates={"deep_reasoning": ["phase_default", "openai:gpt-5"]}
+            ),
+            provider_availability={"anthropic": True, "openai": False},
+            max_retries=1,
+        )
+
+        response = await gateway.call(
+            GatewayRequest(
+                phase="eval_judge",
+                system_prompt="You are a judge.",
+                user_prompt="Score this output.",
+                routing_context=RoutingContext(phase="eval_judge"),
+            ),
+            config_override=ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model="claude-sonnet-4-6",
+                max_tokens=1000,
+                temperature=0.0,
+            ),
+        )
+
+        self.assertTrue(response.error)
+        self.assertIn("quota_exceeded", response.error)
+        self.assertEqual(response.error_type, QUOTA_EXCEEDED)
+        self.assertFalse(response.fallback_used)
+        self.assertEqual(response.failed_provider, "anthropic")
+        self.assertEqual(response.failed_error_type, QUOTA_EXCEEDED)
+
+    async def test_quota_exhaustion_fallback_metadata_preserved(self):
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            raise _FakeAnthropicLowCreditError()
+
+        async def fake_openai(model, system, prompt, max_tokens, temperature):
+            return SimpleNamespace(
+                text="fallback text",
+                model_used=model,
+                input_tokens=5,
+                output_tokens=3,
+                cache_read_tokens=0,
+                cost_usd=0.005,
+                latency_ms=4,
+                error="",
+                error_type="",
+            )
+
+        gateway = DefaultProviderGateway(
+            anthropic_executor=fake_anthropic,
+            openai_executor=fake_openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            routing_config=RoutingConfig(
+                task_profile_candidates={"deep_reasoning": ["phase_default", "openai:gpt-5"]}
+            ),
+            provider_availability={"anthropic": True, "openai": True},
+            max_retries=1,
+        )
+
+        response = await gateway.call(
+            GatewayRequest(
+                phase="eval_judge",
+                system_prompt="system",
+                user_prompt="prompt",
+                routing_context=RoutingContext(phase="eval_judge"),
+            ),
+            config_override=ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model="claude-sonnet-4-6",
+                max_tokens=1000,
+                temperature=0.0,
+            ),
+        )
+
+        self.assertTrue(response.fallback_used)
+        self.assertEqual(response.failed_provider, "anthropic")
+        self.assertEqual(response.failed_model, "claude-sonnet-4-6")
+        self.assertEqual(response.failed_error_type, QUOTA_EXCEEDED)
+        self.assertEqual(response.fallback_provider, "openai")
+        self.assertEqual(response.fallback_model, "gpt-5")
+        self.assertFalse(response.error)
+
+    async def test_quota_exhausted_anthropic_candidate_not_retried_repeatedly(self):
+        """Quota-exhausted Anthropic must break out of the retry loop immediately
+        (QUOTA_EXCEEDED is not in RETRYABLE_PROVIDER_ERRORS)."""
+        anthropic_call_count = 0
+
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            nonlocal anthropic_call_count
+            anthropic_call_count += 1
+            raise _FakeAnthropicLowCreditError()
+
+        async def fake_openai(model, system, prompt, max_tokens, temperature):
+            return SimpleNamespace(text="ok", model_used=model, error="", error_type="")
+
+        gateway = DefaultProviderGateway(
+            anthropic_executor=fake_anthropic,
+            openai_executor=fake_openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            routing_config=RoutingConfig(
+                task_profile_candidates={"deep_reasoning": ["phase_default", "openai:gpt-5"]}
+            ),
+            provider_availability={"anthropic": True, "openai": True},
+            max_retries=5,
+        )
+
+        await gateway.call(
+            GatewayRequest(
+                phase="eval_judge",
+                system_prompt="system",
+                user_prompt="prompt",
+                routing_context=RoutingContext(phase="eval_judge"),
+            ),
+            config_override=ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model="claude-sonnet-4-6",
+                max_tokens=1000,
+                temperature=0.0,
+            ),
+        )
+
+        self.assertEqual(anthropic_call_count, 1, "quota-exhausted candidate must not be retried")
 
 
 if __name__ == "__main__":

@@ -538,6 +538,15 @@ class DefaultProviderGateway:
                     if delay > 0:
                         await self._sleep(delay)
 
+        # When the primary failure was quota_exceeded, preserve it as the headline
+        # even if all subsequent fallback candidates were unavailable or also failed.
+        if failed_error_type == QUOTA_EXCEEDED:
+            headline_error = _safe_error_message(QUOTA_EXCEEDED, failed_provider, failed_model)
+            headline_error_type = QUOTA_EXCEEDED
+        else:
+            headline_error = last_error or "All configured provider candidates failed or were unavailable"
+            headline_error_type = last_error_type
+
         return GatewayResponse(
             text="",
             model_used=initial_config.model,
@@ -547,16 +556,16 @@ class DefaultProviderGateway:
             selection_reason=initial_selection.reason,
             task_profile=initial_selection.task_profile,
             cache_status="disabled",
-            fallback_used=bool(failed_provider),
+            fallback_used=False,
             fallback_reason=fallback_reason,
             failed_provider=failed_provider,
             failed_model=failed_model,
             failed_error_type=failed_error_type,
             attempt_count=attempt_count,
             attempts=attempts,
-            error=last_error or "All configured provider candidates failed or were unavailable",
-            error_type=last_error_type,
-            retryable=last_error_type in RETRYABLE_PROVIDER_ERRORS,
+            error=headline_error,
+            error_type=headline_error_type,
+            retryable=headline_error_type in RETRYABLE_PROVIDER_ERRORS,
         )
 
     async def _execute(self, config: ModelConfig, request: GatewayRequest) -> GatewayResponse:
@@ -739,11 +748,13 @@ def normalize_error_type(error_type: str) -> str:
     aliases = {
         "": UNKNOWN_PROVIDER_ERROR,
         "auth": AUTH_ERROR,
+        "auth_error": AUTH_ERROR,
         "authentication": AUTH_ERROR,
         "authentication_error": AUTH_ERROR,
         "config": AUTH_ERROR,
         "configuration": AUTH_ERROR,
         "quota": QUOTA_EXCEEDED,
+        "quota_exceeded": QUOTA_EXCEEDED,
         "insufficient_quota": QUOTA_EXCEEDED,
         "rate": RATE_LIMITED,
         "rate_limit": RATE_LIMITED,
@@ -771,6 +782,31 @@ def normalize_error_type(error_type: str) -> str:
     return UNKNOWN_PROVIDER_ERROR
 
 
+_QUOTA_EXHAUSTION_MARKERS = (
+    "credit balance is too low",
+    "balance is too low",
+    "insufficient credits",
+    "purchase credits",
+    "quota exceeded",
+    "insufficient quota",
+    "exceeded your quota",
+)
+
+
+def _is_quota_exhaustion_exception(exc: Exception) -> bool:
+    """Return True only when the exception body/message contains unambiguous quota/credit exhaustion language."""
+    parts: list[str] = [str(exc).lower()]
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        body_msg = _body_path(body, "error", "message") or _body_path(body, "message") or ""
+        parts.append(str(body_msg).lower())
+    exc_message = getattr(exc, "message", None)
+    if exc_message:
+        parts.append(str(exc_message).lower())
+    combined = " ".join(parts)
+    return any(marker in combined for marker in _QUOTA_EXHAUSTION_MARKERS)
+
+
 def normalize_exception_category(exc: Exception) -> str:
     name = exc.__class__.__name__.lower()
     status = getattr(exc, "status_code", None)
@@ -790,6 +826,8 @@ def normalize_exception_category(exc: Exception) -> str:
     if isinstance(status, int) and 500 <= status < 600:
         return SERVER_ERROR
     if isinstance(status, int) and 400 <= status < 500:
+        if _is_quota_exhaustion_exception(exc):
+            return QUOTA_EXCEEDED
         return INVALID_REQUEST
     return UNKNOWN_PROVIDER_ERROR
 
