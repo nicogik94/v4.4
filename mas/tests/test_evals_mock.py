@@ -10,6 +10,7 @@ from evals.run_evals import (
     _compact_output_for_judge,
     _normalize_eval_text,
     _term_present,
+    _term_present_exact,
     aggregate_summaries,
     judge_case,
     load_cases,
@@ -380,6 +381,114 @@ def test_judge_output_view_keeps_only_completed_eval_phases():
     assert set(compact) == {"classify", "hypotheses", "strategy"}
     assert "project_id" not in compact
     assert "report" not in compact
+
+
+def test_must_not_mention_scattered_tokens_not_a_violation():
+    # "outright ban" and "no data" appear separately — not the exact forbidden phrase.
+    # _term_present_exact must return False; score_deterministic must report 0 violations.
+    forbidden_term = "outright ban with no data"
+    text = _normalize_eval_text(
+        "We recommend against an outright ban. There is simply no data yet to support "
+        "a sweeping policy change."
+    )
+    assert not _term_present_exact(forbidden_term, text), (
+        "scattered tokens must not trigger a must-not-mention violation"
+    )
+
+    case = {
+        "id": "SCATTER",
+        "expected_domain": "Complex",
+        "min_hypotheses": 1,
+        "max_hypotheses": 5,
+        "must_contain_frameworks": [],
+        "strategy_must_not_mention": [forbidden_term],
+        "data_based_expected": False,
+    }
+    output = {
+        "classify": {"domain": "Complex"},
+        "hypotheses": [{"id": "H1"}],
+        "strategy": {
+            "executive_strategy": (
+                "We recommend against an outright ban. There is simply no data yet "
+                "to support a sweeping policy change."
+            )
+        },
+        "audit": {"data_based": False},
+    }
+    result = score_deterministic(case, output)
+    assert result.must_not_mention_violations == 0
+
+
+def test_must_not_mention_genuine_forbidden_phrase_is_violation():
+    # The literal phrase "just ignore bugs" appears — must still be detected.
+    forbidden_term = "just ignore bugs"
+    text = _normalize_eval_text(
+        "The simplest path forward is to just ignore bugs that do not affect revenue."
+    )
+    assert _term_present_exact(forbidden_term, text), (
+        "literal forbidden phrase must still trigger a violation"
+    )
+
+    case = {
+        "id": "GENUINE",
+        "expected_domain": "Simple",
+        "min_hypotheses": 1,
+        "max_hypotheses": 5,
+        "must_contain_frameworks": [],
+        "strategy_must_not_mention": [forbidden_term],
+        "data_based_expected": False,
+    }
+    output = {
+        "classify": {"domain": "Simple"},
+        "hypotheses": [{"id": "H1"}],
+        "strategy": {
+            "executive_strategy": (
+                "The simplest path forward is to just ignore bugs that do not affect revenue."
+            )
+        },
+        "audit": {"data_based": False},
+    }
+    result = score_deterministic(case, output)
+    assert result.must_not_mention_violations == 1
+
+
+def test_must_not_mention_apostrophe_normalization_still_matches():
+    # _normalize_eval_text strips apostrophes to spaces: "you're" → "you re".
+    # Both the forbidden term and the text go through the same normalization, so when
+    # the text uses the same apostrophe form, exact-substring matching still works.
+    # Note: "you're" and "you are" do NOT produce the same normalized form ("you re"
+    # vs "you are"), so _term_present_exact does not expand contractions — it detects
+    # the literal phrase in whatever surface form normalization produces.
+    forbidden_term = "charge more because you're worth it"
+    text_same_form = _normalize_eval_text(
+        "A premium pricing strategy is justified: charge more because you're worth it."
+    )
+    assert _term_present_exact(forbidden_term, text_same_form), (
+        "forbidden phrase with apostrophe must be detected when text uses the same form"
+    )
+
+    case = {
+        "id": "APOSTROPHE",
+        "expected_domain": "Complicated",
+        "min_hypotheses": 1,
+        "max_hypotheses": 5,
+        "must_contain_frameworks": [],
+        "strategy_must_not_mention": [forbidden_term],
+        "data_based_expected": False,
+    }
+    output = {
+        "classify": {"domain": "Complicated"},
+        "hypotheses": [{"id": "H1"}],
+        "strategy": {
+            "executive_strategy": (
+                "A premium pricing strategy is justified: "
+                "charge more because you're worth it."
+            )
+        },
+        "audit": {"data_based": False},
+    }
+    result = score_deterministic(case, output)
+    assert result.must_not_mention_violations == 1
 
 
 def test_real_eval_runner_halts_after_confused_classification(monkeypatch):

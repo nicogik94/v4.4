@@ -99,6 +99,20 @@ def _term_present(term: str, normalized_text: str) -> bool:
     )
 
 
+def _term_present_exact(term: str, normalized_text: str) -> bool:
+    """Exact-substring-only variant of _term_present for must-not-mention checks.
+
+    The multi-token fallback in _term_present fires on negation context
+    (e.g. 'do not ignore bugs' triggers 'just ignore bugs') because prohibited
+    tokens appear scattered across unrelated sentences.  Must-not-mention only
+    needs to catch the literal prohibited phrase, so skip the fuzzy path.
+    """
+    normalized_term = _normalize_eval_text(term)
+    if not normalized_term:
+        return True
+    return normalized_term in normalized_text
+
+
 def _is_confused_classification(state: ProjectState) -> bool:
     classify = getattr(state, "classify", None)
     return _normalize_eval_text(getattr(classify, "domain", "")) == "confused"
@@ -326,7 +340,7 @@ def score_deterministic(case: dict, output: dict) -> CaseResult:
 
     forbidden = [m.lower() for m in case.get("strategy_must_not_mention", [])]
     r.must_not_mention_violations = sum(
-        1 for m in forbidden if _term_present(m, normalized_flat)
+        1 for m in forbidden if _term_present_exact(m, normalized_flat)
     )
 
     # Data labeling honesty (audit phase should mark findings PREDICTED when no data)
