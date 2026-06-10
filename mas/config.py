@@ -8,8 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE
-
-APP_VERSION = "4.4.0"
+from version import APP_VERSION
 
 # ═══ LLM Provider Configuration ═══
 

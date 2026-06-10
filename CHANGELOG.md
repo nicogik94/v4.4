@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## v4.4.0 — Wave 10.1 hardening (2026-06-10)
+
+v5-track hardening and productization work has landed inside the v4.4 repository. This entry records additive trust-hardening changes only; no runtime behavior, no prompt changes, no eval threshold changes.
+
+### Added (Wave 10.1)
+
+- **pytest CI gate** — `.github/workflows/tests.yml` runs `python -m pytest tests -q` on every pull request and push to `main`. Uses ubuntu-latest, Python 3.12, and a postgres:16 service container. 682 tests pass on the existing suite.
+- **Provenance foundation** — `mas/version.py` is now the single canonical source for `APP_VERSION` and exposes `get_git_sha()`. Resolution order: `V4_GIT_SHA` env → `GIT_SHA` env → `GITHUB_SHA` env (set automatically in GitHub Actions) → `git rev-parse --short HEAD` → `"unknown"`.
+- **Version + SHA surfaced** — `git_sha` is now returned in `/health`, `/runtime/preflight`, and the machine-readable `export_manifest.json` inside archive exports.
+
+### Not changed (Wave 10.1)
+
+- No prompt or eval changes. No golden-case changes. No eval thresholds. No runtime recovery or drain behavior. No auth, CORS, or exposure interlocks. No schema migrations. No client-facing report prose. Wave 10.2 will address runtime recovery and exposure interlocks.
+
+---
+
 ## v4.4.0 — 2026-04-09
 
 The UX release. v4.3 added a lot of capability (deterministic enforcement, prompt injection defenses, EU AI Act compliance, six new API endpoints) but the surface for using all of that was still curl commands and reading files. v4.4 collapses the daily-use surface to **one screen with buttons** and **one document that explains the workflow**.

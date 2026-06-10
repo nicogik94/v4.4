@@ -5,6 +5,7 @@ import os
 from typing import Iterable
 
 from config import APP_VERSION
+from version import get_git_sha
 from knowledge.files import check_upload_store_writable
 from runtime import run_state
 from runtime import work_queue
@@ -29,6 +30,7 @@ async def build_runtime_preflight(*, running_project_ids: Iterable[str] = ()) ->
     return {
         "status": _overall_status(checks),
         "version": APP_VERSION or "unknown",
+        "git_sha": get_git_sha(),
         "operator_only": True,
         "checks": checks,
     }
