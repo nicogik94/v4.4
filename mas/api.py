@@ -98,6 +98,7 @@ from exporters import (
     export_project_profile_bytes,
 )
 from config import APP_VERSION
+from version import get_git_sha
 import store
 from workflow_templates import (
     TECHNOLOGY_READINESS_PHASE_SEQUENCE,
@@ -305,6 +306,7 @@ async def health():
     return {
         "status": "ok",
         "version": APP_VERSION,
+        "git_sha": get_git_sha(),
         "persistence": "postgres" if pool else "memory",
         "tracing": "langfuse" if observability.enabled() else "off",
     }

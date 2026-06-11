@@ -62,6 +62,7 @@ from technology_readiness_workbook import (
     technology_readiness_workbook_xlsx_bytes,
 )
 from workflow_templates import TECHNOLOGY_READINESS_PHASE_LABELS, TECHNOLOGY_READINESS_PHASE_SEQUENCE
+from version import get_git_sha
 
 
 def build_export_filename(state: ProjectState, ext: str) -> str:
@@ -2799,6 +2800,7 @@ def build_export_manifest(
             "export_format": format,
             "generated_at": _utc_now(),
             "code_version": current_version,
+            "git_sha": get_git_sha(),
             "report_freshness": report_freshness.report_freshness_manifest(
                 state,
                 current_version=current_version,

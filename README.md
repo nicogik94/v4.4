@@ -2,9 +2,11 @@
 
 A multi-agent decision engine that applies 30 analytical frameworks across 6 phases with mathematical convergence gates, Bayesian priors, a meta-learner that closes the loop on calibration, deterministic policy enforcement (v4.3), and a single-screen operator console (v4.4).
 
-**Status:** v4.4 — UX release: operator console replaces curl-driven workflow
+**Status:** v4.4 — v5-track hardening and productization work underway inside this repository
 **Author:** Nicolás Grinberg
 **Date:** April 2026
+
+> **Wave 10 (in progress):** CI pytest gate and provenance reporting have landed. A pytest workflow runs on every PR and push to main. Version and git SHA are stamped in `/health`, `/runtime/preflight`, and machine-readable export manifests. This is hardening work; it does not change runtime behavior or claim public SaaS or v5 production readiness.
 
 ---
 

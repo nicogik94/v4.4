@@ -449,9 +449,14 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
     async def test_health_remains_lightweight_and_backward_compatible(self):
         with patch("api.store._get_pool", new=AsyncMock(return_value=object())):
             with patch("api.observability.enabled", return_value=False):
-                result = await api.health()
+                with patch("api.get_git_sha", return_value="abc1234"):
+                    result = await api.health()
 
-        self.assertEqual(result, {"status": "ok", "version": APP_VERSION, "persistence": "postgres", "tracing": "off"})
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["version"], APP_VERSION)
+        self.assertEqual(result["git_sha"], "abc1234")
+        self.assertEqual(result["persistence"], "postgres")
+        self.assertEqual(result["tracing"], "off")
 
 
 if __name__ == "__main__":
