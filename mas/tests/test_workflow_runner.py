@@ -3,6 +3,7 @@ import json
 import re
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -1876,6 +1877,7 @@ class _RunStateConn:
         self.active_jobs_by_run = {}
         self.heartbeat_counter = 0
         self.job_counter = 0
+        self.now = datetime(2026, 5, 22, 1, 0, tzinfo=timezone.utc)
 
     async def execute(self, query, *args):
         return "OK"
@@ -1883,11 +1885,12 @@ class _RunStateConn:
     async def fetchval(self, query, *args):
         normalized = " ".join(query.split()).upper()
         if "COALESCE(HEARTBEAT_AT" in normalized:
+            threshold = self._threshold(args)
             excluded = self._excluded_projects(args)
             return sum(
                 1
                 for row in self.rows.values()
-                if self._is_active_stale(row) and row["project_id"] not in excluded
+                if self._is_active_stale(row, threshold) and row["project_id"] not in excluded
             )
         if "FROM WORKFLOW_RUNS" in normalized:
             return sum(1 for row in self.rows.values() if row["status"] in workflow_run_state.ACTIVE_RUN_STATUSES)
@@ -1901,17 +1904,18 @@ class _RunStateConn:
                 counts[row["status"]] = counts.get(row["status"], 0) + 1
             return [{"status": status, "count": count} for status, count in counts.items()]
         if "WITH STALE AS" in normalized and "UPDATE WORKFLOW_RUNS" in normalized:
+            threshold = self._threshold(args)
             limit = int(args[1])
             excluded = self._excluded_projects(args)
             recovered = []
-            for row in sorted(self.rows.values(), key=lambda item: item.get("heartbeat_at") or ""):
+            for row in sorted(self.rows.values(), key=self._observed_at):
                 if len(recovered) >= limit:
                     break
                 if row["project_id"] in excluded:
                     continue
-                if self._is_active_stale(row):
+                if self._is_active_stale(row, threshold):
                     row["status"] = "failed"
-                    row["finished_at"] = "2026-05-22T00:02:00+00:00"
+                    row["finished_at"] = self._iso(self.now + timedelta(minutes=1))
                     row["heartbeat_at"] = self._next_heartbeat()
                     row["error_summary"] = args[3]
                     self.active_by_project.pop(row["project_id"], None)
@@ -1932,8 +1936,8 @@ class _RunStateConn:
                 "status": "queued",
                 "attempt_count": 0,
                 "max_attempts": attempts,
-                "created_at": "2026-05-22T00:00:00+00:00",
-                "available_at": "2026-05-22T00:00:00+00:00",
+                "created_at": self._iso(self.now),
+                "available_at": self._iso(self.now),
                 "started_at": None,
                 "finished_at": None,
                 "error_summary": "",
@@ -1951,7 +1955,7 @@ class _RunStateConn:
                     and run["status"] in workflow_run_state.ACTIVE_RUN_STATUSES
                 ):
                     row["status"] = "running"
-                    row["started_at"] = "2026-05-22T00:01:00+00:00"
+                    row["started_at"] = self._iso(self.now + timedelta(minutes=1))
                     row["attempt_count"] += 1
                     row["error_summary"] = ""
                     return row
@@ -1969,7 +1973,7 @@ class _RunStateConn:
                 return None
             row["status"] = status
             if set_finished:
-                row["finished_at"] = "2026-05-22T00:02:00+00:00"
+                row["finished_at"] = self._iso(self.now + timedelta(minutes=2))
             row["error_summary"] = error_summary
             if status in workflow_queue.TERMINAL_JOB_STATUSES:
                 self.active_jobs_by_run.pop(row["run_id"], None)
@@ -1983,7 +1987,7 @@ class _RunStateConn:
                 "project_id": project_id,
                 "status": "queued",
                 "current_phase": "",
-                "created_at": "2026-05-22T00:00:00+00:00",
+                "created_at": self._iso(self.now),
                 "started_at": None,
                 "finished_at": None,
                 "heartbeat_at": self._next_heartbeat(),
@@ -2003,9 +2007,9 @@ class _RunStateConn:
             project_id, threshold, summary = args
             run_id = self.active_by_project.get(project_id)
             row = self.rows.get(run_id) if run_id else None
-            if row and self._is_active_stale(row):
+            if row and self._is_active_stale(row, threshold):
                 row["status"] = "failed"
-                row["finished_at"] = "2026-05-22T00:02:00+00:00"
+                row["finished_at"] = self._iso(self.now + timedelta(minutes=1))
                 row["heartbeat_at"] = self._next_heartbeat()
                 row["error_summary"] = summary
                 self.active_by_project.pop(project_id, None)
@@ -2021,9 +2025,9 @@ class _RunStateConn:
             if current_phase is not None:
                 row["current_phase"] = current_phase
             if set_started and row["started_at"] is None:
-                row["started_at"] = "2026-05-22T00:01:00+00:00"
+                row["started_at"] = self._iso(self.now + timedelta(minutes=1))
             if set_finished:
-                row["finished_at"] = "2026-05-22T00:02:00+00:00"
+                row["finished_at"] = self._iso(self.now + timedelta(minutes=2))
             if error_summary is not None:
                 row["error_summary"] = error_summary
             if touch_heartbeat:
@@ -2033,15 +2037,33 @@ class _RunStateConn:
             return row
         return None
 
-    def mark_stale(self, run_id):
-        self.rows[run_id]["heartbeat_at"] = "stale"
+    def mark_stale(self, run_id, *, seconds_old: int = 7200):
+        self.rows[run_id]["heartbeat_at"] = self._iso(self.now - timedelta(seconds=seconds_old))
 
-    def _is_active_stale(self, row):
-        return row["status"] in workflow_run_state.ACTIVE_RUN_STATUSES and row.get("heartbeat_at") == "stale"
+    def _is_active_stale(self, row, threshold):
+        if row["status"] not in workflow_run_state.ACTIVE_RUN_STATUSES:
+            return False
+        return self._observed_at(row) < self.now - timedelta(seconds=int(threshold))
 
     def _next_heartbeat(self):
         self.heartbeat_counter += 1
-        return f"2026-05-22T00:{self.heartbeat_counter:02d}:00+00:00"
+        return self._iso(self.now + timedelta(seconds=self.heartbeat_counter))
+
+    def _observed_at(self, row):
+        for key in ("heartbeat_at", "started_at", "created_at"):
+            value = row.get(key)
+            if value:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+        return self.now
+
+    def _threshold(self, args):
+        for arg in args:
+            if isinstance(arg, int):
+                return arg
+        return workflow_run_state.DEFAULT_WORKFLOW_RUN_STALE_AFTER_SECONDS
+
+    def _iso(self, value):
+        return value.isoformat()
 
     def _excluded_projects(self, args):
         for arg in args:
@@ -2084,10 +2106,10 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
         pool = _RunStatePool()
         with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
             acquisition = await workflow_run_state.create_workflow_run("stale-queued", code_version="4.4.0")
-            pool.conn.mark_stale(acquisition.run.run_id)
+            pool.conn.mark_stale(acquisition.run.run_id, seconds_old=600)
 
-            stale_count = await workflow_run_state.count_stale_active_runs()
-            recovery = await workflow_run_state.recover_stale_active_runs()
+            stale_count = await workflow_run_state.count_stale_active_runs(stale_after_seconds=300)
+            recovery = await workflow_run_state.recover_stale_active_runs(stale_after_seconds=300)
             record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
 
         self.assertEqual(stale_count, 1)
@@ -2103,9 +2125,9 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
         with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
             acquisition = await workflow_run_state.create_workflow_run("stale-running", code_version="4.4.0")
             await workflow_run_state.mark_run_running(acquisition.run.run_id, current_phase="audit")
-            pool.conn.mark_stale(acquisition.run.run_id)
+            pool.conn.mark_stale(acquisition.run.run_id, seconds_old=600)
 
-            recovery = await workflow_run_state.recover_stale_active_runs()
+            recovery = await workflow_run_state.recover_stale_active_runs(stale_after_seconds=300)
             record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
 
         self.assertEqual(recovery.recovered_count, 1)
@@ -2113,29 +2135,35 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.current_phase, "audit")
         self.assertEqual(record.error_summary, workflow_run_state.ABANDONED_RUN_ERROR_SUMMARY)
 
-    async def test_fresh_active_run_is_not_marked_stale(self):
+    async def test_non_stale_queued_and_running_runs_are_not_marked_failed(self):
         pool = _RunStatePool()
         with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
-            acquisition = await workflow_run_state.create_workflow_run("fresh-active", code_version="4.4.0")
+            queued = await workflow_run_state.create_workflow_run("fresh-queued", code_version="4.4.0")
+            running = await workflow_run_state.create_workflow_run("fresh-running", code_version="4.4.0")
+            await workflow_run_state.mark_run_running(running.run.run_id, current_phase="classify")
 
-            stale_count = await workflow_run_state.count_stale_active_runs()
-            recovery = await workflow_run_state.recover_stale_active_runs()
-            record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+            stale_count = await workflow_run_state.count_stale_active_runs(stale_after_seconds=300)
+            recovery = await workflow_run_state.recover_stale_active_runs(stale_after_seconds=300)
+            queued_record = await workflow_run_state.get_workflow_run(queued.run.run_id)
+            running_record = await workflow_run_state.get_workflow_run(running.run.run_id)
 
         self.assertEqual(stale_count, 0)
         self.assertEqual(recovery.recovered_count, 0)
-        self.assertEqual(record.status, "queued")
+        self.assertEqual(queued_record.status, "queued")
+        self.assertEqual(running_record.status, "running")
 
     async def test_locally_running_project_is_excluded_from_stale_recovery(self):
         pool = _RunStatePool()
         with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
             acquisition = await workflow_run_state.create_workflow_run("locally-running", code_version="4.4.0")
-            pool.conn.mark_stale(acquisition.run.run_id)
+            pool.conn.mark_stale(acquisition.run.run_id, seconds_old=600)
 
             stale_count = await workflow_run_state.count_stale_active_runs(
+                stale_after_seconds=300,
                 exclude_project_ids=["locally-running"]
             )
             recovery = await workflow_run_state.recover_stale_active_runs(
+                stale_after_seconds=300,
                 exclude_project_ids=["locally-running"]
             )
             record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
@@ -2143,6 +2171,46 @@ class TestWorkflowRunStateDurability(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale_count, 0)
         self.assertEqual(recovery.recovered_count, 0)
         self.assertEqual(record.status, "queued")
+
+    async def test_direct_run_acquisition_recovers_stale_project_run_before_insert(self):
+        pool = _RunStatePool()
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=pool)):
+            stale = await workflow_run_state.create_workflow_run("direct-stale", code_version="4.4.0")
+            pool.conn.mark_stale(stale.run.run_id, seconds_old=600)
+
+            fresh = await workflow_run_state.create_workflow_run(
+                "direct-stale",
+                code_version="4.4.0",
+                stale_after_seconds=300,
+            )
+            stale_record = await workflow_run_state.get_workflow_run(stale.run.run_id)
+            active = await workflow_run_state.get_active_project_run("direct-stale")
+
+        self.assertTrue(fresh.created)
+        self.assertNotEqual(fresh.run.run_id, stale.run.run_id)
+        self.assertEqual(stale_record.status, "failed")
+        self.assertEqual(stale_record.error_summary, workflow_run_state.ABANDONED_RUN_ERROR_SUMMARY)
+        self.assertEqual(active.run_id, fresh.run.run_id)
+
+    async def test_in_memory_recovery_fallback_is_degraded_and_safe(self):
+        with patch("runtime.run_state.store._get_pool", new=AsyncMock(return_value=None)):
+            acquisition = await workflow_run_state.create_workflow_run(
+                "memory-recovery",
+                code_version="4.4.0",
+                stale_after_seconds=300,
+            )
+            project_recovery = await workflow_run_state.recover_stale_project_run(
+                "memory-recovery",
+                stale_after_seconds=300,
+            )
+            global_recovery = await workflow_run_state.recover_stale_active_runs(stale_after_seconds=300)
+            active = await workflow_run_state.get_active_project_run("memory-recovery")
+
+        self.assertTrue(acquisition.created)
+        self.assertEqual(project_recovery.status, "degraded")
+        self.assertEqual(global_recovery.status, "degraded")
+        self.assertIsNotNone(active)
+        self.assertEqual(active.status, "queued")
 
     async def test_phase_progress_updates_run_heartbeat(self):
         pool = _RunStatePool()

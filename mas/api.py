@@ -859,7 +859,11 @@ async def run_full_workflow(project_id: str, background_tasks: BackgroundTasks):
         return {"status": "already_complete", "project_id": project_id}
 
     try:
-        acquisition = await workflow_run_state.create_workflow_run(project_id, code_version=APP_VERSION)
+        acquisition = await workflow_run_state.create_workflow_run(
+            project_id,
+            code_version=APP_VERSION,
+            recover_stale=False,
+        )
     except workflow_run_state.WorkflowRunStateError as exc:
         logger.error("Unable to acquire workflow run state for project %s", project_id, exc_info=True)
         raise HTTPException(503, exc.public_message) from exc

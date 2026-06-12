@@ -62,8 +62,20 @@ class WorkflowRunStateError(RuntimeError):
     public_message = "Workflow run state is unavailable. Check server-side runtime storage."
 
 
-async def create_workflow_run(project_id: str, *, code_version: str | None = None) -> WorkflowRunAcquisition:
+async def create_workflow_run(
+    project_id: str,
+    *,
+    code_version: str | None = None,
+    recover_stale: bool = True,
+    stale_after_seconds: int | None = None,
+) -> WorkflowRunAcquisition:
     """Create a queued run or return the existing active run for this project."""
+    if recover_stale:
+        recovery = await recover_stale_project_run(project_id, stale_after_seconds=stale_after_seconds)
+        if recovery.status == "fail":
+            logger.warning("Unable to recover stale workflow run state before acquisition for %s", project_id)
+            raise WorkflowRunStateError("Unable to recover stale workflow run state.")
+
     version = code_version or APP_VERSION or "unknown"
     pool = await _get_ready_pool()
     if pool is None:
