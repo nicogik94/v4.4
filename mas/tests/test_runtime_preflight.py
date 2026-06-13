@@ -250,9 +250,17 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["operator_only"])
         self.assertEqual(result["version"], APP_VERSION)
         checks = result["checks"]
-        for name in ("version", "upload_store", "database", "redis", "run_state", "workflow_queue", "jobs"):
+        for name in ("version", "public_exposure", "upload_store", "database", "redis", "run_state", "workflow_queue", "jobs"):
             self.assertIn(name, checks)
             self.assertIn("status", checks[name])
+        public_exposure = checks["public_exposure"]
+        self.assertEqual(public_exposure["status"], "ok")
+        self.assertTrue(public_exposure["operator_only"])
+        self.assertFalse(public_exposure["auth_implemented"])
+        self.assertFalse(public_exposure["multi_tenancy_implemented"])
+        self.assertFalse(public_exposure["public_hardening_implemented"])
+        self.assertTrue(public_exposure["cors"]["wildcard"])
+        self.assertIn("auth/multi-tenancy/public hardening are not implemented yet", public_exposure["message"])
         self.assertIn("durable_run_state_active", checks["run_state"])
         self.assertIn("cross_process_run_guard_enabled", checks["run_state"])
         self.assertIn("stale_recovery_available", checks["run_state"])
@@ -267,6 +275,81 @@ class TestRuntimePreflight(unittest.IsolatedAsyncioTestCase):
         serialized = json.dumps(result)
         for forbidden in ("secret", "postgres://", "redis://", "Traceback", "/app/private/path", r"C:\private"):
             self.assertNotIn(forbidden, serialized)
+
+    async def test_public_exposure_local_default_posture_does_not_block_normal_use(self):
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env({"DATABASE_URL": "postgres://user:secret@db/app"})):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=_FakePool())):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        public_exposure = result["checks"]["public_exposure"]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(public_exposure["status"], "ok")
+        self.assertFalse(public_exposure["explicit_public_exposure_intent"])
+        self.assertFalse(public_exposure["public_exposure_intent"])
+        self.assertEqual(public_exposure["host_binding"]["classification"], "local_default")
+        self.assertTrue(public_exposure["cors"]["wildcard"])
+        self.assertIn("auth/multi-tenancy/public hardening are not implemented yet", public_exposure["message"])
+
+    async def test_docker_wildcard_bind_without_public_intent_is_not_public_by_itself(self):
+        env = {
+            "DATABASE_URL": "postgres://user:secret@db/app",
+            "MAS_API_HOST": "0.0.0.0",
+        }
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env(env)):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=_FakePool())):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        public_exposure = result["checks"]["public_exposure"]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(public_exposure["status"], "ok")
+        self.assertFalse(public_exposure["public_exposure_intent"])
+        self.assertEqual(public_exposure["host_binding"]["classification"], "wildcard_container")
+        self.assertTrue(public_exposure["host_binding"]["wildcard_bind"])
+        self.assertFalse(public_exposure["host_binding"]["public_host_intent"])
+        self.assertIn("not treated as public exposure", public_exposure["message"])
+
+    async def test_wildcard_cors_with_public_exposure_intent_is_blocked_without_auth(self):
+        env = {
+            "DATABASE_URL": "postgres://user:secret@db/app",
+            "MAS_PUBLIC_EXPOSURE": "true",
+        }
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env(env)):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=_FakePool())):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        public_exposure = result["checks"]["public_exposure"]
+        serialized = json.dumps(result)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(public_exposure["status"], "fail")
+        self.assertTrue(public_exposure["explicit_public_exposure_intent"])
+        self.assertTrue(public_exposure["public_exposure_intent"])
+        self.assertEqual(public_exposure["public_exposure_intent_source"], "MAS_PUBLIC_EXPOSURE")
+        self.assertTrue(public_exposure["cors"]["wildcard"])
+        self.assertIn("wildcard CORS", public_exposure["message"])
+        self.assertIn("auth/multi-tenancy/public hardening are not implemented yet", public_exposure["message"])
+        self.assertNotIn("secret", serialized)
+
+    async def test_public_host_binding_is_flagged_when_auth_is_absent(self):
+        env = {
+            "DATABASE_URL": "postgres://user:secret@db/app",
+            "MAS_API_HOST": "8.8.8.8",
+        }
+        with _upload_ok(), patch("runtime.preflight.os.getenv", side_effect=_env(env)):
+            with patch("runtime.preflight.store._get_pool", new=AsyncMock(return_value=_FakePool())):
+                result = await preflight.build_runtime_preflight(running_project_ids=[])
+
+        public_exposure = result["checks"]["public_exposure"]
+        serialized = json.dumps(result)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(public_exposure["status"], "fail")
+        self.assertFalse(public_exposure["auth_implemented"])
+        self.assertTrue(public_exposure["public_exposure_intent"])
+        self.assertEqual(public_exposure["host_binding"]["classification"], "public")
+        self.assertTrue(public_exposure["host_binding"]["public_host_intent"])
+        self.assertEqual(public_exposure["host_binding"]["reported_value"], "[configured non-local host redacted]")
+        self.assertIn("auth/multi-tenancy/public hardening are not implemented yet", public_exposure["message"])
+        self.assertNotIn("8.8.8.8", serialized)
+        self.assertNotIn("secret", serialized)
 
     async def test_existing_database_without_workflow_runs_is_ensured_for_preflight(self):
         conn = _SchemaAwareConn()
