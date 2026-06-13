@@ -69,25 +69,21 @@ async def create_workflow_run(project_id: str, *, code_version: str | None = Non
     if pool is None:
         return _create_memory_run(project_id, version)
 
-    run_id = str(uuid.uuid4())
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO workflow_runs (
-                run_id, project_id, status, current_phase, code_version, heartbeat_at
+        for attempt in range(2):
+            row = await _insert_workflow_run(conn, project_id, version)
+            if row:
+                return WorkflowRunAcquisition(created=True, run=_row_to_record(row), durable=True)
+            if attempt == 1:
+                break
+            recovered = await _recover_stale_project_run_with_conn(
+                conn,
+                project_id,
+                workflow_run_stale_after_seconds(),
             )
-            VALUES ($1::uuid, $2, 'queued', '', $3, NOW())
-            ON CONFLICT (project_id) WHERE status IN ('queued', 'running')
-            DO NOTHING
-            RETURNING run_id, project_id, status, current_phase, created_at,
-                      started_at, finished_at, heartbeat_at, error_summary, code_version
-            """,
-            run_id,
-            project_id,
-            version,
-        )
-        if row:
-            return WorkflowRunAcquisition(created=True, run=_row_to_record(row), durable=True)
+            if not recovered:
+                break
+            logger.info("Recovered stale workflow run for project %s while acquiring a new run", project_id)
         active = await _fetch_active_project_run(conn, project_id)
         if active:
             return WorkflowRunAcquisition(created=False, run=_row_to_record(active), durable=True)
@@ -328,23 +324,7 @@ async def recover_stale_project_run(
 
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE workflow_runs
-                SET status = 'failed',
-                    finished_at = NOW(),
-                    heartbeat_at = NOW(),
-                    error_summary = $3
-                WHERE project_id = $1
-                  AND status IN ('queued', 'running')
-                  AND COALESCE(heartbeat_at, started_at, created_at)
-                        < NOW() - ($2::int * INTERVAL '1 second')
-                RETURNING run_id
-                """,
-                project_id,
-                threshold,
-                ABANDONED_RUN_ERROR_SUMMARY,
-            )
+            recovered_count = await _recover_stale_project_run_with_conn(conn, project_id, threshold)
     except Exception:
         logger.warning("Project workflow run-state recovery failed", exc_info=True)
         return WorkflowRunRecoveryResult(
@@ -356,7 +336,6 @@ async def recover_stale_project_run(
             message="Workflow run-state recovery failed; see server logs.",
         )
 
-    recovered_count = 1 if row else 0
     return WorkflowRunRecoveryResult(
         status="ok",
         durable=True,
@@ -574,6 +553,45 @@ async def _ensure_schema(pool) -> None:
             """
         )
     _schema_ready_for_pool.add(pool_key)
+
+
+async def _insert_workflow_run(conn, project_id: str, code_version: str):
+    return await conn.fetchrow(
+        """
+        INSERT INTO workflow_runs (
+            run_id, project_id, status, current_phase, code_version, heartbeat_at
+        )
+        VALUES ($1::uuid, $2, 'queued', '', $3, NOW())
+        ON CONFLICT (project_id) WHERE status IN ('queued', 'running')
+        DO NOTHING
+        RETURNING run_id, project_id, status, current_phase, created_at,
+                  started_at, finished_at, heartbeat_at, error_summary, code_version
+        """,
+        str(uuid.uuid4()),
+        project_id,
+        code_version,
+    )
+
+
+async def _recover_stale_project_run_with_conn(conn, project_id: str, threshold: int) -> int:
+    row = await conn.fetchrow(
+        """
+        UPDATE workflow_runs
+        SET status = 'failed',
+            finished_at = NOW(),
+            heartbeat_at = NOW(),
+            error_summary = $3
+        WHERE project_id = $1
+          AND status IN ('queued', 'running')
+          AND COALESCE(heartbeat_at, started_at, created_at)
+                < NOW() - ($2::int * INTERVAL '1 second')
+        RETURNING run_id
+        """,
+        project_id,
+        threshold,
+        ABANDONED_RUN_ERROR_SUMMARY,
+    )
+    return 1 if row else 0
 
 
 async def _fetch_active_project_run(conn, project_id: str):
