@@ -6,7 +6,7 @@ import ipaddress
 from typing import Iterable
 from urllib.parse import urlparse
 
-from config import APP_VERSION
+from config import APP_VERSION, OPERATOR_AUTH_HEADER, get_operator_auth_config
 from version import get_git_sha
 from knowledge.files import check_upload_store_writable
 from runtime import run_state
@@ -19,7 +19,7 @@ _PUBLIC_EXPOSURE_MODE_ENV_NAMES = ("MAS_EXPOSURE_MODE", "API_EXPOSURE_MODE", "MA
 _PUBLIC_BASE_URL_ENV_NAMES = ("MAS_PUBLIC_BASE_URL", "API_PUBLIC_BASE_URL")
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 _PUBLIC_MODE_VALUES = {"public", "internet", "external"}
-_PUBLIC_HARDENING_MESSAGE = "auth/multi-tenancy/public hardening are not implemented yet"
+_PUBLIC_HARDENING_MESSAGE = "full public hardening and multi-tenancy are not implemented yet"
 
 
 async def build_runtime_preflight(*, running_project_ids: Iterable[str] = ()) -> dict:
@@ -28,6 +28,7 @@ async def build_runtime_preflight(*, running_project_ids: Iterable[str] = ()) ->
     checks = {
         "version": _check_version(),
         "public_exposure": _check_public_exposure(),
+        "operator_auth": _check_operator_auth(),
         "upload_store": _check_upload_store(),
         "database": await _check_database(),
         "redis": await _check_redis(),
@@ -44,6 +45,36 @@ async def build_runtime_preflight(*, running_project_ids: Iterable[str] = ()) ->
         "git_sha": get_git_sha(),
         "operator_only": True,
         "checks": checks,
+    }
+
+
+def _check_operator_auth() -> dict:
+    auth_config = get_operator_auth_config()
+    configured = auth_config.configured
+    required = auth_config.require_operator_auth
+    if required and not configured:
+        status = "fail"
+        message = "Operator auth is required but MAS_OPERATOR_API_KEY is not configured."
+    elif required:
+        status = "ok"
+        message = "Operator auth is required for protected control-plane endpoints."
+    elif configured:
+        status = "ok"
+        message = "Operator auth key is configured, but protected endpoints are not requiring it."
+    else:
+        status = "ok"
+        message = "Operator auth is available but not required in local/default mode."
+
+    return {
+        "status": status,
+        "implemented": auth_config.implemented,
+        "operator_auth_implemented": auth_config.implemented,
+        "configured": configured,
+        "auth_configured": configured,
+        "required": required,
+        "auth_required": required,
+        "header": OPERATOR_AUTH_HEADER,
+        "message": message,
     }
 
 
