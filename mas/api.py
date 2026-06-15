@@ -8,13 +8,14 @@ if DATABASE_URL is unset. Langfuse tracing wired via observability.py.
 import asyncio
 import json
 import re
+import secrets
 import uuid
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, File, Form, Request, UploadFile
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ValidationError
@@ -97,7 +98,7 @@ from exporters import (
     export_project_pdf_bytes,
     export_project_profile_bytes,
 )
-from config import APP_VERSION
+from config import APP_VERSION, OPERATOR_AUTH_HEADER, get_operator_auth_config
 from version import get_git_sha
 import store
 from workflow_templates import (
@@ -155,6 +156,20 @@ def _normalize_request_id(value: str | None) -> str:
     if value and _SAFE_REQUEST_ID.fullmatch(value):
         return value
     return str(uuid.uuid4())
+
+
+async def require_operator_auth(
+    operator_key: str | None = Header(default=None, alias=OPERATOR_AUTH_HEADER),
+) -> None:
+    auth_config = get_operator_auth_config()
+    if not auth_config.require_operator_auth:
+        return
+    expected_key = auth_config.api_key
+    if not expected_key:
+        raise HTTPException(503, "Operator auth is required but not configured")
+    supplied_key = (operator_key or "").strip()
+    if not supplied_key or not secrets.compare_digest(supplied_key, expected_key):
+        raise HTTPException(401, "Operator authentication required")
 
 
 class CreateProjectRequest(BaseModel):
@@ -364,7 +379,7 @@ def _release_readiness_items(checks: dict[str, Any], target_status: str) -> list
     return items
 
 
-@app.post("/projects", response_model=ProjectResponse)
+@app.post("/projects", response_model=ProjectResponse, dependencies=[Depends(require_operator_auth)])
 async def create_project(payload: dict[str, Any] = Body(...)):
     try:
         req = normalize_project_ingestion(payload)
@@ -472,7 +487,7 @@ async def get_clarifications(project_id: str):
     return _clarification_response(state)
 
 
-@app.post("/projects/{project_id}/clarifications/cycles")
+@app.post("/projects/{project_id}/clarifications/cycles", dependencies=[Depends(require_operator_auth)])
 async def create_clarification_cycle(project_id: str):
     state = await store.load(project_id)
     if not state:
@@ -491,7 +506,7 @@ async def create_clarification_cycle(project_id: str):
     return _clarification_response(state, cycle=cycle)
 
 
-@app.post("/projects/{project_id}/clarifications/answers")
+@app.post("/projects/{project_id}/clarifications/answers", dependencies=[Depends(require_operator_auth)])
 async def answer_clarification(project_id: str, req: ClarificationAnswerRequest):
     state = await store.load(project_id)
     if not state:
@@ -629,7 +644,7 @@ async def get_knowledge_retrieval_phase(project_id: str, phase: str):
         raise HTTPException(404, "Knowledge retrieval phase not found") from None
 
 
-@app.post("/projects/{project_id}/knowledge/sources")
+@app.post("/projects/{project_id}/knowledge/sources", dependencies=[Depends(require_operator_auth)])
 async def upsert_knowledge_source(project_id: str, req: KnowledgeSourceUpsertRequest):
     state = await store.load(project_id)
     if not state:
@@ -677,7 +692,7 @@ async def upsert_knowledge_source(project_id: str, req: KnowledgeSourceUpsertReq
     }
 
 
-@app.post("/projects/{project_id}/knowledge/sync")
+@app.post("/projects/{project_id}/knowledge/sync", dependencies=[Depends(require_operator_auth)])
 async def sync_project_knowledge(project_id: str, req: KnowledgeSyncRequest):
     state = await store.load(project_id)
     if not state:
@@ -718,7 +733,7 @@ async def sync_project_knowledge(project_id: str, req: KnowledgeSyncRequest):
     }
 
 
-@app.post("/projects/{project_id}/knowledge/sync/{source_id}")
+@app.post("/projects/{project_id}/knowledge/sync/{source_id}", dependencies=[Depends(require_operator_auth)])
 async def sync_project_knowledge_source(project_id: str, source_id: str, req: KnowledgeSourceSyncRequest):
     state = await store.load(project_id)
     if not state:
@@ -755,7 +770,7 @@ async def sync_project_knowledge_source(project_id: str, source_id: str, req: Kn
     }
 
 
-@app.post("/projects/{project_id}/files")
+@app.post("/projects/{project_id}/files", dependencies=[Depends(require_operator_auth)])
 async def upload_project_file(
     project_id: str,
     file: UploadFile = File(...),
@@ -819,7 +834,7 @@ async def upload_project_file(
     }
 
 
-@app.delete("/projects/{project_id}/files/{file_id}")
+@app.delete("/projects/{project_id}/files/{file_id}", dependencies=[Depends(require_operator_auth)])
 async def delete_project_file(project_id: str, file_id: str):
     state = await store.load(project_id)
     if not state:
@@ -843,7 +858,7 @@ async def delete_project_file(project_id: str, file_id: str):
     return result
 
 
-@app.post("/projects/{project_id}/run")
+@app.post("/projects/{project_id}/run", dependencies=[Depends(require_operator_auth)])
 async def run_full_workflow(project_id: str, background_tasks: BackgroundTasks):
     state = await store.load(project_id)
     if not state:
@@ -888,7 +903,7 @@ async def run_full_workflow(project_id: str, background_tasks: BackgroundTasks):
     return {"status": "started", "project_id": project_id, "run_id": acquisition.run.run_id}
 
 
-@app.post("/projects/{project_id}/phase")
+@app.post("/projects/{project_id}/phase", dependencies=[Depends(require_operator_auth)])
 async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
     state = await store.load(project_id)
     if not state:
@@ -905,7 +920,7 @@ async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
     }
 
 
-@app.patch("/projects/{project_id}/input")
+@app.patch("/projects/{project_id}/input", dependencies=[Depends(require_operator_auth)])
 async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
     state = await store.load(project_id)
     if not state:
@@ -958,7 +973,7 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
     }
 
 
-@app.patch("/projects/{project_id}/phase-output/{phase}")
+@app.patch("/projects/{project_id}/phase-output/{phase}", dependencies=[Depends(require_operator_auth)])
 async def patch_phase_output(project_id: str, phase: str, payload: Any = Body(...)):
     phase = phase.strip().lower()
     if phase not in EDITABLE_PHASES:
@@ -989,7 +1004,7 @@ async def patch_phase_output(project_id: str, phase: str, payload: Any = Body(..
     }
 
 
-@app.post("/projects/{project_id}/imports/csv")
+@app.post("/projects/{project_id}/imports/csv", dependencies=[Depends(require_operator_auth)])
 async def import_csv(project_id: str, req: CSVImportRequest):
     state = await store.load(project_id)
     if not state:
@@ -1120,7 +1135,7 @@ async def list_projects():
     return [_to_response(s) for s in states]
 
 
-@app.delete("/projects/{project_id}")
+@app.delete("/projects/{project_id}", dependencies=[Depends(require_operator_auth)])
 async def delete_project(project_id: str):
     ok = await store.delete(project_id)
     if ok:
@@ -1140,7 +1155,7 @@ class OutcomeRecord(BaseModel):
     recorded_by: str = "client"
 
 
-@app.post("/projects/{project_id}/outcomes")
+@app.post("/projects/{project_id}/outcomes", dependencies=[Depends(require_operator_auth)])
 async def record_outcome(project_id: str, outcome: OutcomeRecord):
     """Record a realized outcome. Feeds jobs/update_priors.py the next time it runs."""
     pool = await store._get_pool()
@@ -1267,7 +1282,7 @@ async def calibration_deltas_endpoint():
 # v4.3 — POLICY LAYER ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-@app.post("/projects/{project_id}/kill")
+@app.post("/projects/{project_id}/kill", dependencies=[Depends(require_operator_auth)])
 async def kill_project(project_id: str, req: KillSwitchRequest):
     """Trigger the kill switch on a project. The orchestrator will halt
     on its next phase or LLM call check. Persisted to the store so it
@@ -1297,7 +1312,7 @@ async def kill_project(project_id: str, req: KillSwitchRequest):
     }
 
 
-@app.post("/projects/{project_id}/risk-classification")
+@app.post("/projects/{project_id}/risk-classification", dependencies=[Depends(require_operator_auth)])
 async def set_risk_classification(project_id: str, req: RiskClassificationRequest):
     """Set the EU AI Act risk classification for a project. Default for
     every new project is minimal_risk; the operator MUST override if the
@@ -1363,7 +1378,7 @@ async def get_budget(project_id: str):
     }
 
 
-@app.post("/projects/{project_id}/budget")
+@app.post("/projects/{project_id}/budget", dependencies=[Depends(require_operator_auth)])
 async def set_budget_caps(project_id: str, req: BudgetCapsRequest):
     """Update budget caps for a project. Only fields provided in the
     request are updated; omitted fields keep their existing values.
@@ -1393,7 +1408,7 @@ async def set_budget_caps(project_id: str, req: BudgetCapsRequest):
     return {"project_id": project_id, "caps": caps}
 
 
-@app.post("/projects/{project_id}/approvals")
+@app.post("/projects/{project_id}/approvals", dependencies=[Depends(require_operator_auth)])
 async def grant_approval(project_id: str, req: ApprovalRequest):
     """Grant HITL approval for a specific action on a project. Required
     for irreversible_internal actions on high-risk projects and for any
@@ -1422,7 +1437,7 @@ async def grant_approval(project_id: str, req: ApprovalRequest):
     return {"project_id": project_id, "action": req.action, "approved": True}
 
 
-@app.post("/projects/{project_id}/breakers/reset")
+@app.post("/projects/{project_id}/breakers/reset", dependencies=[Depends(require_operator_auth)])
 async def reset_breakers(project_id: str, req: ResetBreakersRequest):
     """Operator reset for stuck policy breakers on a single project.
 

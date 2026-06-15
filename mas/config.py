@@ -62,6 +62,17 @@ class UploadLayerConfig:
     max_cell_chars: int = 180
     max_row_summary_chars: int = 360
 
+
+@dataclass(frozen=True)
+class OperatorAuthConfig:
+    api_key: str = field(default="", repr=False)
+    require_operator_auth: bool = False
+    implemented: bool = True
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key)
+
 # Cost-optimized model routing per phase
 # Classify = cheap/fast, Strategy = expensive/deep, Report = mid-tier
 MODEL_ROUTING: dict[str, ModelConfig] = {
@@ -342,6 +353,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/workflow_v
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPERATOR_API_KEY_ENV = "MAS_OPERATOR_API_KEY"
+REQUIRE_OPERATOR_AUTH_ENV = "MAS_REQUIRE_OPERATOR_AUTH"
+OPERATOR_AUTH_HEADER = "X-MAS-Operator-Key"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -349,6 +363,13 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_operator_auth_config() -> OperatorAuthConfig:
+    return OperatorAuthConfig(
+        api_key=os.getenv(OPERATOR_API_KEY_ENV, "").strip(),
+        require_operator_auth=_env_flag(REQUIRE_OPERATOR_AUTH_ENV, default=False),
+    )
 
 
 def _env_json_map(name: str) -> dict[str, str]:
