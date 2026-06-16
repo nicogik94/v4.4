@@ -13,21 +13,35 @@ scenario_shadow_changed() {
   return 1
 }
 
-report_final_status() {
-  local exit_code=$?
+cleanup_and_report_final_status() {
+  local verification_exit=$?
+  local cleanup_exit=0
   trap - EXIT
+  set +e
 
-  echo "Final git status:"
+  echo "Running artifact cleanup:"
+  scripts/wave_clean_artifacts.sh
+  cleanup_exit=$?
+
+  if (( cleanup_exit != 0 )); then
+    echo "Artifact cleanup failed with exit code $cleanup_exit." >&2
+  fi
+
+  echo "Final git status after cleanup:"
   git status --short || true
 
   if scenario_shadow_changed; then
-    echo "scenario_shadow.sqlite3 changed; run scripts/wave_clean_artifacts.sh before committing." >&2
+    echo "scenario_shadow.sqlite3 remains changed after cleanup; inspect scripts/wave_clean_artifacts.sh output before committing." >&2
   fi
 
-  exit "$exit_code"
+  if (( verification_exit != 0 )); then
+    exit "$verification_exit"
+  fi
+
+  exit "$cleanup_exit"
 }
 
-trap report_final_status EXIT
+trap cleanup_and_report_final_status EXIT
 
 git diff --check
 
