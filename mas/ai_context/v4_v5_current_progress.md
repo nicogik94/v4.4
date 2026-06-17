@@ -5,7 +5,7 @@
 Repository branch baseline:
 
 - Branch: `main`
-- Latest known commit: `d4ce78d Auto-clean test artifacts after wave verification (#55)`
+- Latest known commit: `05dca9d Add operator auth startup smoke runbook (#57)`
 
 The project is currently in a local/operator-first hardening phase before any public SaaS or multi-tenant expansion.
 
@@ -76,6 +76,31 @@ Important points:
 - No `git clean` behavior was added.
 - No untracked files are deleted.
 
+### Wave 10.4 — Current progress context refresh
+
+Refreshed the AI/operator progress context for the v4/v5 hardening track.
+
+Important points:
+
+- Captured current local/operator-first posture.
+- Preserved product identity and non-overclaim boundaries.
+- Documented recent Wave 10 hardening progress.
+
+### Wave 10.5 — Operator authenticated startup/runbook smoke
+
+Added a local-only operator auth startup smoke runbook and operator-invoked smoke script.
+
+Important points:
+
+- Added `ai_context/waves/wave_10_5_operator_auth_smoke.md`.
+- Added `docs/runbooks/operator_auth_smoke_runbook.md`.
+- Added `scripts/operator_auth_smoke.sh`.
+- Script defaults to `http://127.0.0.1:8000`.
+- Script refuses non-loopback URLs.
+- Script requires `MAS_REQUIRE_OPERATOR_AUTH=true` and `MAS_OPERATOR_API_KEY`.
+- Script does not print the raw operator key.
+- Protected endpoint smoke uses valid auth plus a missing dummy project to reach safe application-level `404`.
+
 ## Current safety posture
 
 Current safety posture:
@@ -99,7 +124,7 @@ Recent local verification:
 
 Recent GitHub CI:
 
-- PR #55 pytest CI passed.
+- PR #57 pytest CI passed.
 
 ## Wave automation workflow
 
@@ -133,12 +158,12 @@ Use explicit-file commits through `scripts/wave_commit.sh`.
 
 Good next small waves:
 
-1. Operator authenticated startup/runbook smoke.
-2. Release readiness checklist.
-3. Export/provenance polish.
-4. Technology Readiness UX/output polish.
-5. Monitoring template polish.
-6. CI/eval aggregation reliability cleanup.
+1. Release readiness checklist.
+2. Export/provenance polish.
+3. Technology Readiness UX/output polish.
+4. Monitoring template polish.
+5. CI/eval aggregation reliability cleanup.
+6. Operator-authenticated runtime drill polish, if the new smoke runbook reveals gaps.
 
 ## Current guidance for future agents
 
