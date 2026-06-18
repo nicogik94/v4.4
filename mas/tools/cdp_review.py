@@ -22,6 +22,11 @@ from cdp.citation_resolvability import (  # noqa: E402
     build_defense_pass_result,
     build_evidence_locator_registry,
 )
+from cdp.review_caveats import (  # noqa: E402
+    ALL_ID_ONLY_CAVEAT,
+    ANTI_OVERCLAIMING_LABELS,
+    LOCATOR_PRECISION_CAVEAT,
+)
 from extensions.runtime import GatewayRequest, RoutingContext  # noqa: E402
 from state import ProjectState  # noqa: E402
 
@@ -36,24 +41,6 @@ RESOLVER_STATUSES = (
     "malformed",
 )
 TERMINAL_NONPASS_STATUSES = {"BLOCKED", "FAIL", "PROVIDER_INCONCLUSIVE"}
-ANTI_OVERCLAIMING_LABELS = [
-    "CDP v0.1 is review-only citation resolvability.",
-    "resolved_id_only means evidence-ID traceability only.",
-    "resolved_id_only is weaker than resolved_exact.",
-    "This does not verify semantic support.",
-    "This does not prove full claim defensibility.",
-    "This does not rewrite, strip, or correct report text.",
-    "Load-bearing findings are line-level review prompts, not claim cards.",
-]
-LOCATOR_PRECISION_CAVEAT = (
-    "Locator precision caveat: this project traces primarily to evidence IDs without specific "
-    "locator anchors. resolved_id_only is weaker than resolved_exact and does not prove "
-    "page/chunk/row-level support."
-)
-ALL_ID_ONLY_CAVEAT = (
-    "All resolved markers are ID-only. This shows evidence-ID traceability, not locator-level "
-    "precision or semantic support."
-)
 
 
 @dataclass(frozen=True)

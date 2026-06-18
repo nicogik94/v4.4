@@ -18,8 +18,19 @@ from typing import Any
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
+from cdp.citation_resolvability import (
+    CitationResolution,
+    LoadBearingReviewFinding,
+    build_defense_pass_result,
+)
+from cdp.review_caveats import (
+    ANTI_OVERCLAIMING_LABELS,
+    CDP_REVIEW_CAVEATS,
+    RESOLVER_STATUS_DESCRIPTIONS,
+    RESOLVER_STATUSES,
+)
 from clarifications import (
     ClarificationAnswer,
     ClarificationCycle,
@@ -274,6 +285,65 @@ class ProjectResponse(BaseModel):
     reentry_count: int = 0
 
 
+class EvidenceReviewResolverStatus(BaseModel):
+    status: str
+    count: int = 0
+    description: str = ""
+
+
+class EvidenceReviewPayload(BaseModel):
+    project_id: str
+    schema_version: str = "cdp.v0.1"
+    source: str = "ProjectState.report"
+    extraction_method: str = ""
+    source_report_sha256: str = ""
+    source_report_length: int = 0
+    report_text_preserved: bool = True
+    read_only: bool = True
+    review_only: bool = True
+    summary_counts: dict[str, int] = Field(default_factory=dict)
+    resolver_statuses: list[EvidenceReviewResolverStatus] = Field(default_factory=list)
+    resolutions: list[CitationResolution] = Field(default_factory=list)
+    load_bearing_reviews: list[LoadBearingReviewFinding] = Field(default_factory=list)
+    malformed_candidates: list[str] = Field(default_factory=list)
+    missing_inputs: list[str] = Field(default_factory=list)
+    claims_requiring_review: list[str] = Field(default_factory=list)
+    extraction_limitations: list[str] = Field(default_factory=list)
+    anti_overclaiming_labels: list[str] = Field(default_factory=list)
+    anti_overclaiming_caveats: list[str] = Field(default_factory=list)
+
+
+def _build_evidence_review_payload(project_id: str, state: ProjectState) -> EvidenceReviewPayload:
+    result = build_defense_pass_result(state)
+    counts = dict(result.summary_counts)
+    return EvidenceReviewPayload(
+        project_id=project_id,
+        schema_version=result.schema_version,
+        source=result.source,
+        extraction_method=result.extraction_method,
+        source_report_sha256=result.source_report_sha256,
+        source_report_length=result.source_report_length,
+        report_text_preserved=result.report_text_preserved,
+        summary_counts=counts,
+        resolver_statuses=[
+            EvidenceReviewResolverStatus(
+                status=status,
+                count=int(counts.get(status, 0) or 0),
+                description=RESOLVER_STATUS_DESCRIPTIONS.get(status, ""),
+            )
+            for status in RESOLVER_STATUSES
+        ],
+        resolutions=list(result.resolutions),
+        load_bearing_reviews=list(result.load_bearing_reviews),
+        malformed_candidates=list(result.malformed_candidates),
+        missing_inputs=list(result.missing_inputs),
+        claims_requiring_review=list(result.claims_requiring_review),
+        extraction_limitations=list(result.extraction_limitations),
+        anti_overclaiming_labels=list(ANTI_OVERCLAIMING_LABELS),
+        anti_overclaiming_caveats=list(CDP_REVIEW_CAVEATS),
+    )
+
+
 # v4.3 — policy layer request models
 class KillSwitchRequest(BaseModel):
     reason: str
@@ -461,6 +531,14 @@ async def get_full_state(project_id: str):
         raise HTTPException(404, "Project not found")
     ensure_decision_objects(state, trigger="api.state")
     return state.model_dump(mode="json")
+
+
+@app.get("/projects/{project_id}/evidence-review", response_model=EvidenceReviewPayload)
+async def get_evidence_review(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return _build_evidence_review_payload(project_id, state)
 
 
 @app.get("/projects/{project_id}/workspace", response_model=WorkspaceSummary)

@@ -5,8 +5,9 @@ Schema: cdp.v0.1.
 This module reads ProjectState and never mutates it. It emits an in-memory
 DefensePassResult for deterministic post-pass review only.
 
-It is not wired into the workflow graph, API, renderer, exporter, database,
-persistence, or product surfaces. Full claim defensibility is later work.
+It is not wired into the workflow graph, renderer, exporter, database, or
+persistence. Runtime surfaces may project this result read-only. Full claim
+defensibility is later work.
 
 The canonical evidence marker format is defined in cdp.citation_format.
 """
@@ -158,7 +159,7 @@ def build_defense_pass_result(state: Any) -> DefensePassResult:
         extraction_limitations=[
             "Raw ProjectState.report markdown only; no structured claim extraction.",
             "Line-level load-bearing review triage only; not proof of claim defensibility.",
-            "No renderer, export, API, graph, database, or persistence integration.",
+            "No renderer, export, graph, database, or persistence integration; API/trace surfaces are read-only projections.",
         ],
         summary_counts=_summary_counts(markers, malformed_resolutions, resolutions, load_bearing_reviews),
     )
