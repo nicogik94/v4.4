@@ -10,6 +10,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from cdp.citation_resolvability import build_defense_pass_result
+from cdp.review_caveats import CDP_REVIEW_CAVEATS
 from config import FRAMEWORKS_BY_PHASE, GATE_CONFIGS
 from decision_objects import ensure_decision_objects
 from knowledge.freshness import build_knowledge_health
@@ -174,11 +176,23 @@ class ActionExplanation(BaseModel):
     uncertainty: UncertaintySummary = Field(default_factory=UncertaintySummary)
 
 
+class EvidenceReviewTraceSummary(BaseModel):
+    schema_version: str = "cdp.v0.1"
+    source: str = "ProjectState.report"
+    review_only: bool = True
+    read_only: bool = True
+    summary_counts: dict[str, int] = Field(default_factory=dict)
+    missing_inputs: list[str] = Field(default_factory=list)
+    review_item_count: int = 0
+    caveats: list[str] = Field(default_factory=list)
+
+
 class ProjectTrace(BaseModel):
     project_id: str
     project_name: str
     current_phase: str
     phases: list[PhaseTraceSummary] = Field(default_factory=list)
+    evidence_review: EvidenceReviewTraceSummary = Field(default_factory=EvidenceReviewTraceSummary)
 
 
 class ExplainabilityReport(BaseModel):
@@ -201,6 +215,19 @@ def build_project_trace(state: ProjectState) -> ProjectTrace:
         project_name=state.project_name,
         current_phase=state.current_phase,
         phases=traces,
+        evidence_review=_evidence_review_trace_summary(state),
+    )
+
+
+def _evidence_review_trace_summary(state: ProjectState) -> EvidenceReviewTraceSummary:
+    result = build_defense_pass_result(state)
+    return EvidenceReviewTraceSummary(
+        schema_version=result.schema_version,
+        source=result.source,
+        summary_counts=dict(result.summary_counts),
+        missing_inputs=list(result.missing_inputs),
+        review_item_count=len(result.claims_requiring_review),
+        caveats=list(CDP_REVIEW_CAVEATS),
     )
 
 

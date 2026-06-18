@@ -8,7 +8,7 @@
 | T1a Report Citation Discipline | Complete | Behaviorally validated under primary Anthropic. Reports can emit canonical evidence markers. |
 | T1b Citation Resolvability | Complete | Review-only, in-memory citation resolvability over raw `ProjectState.report`. |
 | Shared citation marker format | Complete | Marker format is centralized in `cdp.citation_format`. |
-| T1c Product Surface | Not started | Should be planned separately as read-only surface work. |
+| T1c Product Surface | Complete | Read-only operator API endpoint and compact Decision Trace summary. |
 | Evidence Gauge | Not started | Out of scope for `cdp.v0.1`. |
 | Defense Index | Not started | Out of scope for `cdp.v0.1`. |
 | Claim Cards | Not started | Out of scope for `cdp.v0.1`. |
@@ -27,12 +27,14 @@ CDP v0.1 must not:
 
 - persist anything to `ProjectState`
 - add a graph node
-- add API wiring
 - add export or renderer integration
 - auto-strip or rewrite claims
 - claim full claim defensibility
 - mutate report text
 - silently normalize malformed markers
+
+The only current runtime wiring is a read-only operator projection of the
+in-memory result. It does not save state or approve delivery.
 
 ## Resolver statuses
 
@@ -53,7 +55,7 @@ CDP v0.1 is intentionally narrow:
 - no Defense Index
 - no claim cards
 - no auto-stripping
-- no product-surface integration
+- no mutating product-surface integration
 
 A resolved marker means only that the marker maps to known evidence locator metadata. It does not prove that the evidence supports the claim.
 
