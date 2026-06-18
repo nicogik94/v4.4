@@ -1140,6 +1140,7 @@ def test_tto_handoff_package_keeps_confidential_and_non_confidential_boundaries(
     assert "not legal advice" in combined
     assert "legal patentability" in combined
     assert "guaranteed transfer" in combined
+    assert "Evidence-traceable planning estimate" in combined
     assert "legally patentable" not in combined.lower()
 
 

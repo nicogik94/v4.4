@@ -857,6 +857,8 @@ def _assert_client_language_polished(testcase: unittest.TestCase, compact: str) 
     for preserved in (
         CLIENT_DELIVERY_VALIDATION_BANNER,
         "Evidence maturity: Partial evidence",
+        "Evidence markers and citations are traceability aids, not proof of every claim.",
+        "Provenance boundary: Evidence markers and source references provide traceability",
         "output trust metric",
         "more than 20% over approved budget",
         "caveat: budget assumptions need validation",
@@ -1201,6 +1203,8 @@ Stop if baseline data access is unavailable.
         self.assertIn("not TRL certification", workbook_text)
         self.assertIn("legal patentability advice", workbook_text)
         self.assertIn("guarantee of commercial transfer", workbook_text)
+        self.assertIn("Evidence/provenance fields support traceability", workbook_text)
+        self.assertIn("do not prove every claim", workbook_text)
         self.assertIn("Evidence Register", workbook.sheetnames)
         self.assertIn("Next-Level Recommendations", workbook.sheetnames)
         self.assertIn("Stage-Gate Decisions", workbook.sheetnames)
@@ -1252,6 +1256,8 @@ Stop if baseline data access is unavailable.
             "NanoSeal-H2",
             "not TRL certification",
             "not legal patentability advice",
+            "Evidence and citations support traceability, not proof of readiness",
+            "Recommended actions are operator-reviewed planning steps",
         ):
             self.assertIn(expected, markdown)
         self.assertNotIn("NanoSeal-the automation architecture assumption", markdown)
@@ -1280,6 +1286,8 @@ Stop if baseline data access is unavailable.
         self.assertIn("Phase completion status", markdown)
         self.assertIn("Evidence and source summary", markdown)
         self.assertIn("citation_marker_count", markdown)
+        self.assertIn("Provenance boundary", markdown)
+        self.assertIn("do not by themselves prove semantic support", markdown)
         for phase in (
             "Scope",
             "Scientific Inventory",
@@ -1378,6 +1386,8 @@ This section is narrative only and should not replace Decision Gates.
         self.assertIn("Pilot dashboard", workbook_text)
         self.assertIn("caveat: budget assumptions need validation", workbook_text)
         self.assertIn("Human review required before client delivery.", workbook_text)
+        self.assertIn("Monitoring rows are human-review controls", workbook_text)
+        self.assertIn("do not trigger autonomous actions", workbook_text)
         self.assertIn("To be confirmed", workbook_text)
         self.assertIn("Not supplied", workbook_text)
         for forbidden in ("hypothesis 5", "hypothesis 9", "architecture hypothesis", "H5", "H9"):
@@ -1416,6 +1426,9 @@ This section is narrative only and should not replace Decision Gates.
         self.assertIn("monitor.circuit_breakers[0]", workbook_text)
         self.assertIn("Evidence maturity", workbook_text)
         self.assertIn("Human review required before client delivery.", workbook_text)
+        self.assertIn("Monitoring rows are human-review controls", workbook_text)
+        self.assertIn("do not trigger autonomous actions", workbook_text)
+        self.assertIn("Pause or change course only after operator review confirms the trip condition.", workbook_text)
         for sheet_name in (SHEET_NAME, "OODA Schedule", "Circuit Breakers", "Canaries", "Re-entry Watch - Risks", "Review Log"):
             _assert_sheet_has_usability_polish(self, workbook, sheet_name)
 
@@ -3059,6 +3072,9 @@ Proceed if DQ >50.
         self.assertIn("rejected_or_unsupported_file_count", markdown)
         self.assertIn("imported_evidence_count", markdown)
         self.assertIn("imported_signal_count", markdown)
+        self.assertIn("Provenance boundary", markdown)
+        self.assertIn("Evidence markers, citations, and source locators provide traceability", markdown)
+        self.assertIn("They do not by themselves prove semantic support", markdown)
         self.assertIn("| concrete_source_locator_count | 0 |", markdown)
         self.assertIn("| concrete_source_locators_available | False |", markdown)
         self.assertIn("Uploaded knowledge chunks available; imported evidence records unavailable.", markdown)

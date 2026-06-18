@@ -239,20 +239,35 @@ HUMAN_REVIEW_NOTE = (
     "It should not replace expert judgment where legal, financial, medical, "
     "safety, or compliance stakes are involved."
 )
+PROVENANCE_BOUNDARY_NOTE = (
+    "Evidence markers, citations, and source locators provide traceability to supplied material. "
+    "They do not by themselves prove semantic support, validate every claim, or replace operator review."
+)
+CLIENT_PROVENANCE_BOUNDARY_NOTE = (
+    "Evidence markers and source references provide traceability to supplied material. "
+    "They do not by themselves prove semantic support, validate every claim, or replace human review."
+)
 CLIENT_DELIVERY_VALIDATION_BANNER = (
-    "Validate before client delivery. This is a hypothesis-driven diagnostic memo, not a measured audit."
+    "Validate before client delivery. This is a hypothesis-driven diagnostic memo, not a measured audit. "
+    "Evidence markers and citations are traceability aids, not proof of every claim."
 )
 TECHNOLOGY_READINESS_CLIENT_DELIVERY_BANNER = (
     "Validate before client delivery. This is an operator-reviewed technology readiness assessment, "
     "not TRL certification, not legal patentability advice, not freedom-to-operate advice, not regulatory "
     "approval, not safety approval, not investment readiness, not production readiness, not commercial "
-    "viability, and not a guarantee of commercial transfer."
+    "viability, and not a guarantee of commercial transfer. Evidence and citations support traceability, "
+    "not proof of readiness, transferability, or legal status."
 )
 TECHNOLOGY_READINESS_BOUNDARY_NOTE = (
     "Operator-reviewed readiness assessment based on supplied evidence only. It is not TRL certification, "
     "not legal patentability advice, not freedom-to-operate advice, not regulatory approval, not safety "
     "approval, not investment readiness, not production readiness, not commercial viability, and not a "
-    "guarantee of commercial transfer."
+    "guarantee of commercial transfer. It supports planning and specialist intake; it does not authorize "
+    "advancement, external claims, deployment, or autonomous action."
+)
+MONITORING_CONTROLS_NOTE = (
+    "Monitoring signals, canaries, and circuit breakers are human-review controls. They should trigger "
+    "operator review against the Decision Gates; they do not execute autonomous actions."
 )
 
 SPARSE_GROWTH_DECISION_GATES = """| Gate | Proceed | Extend | Stop / Escalate |
@@ -818,7 +833,10 @@ def _technology_readiness_why_not_higher(state: ProjectState) -> str:
         _tr_bullets(executive.get("top_blockers"), ""),
     ]
     body = "\n\n".join(part for part in parts if str(part).strip())
-    return body or "A higher TRL is not justified until the missing evidence is reviewed by the operator."
+    return body or (
+        "A higher TRL is not justified until the missing evidence is reviewed by the operator. "
+        "Absence of recorded gaps should not be treated as proof of readiness."
+    )
 
 
 def _technology_readiness_evidence_gaps_summary(state: ProjectState) -> str:
@@ -832,7 +850,10 @@ def _technology_readiness_evidence_gaps_summary(state: ProjectState) -> str:
         gaps.extend(_tr_list(_technology_readiness_phase_data(state, phase).get(field)))
     unique = _unique_nonempty(gaps)
     if not unique:
-        return "No evidence gaps were recorded in the structured Technology Readiness output."
+        return (
+            "No evidence gaps were recorded in the structured Technology Readiness output. "
+            "The operator should still confirm evidence completeness before client-facing or external use."
+        )
     return "\n".join(f"- {item}" for item in unique)
 
 
@@ -840,7 +861,7 @@ def _technology_readiness_sprint0_validation_package(state: ProjectState) -> str
     next_level = _technology_readiness_phase_data(state, "next_level_recommendations")
     validation = _technology_readiness_phase_data(state, "technical_validation_plan")
     lines = [
-        "Sprint 0 validation required before treating the roadmap, transfer discussion, or readiness verdict as validated.",
+        "Sprint 0 validation required before treating the roadmap, transfer discussion, or readiness verdict as validated or externally reliable.",
         "### Required tests",
         _tr_bullets(next_level.get("required_tests") or validation.get("validation_tests")),
         "### Required evidence",
@@ -923,6 +944,7 @@ def _technology_readiness_next_step_summary(state: ProjectState) -> str:
     rows = [
         ["Field", "Value"],
         ["Recommended next step", _tr_field(executive, "recommended_next_step", "Not supplied.")],
+        ["Human review boundary", "Recommended actions are operator-reviewed planning steps, not autonomous advancement decisions."],
         ["Main gap to next level", _tr_field(next_level, "main_gap_to_next_level", "Not supplied.")],
         ["Next target TRL", _tr_field(next_level, "next_target_trl", "Not supplied.")],
         ["Next phase name", _tr_field(next_level, "next_phase_name", "Not supplied.")],
@@ -2124,6 +2146,7 @@ def _evidence_maturity_badge_markdown(state: ProjectState, quality, *, client: b
         f"Evidence maturity: {projection.maturity}",
         f"Client-use status: {projection.client_use_status}",
         f"Validation required: {projection.validation_required}",
+        f"Provenance boundary: {CLIENT_PROVENANCE_BOUNDARY_NOTE if client else PROVENANCE_BOUNDARY_NOTE}",
     ]
     if client:
         return lines
@@ -2940,22 +2963,23 @@ def summarize_monitoring(state: ProjectState) -> str:
     lines = [
         commitment_score_text(state.monitor.commitment_score, state.monitor.commitment_rationale),
         f"Commitment rationale: {state.monitor.commitment_rationale or 'TBD — requires operator confirmation.'}",
+        f"Monitoring controls note: {MONITORING_CONTROLS_NOTE}",
         "### OODA Schedule",
         _markdown_table(
-            [["Cadence", "Metric", "Owner", "Source"]]
-            + [["Daily", item.metric, item.owner, item.source] for item in state.monitor.ooda_schedule.daily]
-            + [["Weekly", item.metric, item.owner, item.source] for item in state.monitor.ooda_schedule.weekly]
-            + [["Monthly", item.metric, item.owner, item.source] for item in state.monitor.ooda_schedule.monthly]
+            [["Cadence", "Signal / metric", "Owner / role", "Source / evidence source", "Operator review action"]]
+            + [["Daily", item.metric, item.owner, item.source, "Review trend against Decision Gates at this cadence."] for item in state.monitor.ooda_schedule.daily]
+            + [["Weekly", item.metric, item.owner, item.source, "Review trend against Decision Gates at this cadence."] for item in state.monitor.ooda_schedule.weekly]
+            + [["Monthly", item.metric, item.owner, item.source, "Review trend against Decision Gates at this cadence."] for item in state.monitor.ooda_schedule.monthly]
         ),
         "### Circuit Breakers",
         _markdown_table(
-            [["Strategy", "Trip", "Reset"]]
-            + [[item.strategy_ref, item.trip, item.reset] for item in state.monitor.circuit_breakers]
+            [["Strategy / control", "Trip condition", "Reset condition", "Operator action"]]
+            + [[item.strategy_ref, item.trip, item.reset, "Pause or change course only after operator review confirms the trip condition."] for item in state.monitor.circuit_breakers]
         ),
         "### Canaries",
         _markdown_table(
-            [["Signal", "Direction", "Window", "Meaning"]]
-            + [[item.signal, item.direction, item.window, item.meaning] for item in state.monitor.canaries]
+            [["Signal", "Expected direction", "Review window", "What it means", "Operator action"]]
+            + [[item.signal, item.direction, item.window, item.meaning, "Investigate the early-warning signal before changing the plan."] for item in state.monitor.canaries]
         ),
     ]
     return "\n\n".join(lines)

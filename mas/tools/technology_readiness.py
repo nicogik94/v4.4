@@ -89,7 +89,8 @@ STAGE_GATE_DECISIONS = (
 
 WORKBOOK_DISCLAIMER = (
     "This workbook is an operator-reviewed readiness assessment. It is not TRL "
-    "certification, legal patentability advice, or a guarantee of commercial transfer."
+    "certification, legal patentability advice, or a guarantee of commercial transfer. "
+    "Evidence/provenance fields support traceability; they do not prove every claim."
 )
 
 READINESS_RADAR_DIMENSIONS = (
@@ -335,9 +336,9 @@ def build_stage_gate_decision(assessment: Mapping[str, Any] | None) -> dict[str,
     if blocking_gaps:
         rationale_parts.append("Advancement is blocked by evidence gaps.")
     elif ip_condition:
-        rationale_parts.append("Technical evidence is sufficient for conditional review, but IP evidence is incomplete.")
+        rationale_parts.append("Technical evidence is sufficient for conditional operator review, but IP evidence is incomplete.")
     else:
-        rationale_parts.append("Required evidence categories supplied for this stage gate.")
+        rationale_parts.append("Required evidence categories are supplied for operator review at this stage gate.")
     if current_trl == 0:
         rationale_parts.append("A defensible current TRL must be established first.")
 
@@ -561,7 +562,7 @@ def build_tto_handoff_package(assessment: Mapping[str, Any] | None) -> dict[str,
     return {
         "invention_disclosure_draft": {
             "title": technology_name,
-            "readiness_context": f"Evidence-backed estimate: TRL {current_trl}." if current_trl else "TRL not assessable.",
+            "readiness_context": f"Evidence-traceable planning estimate: TRL {current_trl}." if current_trl else "TRL not assessable.",
             "operator_review_note": "Operator-reviewed draft for specialist intake; not legal advice.",
         },
         "non_confidential_summary": (
