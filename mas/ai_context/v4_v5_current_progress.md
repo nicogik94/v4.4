@@ -5,9 +5,9 @@
 Repository branch baseline:
 
 - Branch: `main`
-- Baseline before Wave 10.10: `0efa66e Improve CI eval reliability diagnostics (#61)`
-- Wave 10.9 is complete on main.
-- This document was refreshed by Wave 10.10 as a docs/context-only update.
+- Latest merged baseline: `912e916 Wave 11.1: Add read-only CDP evidence review surface (#63)`
+- Wave 11.1 is complete on main.
+- This document was refreshed by Wave 11.2 as a docs/context-only update.
 - Future context refreshes should replace this baseline with the actual latest merged main commit.
 
 The project remains in a local/operator-first hardening phase. Public SaaS, multi-tenant, autonomous-action, and public-user account capabilities are not implemented.
@@ -153,6 +153,20 @@ Important points:
 - Verification remains honest: failures are not hidden, converted into success, or downgraded to warnings.
 - Known tracked test artifacts are still cleaned/restored; no `git clean` behavior was added.
 
+### Wave 11.1 — CDP T1c read-only evidence review surface
+
+PR #63 merged as `912e916 Wave 11.1: Add read-only CDP evidence review surface (#63)`.
+
+Important points:
+
+- Added `GET /projects/{project_id}/evidence-review`.
+- Exposes existing CDP T1b citation-resolvability results as a read-only operator projection.
+- Adds a compact Decision Trace evidence-review summary.
+- Adds pure shared CDP caveats/status descriptions in `cdp/review_caveats.py`.
+- Updates `tools/cdp_review.py` to use shared caveats and avoid a duplicate caveat source of truth.
+- Adds focused tests for endpoint payload, caveats, resolver statuses, malformed markers, empty/missing cases, and non-mutation.
+- Verification passed: `705 passed, 1 warning, 67 subtests passed`.
+
 ## Current safety posture
 
 - Local/operator-first.
@@ -224,6 +238,26 @@ Current output posture:
 - Provenance surfaces support review and audit.
 - None of these should be described as proof of semantic claim support.
 
+Current CDP status:
+
+- T1a Report Citation Discipline: complete.
+- T1b Citation Resolvability: complete as a deterministic, review-only, in-memory pass over raw `ProjectState.report`.
+- T1c Product Surface: complete as a read-only operator API and compact Decision Trace summary.
+- Evidence Gauge: not implemented and out of scope for CDP v0.1.
+- Defense Index: not implemented and out of scope for CDP v0.1.
+- Claim Cards: not implemented and out of scope for CDP v0.1.
+- Full semantic claim-support verification: not implemented.
+- Full claim defensibility: not implemented.
+
+CDP T1c non-overclaiming boundaries:
+
+- CDP T1c is not semantic evidence verification.
+- A resolved marker means marker-to-registered-evidence metadata traceability only.
+- `resolved_exact` is stronger than `resolved_id_only`, but neither proves semantic support.
+- Evidence-review output is advisory and review-only; it does not approve client delivery.
+- CDP T1c does not mutate `ProjectState`, mutate report text, save state, add a workflow graph node, add a new phase, or change routing, gates, re-entry, SQI, report generation, or exports.
+- Human review remains mandatory.
+
 Current client/operator boundary:
 
 - Keep operator-only warnings and internal diagnostics out of client-facing reports unless a surface is explicitly operator-facing.
@@ -241,14 +275,14 @@ Technology Readiness and monitoring posture:
 
 Current expected local verification shape:
 
-- Full test suite: `696 passed, 1 warning, 67 subtests passed`
+- Full test suite: `705 passed, 1 warning, 67 subtests passed`
 
 Treat this as orientation only. Future waves must rerun the relevant verification command rather than relying on this recorded baseline.
 
 Recent GitHub/main baseline:
 
-- `0efa66e Improve CI eval reliability diagnostics (#61)`
-- Wave 10.9 verification diagnostics are merged.
+- `912e916 Wave 11.1: Add read-only CDP evidence review surface (#63)`
+- Wave 11.1 CDP T1c read-only operator evidence-review surface is merged.
 
 ## Wave automation workflow
 
@@ -278,9 +312,9 @@ Never commit:
 
 Use explicit-file commits through `scripts/wave_commit.sh`.
 
-## Recommended Wave 11 direction
+## Recommended Wave 11.3 direction
 
-Wave 11 should start with strategic direction and best-opportunity review before implementing a new feature.
+Wave 11.3 should be discovery-first before implementing a new feature.
 
 Recommended discovery approach:
 
@@ -288,14 +322,16 @@ Recommended discovery approach:
 - Review current architecture, tests, runbooks, product surfaces, and operator workflows before selecting implementation.
 - Run an ARVV-style audit before committing to a feature wave.
 - Keep the final implementation choice dependent on that review, not on assumptions in this context file.
+- Do not jump straight into a large implementation.
 
-Likely candidates to evaluate:
+Candidate areas to evaluate:
 
-1. Evidence-strength / claim-support layer.
-2. ICE clarification productization.
-3. Decision quality evaluation layer.
-4. Runtime/job durability.
-5. Operator UX consistency / guided review.
+1. Delivery-readiness composite signal, read-only/advisory.
+2. Operator review workflow consolidation around evidence review and clarifications.
+3. Claim-defensibility eval dimension.
+4. ICE productization.
+5. Repo hygiene for tracked artifacts, if still present.
+6. Runtime/job durability, only if operator pain justifies it.
 
 ## What not to do next
 
@@ -308,6 +344,7 @@ Do not:
 - broaden MAS into generic BI
 - implement a large feature without a focused wave spec and tests
 - overclaim operator auth, runtime preflight, public exposure, provenance, or readiness beyond the current implementation
+- overclaim CDP T1c as semantic evidence verification, full claim defensibility, delivery approval, Evidence Gauge, Defense Index, or Claim Cards
 
 ## Current guidance for future agents
 
