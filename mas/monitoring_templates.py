@@ -69,7 +69,7 @@ class MonitoringTemplateRow:
     target_good_sign: str = VALIDATION_REQUIRED
     warning_sign: str = VALIDATION_REQUIRED
     stop_change_threshold: str = THRESHOLD_NOT_CONFIRMED
-    action_if_triggered: str = "Review with decision owner."
+    action_if_triggered: str = "Review with decision owner before changing course."
     evidence_maturity_validation_status: str = VALIDATION_REQUIRED
     notes: str = ""
     row_source: str = ""
@@ -160,6 +160,7 @@ def _write_readme_sheet(worksheet: Any, audience: str) -> None:
     worksheet.append(["Human review", "Human review required before client delivery."])
     worksheet.append(["Validation boundary", "Validate monitoring thresholds before using them as change-course gates."])
     worksheet.append(["Source", "Rows are exported from the existing monitoring plan, strategy outputs, and Decision Gates."])
+    worksheet.append(["Automation boundary", "Monitoring rows are human-review controls; they do not trigger autonomous actions."])
     if audience == "operator":
         worksheet.append(["Operator note", "Operator workbook may include trace columns for review and troubleshooting."])
     else:
@@ -311,7 +312,7 @@ def _parse_decision_gate_tables(section: str, status: str) -> list[MonitoringTem
                         _first_value(cell, ("stop", "change", "threshold", "kill", "defer")),
                         THRESHOLD_NOT_CONFIRMED,
                     ),
-                    action_if_triggered=_clean_placeholder(_first_value(cell, ("action", "triggered", "next")), "Review with decision owner."),
+                    action_if_triggered=_clean_placeholder(_first_value(cell, ("action", "triggered", "next")), "Review with decision owner before changing course."),
                     evidence_maturity_validation_status=status,
                     notes=_clean_placeholder(_first_value(cell, ("note", "caveat", "status")), ""),
                     row_source="decision_gates",
@@ -353,7 +354,7 @@ def _ooda_rows(state: Any, status: str) -> list[MonitoringTemplateRow]:
                         concrete_values,
                         THRESHOLD_NOT_CONFIRMED,
                     ),
-                    action_if_triggered="Review metric trend and compare against Decision Gates.",
+                    action_if_triggered="Review metric trend with the owner and compare against Decision Gates.",
                     evidence_maturity_validation_status=status,
                     notes="OODA schedule item; implementation control, not a separate decision gate.",
                     row_source=f"monitor_ooda_{cadence.lower()}",
@@ -381,7 +382,7 @@ def _circuit_breaker_rows(state: Any, status: str) -> list[MonitoringTemplateRow
                 target_good_sign=_clean_placeholder(reset, VALIDATION_REQUIRED),
                 warning_sign=_clean_placeholder(trip, VALIDATION_REQUIRED),
                 stop_change_threshold=_clean_placeholder(trip, THRESHOLD_NOT_CONFIRMED),
-                action_if_triggered="Pause, escalate, or change course when triggered.",
+                action_if_triggered="Pause or change course only after operator review confirms the trip condition.",
                 evidence_maturity_validation_status=status,
                 notes="Circuit breaker is an implementation control; Decision Gates remain source of truth.",
                 row_source="monitor_circuit_breaker",
@@ -419,7 +420,7 @@ def _canary_rows(state: Any, status: str) -> list[MonitoringTemplateRow]:
                 if inferred_direction
                 else "No movement or movement against expected direction.",
                 stop_change_threshold=_canary_threshold_text(window, inferred_direction, concrete_values),
-                action_if_triggered="Investigate canary and compare against Decision Gates.",
+                action_if_triggered="Investigate canary, review the evidence source, and compare against Decision Gates.",
                 evidence_maturity_validation_status=status,
                 notes="Canary is an early-warning control; threshold requires operator confirmation.",
                 row_source="monitor_canary",
@@ -452,7 +453,7 @@ def _strategy_metric_rows(state: Any, status: str) -> list[MonitoringTemplateRow
                     concrete_values,
                     THRESHOLD_NOT_CONFIRMED,
                 ),
-                action_if_triggered="Review at the next decision checkpoint.",
+                action_if_triggered="Review with the decision owner at the next checkpoint.",
                 evidence_maturity_validation_status=status,
                 notes="Success metric requires validation before it is treated as an approved gate.",
                 row_source="strategy_success_metric",
@@ -497,7 +498,7 @@ def _needs_monitoring_rows(state: Any, status: str) -> list[MonitoringTemplateRo
                     _extract_concrete_monitoring_values(reject) or concrete_values,
                     THRESHOLD_NOT_CONFIRMED,
                 ),
-                action_if_triggered="Validate before changing the recommendation.",
+                action_if_triggered="Validate with the decision owner before changing the recommendation.",
                 evidence_maturity_validation_status=status,
                 notes=_clean_placeholder(monitoring_plan, "Hypothesis requires monitoring."),
                 row_source="strategy_preliminary_verdict",
