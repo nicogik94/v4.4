@@ -5,13 +5,29 @@
 Repository branch baseline:
 
 - Branch: `main`
-- Latest known commit: `05dca9d Add operator auth startup smoke runbook (#57)`
+- Baseline before Wave 10.10: `0efa66e Improve CI eval reliability diagnostics (#61)`
+- Wave 10.9 is complete on main.
+- This document was refreshed by Wave 10.10 as a docs/context-only update.
+- Future context refreshes should replace this baseline with the actual latest merged main commit.
 
-The project is currently in a local/operator-first hardening phase before any public SaaS or multi-tenant expansion.
+The project remains in a local/operator-first hardening phase. Public SaaS, multi-tenant, autonomous-action, and public-user account capabilities are not implemented.
 
 ## Product identity
 
-v4/v5 is a controlled, operator-led decision-analysis engine. It is not a chatbot, not a BI dashboard, and not a public self-serve SaaS product yet.
+v4/v5 MAS is a controlled, operator-led decision-analysis engine.
+
+It is:
+
+- local/operator-first
+- human-reviewed
+- not a chatbot
+- not BI
+- not public SaaS
+- not multi-tenant
+- not a public-user account system
+- not an autonomous action system
+
+Human review remains mandatory before any client-facing use, public exposure, deployment, auth/security change, or runtime-control change.
 
 Core workflow:
 
@@ -101,30 +117,138 @@ Important points:
 - Script does not print the raw operator key.
 - Protected endpoint smoke uses valid auth plus a missing dummy project to reach safe application-level `404`.
 
+### Wave 10.7 — Release readiness checklist
+
+Added a local/operator-first release readiness checklist.
+
+Important points:
+
+- Added `docs/runbooks/release_readiness_checklist.md`.
+- Checklist covers local demo readiness, internal release review readiness, and future deployment/security review readiness.
+- It is a human/operator review gate, not deployment automation.
+- It explicitly does not prove public SaaS readiness.
+- It includes local startup, `/health`, `/runtime/preflight`, operator auth posture, public exposure interlock, `scripts/wave_verify.sh`, artifact cleanup, release evidence packet, and go/no-go decision guidance.
+
+### Wave 10.8 — Output provenance and readiness wording polish
+
+Polished output/provenance, Technology Readiness, and monitoring presentation without changing core workflow behavior.
+
+Important points:
+
+- Evidence markers, citations, source locators, and provenance fields are traceability aids.
+- They should not be treated as proof that every generated claim is semantically supported.
+- Client-clean vs operator-only surfaces remain separated.
+- Technology Readiness outputs should preserve readiness caveats, external-reliance boundaries, and human-review language.
+- Monitoring surfaces should make owner, action, signal, threshold, cadence, canary, circuit-breaker, and review posture easier to act on.
+
+### Wave 10.9 — CI/eval reliability diagnostics
+
+Improved CI/eval and local verification diagnostics without weakening checks.
+
+Important points:
+
+- Updated `scripts/wave_verify.sh` with clearer section headers, working context, rerun guidance, cleanup summary, and final exit-code reporting.
+- Updated `scripts/wave_clean_artifacts.sh` with clearer artifact discovery and restore summaries.
+- Original failing verification exit code remains preserved.
+- Verification remains honest: failures are not hidden, converted into success, or downgraded to warnings.
+- Known tracked test artifacts are still cleaned/restored; no `git clean` behavior was added.
+
 ## Current safety posture
 
-Current safety posture:
-
 - Local/operator-first.
+- Human review remains mandatory.
+- Not a chatbot.
+- Not BI.
 - Not public SaaS.
 - Not multi-tenant.
-- No public-user account system yet.
+- No public-user account system.
+- Not an autonomous action system.
 - Public exposure is blocked by preflight unless intentionally and safely configured.
 - Operator auth exists for protected write/control-plane actions.
 - `/health` remains open for basic runtime health checks.
-- Human review remains required for auth, runtime-control, security, public exposure, and deployment-related changes.
+- `/runtime/preflight` reports operator-local posture and public exposure/auth checks; do not overclaim beyond the current implementation.
+- Human review remains required for auth, runtime-control, security, public exposure, deployment-related, or client-facing changes.
+
+## Current verification posture
+
+`scripts/wave_verify.sh` is the main local verification gate.
+
+Current behavior:
+
+- Runs `git diff --check`.
+- Runs targeted pytest paths when provided.
+- Runs the full pytest suite with `timeout 300s .venv/bin/python -m pytest tests -q`.
+- Runs `scripts/wave_clean_artifacts.sh` automatically on exit.
+- Prints final `git status --short`.
+- Preserves the original verification failure exit code when cleanup also runs.
+
+Wave 10.9 improved:
+
+- diagnostic section headers
+- working directory and branch visibility
+- rerun guidance for failed commands
+- artifact cleanup summaries
+- final verification and cleanup exit-code reporting
+
+Verification posture:
+
+- Failures are not hidden.
+- Failing tests/evals must not be converted into success.
+- Required checks must not be downgraded to warnings.
+- Known tracked test artifacts are cleaned/restored by `scripts/wave_clean_artifacts.sh`.
+- Cleanup must not delete untracked files and must not use `git clean`.
+
+## Current release/readiness posture
+
+`docs/runbooks/release_readiness_checklist.md` exists and should be used before treating a repo state as ready for:
+
+- local demo readiness
+- internal release review readiness
+- future deployment/security review readiness
+
+Important boundaries:
+
+- The checklist is operator review guidance, not deployment automation.
+- It does not prove public SaaS readiness.
+- Public exposure remains blocked by posture/security constraints unless explicitly and safely configured.
+- Operator auth, runtime preflight, and public exposure posture should not be overclaimed beyond the current implementation.
+- Release evidence should include commit SHA, Git status, test summary, health result, preflight summary, operator auth smoke result if run, and known caveats.
+
+## Output/provenance posture
+
+Current output posture:
+
+- Evidence markers are traceability aids.
+- Citations are traceability aids.
+- Source locators are traceability aids.
+- Provenance surfaces support review and audit.
+- None of these should be described as proof of semantic claim support.
+
+Current client/operator boundary:
+
+- Keep operator-only warnings and internal diagnostics out of client-facing reports unless a surface is explicitly operator-facing.
+- Client-facing outputs should remain clean, bounded, and reviewed.
+- Operator-facing outputs may include traceability diagnostics useful for review.
+
+Technology Readiness and monitoring posture:
+
+- Technology Readiness outputs should retain caveats about evidence gaps, external reliance, and human review.
+- Readiness language should not imply unsupported certainty or advancement approval.
+- Monitoring plans should keep owner, action, signal, threshold, cadence, canary, circuit-breaker, and human-review posture clear.
+- MAS does not perform autonomous external monitoring or autonomous actions.
 
 ## Current verified test status
 
-Recent local verification:
+Current expected local verification shape:
 
 - Full test suite: `696 passed, 1 warning, 67 subtests passed`
-- Targeted operator auth tests: `5 passed, 1 warning`
-- Targeted runtime preflight tests: `26 passed, 10 subtests passed`
 
-Recent GitHub CI:
+Treat this as orientation only. Future waves must rerun the relevant verification command rather than relying on this recorded baseline.
 
-- PR #57 pytest CI passed.
+Recent GitHub/main baseline:
+
+- `0efa66e Improve CI eval reliability diagnostics (#61)`
+- Wave 10.9 verification diagnostics are merged.
 
 ## Wave automation workflow
 
@@ -138,7 +262,7 @@ scripts/wave_commit.sh "<commit message>" <explicit files>
 scripts/wave_pr.sh "<PR title>" <PR body file>
 ```
 
-`wave_verify.sh` now runs artifact cleanup automatically after tests.
+`wave_verify.sh` now runs artifact cleanup automatically after tests and prints clearer diagnostics and rerun guidance.
 
 ## Git hygiene
 
@@ -154,21 +278,43 @@ Never commit:
 
 Use explicit-file commits through `scripts/wave_commit.sh`.
 
-## Recommended next implementation candidates
+## Recommended Wave 11 direction
 
-Good next small waves:
+Wave 11 should start with strategic direction and best-opportunity review before implementing a new feature.
 
-1. Release readiness checklist.
-2. Export/provenance polish.
-3. Technology Readiness UX/output polish.
-4. Monitoring template polish.
-5. CI/eval aggregation reliability cleanup.
-6. Operator-authenticated runtime drill polish, if the new smoke runbook reveals gaps.
+Recommended discovery approach:
+
+- Use Claude Code or a comparable repo review pass for discovery/design only.
+- Review current architecture, tests, runbooks, product surfaces, and operator workflows before selecting implementation.
+- Run an ARVV-style audit before committing to a feature wave.
+- Keep the final implementation choice dependent on that review, not on assumptions in this context file.
+
+Likely candidates to evaluate:
+
+1. Evidence-strength / claim-support layer.
+2. ICE clarification productization.
+3. Decision quality evaluation layer.
+4. Runtime/job durability.
+5. Operator UX consistency / guided review.
+
+## What not to do next
+
+Do not:
+
+- jump into public SaaS
+- build multi-tenancy yet
+- make MAS an autonomous agent
+- broaden MAS into a generic chatbot
+- broaden MAS into generic BI
+- implement a large feature without a focused wave spec and tests
+- overclaim operator auth, runtime preflight, public exposure, provenance, or readiness beyond the current implementation
 
 ## Current guidance for future agents
 
-Keep changes small and reviewable.
+Keep changes small, reviewable, and scoped to an explicit wave.
 
-Prefer documentation, verification, and operator-safety polish before adding public/product expansion features.
+Preserve distinctions between implemented, partial, scaffolded, planned, and not implemented work.
 
-Do not introduce public SaaS behavior, multi-tenancy, or public authentication flows without a dedicated security/design wave.
+Prefer documentation, verification, operator-safety, and review-quality polish before adding public/product expansion features.
+
+Do not introduce public SaaS behavior, multi-tenancy, public authentication flows, autonomous action behavior, or deployment posture changes without a dedicated security/design wave.
