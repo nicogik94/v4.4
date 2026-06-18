@@ -167,6 +167,19 @@ Important points:
 - Adds focused tests for endpoint payload, caveats, resolver statuses, malformed markers, empty/missing cases, and non-mutation.
 - Verification passed: `705 passed, 1 warning, 67 subtests passed`.
 
+### Wave 11.4 — Delivery Review Readiness Composite
+
+Wave 11.4 adds a read-only advisory Delivery Review Readiness projection on the `wave11-4-delivery-review-readiness` branch.
+
+Important points:
+
+- Adds `delivery_readiness.py` as a pure projector over existing clarification, CDP evidence-review, risk-gate, phase-state, approval-like, and staleness signals.
+- Adds `GET /projects/{project_id}/delivery-review-readiness`.
+- Adds a compact `delivery_review_readiness` field to workspace summaries; overview includes it through the nested workspace summary.
+- The projection does not approve delivery, gate delivery, mutate `ProjectState`, save state, hydrate decision objects in the endpoint, create a workflow phase, or change report/export behavior.
+- It does not prove semantic evidence support; human review remains mandatory.
+- Focused targeted verification passed: `118 passed, 1 warning, 36 subtests passed`.
+
 ## Current safety posture
 
 - Local/operator-first.
