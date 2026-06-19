@@ -45,6 +45,7 @@ from clarifications import (
     supersede_open_questions,
 )
 from connectors import CONNECTOR_REGISTRY
+from delivery_readiness import DeliveryReviewReadiness, build_delivery_review_readiness
 from explainability import (
     ExplainabilityReport,
     PhaseTraceSummary,
@@ -539,6 +540,14 @@ async def get_evidence_review(project_id: str):
     if not state:
         raise HTTPException(404, "Project not found")
     return _build_evidence_review_payload(project_id, state)
+
+
+@app.get("/projects/{project_id}/delivery-review-readiness", response_model=DeliveryReviewReadiness)
+async def get_delivery_review_readiness(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    return build_delivery_review_readiness(project_id, state)
 
 
 @app.get("/projects/{project_id}/workspace", response_model=WorkspaceSummary)

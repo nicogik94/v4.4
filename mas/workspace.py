@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from clarifications import ClarificationSummary, build_clarification_summary
 from decision_objects import compute_source_state_hash, ensure_decision_objects
+from delivery_readiness import DeliveryReviewReadiness, build_delivery_review_readiness
 from ingestion_contract import DEFAULT_INGESTION_SOURCE, LEGACY_CONTRACT_VERSION
 from knowledge.freshness import build_knowledge_health
 from knowledge.retrieval import RetrievalPhaseImpactSummary, build_prompt_facing_retrieval_impact
@@ -99,6 +100,9 @@ class WorkspaceSummary(BaseModel):
     decision_object_health: DecisionObjectHealth = Field(default_factory=DecisionObjectHealth)
     knowledge_health: KnowledgeHealthSummary = Field(default_factory=KnowledgeHealthSummary)
     clarification_summary: ClarificationSummary = Field(default_factory=ClarificationSummary)
+    delivery_review_readiness: DeliveryReviewReadiness = Field(
+        default_factory=lambda: DeliveryReviewReadiness(project_id="")
+    )
     active_risks: list[Risk] = Field(default_factory=list)
     evidence_timeline: list[Evidence] = Field(default_factory=list)
     hypothesis_table: list[WorkspaceHypothesisRow] = Field(default_factory=list)
@@ -221,6 +225,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         decision_object_health=decision_object_health,
         knowledge_health=knowledge_health,
         clarification_summary=clarification_summary,
+        delivery_review_readiness=build_delivery_review_readiness(state.project_id, state),
         active_risks=active_risks[:12],
         evidence_timeline=evidence_timeline[:24],
         hypothesis_table=hypothesis_table,
