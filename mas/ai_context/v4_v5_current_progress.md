@@ -203,6 +203,17 @@ Important points:
 - Aggregation errors, deterministic eval failures, claim-traceability failures, mixed failures, and real eval-quality regressions still fail.
 - This does not weaken Wave 11.5 claim-traceability evals and does not hide real eval failures.
 
+### Wave 11.6 — Engine Reliability + Support-Phase Test Hardening
+
+Wave 11.6 adds deterministic support-phase reliability tests for gauntlet, SQI, monitor, and small existing monitoring / circuit-breaker interpretation paths.
+
+Important points:
+
+- Improves coverage for support-phase thresholding, output shape preservation, advisory SQI behavior, monitor-plan structure, and surfaced breaker/blocking reasons.
+- This is test and context hardening only.
+- It does not change workflow routing, report/export behavior, delivery-readiness semantics, eval semantics, or monitoring autonomy.
+- MAS remains local/operator-first and human review remains mandatory.
+
 ## Current safety posture
 
 - Local/operator-first.
