@@ -225,6 +225,17 @@ Important points:
 - `.gitignore` covers Python bytecode and pytest cache patterns.
 - This does not change source behavior, tests, workflow routing, readiness semantics, report/export behavior, eval semantics, or runtime behavior.
 
+### Wave 11.8 — Workflow Runner Consolidation Discovery
+
+Wave 11.8 maps the current workflow runner and execution surfaces to prepare a future decision about whether Wave 11.9 should exist.
+
+Important points:
+
+- This is discovery-only.
+- It identifies the API-backed sequential runner as the active operator full-workflow path.
+- It does not change runtime behavior, workflow routing, readiness, eval, report/export, auth, preflight, API behavior, tests, or scripts.
+- It recommends that any Wave 11.9 work be small, test-first, and avoid actual runner consolidation unless separately scoped.
+
 ## Current safety posture
 
 - Local/operator-first.
