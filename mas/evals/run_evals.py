@@ -24,7 +24,9 @@ from typing import Optional
 # Allow running from repo root or from inside mas/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from state import ProjectState
+from cdp.citation_resolvability import build_defense_pass_result
+from cdp.review_caveats import CDP_REVIEW_CAVEATS
+from state import KnowledgeItem, KnowledgeLayerState, ProjectState
 from orchestrator import run_phase_node
 from llm_client import call_llm, LLMResponse, parse_json
 from config import ModelConfig, Provider
@@ -33,6 +35,8 @@ PASS_THRESHOLD = 0.75  # fail CI if <75% of cases pass
 JUDGE_MODEL = "claude-sonnet-4-6"
 JUDGE_SYSTEM_PROMPT = "You are a harsh but fair evaluator. Return only JSON."
 EVAL_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
+CITATION_RESOLVABILITY_SCHEMA_VERSION = "citation_resolvability_eval.v0.1"
+CITATION_RESOLVABILITY_PASS_STATUSES = {"pass", "not_applicable"}
 
 
 def _normalize_eval_text(value) -> str:
@@ -153,6 +157,8 @@ class CaseResult:
     must_mention_hits: float = 0.0       # fraction of must_mention terms seen
     must_not_mention_violations: int = 0
     data_labeling_correct: bool = False  # PREDICTED vs MEASURED honesty
+    citation_resolvability_ok: bool = True
+    citation_resolvability: dict = field(default_factory=dict)
     judge_overall: int = 0               # 0-100 from LLM judge
     judge_rationale: str = ""
     errors: list[str] = field(default_factory=list)
@@ -352,7 +358,189 @@ def score_deterministic(case: dict, output: dict) -> CaseResult:
     else:
         r.data_labeling_correct = True  # no audit to judge yet
 
+    r.citation_resolvability = score_citation_resolvability(case, output)
+    r.citation_resolvability_ok = _citation_resolvability_ok(case, r.citation_resolvability)
+
     return r
+
+
+def score_citation_resolvability(case: dict, output: dict) -> dict:
+    """Score review-only citation resolvability without semantic support claims."""
+    state = _citation_eval_state(case, output)
+    if state is None:
+        return _citation_eval_payload(
+            status="not_applicable",
+            score=0.0,
+            warnings=["No report/evidence fixture was supplied for citation-resolvability eval."],
+            missing_inputs=["citation_resolvability_fixture_missing"],
+        )
+
+    result = build_defense_pass_result(state)
+    counts = dict(result.summary_counts)
+    resolved_exact_count = int(counts.get("resolved_exact", 0) or 0)
+    resolved_id_only_count = int(counts.get("resolved_id_only", 0) or 0)
+    unknown_evidence_id_count = int(counts.get("unknown_evidence_id", 0) or 0)
+    locator_mismatch_count = int(counts.get("locator_mismatch", 0) or 0)
+    malformed_marker_count = int(counts.get("malformed", 0) or 0)
+    canonical_marker_count = int(counts.get("canonical_marker_count", 0) or 0)
+    marker_count = canonical_marker_count + malformed_marker_count
+    unresolved_count = unknown_evidence_id_count + locator_mismatch_count + malformed_marker_count
+    load_bearing_review_count = int(counts.get("load_bearing_review_count", 0) or 0)
+
+    warnings: list[str] = []
+    if not str(getattr(state, "report", "") or "").strip():
+        status = "unknown"
+        warnings.append("Report text is missing; citation resolvability cannot be evaluated.")
+    elif marker_count == 0:
+        status = "no_markers"
+        warnings.append("No evidence citation markers were found; this is not evidence of semantic support.")
+    elif unresolved_count:
+        status = "fail"
+        warnings.append("Unresolved or malformed citation marker(s) require operator review.")
+    elif result.missing_inputs:
+        status = "unknown"
+        warnings.append("Citation-resolvability inputs are incomplete.")
+    elif resolved_id_only_count or load_bearing_review_count:
+        status = "partial"
+        if resolved_id_only_count:
+            warnings.append("ID-only citation resolution is weaker than exact locator resolution.")
+        if load_bearing_review_count:
+            warnings.append("Load-bearing line-level review prompts require operator review.")
+    else:
+        status = "pass"
+
+    score = _citation_resolvability_score(
+        marker_count=marker_count,
+        resolved_exact_count=resolved_exact_count,
+        resolved_id_only_count=resolved_id_only_count,
+        unresolved_count=unresolved_count,
+        status=status,
+    )
+    return _citation_eval_payload(
+        status=status,
+        score=score,
+        marker_count=marker_count,
+        resolved_exact_count=resolved_exact_count,
+        resolved_id_only_count=resolved_id_only_count,
+        unknown_evidence_id_count=unknown_evidence_id_count,
+        locator_mismatch_count=locator_mismatch_count,
+        malformed_marker_count=malformed_marker_count,
+        unresolved_count=unresolved_count,
+        load_bearing_review_count=load_bearing_review_count,
+        missing_inputs=list(result.missing_inputs),
+        warnings=warnings,
+    )
+
+
+def _citation_resolvability_ok(case: dict, summary: dict) -> bool:
+    fixture = case.get("citation_resolvability_fixture") or {}
+    expected_status = str(fixture.get("expected_status") or "").strip()
+    if expected_status:
+        if str(summary.get("status") or "") != expected_status:
+            return False
+        expected_min_score = fixture.get("expected_min_score")
+        if expected_min_score is not None:
+            try:
+                return float(summary.get("score", 0.0) or 0.0) >= float(expected_min_score)
+            except (TypeError, ValueError):
+                return False
+        return True
+    return str(summary.get("status") or "") in CITATION_RESOLVABILITY_PASS_STATUSES
+
+
+def _citation_resolvability_score(
+    *,
+    marker_count: int,
+    resolved_exact_count: int,
+    resolved_id_only_count: int,
+    unresolved_count: int,
+    status: str,
+) -> float:
+    if status in {"not_applicable", "unknown", "no_markers"} or marker_count <= 0:
+        return 0.0
+    weighted = resolved_exact_count + (0.6 * resolved_id_only_count) - unresolved_count
+    return round(max(0.0, min(1.0, weighted / marker_count)), 4)
+
+
+def _citation_eval_payload(
+    *,
+    status: str,
+    score: float,
+    marker_count: int = 0,
+    resolved_exact_count: int = 0,
+    resolved_id_only_count: int = 0,
+    unknown_evidence_id_count: int = 0,
+    locator_mismatch_count: int = 0,
+    malformed_marker_count: int = 0,
+    unresolved_count: int = 0,
+    load_bearing_review_count: int = 0,
+    missing_inputs: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> dict:
+    return {
+        "schema_version": CITATION_RESOLVABILITY_SCHEMA_VERSION,
+        "source": "cdp.citation_resolvability.build_defense_pass_result",
+        "review_only": True,
+        "traceability_only": True,
+        "score": score,
+        "marker_count": marker_count,
+        "resolved_exact_count": resolved_exact_count,
+        "resolved_id_only_count": resolved_id_only_count,
+        "unknown_evidence_id_count": unknown_evidence_id_count,
+        "locator_mismatch_count": locator_mismatch_count,
+        "malformed_marker_count": malformed_marker_count,
+        "unresolved_count": unresolved_count,
+        "load_bearing_review_count": load_bearing_review_count,
+        "status": status,
+        "warnings": list(warnings or []),
+        "missing_inputs": list(missing_inputs or []),
+        "caveats": list(CDP_REVIEW_CAVEATS),
+    }
+
+
+def _citation_eval_state(case: dict, output: dict) -> ProjectState | None:
+    fixture = case.get("citation_resolvability_fixture")
+    if isinstance(fixture, dict):
+        return _citation_fixture_state(case, fixture)
+
+    if not isinstance(output, dict):
+        return None
+    if not any(key in output for key in ("report", "knowledge_layer", "imported_evidence", "decision_objects")):
+        return None
+    payload = {
+        "project_id": output.get("project_id") or f"eval-{case.get('id', 'case')}",
+        "project_name": output.get("project_name") or f"eval {case.get('id', 'case')}",
+        "brief": output.get("brief") or case.get("brief", ""),
+    }
+    payload.update(output)
+    return ProjectState.model_validate(payload)
+
+
+def _citation_fixture_state(case: dict, fixture: dict) -> ProjectState:
+    state = ProjectState(
+        project_id=f"eval-{case.get('id', 'case')}-citation",
+        project_name=f"eval {case.get('id', 'case')} citation fixture",
+        brief=case.get("brief", ""),
+        report=str(fixture.get("report") or ""),
+    )
+    knowledge_items = []
+    for item in fixture.get("knowledge_items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        knowledge_items.append(
+            KnowledgeItem(
+                item_id=str(item.get("item_id") or item.get("evidence_id") or ""),
+                evidence_id=str(item.get("evidence_id") or item.get("item_id") or ""),
+                source_id=str(item.get("source_id") or "eval_fixture"),
+                source_ref=str(item.get("source_ref") or ""),
+                locator=str(item.get("locator") or ""),
+                title=str(item.get("title") or ""),
+                structured_payload=dict(item.get("structured_payload") or {}),
+            )
+        )
+    if knowledge_items:
+        state.knowledge_layer = KnowledgeLayerState(items=knowledge_items)
+    return state
 
 
 JUDGE_PROMPT_TEMPLATE = """You are evaluating the output of an AI decision workflow against a rubric.
@@ -421,6 +609,7 @@ def pass_fail(r: CaseResult) -> bool:
         and r.must_mention_hits >= 0.66
         and r.must_not_mention_violations == 0
         and r.data_labeling_correct
+        and r.citation_resolvability_ok
         and r.judge_overall >= 65
     )
 

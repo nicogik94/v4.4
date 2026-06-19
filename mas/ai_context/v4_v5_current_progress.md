@@ -180,6 +180,18 @@ Important points:
 - It does not prove semantic evidence support; human review remains mandatory.
 - Focused targeted verification passed: `118 passed, 1 warning, 36 subtests passed`.
 
+### Wave 11.5 — Evidence Quality + Claim-Defensibility Eval Dimension
+
+Wave 11.5 adds a deterministic `citation_resolvability` eval dimension.
+
+Important points:
+
+- Reuses CDP citation-resolvability logic to score marker-to-evidence metadata traceability in eval fixtures.
+- Covers exact resolution, ID-only resolution, unknown evidence IDs, malformed markers, and no-marker behavior.
+- Preserves CDP caveats in eval output.
+- This does not prove semantic claim support or full claim defensibility.
+- Evidence Gauge, Defense Index, and Claim Cards remain not implemented.
+
 ## Current safety posture
 
 - Local/operator-first.

@@ -25,7 +25,7 @@ Cases cover every Cynefin domain including Confused (G12, which tests the "halt 
 
 ## Scoring
 
-Each case is scored on **seven deterministic checks** plus an **LLM judge** (Sonnet 4.6):
+Each case is scored on **eight deterministic checks** plus an **LLM judge** (Sonnet 4.6):
 
 1. `domain_match` — classify agent picked the expected Cynefin domain
 2. `hypothesis_count_ok` — within the expected range (usually 8–12)
@@ -33,9 +33,31 @@ Each case is scored on **seven deterministic checks** plus an **LLM judge** (Son
 4. `must_mention_hits ≥ 0.66` — at least 66% of expected strategy concepts surface
 5. `must_not_mention_violations == 0` — no red-flag phrases ("guaranteed ranking", "trust your gut", etc.)
 6. `data_labeling_correct` — audit phase honestly labels PREDICTED vs MEASURED
-7. `judge_overall ≥ 65` — LLM judge gives at least 65/100
+7. `citation_resolvability_ok` — CDP citation-resolvability fixture, when present, matches the expected traceability status
+8. `judge_overall ≥ 65` — LLM judge gives at least 65/100
 
-A case passes only if **all seven** are satisfied. The suite passes overall if **≥75% of cases pass**. Below that, CI fails and prevents merge.
+A case passes only if **all eight** are satisfied. The suite passes overall if **≥75% of cases pass**. Below that, CI fails and prevents merge.
+
+### Citation Resolvability Dimension
+
+The `citation_resolvability` dimension is deterministic and offline. It reuses `cdp.citation_resolvability.build_defense_pass_result` and reports:
+
+- `score`
+- marker and resolver-status counts
+- `unresolved_count`
+- `status`
+- CDP caveats
+
+This dimension is resolvability / traceability only. It does not verify semantic evidence support, does not prove full claim defensibility, does not approve delivery, and does not implement Evidence Gauge, Defense Index, or Claim Cards.
+
+Fixture status meanings:
+
+- `pass` — markers resolve exactly to registered evidence locator metadata.
+- `partial` — markers are known but ID-only or otherwise require operator review.
+- `fail` — unresolved, locator-mismatched, or malformed markers are present.
+- `no_markers` — no citation markers were found; this is not evidence of semantic support.
+- `unknown` — required report or evidence-registry inputs are missing.
+- `not_applicable` — no citation-resolvability fixture or report output was supplied for that eval case.
 
 ## Two runners, two purposes
 
@@ -95,6 +117,8 @@ The eval harness is intentionally **not** a unit test for single agents. It exer
 ## Adding new cases
 
 Append a JSON object to `golden_cases.jsonl` with the same schema. Keep briefs realistic — prefer anonymized real client scenarios over synthetic toys. Aim for 1–2 new cases per month as the system accumulates real engagements.
+
+To exercise citation-resolvability, add a small `citation_resolvability_fixture` with `report`, optional `knowledge_items`, and an `expected_status`. Keep these fixtures tiny and deterministic; they are review-only traceability checks, not semantic-support labels.
 
 ## Cost control
 

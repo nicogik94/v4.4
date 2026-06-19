@@ -1,5 +1,7 @@
 import asyncio
+import json
 
+from cdp.review_caveats import CDP_REVIEW_CAVEATS
 from config import Provider
 from state import ClassifyOutput
 from evals.run_evals import (
@@ -17,6 +19,7 @@ from evals.run_evals import (
     pass_fail,
     run_case_real,
     run_case_mock,
+    score_citation_resolvability,
     score_deterministic,
     shard_cases,
     summarize_results,
@@ -308,6 +311,176 @@ def test_real_pass_fail_still_rejects_missing_framework_coverage():
 
     assert result.frameworks_covered == 0.0
     assert not pass_fail(result)
+
+
+def _citation_case(report, knowledge_items=None, expected_status=None):
+    fixture = {
+        "report": report,
+        "knowledge_items": knowledge_items or [],
+    }
+    if expected_status:
+        fixture["expected_status"] = expected_status
+    return {
+        "id": "CDP-EVAL",
+        "brief": "Evaluate citation resolvability.",
+        "expected_domain": "Complicated",
+        "min_hypotheses": 0,
+        "max_hypotheses": 10,
+        "must_contain_frameworks": [],
+        "strategy_must_mention": [],
+        "strategy_must_not_mention": [],
+        "data_based_expected": False,
+        "citation_resolvability_fixture": fixture,
+    }
+
+
+def _knowledge_item(evidence_id="ev1", locator="chunk=1", source_ref="fixture://source#chunk=1"):
+    return {
+        "item_id": evidence_id,
+        "evidence_id": evidence_id,
+        "source_id": "eval",
+        "source_ref": source_ref,
+        "locator": locator,
+        "title": "Eval evidence",
+    }
+
+
+def test_citation_resolvability_dimension_appears_in_eval_output():
+    case = _citation_case(
+        "# Executive Summary\nA traceable claim [Evidence: ev1 | chunk=1].",
+        [_knowledge_item()],
+        expected_status="pass",
+    )
+    output = {"classify": {"domain": "Complicated"}, "hypotheses": []}
+
+    result = score_deterministic(case, output)
+
+    assert result.citation_resolvability_ok is True
+    assert result.citation_resolvability["schema_version"] == "citation_resolvability_eval.v0.1"
+    assert result.citation_resolvability["status"] == "pass"
+    assert result.citation_resolvability["marker_count"] == 1
+    assert result.citation_resolvability["resolved_exact_count"] == 1
+
+
+def test_exact_resolved_markers_improve_dimension_score():
+    case = _citation_case(
+        "# Executive Summary\nA traceable claim [Evidence: ev1 | chunk=1].",
+        [_knowledge_item()],
+    )
+
+    summary = score_citation_resolvability(case, {})
+
+    assert summary["status"] == "pass"
+    assert summary["score"] == 1.0
+    assert summary["resolved_exact_count"] == 1
+    assert summary["unresolved_count"] == 0
+
+
+def test_id_only_resolution_is_partial_warning_not_semantic_support():
+    case = _citation_case(
+        "# Executive Summary\nID-only claim [Evidence: ev1 | locator unavailable].",
+        [_knowledge_item(locator="", source_ref="fixture://source")],
+        expected_status="partial",
+    )
+
+    summary = score_citation_resolvability(case, {})
+
+    assert summary["status"] == "partial"
+    assert summary["score"] == 0.6
+    assert summary["resolved_id_only_count"] == 1
+    assert any("ID-only" in warning for warning in summary["warnings"])
+    assert "CDP does not verify semantic support." in summary["caveats"]
+
+
+def test_unknown_evidence_id_and_malformed_marker_degrade_dimension():
+    cases = [
+        (
+            _citation_case(
+                "# Executive Summary\nUnknown claim [Evidence: ev-missing | chunk=1].",
+                [],
+                expected_status="fail",
+            ),
+            "unknown_evidence_id_count",
+        ),
+        (
+            _citation_case(
+                "# Executive Summary\nMalformed claim [Evidence: ev1 \\| chunk=1].",
+                [_knowledge_item()],
+                expected_status="fail",
+            ),
+            "malformed_marker_count",
+        ),
+    ]
+
+    for case, count_key in cases:
+        summary = score_citation_resolvability(case, {})
+        assert summary["status"] == "fail"
+        assert summary["score"] == 0.0
+        assert summary[count_key] == 1
+        assert summary["unresolved_count"] == 1
+
+
+def test_no_marker_case_does_not_overclaim_success():
+    case = _citation_case(
+        "# Executive Summary\nNo evidence markers appear in this report.",
+        [],
+        expected_status="no_markers",
+    )
+
+    summary = score_citation_resolvability(case, {})
+
+    assert summary["status"] == "no_markers"
+    assert summary["score"] == 0.0
+    assert summary["marker_count"] == 0
+    assert any("not evidence of semantic support" in warning for warning in summary["warnings"])
+
+
+def test_golden_citation_fixtures_cover_required_statuses_and_mock_path_still_passes():
+    expected_statuses = {
+        (case.get("citation_resolvability_fixture") or {}).get("expected_status")
+        for case in load_cases()
+        if case.get("citation_resolvability_fixture")
+    }
+
+    assert {"pass", "partial", "fail", "no_markers"}.issubset(expected_statuses)
+    for case in load_cases():
+        _, result = _mock_score(case)
+        assert result.passed, case["id"]
+
+
+def test_citation_resolvability_caveats_are_not_lost():
+    case = _citation_case(
+        "# Executive Summary\nA traceable claim [Evidence: ev1 | chunk=1].",
+        [_knowledge_item()],
+    )
+
+    summary = score_citation_resolvability(case, {})
+
+    assert summary["caveats"] == list(CDP_REVIEW_CAVEATS)
+
+
+def test_citation_resolvability_output_avoids_overclaiming_field_language():
+    case = _citation_case(
+        "# Executive Summary\nA traceable claim [Evidence: ev1 | chunk=1].",
+        [_knowledge_item()],
+    )
+
+    payload = score_citation_resolvability(case, {})
+    text = json.dumps({key: value for key, value in payload.items() if key != "caveats"}).lower()
+
+    forbidden = [
+        "semantic_support",
+        "claim_truth",
+        "defensibility_proven",
+        "evidence_gauge",
+        "defense_index",
+        "claim_cards",
+        "safe_to_send",
+        "delivery_approved",
+        "delivery_gate_passed",
+    ]
+    for phrase in forbidden:
+        assert phrase not in text
 
 
 def test_deterministic_scoring_normalizes_framework_and_phrase_text():
