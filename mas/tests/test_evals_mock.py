@@ -13,6 +13,7 @@ from evals.run_evals import (
     _normalize_eval_text,
     _term_present,
     _term_present_exact,
+    aggregate_exit_code,
     aggregate_summaries,
     judge_case,
     load_cases,
@@ -75,6 +76,55 @@ def _fake_case_result(case_id, passed=True, rationale="mock"):
         data_labeling_correct=True,
         judge_overall=70 if passed else 0,
         judge_rationale=rationale,
+    )
+
+
+def _provider_failure_case_result(case_id, rationale):
+    return CaseResult(
+        case_id=case_id,
+        passed=False,
+        domain_match=True,
+        hypothesis_count_ok=True,
+        frameworks_covered=1.0,
+        must_mention_hits=1.0,
+        must_not_mention_violations=0,
+        data_labeling_correct=True,
+        citation_resolvability_ok=True,
+        judge_overall=0,
+        judge_rationale=rationale,
+    )
+
+
+def _quality_failure_case_result(case_id):
+    return CaseResult(
+        case_id=case_id,
+        passed=False,
+        domain_match=False,
+        hypothesis_count_ok=True,
+        frameworks_covered=1.0,
+        must_mention_hits=1.0,
+        must_not_mention_violations=0,
+        data_labeling_correct=True,
+        citation_resolvability_ok=True,
+        judge_overall=70,
+        judge_rationale="mock quality failure",
+    )
+
+
+def _claim_traceability_failure_case_result(case_id):
+    return CaseResult(
+        case_id=case_id,
+        passed=False,
+        domain_match=True,
+        hypothesis_count_ok=True,
+        frameworks_covered=1.0,
+        must_mention_hits=1.0,
+        must_not_mention_violations=0,
+        data_labeling_correct=True,
+        citation_resolvability_ok=False,
+        citation_resolvability={"status": "fail", "unresolved_count": 1},
+        judge_overall=70,
+        judge_rationale="mock",
     )
 
 
@@ -168,6 +218,134 @@ def test_aggregate_preserves_provider_failure_rationale(tmp_path):
 
     first_case = next(case for case in aggregate["cases"] if case["case_id"] == first_id)
     assert first_case["judge_rationale"] == provider_rationale
+
+
+def test_provider_quota_only_aggregate_failure_is_provider_unavailable(tmp_path):
+    cases = load_cases()
+    provider_rationale = (
+        "judge error: Provider call failed: category=quota_exceeded, "
+        "provider=anthropic, model=claude-sonnet-4-6"
+    )
+    results_by_id = {
+        case["id"]: _provider_failure_case_result(case["id"], provider_rationale)
+        for case in cases
+    }
+
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.75,
+    )
+
+    assert aggregate["ok"] is False
+    assert aggregate["aggregate_failure_kind"] == "provider_unavailable"
+    assert aggregate["provider_unavailable"] is True
+    assert aggregate["provider_failure_only"] is True
+    assert aggregate["provider_failure_detected"] is True
+    assert aggregate["provider_failure_count"] == len(cases)
+    assert aggregate["provider_failure_categories"] == ["quota_exceeded"]
+    assert aggregate["quality_failure_count"] == 0
+    assert aggregate["quality_ok"] == "unknown"
+    assert aggregate_exit_code(aggregate) == 0
+
+
+def test_provider_quota_only_aggregate_is_not_eval_quality_failure(tmp_path):
+    cases = load_cases()
+    provider_rationale = (
+        "judge error: Provider call failed: category=quota_exceeded, "
+        "provider=anthropic, model=claude-sonnet-4-6"
+    )
+    results_by_id = {
+        case["id"]: _provider_failure_case_result(case["id"], provider_rationale)
+        for case in cases
+    }
+
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.75,
+    )
+
+    assert aggregate["aggregate_failure_kind"] != "eval_quality_failure"
+    assert aggregate["quality_failure_case_ids"] == []
+
+
+def test_mixed_provider_and_real_quality_failure_still_fails(tmp_path):
+    cases = load_cases()
+    provider_rationale = (
+        "judge error: Provider call failed: category=quota_exceeded, "
+        "provider=anthropic, model=claude-sonnet-4-6"
+    )
+    results_by_id = {case["id"]: _fake_case_result(case["id"], passed=True) for case in cases}
+    results_by_id[cases[0]["id"]] = _provider_failure_case_result(cases[0]["id"], provider_rationale)
+    results_by_id[cases[1]["id"]] = _quality_failure_case_result(cases[1]["id"])
+
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.99,
+    )
+
+    assert aggregate["aggregate_failure_kind"] == "mixed_failure"
+    assert aggregate["provider_failure_count"] == 1
+    assert aggregate["quality_failure_count"] == 1
+    assert aggregate["provider_unavailable"] is False
+    assert aggregate_exit_code(aggregate) == 1
+
+
+def test_aggregation_errors_remain_failing(tmp_path):
+    aggregate = aggregate_summaries(
+        [str(tmp_path / "missing-summary-dir")],
+        threshold=0.75,
+    )
+
+    assert aggregate["aggregate_failure_kind"] == "aggregation_error"
+    assert aggregate["aggregation_errors"]
+    assert aggregate["provider_failure_detected"] is False
+    assert aggregate_exit_code(aggregate) == 1
+
+
+def test_claim_traceability_failure_remains_real_eval_failure(tmp_path):
+    cases = load_cases()
+    results_by_id = {case["id"]: _fake_case_result(case["id"], passed=True) for case in cases}
+    results_by_id[cases[0]["id"]] = _claim_traceability_failure_case_result(cases[0]["id"])
+
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.99,
+    )
+
+    assert aggregate["aggregate_failure_kind"] == "eval_quality_failure"
+    assert aggregate["provider_failure_count"] == 0
+    assert aggregate["quality_failure_count"] == 1
+    assert aggregate["quality_failure_case_ids"] == [cases[0]["id"]]
+    assert aggregate_exit_code(aggregate) == 1
+
+
+def test_aggregate_provider_diagnostics_avoid_overclaiming_language(tmp_path):
+    cases = load_cases()
+    provider_rationale = (
+        "judge error: Provider call failed: category=quota_exceeded, "
+        "provider=anthropic, model=claude-sonnet-4-6"
+    )
+    results_by_id = {
+        case["id"]: _provider_failure_case_result(case["id"], provider_rationale)
+        for case in cases
+    }
+
+    aggregate = aggregate_summaries(
+        _write_sharded_summaries(tmp_path, results_by_id),
+        threshold=0.75,
+    )
+    payload = {key: value for key, value in aggregate.items() if key != "cases"}
+    text = json.dumps(payload, sort_keys=True).lower()
+
+    for phrase in (
+        "semantic_support",
+        "claim_truth",
+        "defensibility_proven",
+        "delivery_approved",
+        "delivery_gate_passed",
+        "safe_to_send",
+    ):
+        assert phrase not in text
 
 
 def test_judge_case_calls_current_call_llm_interface(monkeypatch):

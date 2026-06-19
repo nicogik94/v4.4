@@ -84,6 +84,20 @@ python -m evals.run_evals --mock
 python -m evals.run_evals --report evals/out/
 ```
 
+### Aggregate Diagnostics
+
+Shard aggregation classifies aggregate failures explicitly:
+
+- `none` — aggregate passed.
+- `eval_quality_failure` — deterministic checks or non-provider judge scoring failed.
+- `provider_unavailable` — the only failing cases have passing deterministic checks, but the LLM judge failed because the external provider was unavailable, quota-exhausted, or rate-limited.
+- `aggregation_error` — shard reports were missing, duplicated, malformed, or incomplete.
+- `mixed_failure` — provider failures and real eval/aggregation failures appeared together.
+
+Aggregate summaries include `provider_failure_count`, `provider_failure_categories`, `provider_failure_detected`, `provider_failure_only`, `provider_unavailable`, `aggregate_failure_kind`, and `quality_ok`.
+
+CI does not treat a provider-unavailable-only aggregate as an eval-quality regression. It still writes `ok: false` and `quality_ok: "unknown"` because the judge did not fully evaluate quality. Aggregation errors, deterministic failures, claim-traceability failures, schema failures, mixed failures, and real quality regressions remain blocking.
+
 ### Batch runner (nightly + regression sweeps)
 
 ```bash
