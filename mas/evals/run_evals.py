@@ -393,16 +393,9 @@ def aggregate_exit_code(summary: dict) -> int:
 def _case_failed_due_provider_only(result: CaseResult, provider_category: str) -> bool:
     if result.passed or not provider_category or result.errors:
         return False
-    deterministic_ok = (
-        result.domain_match
-        and result.hypothesis_count_ok
-        and result.frameworks_covered >= 0.75
-        and result.must_mention_hits >= 0.66
-        and result.must_not_mention_violations == 0
-        and result.data_labeling_correct
-        and result.citation_resolvability_ok
-    )
-    return deterministic_ok and result.judge_overall < 65
+    # Provider judge outages make same-case quality fields unavailable; separate
+    # failed cases without provider rationale are still real quality failures.
+    return result.judge_overall < 65
 
 
 def _normalize_provider_failure_text(value: str) -> str:

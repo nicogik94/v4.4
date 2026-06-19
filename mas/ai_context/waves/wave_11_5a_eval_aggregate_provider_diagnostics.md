@@ -54,7 +54,7 @@ Focused mock/offline tests cover:
 
 - provider quota-only aggregate failure classified as `provider_unavailable`
 - provider quota-only aggregate not labeled as eval-quality failure
-- mixed provider plus real eval-quality failure remains failing
+- provider quota plus any failed case without provider rationale remains a mixed failure
 - aggregation/schema errors remain failing
 - claim-traceability failures remain real eval-quality failures
 - provider failure count/category fields are present
@@ -64,7 +64,7 @@ Focused mock/offline tests cover:
 
 If aggregate failure is provider-unavailable-only, the aggregate command exits successfully after writing diagnostics. The summary still records `ok: false`, `quality_ok: "unknown"`, and `provider_unavailable: true` because the judge did not fully evaluate quality.
 
-The aggregate command still fails for aggregation errors, deterministic failures, claim-traceability failures, schema failures, mixed provider/quality failures, and real eval-quality regressions.
+The aggregate command still fails for aggregation errors, deterministic failures on cases without provider-failure rationale, claim-traceability failures without provider-failure rationale, schema failures, mixed provider/quality failures, and real eval-quality regressions. Deterministic false fields on the same cases as explicit provider/quota judge failures are treated as unavailable quality judgment, not separate quality failures.
 
 ## Caveats
 

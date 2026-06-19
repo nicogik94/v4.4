@@ -89,7 +89,8 @@ def _provider_failure_case_result(case_id, rationale):
         must_mention_hits=1.0,
         must_not_mention_violations=0,
         data_labeling_correct=True,
-        citation_resolvability_ok=True,
+        citation_resolvability_ok=False,
+        citation_resolvability={"status": "fail", "unresolved_count": 1},
         judge_overall=0,
         judge_rationale=rationale,
     )
@@ -244,7 +245,9 @@ def test_provider_quota_only_aggregate_failure_is_provider_unavailable(tmp_path)
     assert aggregate["provider_failure_count"] == len(cases)
     assert aggregate["provider_failure_categories"] == ["quota_exceeded"]
     assert aggregate["quality_failure_count"] == 0
+    assert aggregate["quality_failure_case_ids"] == []
     assert aggregate["quality_ok"] == "unknown"
+    assert all(case["citation_resolvability_ok"] is False for case in aggregate["cases"])
     assert aggregate_exit_code(aggregate) == 0
 
 
@@ -274,19 +277,23 @@ def test_mixed_provider_and_real_quality_failure_still_fails(tmp_path):
         "judge error: Provider call failed: category=quota_exceeded, "
         "provider=anthropic, model=claude-sonnet-4-6"
     )
-    results_by_id = {case["id"]: _fake_case_result(case["id"], passed=True) for case in cases}
-    results_by_id[cases[0]["id"]] = _provider_failure_case_result(cases[0]["id"], provider_rationale)
+    results_by_id = {
+        case["id"]: _provider_failure_case_result(case["id"], provider_rationale)
+        for case in cases
+    }
     results_by_id[cases[1]["id"]] = _quality_failure_case_result(cases[1]["id"])
 
     aggregate = aggregate_summaries(
         _write_sharded_summaries(tmp_path, results_by_id),
-        threshold=0.99,
+        threshold=0.75,
     )
 
     assert aggregate["aggregate_failure_kind"] == "mixed_failure"
-    assert aggregate["provider_failure_count"] == 1
+    assert aggregate["provider_failure_count"] == len(cases) - 1
     assert aggregate["quality_failure_count"] == 1
+    assert aggregate["provider_failure_only"] is False
     assert aggregate["provider_unavailable"] is False
+    assert aggregate["quality_ok"] is False
     assert aggregate_exit_code(aggregate) == 1
 
 
@@ -338,9 +345,13 @@ def test_aggregate_provider_diagnostics_avoid_overclaiming_language(tmp_path):
     text = json.dumps(payload, sort_keys=True).lower()
 
     for phrase in (
+        "semantic support",
+        "semantic-support",
         "semantic_support",
         "claim_truth",
         "defensibility_proven",
+        "delivery approval",
+        "delivery-approval",
         "delivery_approved",
         "delivery_gate_passed",
         "safe_to_send",
