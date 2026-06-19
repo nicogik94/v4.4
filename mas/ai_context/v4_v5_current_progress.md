@@ -214,6 +214,17 @@ Important points:
 - It does not change workflow routing, report/export behavior, delivery-readiness semantics, eval semantics, or monitoring autonomy.
 - MAS remains local/operator-first and human review remains mandatory.
 
+### Wave 11.7 — Repo Hygiene for Generated Artifacts
+
+Wave 11.7 removes tracked generated Python bytecode/cache artifacts from the Git index and ensures future bytecode generation is ignored.
+
+Important points:
+
+- Only generated Python bytecode/cache artifacts are untracked from the index.
+- `scenario_shadow.sqlite3` and other sqlite/db or fixture-like artifacts remain tracked and untouched.
+- `.gitignore` covers Python bytecode and pytest cache patterns.
+- This does not change source behavior, tests, workflow routing, readiness semantics, report/export behavior, eval semantics, or runtime behavior.
+
 ## Current safety posture
 
 - Local/operator-first.
