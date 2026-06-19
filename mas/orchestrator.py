@@ -39,6 +39,7 @@ from tools.scoring import (
 )
 from workflow_templates import (
     DEFAULT_PROJECT_TYPE,
+    STRATEGIC_AUDIT_PHASE_SEQUENCE,
     TECHNOLOGY_READINESS_PHASE_SEQUENCE,
     get_workflow_phase_sequence,
 )
@@ -885,10 +886,7 @@ PROMPT_BUILDERS = {
     "executive_summary": build_executive_summary_prompt,
 }
 
-WORKFLOW_PHASE_SEQUENCE = (
-    "classify", "hypotheses", "gauntlet", "audit",
-    "strategy", "sqi", "monitor", "report",
-)
+WORKFLOW_PHASE_SEQUENCE = STRATEGIC_AUDIT_PHASE_SEQUENCE
 
 
 def workflow_phase_sequence_for_state(state: ProjectState) -> tuple[str, ...]:

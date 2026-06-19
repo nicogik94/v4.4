@@ -223,8 +223,11 @@ def test_technology_readiness_state_uses_template_sequence():
 
 
 def test_existing_project_type_sequences_are_unchanged():
-    assert WORKFLOW_PHASE_SEQUENCE == STRATEGIC_AUDIT_PHASE_SEQUENCE
-    assert get_workflow_phase_sequence("strategic_audit") == STRATEGIC_AUDIT_PHASE_SEQUENCE
+    assert (
+        WORKFLOW_PHASE_SEQUENCE
+        == STRATEGIC_AUDIT_PHASE_SEQUENCE
+        == get_workflow_phase_sequence("strategic_audit")
+    )
     assert get_workflow_phase_sequence("ai_readiness") == STRATEGIC_AUDIT_PHASE_SEQUENCE
     assert get_workflow_phase_sequence("automation_roi") == STRATEGIC_AUDIT_PHASE_SEQUENCE
     assert ProjectState(project_id="default", brief="x").current_phase == "classify"

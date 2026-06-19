@@ -5,10 +5,8 @@
 Repository branch baseline:
 
 - Branch: `main`
-- Latest merged baseline: `912e916 Wave 11.1: Add read-only CDP evidence review surface (#63)`
-- Wave 11.1 is complete on main.
-- This document was refreshed by Wave 11.2 as a docs/context-only update.
-- Future context refreshes should replace this baseline with the actual latest merged main commit.
+- Wave 11.9 start-point main baseline: `264433e Map workflow runner consolidation options (#70)`.
+- Git history is authoritative for current main HEAD.
 
 The project remains in a local/operator-first hardening phase. Public SaaS, multi-tenant, autonomous-action, and public-user account capabilities are not implemented.
 
@@ -235,6 +233,16 @@ Important points:
 - It identifies the API-backed sequential runner as the active operator full-workflow path.
 - It does not change runtime behavior, workflow routing, readiness, eval, report/export, auth, preflight, API behavior, tests, or scripts.
 - It recommends that any Wave 11.9 work be small, test-first, and avoid actual runner consolidation unless separately scoped.
+
+### Wave 11.9 - Strategic-Audit Phase-Sequence Alignment
+
+Wave 11.9 removes the duplicated strategic-audit phase-sequence literal by making `orchestrator.WORKFLOW_PHASE_SEQUENCE` a direct alias of `workflow_templates.STRATEGIC_AUDIT_PHASE_SEQUENCE`.
+
+Important points:
+
+- This is a narrow constant-alignment refactor.
+- Equality-based coverage confirms `WORKFLOW_PHASE_SEQUENCE`, `STRATEGIC_AUDIT_PHASE_SEQUENCE`, and `get_workflow_phase_sequence("strategic_audit")` remain aligned.
+- No runtime behavior, workflow routing, phase order, queue/run-state behavior, eval semantics, policy gates, readiness, report/export behavior, auth, preflight, scripts, or API behavior changes.
 
 ## Current safety posture
 
