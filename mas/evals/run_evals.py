@@ -37,6 +37,11 @@ JUDGE_SYSTEM_PROMPT = "You are a harsh but fair evaluator. Return only JSON."
 EVAL_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
 CITATION_RESOLVABILITY_SCHEMA_VERSION = "citation_resolvability_eval.v0.1"
 CITATION_RESOLVABILITY_PASS_STATUSES = {"pass", "not_applicable"}
+AGGREGATE_FAILURE_NONE = "none"
+AGGREGATE_FAILURE_EVAL_QUALITY = "eval_quality_failure"
+AGGREGATE_FAILURE_PROVIDER_UNAVAILABLE = "provider_unavailable"
+AGGREGATE_FAILURE_AGGREGATION_ERROR = "aggregation_error"
+AGGREGATE_FAILURE_MIXED = "mixed_failure"
 
 
 def _normalize_eval_text(value) -> str:
@@ -200,6 +205,12 @@ def summarize_results(
     total = len(results)
     pass_rate = passed / total if total else 0.0
     errors = aggregation_errors or []
+    aggregate_diagnostics = build_aggregate_diagnostics(
+        results,
+        threshold=threshold,
+        pass_rate=pass_rate,
+        aggregation_errors=errors,
+    )
     return {
         "timestamp": datetime.now().isoformat(),
         "mode": mode,
@@ -212,6 +223,7 @@ def summarize_results(
         "threshold": threshold,
         "ok": pass_rate >= threshold and not errors,
         "aggregation_errors": errors,
+        **aggregate_diagnostics,
         "cases": [asdict(r) for r in results],
     }
 
@@ -271,6 +283,123 @@ def aggregate_summaries(report_dirs: list[str], *, threshold: float) -> dict:
         case_ids=[result.case_id for result in ordered_results],
         aggregation_errors=aggregation_errors,
     )
+
+
+def build_aggregate_diagnostics(
+    results: list[CaseResult],
+    *,
+    threshold: float,
+    pass_rate: float,
+    aggregation_errors: list[str],
+) -> dict:
+    provider_failures: list[tuple[CaseResult, str]] = []
+    real_quality_failures: list[CaseResult] = []
+    failed_results = [result for result in results if not result.passed]
+
+    for result in failed_results:
+        provider_category = classify_provider_failure(result.judge_rationale)
+        if provider_category:
+            provider_failures.append((result, provider_category))
+        if not _case_failed_due_provider_only(result, provider_category):
+            real_quality_failures.append(result)
+
+    provider_failure_categories = sorted({category for _, category in provider_failures})
+    provider_failure_only = bool(provider_failures) and not aggregation_errors and not real_quality_failures
+    provider_unavailable = provider_failure_only and pass_rate < threshold
+    if aggregation_errors:
+        aggregate_failure_kind = (
+            AGGREGATE_FAILURE_MIXED
+            if provider_failures or real_quality_failures
+            else AGGREGATE_FAILURE_AGGREGATION_ERROR
+        )
+    elif provider_unavailable:
+        aggregate_failure_kind = AGGREGATE_FAILURE_PROVIDER_UNAVAILABLE
+    elif pass_rate < threshold:
+        aggregate_failure_kind = (
+            AGGREGATE_FAILURE_MIXED
+            if provider_failures and real_quality_failures
+            else AGGREGATE_FAILURE_EVAL_QUALITY
+        )
+    else:
+        aggregate_failure_kind = AGGREGATE_FAILURE_NONE
+
+    if provider_failure_only:
+        quality_ok: bool | str = "unknown"
+        evaluation_note = "Quality was not fully evaluated because the judge provider was unavailable."
+    elif real_quality_failures:
+        quality_ok = False
+        evaluation_note = "One or more eval cases failed deterministic checks or non-provider judge scoring."
+    else:
+        quality_ok = True
+        evaluation_note = ""
+
+    return {
+        "provider_failure_count": len(provider_failures),
+        "provider_failure_categories": provider_failure_categories,
+        "provider_failure_detected": bool(provider_failures),
+        "provider_failure_only": provider_failure_only,
+        "provider_unavailable": provider_unavailable,
+        "aggregate_failure_kind": aggregate_failure_kind,
+        "quality_ok": quality_ok,
+        "quality_evaluation_note": evaluation_note,
+        "quality_failure_count": len(real_quality_failures),
+        "quality_failure_case_ids": [result.case_id for result in real_quality_failures],
+        "provider_failure_case_ids": [result.case_id for result, _ in provider_failures],
+    }
+
+
+def classify_provider_failure(rationale: str) -> str:
+    """Return a conservative provider/infra failure category from judge rationale."""
+    text = _normalize_provider_failure_text(rationale)
+    if not text:
+        return ""
+    provider_context = (
+        "judge error" in text
+        or "provider call failed" in text
+        or "provider=" in text
+        or "batch error" in text
+    )
+    if not provider_context:
+        return ""
+    if "quota_exceeded" in text or "quota exceeded" in text or "credit balance" in text:
+        return "quota_exceeded"
+    if "rate_limit" in text or "rate limit" in text or "rate-limit" in text or "status_code=429" in text:
+        return "rate_limit"
+    unavailable_terms = (
+        "provider_unavailable",
+        "provider unavailable",
+        "service unavailable",
+        "temporarily unavailable",
+        "transient provider",
+        "overloaded",
+        "timed out",
+        "timeout",
+        "model is not available",
+        "billing blocked",
+    )
+    if any(term in text for term in unavailable_terms):
+        return "provider_unavailable"
+    return ""
+
+
+def aggregate_exit_code(summary: dict) -> int:
+    if summary.get("ok"):
+        return 0
+    if summary.get("aggregate_failure_kind") == AGGREGATE_FAILURE_PROVIDER_UNAVAILABLE:
+        return 0
+    return 1
+
+
+def _case_failed_due_provider_only(result: CaseResult, provider_category: str) -> bool:
+    if result.passed or not provider_category or result.errors:
+        return False
+    # Provider judge outages make same-case quality fields unavailable; separate
+    # failed cases without provider rationale are still real quality failures.
+    return result.judge_overall < 65
+
+
+def _normalize_provider_failure_text(value: str) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
 
 
 async def run_case_real(case: dict) -> ProjectState:
@@ -641,9 +770,15 @@ async def main():
         if not summary["ok"]:
             if summary.get("aggregation_errors"):
                 print("FAIL: aggregate report is incomplete or invalid")
+            elif summary.get("aggregate_failure_kind") == AGGREGATE_FAILURE_PROVIDER_UNAVAILABLE:
+                print("PROVIDER UNAVAILABLE: judge provider/quota failure prevented full quality evaluation")
+                print(f"Provider failure categories: {', '.join(summary.get('provider_failure_categories') or [])}")
+                print("PASS: aggregate did not fail as an eval-quality regression")
+                return
             else:
-                print(f"FAIL: pass rate {summary['pass_rate']:.1%} < threshold {args.threshold:.1%}")
-            sys.exit(1)
+                kind = summary.get("aggregate_failure_kind") or AGGREGATE_FAILURE_EVAL_QUALITY
+                print(f"FAIL: {kind}; pass rate {summary['pass_rate']:.1%} < threshold {args.threshold:.1%}")
+            sys.exit(aggregate_exit_code(summary))
         print("PASS")
         return
 

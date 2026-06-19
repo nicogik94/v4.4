@@ -192,6 +192,17 @@ Important points:
 - This does not prove semantic claim support or full claim defensibility.
 - Evidence Gauge, Defense Index, and Claim Cards remain not implemented.
 
+### Wave 11.5A — Eval Aggregate Provider-Failure Diagnostics
+
+Wave 11.5A classifies eval aggregate provider/quota failures separately from eval-quality failures.
+
+Important points:
+
+- Adds aggregate diagnostics for provider failure count, categories, provider-unavailable-only state, and aggregate failure kind.
+- Provider-unavailable-only aggregate failures do not block CI as eval-quality regressions, but remain marked `ok: false` with unknown quality status.
+- Aggregation errors, deterministic eval failures, claim-traceability failures, mixed failures, and real eval-quality regressions still fail.
+- This does not weaken Wave 11.5 claim-traceability evals and does not hide real eval failures.
+
 ## Current safety posture
 
 - Local/operator-first.
