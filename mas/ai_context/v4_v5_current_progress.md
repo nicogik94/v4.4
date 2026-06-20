@@ -255,6 +255,29 @@ Important points:
 - It prepares a controlled internal pilot with human review mandatory.
 - It does not authorize public deployment, public SaaS, autonomous operation, or automatic external delivery.
 
+### Wave 12.1A - Phase Failure Transparency
+
+Wave 12.1A preserves bounded phase failure diagnostics after parse/schema
+failures and carries the best available diagnostic into durable workflow run
+summaries.
+
+Important points:
+
+- Adds additive `ProjectState.phase_failure_details` keyed by phase.
+- Stores sanitized, bounded diagnostic category/message metadata, not raw model
+  responses, provider errors, or policy reasons.
+- Preserves gauntlet `GauntletOutput(**data)` validation details such as missing
+  field paths instead of reducing them to a generic stopped-phase summary.
+- Preserves structured validation diagnostics for core JSON phases and
+  Technology Readiness phases while keeping hypotheses partial-item recovery
+  unchanged.
+- Clears a phase's stale diagnostic when that phase completes successfully.
+- Uses the phase diagnostic when an incomplete background run is marked failed in
+  `workflow_runs.error_summary`; no database schema change is required.
+- This does not change model routing, providers, prompts, token caps, retry
+  counts, phase order, migrations, `decision_events`, Docker Compose, or live
+  workflow execution semantics.
+
 ## Current safety posture
 
 - Local/operator-first.

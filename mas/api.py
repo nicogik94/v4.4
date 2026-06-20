@@ -1947,6 +1947,36 @@ async def _execute_workflow_job(job: workflow_queue.WorkflowJobRecord):
         running.discard(job.project_id)
 
 
+def _workflow_incomplete_error_summary(final_state: ProjectState, current_phase: str) -> str:
+    phase = final_state.current_phase or current_phase or "unknown"
+    detail = _phase_failure_detail(final_state, phase)
+    if detail is None:
+        for candidate, status in final_state.phase_status.items():
+            if status == PhaseStatus.FAILED:
+                detail = _phase_failure_detail(final_state, candidate)
+                if detail is not None:
+                    phase = candidate
+                    break
+    if detail is not None:
+        detail_phase = _phase_failure_detail_value(detail, "phase") or phase
+        message = _phase_failure_detail_value(detail, "message")
+        category = _phase_failure_detail_value(detail, "category")
+        if message:
+            diagnostic = f"{category}: {message}" if category else message
+            return f"Workflow stopped before completion at phase {detail_phase}: {diagnostic}"
+    return f"Workflow stopped before completion at phase {phase}."
+
+
+def _phase_failure_detail(final_state: ProjectState, phase: str):
+    return (getattr(final_state, "phase_failure_details", None) or {}).get(phase)
+
+
+def _phase_failure_detail_value(detail, key: str) -> str:
+    if isinstance(detail, dict):
+        return str(detail.get(key) or "")
+    return str(getattr(detail, key, "") or "")
+
+
 async def _run_workflow(project_id: str, run_id: str | None = None):
     current_phase = ""
     try:
@@ -1996,7 +2026,7 @@ async def _run_workflow(project_id: str, run_id: str | None = None):
                 await _safe_mark_workflow_run(
                     workflow_run_state.mark_run_failed,
                     run_id,
-                    error=f"Workflow stopped before completion at phase {current_phase}.",
+                    error=_workflow_incomplete_error_summary(final_state, current_phase),
                     current_phase=current_phase,
                 )
             logger.warning(
