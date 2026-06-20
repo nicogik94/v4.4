@@ -244,6 +244,17 @@ Important points:
 - Equality-based coverage confirms `WORKFLOW_PHASE_SEQUENCE`, `STRATEGIC_AUDIT_PHASE_SEQUENCE`, and `get_workflow_phase_sequence("strategic_audit")` remain aligned.
 - No runtime behavior, workflow routing, phase order, queue/run-state behavior, eval semantics, policy gates, readiness, report/export behavior, auth, preflight, scripts, or API behavior changes.
 
+### Wave 12.0 - Strategic Decision Audit Pilot Readiness
+
+Wave 12.0 creates a Strategic Decision Audit pilot-readiness package for a controlled internal/operator-led pilot.
+
+Important points:
+
+- This is documentation/operator-process only.
+- It does not change runtime, API, workflow, reports, exports, auth, preflight, evals, scripts, dashboards, or source behavior.
+- It prepares a controlled internal pilot with human review mandatory.
+- It does not authorize public deployment, public SaaS, autonomous operation, or automatic external delivery.
+
 ## Current safety posture
 
 - Local/operator-first.
