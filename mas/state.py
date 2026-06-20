@@ -902,6 +902,13 @@ class Prediction(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class PhaseFailureDiagnostic(BaseModel):
+    phase: str = ""
+    category: str = ""
+    message: str = ""
+    captured_at: str = ""
+
+
 # ═══ MASTER PROJECT STATE ═══
 
 class ProjectState(BaseModel):
@@ -932,6 +939,7 @@ class ProjectState(BaseModel):
     })
     phase_confidence: dict[str, float] = Field(default_factory=dict)
     phase_run_completed_at: dict[str, str] = Field(default_factory=dict)
+    phase_failure_details: dict[str, PhaseFailureDiagnostic] = Field(default_factory=dict)
     re_entry_count: dict[str, int] = Field(default_factory=lambda: {
         p: 0 for p in ["classify", "hypotheses", "audit", "strategy", "monitor", "report"]
     })

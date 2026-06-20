@@ -53,6 +53,7 @@ from state import (
     MonitorOutput,
     MonitorScheduleItem,
     OODALoop,
+    PhaseFailureDiagnostic,
     PhaseStatus,
     PreliminaryVerdict,
     Priority,
@@ -400,6 +401,17 @@ def report_load_bearing_marker_counts(report: str) -> dict[str, int]:
 
 
 class TestWorkflowHelpers(unittest.TestCase):
+
+    def test_legacy_project_state_payload_loads_without_phase_failure_details(self):
+        state = ProjectState.model_validate(
+            {
+                "project_id": "legacy-no-phase-detail",
+                "project_name": "Legacy",
+                "brief": "Stored before phase failure diagnostics existed.",
+            }
+        )
+
+        self.assertEqual(state.phase_failure_details, {})
 
     def test_classify_prompt_includes_cynefin_domain_guardrails(self):
         prompt = build_classify_prompt(
@@ -1268,6 +1280,64 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         prompt = build_hypotheses_prompt(state)
         self.assertNotIn("SPARSE EVIDENCE NOTE", prompt)
 
+    async def test_gauntlet_schema_validation_failure_records_safe_phase_detail(self):
+        state = make_completed_state("gauntlet-schema-validation")
+        state.phase_status["gauntlet"] = PhaseStatus.PENDING
+        state.gauntlet = None
+        payload = {
+            "results": [
+                {
+                    "risk_rank": 1,
+                    "frameworks": [{"fw": "STEELMAN", "finding": "x", "action": "y"}],
+                    "crux": r"token=abc123 /home/nicolas/private/raw-output.txt",
+                    "top_fmea": {"mode": "Bad parse", "s": 8, "o": 7, "d": 6, "rpn": 336},
+                    "fta_cut_set": "No schema guard",
+                }
+            ],
+            "portfolio_correlation": 0.2,
+            "mece_gaps": "",
+            "thompson_priority": "H1",
+            "evoi_ranking": "H1",
+        }
+        response = make_response(json.dumps(payload), 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)) as call_mock:
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "gauntlet")
+
+        self.assertEqual(call_mock.await_count, 1)
+        self.assertEqual(updated.phase_status["gauntlet"], PhaseStatus.FAILED)
+        self.assertIsNone(updated.gauntlet)
+        detail = updated.phase_failure_details.get("gauntlet")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail.category, "schema_validation")
+        self.assertIn("results.0.id", detail.message)
+        self.assertIn("Field required", detail.message)
+        self.assertNotIn("token=abc123", detail.message)
+        self.assertNotIn("/home/nicolas", detail.message)
+
+    async def test_gauntlet_list_shaped_output_records_generic_json_shape_detail(self):
+        state = make_completed_state("gauntlet-list-shape")
+        state.phase_status["gauntlet"] = PhaseStatus.PENDING
+        state.gauntlet = None
+        first = make_response(json.dumps([{"results": []}]), 18, 9, 0.04)
+        second = make_response(json.dumps([{"results": []}, {"results": []}]), 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(side_effect=[first, second])) as call_mock:
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "gauntlet")
+
+        self.assertEqual(call_mock.await_count, 2)
+        self.assertEqual(updated.phase_status["gauntlet"], PhaseStatus.FAILED)
+        self.assertIsNone(updated.gauntlet)
+        detail = updated.phase_failure_details.get("gauntlet")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail.category, "json_shape")
+        self.assertIn("top_level_type=list", detail.message)
+        self.assertIn("list_length=2", detail.message)
+        self.assertNotIn("candidate_dict_count", detail.message)
+        self.assertNotIn("results", detail.message)
+
     async def test_audit_phase_repairs_truncated_object_when_required_fields_are_complete(self):
         state = make_completed_state("audit-phase-truncated-repair")
         state.phase_status["audit"] = PhaseStatus.PENDING
@@ -1343,6 +1413,38 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(updated.audit)
         self.assertEqual(updated.audit_raw, response.text)
         self.assertFalse(_phase_has_output(updated, "audit"))
+        detail = updated.phase_failure_details.get("audit")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail.category, "json_parse")
+        self.assertIn("JSON parse failed", detail.message)
+        self.assertNotIn(response.text, detail.message)
+
+    async def test_audit_schema_validation_failure_records_safe_phase_detail(self):
+        state = make_completed_state("audit-schema-validation")
+        state.phase_status["audit"] = PhaseStatus.PENDING
+        state.audit = None
+        state.audit_raw = None
+        payload = {
+            "data_based": True,
+            "fmea": [{"failure_mode": "No owner validation"}],
+            "top_findings": ["Authorization: Bearer secret-value should not leak"],
+        }
+        response = make_response(json.dumps(payload), 18, 9, 0.04)
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)) as call_mock:
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "audit")
+
+        self.assertEqual(call_mock.await_count, 1)
+        self.assertEqual(updated.phase_status["audit"], PhaseStatus.FAILED)
+        self.assertIsNone(updated.audit)
+        detail = updated.phase_failure_details.get("audit")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail.category, "schema_validation")
+        self.assertIn("fmea.0.component", detail.message)
+        self.assertIn("Field required", detail.message)
+        self.assertNotIn("Authorization", detail.message)
+        self.assertNotIn("secret-value", detail.message)
 
     async def test_strategy_phase_repairs_truncated_object_when_required_fields_are_complete(self):
         state = make_completed_state("strategy-phase-truncated-repair")
@@ -1485,6 +1587,12 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         state = make_completed_state("monitor-phase")
         state.phase_status["monitor"] = PhaseStatus.PENDING
         state.monitor = None
+        state.phase_failure_details["monitor"] = PhaseFailureDiagnostic(
+            phase="monitor",
+            category="json_parse",
+            message="stale monitor failure",
+            captured_at="2026-06-20T00:00:00",
+        )
         response = make_response(json.dumps(make_monitor_payload()), 14, 7, 0.03)
         with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
             with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
@@ -1494,6 +1602,7 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.phase_confidence["monitor"], 1.0)
         self.assertIsNotNone(updated.monitor)
         self.assertEqual(updated.monitor.commitment_score, 81)
+        self.assertNotIn("monitor", updated.phase_failure_details)
 
     async def test_pre_attempt_governance_denial_fails_without_retry_or_fallback(self):
         state = make_completed_state("pre-attempt-governance")
@@ -2525,6 +2634,73 @@ class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Traceback", record.error_summary)
         self.assertNotIn("C:\\", record.error_summary)
         self.assertNotIn("abc123", record.error_summary)
+        self.assertFalse(await workflow_run_state.has_active_project_run(state.project_id))
+
+    async def test_provider_error_detail_excludes_raw_secret_from_phase_and_run_summary(self):
+        state = make_completed_state("provider-error-safe")
+        state.phase_status["monitor"] = PhaseStatus.PENDING
+        state.monitor = None
+        response = LLMResponse(
+            ok=False,
+            error="Authorization: Bearer secret-value quota exceeded before response",
+            error_type="quota_exceeded",
+            model_used="",
+            provider_used="anthropic",
+        )
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                final_state = await run_phase_node(state, "monitor")
+
+        detail = final_state.phase_failure_details.get("monitor")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail.category, "quota_exceeded")
+        self.assertEqual(detail.message, "Provider quota prevented a usable phase response.")
+        self.assertNotIn("Authorization", detail.message)
+        self.assertNotIn("secret-value", detail.message)
+
+        acquisition = await workflow_run_state.create_workflow_run(final_state.project_id, code_version="4.4.0")
+        initial_state = ProjectState(
+            project_id=final_state.project_id,
+            project_name="Provider Failure",
+            brief="Run fails before usable output.",
+        )
+        with patch("api.store.load", new=AsyncMock(return_value=initial_state)):
+            with patch("api.store.save", new=AsyncMock()):
+                with patch("api.run_workflow_sequence", new=AsyncMock(return_value=final_state)):
+                    await api._run_workflow(final_state.project_id, acquisition.run.run_id)
+
+        record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+        self.assertEqual(record.status, "failed")
+        self.assertIn("quota_exceeded", record.error_summary)
+        self.assertIn("Provider quota prevented a usable phase response.", record.error_summary)
+        self.assertNotIn("Authorization", record.error_summary)
+        self.assertNotIn("secret-value", record.error_summary)
+        self.assertFalse(await workflow_run_state.has_active_project_run(final_state.project_id))
+
+    async def test_incomplete_background_run_preserves_phase_failure_detail_in_error_summary(self):
+        state = ProjectState(project_id="failed-phase-detail", project_name="Failure", brief="Run fails")
+        final_state = ProjectState(project_id=state.project_id, project_name="Failure", brief="Run fails")
+        final_state.current_phase = "gauntlet"
+        final_state.phase_status["gauntlet"] = PhaseStatus.FAILED
+        final_state.phase_failure_details["gauntlet"] = PhaseFailureDiagnostic(
+            phase="gauntlet",
+            category="schema_validation",
+            message="Structured output failed schema validation: results.0.id: Field required",
+            captured_at="2026-06-20T00:00:00",
+        )
+        acquisition = await workflow_run_state.create_workflow_run(state.project_id, code_version="4.4.0")
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with patch("api.store.save", new=AsyncMock()):
+                with patch("api.run_workflow_sequence", new=AsyncMock(return_value=final_state)):
+                    await api._run_workflow(state.project_id, acquisition.run.run_id)
+
+        record = await workflow_run_state.get_workflow_run(acquisition.run.run_id)
+        self.assertEqual(record.status, "failed")
+        self.assertIn("Workflow stopped before completion at phase gauntlet", record.error_summary)
+        self.assertIn("schema_validation", record.error_summary)
+        self.assertIn("results.0.id: Field required", record.error_summary)
         self.assertFalse(await workflow_run_state.has_active_project_run(state.project_id))
 
     async def test_manual_phase_rejects_when_workflow_is_running(self):

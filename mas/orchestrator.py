@@ -13,7 +13,7 @@ from typing import Awaitable, Callable, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from state import ProjectState, PhaseStatus
+from state import ProjectState, PhaseStatus, PhaseFailureDiagnostic
 from config import PHASE_ORDER, GATE_CONFIGS, FRAMEWORKS_BY_PHASE
 from llm_client import call_llm, parse_json, LLMResponse
 from cdp.citation_format import (
@@ -45,6 +45,113 @@ from workflow_templates import (
 )
 
 logger = logging.getLogger(__name__)
+
+PHASE_FAILURE_SUMMARY_MAX_LENGTH = 320
+CORE_STRUCTURED_VALIDATION_PHASES = frozenset(("classify", "gauntlet", "audit", "strategy", "monitor", "sqi"))
+POLICY_FAILURE_CATEGORIES = frozenset(("policy", "kill_switch", "budget", "breaker", "approval"))
+PROVIDER_QUOTA_DIAGNOSTIC_MESSAGE = "Provider quota prevented a usable phase response."
+PROVIDER_ERROR_DIAGNOSTIC_MESSAGE = "Provider call failed before usable phase output was returned."
+POLICY_BLOCKED_DIAGNOSTIC_MESSAGE = "Policy gate blocked this phase before provider execution."
+
+
+def _record_phase_failure(state: ProjectState, phase: str, category: str, message: str) -> None:
+    if not phase:
+        return
+    if getattr(state, "phase_failure_details", None) is None:
+        state.phase_failure_details = {}
+    state.phase_failure_details[phase] = PhaseFailureDiagnostic(
+        phase=phase,
+        category=_sanitize_phase_failure_text(category, max_length=80),
+        message=_sanitize_phase_failure_text(message),
+        captured_at=datetime.now().isoformat(),
+    )
+
+
+def _clear_phase_failure(state: ProjectState, phase: str) -> None:
+    if getattr(state, "phase_failure_details", None) is not None:
+        state.phase_failure_details.pop(phase, None)
+
+
+def _sanitize_phase_failure_text(text: object, *, max_length: int = PHASE_FAILURE_SUMMARY_MAX_LENGTH) -> str:
+    value = str(text or "Phase failed").replace("\r", " ").replace("\n", " ")
+    value = re.sub(r"Traceback \(most recent call last\):.*", "Phase failed", value)
+    value = re.sub(r"[A-Za-z]:\\[^\s:;,\"]+", "[local path redacted]", value)
+    value = re.sub(r"(?<![A-Za-z0-9_:/])/(?:[^/\s:;,\"]+/)+[^/\s:;,\"]+", "[local path redacted]", value)
+    value = re.sub(r"(?i)(api[_-]?key|token|password|secret)=\S+", r"\1=[redacted]", value)
+    value = " ".join(value.split())
+    if not value:
+        value = "Phase failed"
+    if len(value) > max_length:
+        value = value[: max_length - 3].rstrip() + "..."
+    return value
+
+
+def _provider_failure_diagnostic(response: LLMResponse) -> tuple[str, str]:
+    error_type = str(getattr(response, "error_type", "") or "").lower()
+    failed_error_type = str(getattr(response, "failed_error_type", "") or "").lower()
+    error_text = str(getattr(response, "error", "") or "").lower()
+    combined = " ".join((error_type, failed_error_type, error_text))
+    if any(marker in combined for marker in ("quota", "insufficient_quota", "credit balance", "credit exhausted")):
+        return "quota_exceeded", PROVIDER_QUOTA_DIAGNOSTIC_MESSAGE
+    return "provider_error", PROVIDER_ERROR_DIAGNOSTIC_MESSAGE
+
+
+def _is_policy_failure_response(response: LLMResponse) -> bool:
+    category = str(getattr(response, "error_type", "") or "").lower()
+    return category in POLICY_FAILURE_CATEGORIES
+
+
+def _phase_exception_diagnostic(exc: BaseException) -> str:
+    errors_fn = getattr(exc, "errors", None)
+    if callable(errors_fn):
+        errors = None
+        for kwargs in (
+            {"include_url": False, "include_input": False, "include_context": False},
+            {"include_url": False, "include_input": False},
+            {},
+        ):
+            try:
+                errors = errors_fn(**kwargs)
+                break
+            except TypeError:
+                continue
+        if errors:
+            parts = []
+            for entry in errors[:3]:
+                loc = ".".join(str(item) for item in entry.get("loc", ()))
+                msg = str(entry.get("msg") or "validation failed")
+                err_type = str(entry.get("type") or "validation_error")
+                parts.append(f"{loc}: {msg} ({err_type})" if loc else f"{msg} ({err_type})")
+            if len(errors) > len(parts):
+                parts.append(f"+{len(errors) - len(parts)} more")
+            return _sanitize_phase_failure_text(
+                f"{type(exc).__name__}: " + "; ".join(parts)
+            )
+    return _sanitize_phase_failure_text(f"{type(exc).__name__}: Structured output validation failed.")
+
+
+def _json_shape_failure_message(phase: str, parsed) -> str:
+    expected = {
+        "classify": "JSON object",
+        "hypotheses": "JSON array or object with a hypotheses array",
+        "gauntlet": "JSON object matching the gauntlet schema",
+        "audit": "JSON object matching the audit schema",
+        "strategy": "JSON object matching the strategy schema",
+        "monitor": "JSON object matching the monitor schema",
+        "sqi": "JSON object matching the SQI schema",
+    }.get(phase, "phase JSON schema")
+    parts = [
+        f"Invalid JSON shape: expected {expected}",
+        f"top_level_type={type(parsed).__name__}",
+    ]
+    if isinstance(parsed, list):
+        parts.append(f"list_length={len(parsed)}")
+        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            stats = _technology_readiness_list_candidate_stats(phase, parsed)
+            for key in ("candidate_dict_count", "valid_candidate_count", "reason"):
+                if key in stats:
+                    parts.append(f"{key}={stats[key]}")
+    return _sanitize_phase_failure_text("; ".join(parts))
 
 # ═══ SYSTEM PROMPT BUILDER ═══
 
@@ -1075,10 +1182,11 @@ def _invalid_json_shape_diagnostic(phase: str, parsed, response_text: str) -> st
     ]
     if isinstance(parsed, list):
         parts.append(f"list_length={len(parsed)}")
-        stats = _technology_readiness_list_candidate_stats(phase, parsed)
-        for key in ("candidate_dict_count", "valid_candidate_count", "reason"):
-            if key in stats:
-                parts.append(f"{key}={stats[key]}")
+        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+            stats = _technology_readiness_list_candidate_stats(phase, parsed)
+            for key in ("candidate_dict_count", "valid_candidate_count", "reason"):
+                if key in stats:
+                    parts.append(f"{key}={stats[key]}")
     parts.append(f"preview={(response_text or '')[:500]!r}")
     return ", ".join(parts)
 
@@ -1378,6 +1486,12 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         logger.error(f"POLICY GATE BLOCKED phase {phase}: {decision.reason}")
         state.phase_status[phase] = PhaseStatus.FAILED
         state.phase_confidence[phase] = 0.0
+        _record_phase_failure(
+            state,
+            phase,
+            "policy_blocked",
+            POLICY_BLOCKED_DIAGNOSTIC_MESSAGE,
+        )
         log_policy_event(state, "policy_gate_blocked", {
             "phase": phase,
             "reason": decision.reason,
@@ -1395,6 +1509,12 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         logger.error(f"No prompt builder for phase: {phase}")
         state.phase_status[phase] = PhaseStatus.FAILED
         state.phase_confidence[phase] = 0.0
+        _record_phase_failure(
+            state,
+            phase,
+            "phase_configuration",
+            f"No prompt builder configured for phase {phase}.",
+        )
         return state
 
     prompt = builder(state)
@@ -1477,11 +1597,24 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         logger.error(f"Phase {phase} failed: {response.error}")
         state.phase_status[phase] = PhaseStatus.FAILED
         state.phase_confidence[phase] = 0.0
+        if _is_policy_failure_response(response):
+            failure_category = "policy_blocked"
+            failure_message = POLICY_BLOCKED_DIAGNOSTIC_MESSAGE
+        else:
+            failure_category, failure_message = _provider_failure_diagnostic(response)
+        _record_phase_failure(
+            state,
+            phase,
+            failure_category,
+            failure_message,
+        )
         return state
 
     # ═══ v4.4.1: Parse and store output (rewritten) ═══
     if is_json:
         repair_attempted = False
+        failure_category = ""
+        failure_message = ""
         parsed = parse_json(response.text)
         parsed, repaired_tr_payload = _repair_technology_readiness_top_level_payload(phase, parsed)
         _log_technology_readiness_top_level_payload_repair(phase, repaired_tr_payload)
@@ -1595,7 +1728,21 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                         f"{type(parsed).__name__} "
                         f"({_invalid_json_shape_diagnostic(phase, parsed, retry_response.text)})"
                     )
+                    failure_category = "json_shape"
+                    failure_message = _json_shape_failure_message(phase, parsed)
                 response = retry_response
+            else:
+                failure_category, failure_message = _provider_failure_diagnostic(retry_response)
+
+            if not failure_message and parsed is None:
+                failure_category = "json_parse"
+                failure_message = (
+                    "JSON parse failed after repair attempt; no valid top-level JSON "
+                    "object or array was recovered."
+                )
+            elif not shape_ok and not failure_message:
+                failure_category = "json_shape"
+                failure_message = _json_shape_failure_message(phase, parsed)
 
         stored_output = False
         if parsed is not None and _parsed_json_matches_phase(phase, parsed):
@@ -1664,13 +1811,24 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                                     f"Phase {phase}: Technology Readiness schema validation "
                                     f"failed after one repair attempt. Error: {retry_store_exc!r}"
                                 )
+                                failure_category = "schema_validation"
+                                failure_message = (
+                                    "Structured output failed schema validation after one repair attempt: "
+                                    f"{_phase_exception_diagnostic(retry_store_exc)}"
+                                )
                     else:
                         logger.error(
                             f"Phase {phase}: schema repair retry failed: {retry_response.error}"
                         )
+                        failure_category, failure_message = _provider_failure_diagnostic(retry_response)
                 else:
                     logger.error(
                         f"Phase {phase}: structured output failed validation. Error: {store_exc!r}"
+                    )
+                    failure_category = "schema_validation"
+                    failure_message = (
+                        "Structured output failed schema validation: "
+                        f"{_phase_exception_diagnostic(store_exc)}"
                     )
 
         if stored_output:
@@ -1688,13 +1846,31 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 )
                 state.phase_status[phase] = PhaseStatus.FAILED
                 state.phase_confidence[phase] = 0.0
+                _record_phase_failure(
+                    state,
+                    phase,
+                    "missing_output",
+                    "Parsed output was accepted but did not populate the expected state field.",
+                )
             else:
                 state.phase_status[phase] = PhaseStatus.COMPLETED
                 state.phase_confidence[phase] = 1.0
+                _clear_phase_failure(state, phase)
                 if phase == "hypotheses":
                     state.sealed = True
                     state.seal_date = date.today().isoformat()
         else:
+            if not failure_message:
+                if parsed is None:
+                    failure_category = "json_parse"
+                    failure_message = "JSON parse failed; no valid phase payload was recovered."
+                elif not _parsed_json_matches_phase(phase, parsed):
+                    failure_category = "json_shape"
+                    failure_message = _json_shape_failure_message(phase, parsed)
+                else:
+                    failure_category = "schema_validation"
+                    failure_message = "Structured output could not be stored in ProjectState."
+            _record_phase_failure(state, phase, failure_category, failure_message)
             if phase == "audit":
                 state.audit_raw = response.text
                 state.phase_status[phase] = PhaseStatus.FAILED
@@ -1727,6 +1903,7 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         )
         state.phase_status[phase] = PhaseStatus.COMPLETED
         state.phase_confidence[phase] = 1.0
+        _clear_phase_failure(state, phase)
 
     # Generate compressed summary for downstream context
     state.phase_summaries[phase] = summarize_phase_output(phase, state)
@@ -1822,6 +1999,16 @@ async def run_workflow_sequence(
                         f"blocking={structural} confidence={gate['confidence']}"
                     )
                     state.phase_status[phase] = PhaseStatus.FAILED
+                    _record_phase_failure(
+                        state,
+                        phase,
+                        "gate_structural",
+                        (
+                            "Gate structurally blocked the workflow: "
+                            f"{'; '.join(str(item) for item in structural[:3])}; "
+                            f"confidence={gate['confidence']}"
+                        ),
+                    )
                     if persist_state:
                         await persist_state(state)
                     return state
@@ -1907,7 +2094,7 @@ def _store_phase_output(state: ProjectState, phase: str, data: dict | list):
             f"Failed to parse {phase} output: type={type(data).__name__} "
             f"preview={preview[:500]} error={e}"
         )
-        if phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
+        if phase in CORE_STRUCTURED_VALIDATION_PHASES or phase in TECHNOLOGY_READINESS_PHASE_SEQUENCE:
             raise
 
 
