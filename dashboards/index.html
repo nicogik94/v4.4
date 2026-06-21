@@ -3762,11 +3762,12 @@ function toast(message, kind = '') {
    ═══════════════════════════════════════════════════════════════════════ */
 const state = {
   selectedProjectId: null,
-  activeTab: 'decide',          // decide | evidence | outcomes | calibration | report | audit
+  activeTab: 'overview',        // overview | workflow | evidence | trace | report
   projects: [],
   portfolioDeltas: [],
   portfolioDeltasError: null,
   runtimeDiagnostics: null,
+  portfolioFilter: 'needs_attention',
   projectFilter: '',
   learningEngine: null,
   refreshTimer: null,
@@ -3786,14 +3787,27 @@ const state = {
 };
 
 const TAB_LABELS = {
-  decide: 'Overview',
-  evidence: 'Dossier',
-  outcomes: 'Outcomes',
-  bayesian: 'Bayesian',
-  calibration: 'Calibration',
-  report: 'Report',
-  audit: 'Control log',
+  overview: 'Overview',
+  workflow: 'Workflow',
+  evidence: 'Evidence & Risks',
+  trace: 'Decision Trace',
+  report: 'Report & Export',
 };
+
+const WORKSPACE_TABS = ['overview', 'workflow', 'evidence', 'trace', 'report'];
+const LEGACY_TAB_ALIASES = {
+  decide: 'overview',
+  outcomes: 'overview',
+  calibration: 'overview',
+  bayesian: 'trace',
+  audit: 'trace',
+};
+const PORTFOLIO_FILTERS = [
+  { key: 'needs_attention', label: 'Needs attention' },
+  { key: 'active', label: 'Active' },
+  { key: 'complete', label: 'Complete' },
+  { key: 'all', label: 'All' },
+];
 
 const EXPORT_PROFILES = {
   report: {
@@ -3842,15 +3856,20 @@ function eventNamespace(eventType) {
 
 /* ═══════════════════════════════════════════════════════════════════════
    Routing — hash-based deep linking
-   #/                    → empty state
-   #/project/{id}        → project selected (default view: decision-plane)
-   #/project/{id}/{view} → project selected, specific view (tranche 2+)
+   #/                    → Portfolio Operations landing view
+   #/project/{id}        → project selected (default view: Overview)
+   #/project/{id}/{view} → project selected, specific workspace view
    ═══════════════════════════════════════════════════════════════════════ */
 function parseHash() {
   // #/project/{id}/{tab}
   const h = (location.hash || '').replace(/^#\//, '').split('/').filter(Boolean);
   if (h[0] !== 'project') return { projectId: null, tab: null };
   return { projectId: h[1] || null, tab: h[2] || null };
+}
+function normalizeWorkspaceTab(tab) {
+  const raw = String(tab || '').trim();
+  const mapped = LEGACY_TAB_ALIASES[raw] || raw;
+  return WORKSPACE_TABS.includes(mapped) ? mapped : 'overview';
 }
 function routeTo(path) {
   location.hash = '#/' + path.replace(/^\//, '');
@@ -3863,7 +3882,7 @@ async function onHashChange() {
   if (raw && !raw.startsWith('#/')) return;
 
   const { projectId, tab } = parseHash();
-  const validTab = TAB_LABELS.hasOwnProperty(tab) ? tab : 'decide';
+  const validTab = normalizeWorkspaceTab(tab);
   const projectChanged = projectId !== state.selectedProjectId;
   const tabChanged = validTab !== state.activeTab;
 
@@ -3881,14 +3900,16 @@ async function onHashChange() {
   if (projectId) {
     if (projectChanged) await loadProject(projectId);
     renderMain();
-    if (state.activeTab === 'decide') await loadDecisionPlane(projectId);
-    if (state.activeTab === 'audit') await loadDecisionPlane(projectId);
-    if (state.activeTab === 'report' && state.project && state.project.report == null) {
-      await loadReport(projectId);
+    if ((state.activeTab === 'overview' || state.activeTab === 'trace') && state.project) {
+      await loadDecisionPlane(projectId);
       renderMain();
     }
-    if ((state.activeTab === 'calibration' || state.activeTab === 'outcomes') && state.project && !state.project.calibration) {
+    if (state.activeTab === 'workflow' && state.project && !state.project.calibration) {
       await loadCalibration(projectId);
+      renderMain();
+    }
+    if (state.activeTab === 'report' && state.project && state.project.report == null) {
+      await loadReport(projectId);
       renderMain();
     }
   } else {
@@ -3979,12 +4000,101 @@ function renderRuntimeReadinessPanel() {
   const details = renderRuntimeReadinessDetails();
   return `<div class="runtime-readiness-panel" id="runtime-readiness-panel" ${details ? '' : 'hidden'}>${details}</div>`;
 }
+function runtimeCheckStatus(check) {
+  return String(check?.status || 'unavailable').toLowerCase();
+}
+function runtimeTone(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'ok' || s === 'pass' || s === 'healthy' || s === 'available') return 'ok';
+  if (s === 'fail' || s === 'block' || s === 'blocked' || s === 'unavailable') return 'err';
+  return 'warn';
+}
+function runtimeHealthSummary(diagnostics = state.runtimeDiagnostics || {}) {
+  const preflight = diagnostics.preflight || {};
+  const readiness = diagnostics.readiness || {};
+  if (!preflight.ok || !readiness.ok) {
+    return {
+      label: 'Runtime fetch failed',
+      tone: 'err',
+      status: 'fetch_failed',
+      detail: preflight.ok ? 'Release readiness fetch failed.' : 'Runtime preflight fetch failed.',
+    };
+  }
+  const preflightStatus = String(preflight.body?.status || 'unavailable').toLowerCase();
+  const releaseGate = String(readiness.body?.release_gate || readiness.body?.status || 'unavailable').toLowerCase();
+  if (preflightStatus === 'fail' || releaseGate === 'block') {
+    return { label: 'Runtime blocked', tone: 'err', status: 'blocked', detail: 'Preflight or release gate is blocking.' };
+  }
+  if (preflightStatus === 'degraded' || releaseGate === 'warn') {
+    return { label: 'Runtime degraded', tone: 'warn', status: 'degraded', detail: 'Preflight or release gate has warnings.' };
+  }
+  if (preflightStatus === 'ok' && releaseGate === 'pass') {
+    return { label: 'Runtime healthy', tone: 'ok', status: 'healthy', detail: 'Preflight and release gate are passing.' };
+  }
+  return { label: 'Runtime degraded', tone: 'warn', status: 'degraded', detail: 'Runtime readiness is partially available.' };
+}
+function runtimeHealthItem(label, value, tone, detail = '') {
+  return `
+    <div class="runtime-health-item ${escapeHtml(tone || 'warn')}">
+      <div class="label">${escapeHtml(label)}</div>
+      <div class="value">${escapeHtml(value || 'unavailable')}</div>
+      ${detail ? `<div class="detail">${escapeHtml(detail)}</div>` : ''}
+    </div>
+  `;
+}
+function renderRuntimeHealthPanel() {
+  const diagnostics = state.runtimeDiagnostics || {};
+  const preflightBody = diagnostics.preflight?.body || {};
+  const readinessBody = diagnostics.readiness?.body || {};
+  const checks = preflightBody.checks && typeof preflightBody.checks === 'object' ? preflightBody.checks : {};
+  const database = checks.database || {};
+  const runState = checks.run_state || {};
+  const queue = checks.workflow_queue || {};
+  const summary = runtimeHealthSummary(diagnostics);
+  const releaseGate = readinessBody.release_gate || readinessBody.status || (diagnostics.readiness?.ok ? 'unavailable' : 'fetch failed');
+  const updated = diagnostics.updatedAt ? new Date(diagnostics.updatedAt).toLocaleTimeString() : 'not refreshed';
+  const runStateValue = runState.durable_run_state_active === true
+    ? 'available'
+    : (runState.durable_run_state_active === false ? 'unavailable' : runtimeCheckStatus(runState));
+  const queueValue = queue.durable_queue_active === true
+    ? 'available'
+    : (queue.durable_queue_active === false ? 'unavailable' : runtimeCheckStatus(queue));
+  const fetchValue = (!diagnostics.preflight?.ok || !diagnostics.readiness?.ok) ? 'fetch failed' : `fresh ${updated}`;
+
+  return `
+    <section class="runtime-health-panel ${escapeHtml(summary.tone)}" id="runtime-health-panel" aria-label="Runtime health">
+      <div class="runtime-health-head">
+        <div>
+          <h3>Runtime health</h3>
+          <div class="meta">Global runtime only. This is separate from project lifecycle state.</div>
+        </div>
+        <span class="pill ${escapeHtml(summary.tone)}"><span class="dot"></span>${escapeHtml(summary.label)}</span>
+      </div>
+      <div class="runtime-health-grid">
+        ${runtimeHealthItem('Runtime', summary.status, summary.tone, summary.detail)}
+        ${runtimeHealthItem('Persistence / database', runtimeCheckStatus(database), runtimeTone(database.status), database.message || '')}
+        ${runtimeHealthItem('Durable run-state', runStateValue, runtimeTone(runState.durable_run_state_active === true ? 'ok' : runtimeCheckStatus(runState)), runState.workflow_run_tracking || '')}
+        ${runtimeHealthItem('Workflow queue', queueValue, runtimeTone(queue.durable_queue_active === true ? 'ok' : runtimeCheckStatus(queue)), queue.execution_mode || '')}
+        ${runtimeHealthItem('Release gate', String(releaseGate), runtimeTone(releaseGate), readinessBody.status || '')}
+        ${runtimeHealthItem('Freshness', fetchValue, fetchValue === 'fetch failed' ? 'err' : 'ok')}
+      </div>
+    </section>
+  `;
+}
 function syncRuntimeReadinessPanel() {
   const panel = $('runtime-readiness-panel');
   if (!panel) return;
   const details = renderRuntimeReadinessDetails();
   panel.innerHTML = details;
   panel.hidden = !details;
+}
+function syncRuntimeHealthPanel() {
+  const panel = $('runtime-health-panel');
+  if (!panel) return;
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderRuntimeHealthPanel();
+  const next = wrapper.firstElementChild;
+  if (next) panel.replaceWith(next);
 }
 async function loadHealth() {
   updateConnStatus('connecting');
@@ -4020,27 +4130,99 @@ async function loadHealth() {
     ].join('');
   }
   syncRuntimeReadinessPanel();
+  syncRuntimeHealthPanel();
 }
 setInterval(loadHealth, 30000);
 
 /* ═══════════════════════════════════════════════════════════════════════
    Projects (left rail list)
    ═══════════════════════════════════════════════════════════════════════ */
+function isCompletedProject(project) {
+  return String(project?.project_status || '').toLowerCase() === 'completed';
+}
+function projectAttentionReasons(project) {
+  if (isCompletedProject(project)) return [];
+  const reasons = [];
+  const blockers = Array.isArray(project?.blocking_reasons) ? project.blocking_reasons.filter(Boolean) : [];
+  if (blockers.length) reasons.push(blockers.length === 1 ? `Blocker: ${blockers[0]}` : `${blockers.length} blockers`);
+  if (project?.requires_approval === true) reasons.push('Approval required');
+  if (project?.has_stale_downstream === true) reasons.push('Stale downstream');
+  const activeRiskCount = Number(project?.active_risk_count || 0);
+  if (activeRiskCount > 0) reasons.push(`${fmtInt(activeRiskCount)} active risk${activeRiskCount === 1 ? '' : 's'}`);
+  return reasons;
+}
+function projectNeedsAttention(project) {
+  return projectAttentionReasons(project).length > 0;
+}
+function filterPortfolioProjects(projects, filterKey = state.portfolioFilter) {
+  const rows = Array.isArray(projects) ? projects : [];
+  if (filterKey === 'complete') return rows.filter(isCompletedProject);
+  if (filterKey === 'needs_attention') return rows.filter(projectNeedsAttention);
+  if (filterKey === 'active') return rows.filter(project => !isCompletedProject(project) && !projectNeedsAttention(project));
+  return rows;
+}
+function formatProjectUpdatedAt(value) {
+  if (!value) return 'updated: unavailable';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return `updated: ${String(value)}`;
+  return `updated: ${date.toLocaleString()}`;
+}
+function lifecycleStateLabel(project) {
+  return project?.project_status || 'unknown';
+}
+function workflowPhaseLabel(project) {
+  return project?.current_phase || 'idle';
+}
+function safeNextActionForProject(project) {
+  const blockers = Array.isArray(project?.blocking_reasons) ? project.blocking_reasons.filter(Boolean) : [];
+  if (isCompletedProject(project)) return 'Open the project workspace to review report and exports.';
+  if (blockers.length) return `Resolve blocker: ${blockers[0]}`;
+  if (project?.requires_approval === true) return 'Review pending approval.';
+  if (project?.has_stale_downstream === true) return 'Review stale downstream outputs before relying on them.';
+  if (Number(project?.active_risk_count || 0) > 0) return 'Review active risks in the project workspace.';
+  return 'Open the project workspace and continue workflow review.';
+}
+function projectSignalTags(project) {
+  const tags = [];
+  const blockers = Array.isArray(project?.blocking_reasons) ? project.blocking_reasons.filter(Boolean) : [];
+  if (blockers.length) tags.push({ label: blockers.length === 1 ? 'blocker' : `${blockers.length} blockers`, tone: 'bad' });
+  if (project?.requires_approval === true) tags.push({ label: 'approval', tone: 'warn' });
+  if (project?.has_stale_downstream === true) tags.push({ label: 'stale downstream', tone: 'warn' });
+  if (project?.active_risk_count != null) {
+    const riskCount = Number(project.active_risk_count || 0);
+    tags.push({ label: `${fmtInt(riskCount)} active risk${riskCount === 1 ? '' : 's'}`, tone: riskCount > 0 ? 'warn' : 'info' });
+  }
+  return tags;
+}
+function renderSignalTags(project) {
+  const tags = projectSignalTags(project);
+  if (!tags.length) return '<span class="signal info">no queue flags</span>';
+  return tags.map(tag => `<span class="signal ${escapeHtml(tag.tone)}">${escapeHtml(tag.label)}</span>`).join('');
+}
+function renderPortfolioFilterControl(context = 'portfolio') {
+  return `
+    <div class="portfolio-filter-control" data-portfolio-filter-scope="${escapeHtml(context)}">
+      <div class="portfolio-segmented" role="tablist" aria-label="Portfolio project filter">
+        ${PORTFOLIO_FILTERS.map(item => `
+          <button
+            type="button"
+            class="portfolio-filter-btn ${state.portfolioFilter === item.key ? 'active' : ''}"
+            data-portfolio-filter="${escapeHtml(item.key)}"
+            role="tab"
+            aria-selected="${state.portfolioFilter === item.key ? 'true' : 'false'}"
+          >${escapeHtml(item.label)}</button>
+        `).join('')}
+      </div>
+      <div class="portfolio-result-note">Showing the current project result set.</div>
+    </div>
+  `;
+}
 async function loadProjects() {
   try {
     state.portfolioDeltasError = null;
-    const [queue, deltasResp] = await Promise.all([
-      apiGet('/projects/queue'),
-      apiGet('/calibration/deltas').catch((error) => {
-        state.portfolioDeltasError = error;
-        return { deltas: [] };
-      }),
-    ]);
+    const queue = await apiGet('/projects/queue');
     state.projects = Array.isArray(queue) ? queue : [];
-    state.portfolioDeltas = Array.isArray(deltasResp?.deltas) ? deltasResp.deltas : [];
-    if (!state.portfolioDeltasError && deltasResp && typeof deltasResp.note === 'string' && /database/i.test(deltasResp.note)) {
-      state.portfolioDeltasError = new Error(`/calibration/deltas → 503: ${deltasResp.note}`);
-    }
+    state.portfolioDeltas = [];
     renderProjects();
     if (!state.selectedProjectId) renderMain();
   } catch (e) {
@@ -4058,12 +4240,22 @@ function renderProjects() {
   $('projects-count').textContent = count ? `(${count})` : '';
 
   const filter = state.projectFilter.trim().toLowerCase();
+  const portfolioFiltered = filterPortfolioProjects(state.projects, state.portfolioFilter);
   const filtered = filter
-    ? state.projects.filter(p => {
+    ? portfolioFiltered.filter(p => {
         const hay = `${p.project_name || ''} ${p.current_phase || ''} ${p.risk_classification || ''} ${p.project_type || ''}`.toLowerCase();
         return hay.includes(filter);
       })
-    : state.projects;
+    : portfolioFiltered;
+
+  const existingFilter = document.querySelector('.project-filter .portfolio-filter-control');
+  if (!existingFilter) {
+    const filterWrap = document.querySelector('.project-filter');
+    if (filterWrap) filterWrap.insertAdjacentHTML('afterbegin', renderPortfolioFilterControl('sidebar'));
+  } else {
+    existingFilter.outerHTML = renderPortfolioFilterControl('sidebar');
+  }
+  wirePortfolioFilters();
 
   if (count === 0) {
     list.innerHTML = `
@@ -4082,15 +4274,18 @@ function renderProjects() {
   list.innerHTML = filtered.map(p => {
     const pid = p.project_id;
     const isSelected = pid === state.selectedProjectId;
-    const running = p.workflow_running;
-    const status = running ? 'running' : (p.project_status || 'pending');
-    const phase = p.current_phase || 'idle';
+    const status = lifecycleStateLabel(p);
+    const phase = workflowPhaseLabel(p);
+    const statusClass = String(status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]+/g, '_');
     return `
       <div class="project-row ${isSelected ? 'selected' : ''}" data-pid="${escapeHtml(pid)}">
-        <div class="project-status-dot ${escapeHtml(status)}" title="${escapeHtml(status)}"></div>
+        <div class="project-status-dot ${escapeHtml(statusClass)}" title="Project lifecycle state: ${escapeHtml(status)}"></div>
         <div class="project-body">
           <div class="project-name">${escapeHtml(p.project_name || 'Untitled')}</div>
-          <div class="project-sub">${escapeHtml(pid.slice(0, 8))}…</div>
+          <div class="project-sub">${escapeHtml(pid.slice(0, 8))}… · lifecycle: ${escapeHtml(status)}</div>
+          <div class="project-meta-line">workflow phase: ${escapeHtml(phase)} · ${escapeHtml(formatProjectUpdatedAt(p.updated_at))}</div>
+          <div class="project-signals">${renderSignalTags(p)}</div>
+          <div class="project-next">Next: ${escapeHtml(safeNextActionForProject(p))}</div>
         </div>
         <div class="project-phase">${escapeHtml(phase)}</div>
       </div>`;
@@ -4250,7 +4445,7 @@ async function loadDecisionPlane(pid) {
     state.dp.policyDecisions = [];
     state.dp.diff = null;
 
-    if (state.activeTab === 'decide' || state.activeTab === 'audit') renderMain();
+    if (state.activeTab === 'overview' || state.activeTab === 'trace') renderMain();
   } catch (e) {
     toast('Could not load decision plane: ' + e.message, 'err');
   }
@@ -4264,6 +4459,7 @@ function renderMain() {
   if (!state.selectedProjectId) {
     main.innerHTML = `
       ${renderRuntimeReadinessPanel()}
+      ${renderRuntimeHealthPanel()}
       <div class="ops-overview">
         ${renderPortfolioOverview()}
         <div class="empty-state">
@@ -4309,6 +4505,7 @@ function renderMain() {
 
   main.innerHTML = `
     ${renderRuntimeReadinessPanel()}
+    ${renderRuntimeHealthPanel()}
     <div class="workstation">
       ${renderHero(proj, workspace, audit)}
       ${renderSanitizationAlert(proj.intake_sanitization_findings)}
@@ -4326,116 +4523,71 @@ function renderMain() {
 
   wireHeroActions();
   wireTabs();
-  if (state.activeTab === 'decide') wireDecisionPlane();
+  if (state.activeTab === 'overview' || state.activeTab === 'trace') wireDecisionPlane();
   if (state.activeTab === 'evidence') wireEvidence();
-  if (state.activeTab === 'calibration' || state.activeTab === 'outcomes') wireCalibration();
+  if (state.activeTab === 'workflow') wireCalibration();
   renderInspector();
 }
 
 function renderPortfolioOverview() {
   const queue = state.projects || [];
-  const deltas = state.portfolioDeltas || [];
-  const deltasError = state.portfolioDeltasError;
-  const deltasByProject = new Map(deltas.map(item => [item.project_id, item]));
-
-  const needsAttention = queue.filter(p =>
-    ['blocked', 'review_required', 'stale'].includes(String(p.project_status || '').toLowerCase())
-    || Boolean(p.requires_approval)
-    || Boolean(p.has_stale_downstream)
-    || ((p.blocking_reasons || []).length > 0)
-  );
-  const likelyMissingOutcomeResolution = queue.filter(p => {
-    const row = deltasByProject.get(p.project_id);
-    return !row || Number(row.n_resolved || 0) <= 0;
-  });
-  const reportPhaseProjects = queue.filter(p =>
-    String(p.current_phase || '').toLowerCase() === 'report'
-    || String(p.project_status || '').toLowerCase() === 'completed'
-  );
-  const approvalsPending = queue.filter(p => Boolean(p.requires_approval));
-  const calibrationHealthy = deltas.filter(d =>
-    Number(d.n_resolved || 0) > 0 && Math.abs(Number(d.calibration_delta || 0)) <= 0.10
-  );
-  const recentCalibration = deltas
-    .filter(d => Number(d.n_predictions || 0) > 0 || Number(d.n_resolved || 0) > 0)
-    .slice(0, 8);
-
-  const listItem = (p, meta, label = '') => `
-    <li class="ops-list-item" data-pid="${escapeHtml(p.project_id)}">
-      <div class="title">${escapeHtml(p.project_name || 'Untitled')}${label ? ` <span class="tag">${escapeHtml(label)}</span>` : ''}</div>
-      <div class="meta">${meta}</div>
-    </li>`;
+  const needsAttention = filterPortfolioProjects(queue, 'needs_attention');
+  const active = filterPortfolioProjects(queue, 'active');
+  const complete = filterPortfolioProjects(queue, 'complete');
+  const filteredProjects = filterPortfolioProjects(queue, state.portfolioFilter);
+  const activeFilterLabel = PORTFOLIO_FILTERS.find(item => item.key === state.portfolioFilter)?.label || 'Projects';
 
   const metrics = [
-    { label: 'Active projects', value: fmtInt(queue.length), note: 'queue visibility' },
-    { label: 'Need attention', value: fmtInt(needsAttention.length), note: 'status + blockers + approval flags' },
-    { label: 'Likely unresolved outcomes', value: fmtInt(likelyMissingOutcomeResolution.length), note: 'conservative outcome-resolution signal' },
-    { label: 'Approvals pending', value: fmtInt(approvalsPending.length), note: 'from queue approval flag' },
-    { label: 'Calibration healthy', value: fmtInt(calibrationHealthy.length), note: '|Δ| ≤ 0.10 with resolved outcomes' },
-    { label: 'Evidence counts', value: '—', note: 'Backend gap: no portfolio aggregate endpoint yet' },
-    { label: 'Monitoring inputs due', value: '—', note: 'Backend gap: no due-state endpoint yet' },
+    { label: 'Projects', value: fmtInt(queue.length), note: 'from /projects/queue' },
+    { label: 'Need attention', value: fmtInt(needsAttention.length), note: 'queue flags only' },
+    { label: 'Active', value: fmtInt(active.length), note: 'not complete and not attention' },
+    { label: 'Complete', value: fmtInt(complete.length), note: 'project_status completed' },
   ];
 
   const attentionRows = needsAttention.length
-    ? `<ul class="ops-list">${needsAttention.slice(0, 8).map(p => {
-      const reasons = [];
-      if (p.project_status) reasons.push(`status: ${p.project_status}`);
-      if (p.requires_approval) reasons.push('approval required');
-      if (p.has_stale_downstream) reasons.push('stale downstream');
-      if ((p.blocking_reasons || []).length) reasons.push(p.blocking_reasons[0]);
-      return listItem(p, escapeHtml(reasons.join(' · ') || 'operator review recommended'));
-    }).join('')}</ul>`
+    ? `
+      <div class="attention-table">
+        ${needsAttention.slice(0, 8).map(p => `
+          <button class="attention-row" type="button" data-pid="${escapeHtml(p.project_id || '')}">
+            <div class="attention-name">${escapeHtml(p.project_name || 'Untitled')}</div>
+            <div class="attention-reason">${escapeHtml(projectAttentionReasons(p).join(' · ') || 'Operator review required')}</div>
+            <div class="attention-state">lifecycle: ${escapeHtml(lifecycleStateLabel(p))}</div>
+            <div class="attention-phase">workflow phase: ${escapeHtml(workflowPhaseLabel(p))}</div>
+            <div class="attention-action">Next: ${escapeHtml(safeNextActionForProject(p))}</div>
+          </button>
+        `).join('')}
+      </div>
+    `
     : `<div class="ops-empty">No projects currently match attention signals from queue fields.</div>`;
 
-  const missingOutcomeRows = deltasError
-    ? `${renderTaxonomyNote(deltasError, 'capability')}<div class="ops-empty">Outcome-resolution signal unavailable until calibration deltas can be read.</div>`
-    : (likelyMissingOutcomeResolution.length
-      ? `<ul class="ops-list">${likelyMissingOutcomeResolution.slice(0, 8).map(p => {
-        const row = deltasByProject.get(p.project_id);
-        const resolved = row ? Number(row.n_resolved || 0) : 0;
-        const preds = row ? Number(row.n_predictions || 0) : 0;
-        return listItem(p, `resolved: ${fmtInt(resolved)} · predictions: ${fmtInt(preds)} · phase: ${escapeHtml(p.current_phase || '—')}`);
-      }).join('')}</ul>`
-      : `<div class="ops-empty">No projects currently look missing outcome-resolution signals.</div>`);
-
-  const reportRows = reportPhaseProjects.length
-    ? `<ul class="ops-list">${reportPhaseProjects.slice(0, 8).map(p =>
-      listItem(p, `phase: ${escapeHtml(p.current_phase || '—')} · queue status: ${escapeHtml(p.project_status || 'unknown')}`, 'indicator')
-    ).join('')}</ul>`
-    : `<div class="ops-empty">No projects are currently in report-phase or completed queue states.</div>`;
-
-  const calibrationRows = deltasError
-    ? `${renderTaxonomyNote(deltasError, 'capability')}<div class="ops-empty">Recent calibration / decision quality rows are unavailable.</div>`
-    : (recentCalibration.length
-      ? `<ul class="ops-list">${recentCalibration.map(row => {
-        const delta = row.calibration_delta == null ? 'δ —' : `δ ${Number(row.calibration_delta) > 0 ? '+' : ''}${fmt(row.calibration_delta)}`;
-        const brier = row.mean_brier == null ? 'Brier —' : `Brier ${fmt(row.mean_brier)}`;
-        return `
-          <li class="ops-list-item" data-pid="${escapeHtml(row.project_id || '')}">
-            <div class="title">${escapeHtml(row.name || 'Untitled')}</div>
-            <div class="meta">predictions ${fmtInt(row.n_predictions || 0)} · resolved ${fmtInt(row.n_resolved || 0)} · ${brier} · ${delta}</div>
-          </li>
-        `;
-      }).join('')}</ul>`
-      : `<div class="ops-empty">No resolved calibration rows yet.</div>`);
-
-  const warningRows = needsAttention.slice(0, 4).map((p) => {
-    const reason = (p.blocking_reasons || [])[0]
-      || (p.requires_approval ? 'Formal approval pending' : '')
-      || (p.has_stale_downstream ? 'Downstream outputs are stale' : '')
-      || `Status: ${p.project_status || 'review'}`;
-    return `
-      <div class="ops-risk-row">
-        <div class="ops-risk-badge warn">WARN</div>
-        <div class="ops-risk-text"><strong>${escapeHtml(p.project_name || 'Untitled')}</strong><br>${escapeHtml(reason)}</div>
+  const projectRows = filteredProjects.length
+    ? `
+      <div class="ops-project-list">
+        ${filteredProjects.map(p => `
+          <button class="portfolio-project-row" type="button" data-pid="${escapeHtml(p.project_id || '')}">
+            <div class="portfolio-project-main">
+              <div class="portfolio-project-name">${escapeHtml(p.project_name || 'Untitled')}</div>
+              <div class="portfolio-project-meta">
+                <span>Project lifecycle state: <strong>${escapeHtml(lifecycleStateLabel(p))}</strong></span>
+                <span>Workflow phase: <strong>${escapeHtml(workflowPhaseLabel(p))}</strong></span>
+                <span>${escapeHtml(formatProjectUpdatedAt(p.updated_at))}</span>
+              </div>
+              <div class="project-signals">${renderSignalTags(p)}</div>
+              <div class="portfolio-project-action">Next: ${escapeHtml(safeNextActionForProject(p))}</div>
+            </div>
+          </button>
+        `).join('')}
       </div>
-    `;
-  }).join('');
+    `
+    : `<div class="ops-empty">No projects match the ${escapeHtml(activeFilterLabel)} filter.</div>`;
 
   return `
-    <div class="ops-card">
+    <div class="ops-card portfolio-landing-card">
       <div class="ops-card-head">
-        <h3>Portfolio / Operator summary</h3>
+        <div>
+          <h3>Portfolio Operations</h3>
+          <div class="ops-section-note">Projects. Showing the current project result set.</div>
+        </div>
         <span class="count">${fmtInt(queue.length)} project(s)</span>
       </div>
       <div style="padding: 12px;">
@@ -4449,41 +4601,62 @@ function renderPortfolioOverview() {
           `).join('')}
         </div>
       </div>
-      <div class="ops-grid" style="padding: 0 12px 12px;">
-        <div class="ops-card">
-          <div class="ops-card-head"><h3>Projects needing attention</h3><span class="count">${fmtInt(needsAttention.length)}</span></div>
-          ${attentionRows}
-        </div>
-        <div class="ops-card">
-          <div class="ops-card-head"><h3>Projects likely missing outcome resolution</h3><span class="count">${fmtInt(likelyMissingOutcomeResolution.length)}</span></div>
-          ${missingOutcomeRows}
-        </div>
-        <div class="ops-card">
-          <div class="ops-card-head"><h3>Report-phase / likely report-ready projects</h3><span class="count">${fmtInt(reportPhaseProjects.length)}</span></div>
-          ${reportRows}
-        </div>
-        <div class="ops-card">
-          <div class="ops-card-head"><h3>Recent calibration / decision quality</h3><span class="count">${deltasError ? 'n/a' : fmtInt(recentCalibration.length)}</span></div>
-          ${calibrationRows}
-        </div>
-        <div class="ops-card" style="grid-column: 1 / -1;">
-          <div class="ops-card-head"><h3>Operator warnings</h3><span class="count">${fmtInt(needsAttention.length)}</span></div>
-          <div class="ops-risk-list">
-            ${warningRows || `<div class="ops-risk-row"><div class="ops-risk-badge info">OK</div><div class="ops-risk-text">No active queue warnings right now.</div></div>`}
-          </div>
-        </div>
-      </div>
     </div>
+
+    <div class="ops-card">
+      <div class="ops-card-head">
+        <h3>Decision Attention Queue</h3>
+        <span class="count">${fmtInt(needsAttention.length)}</span>
+      </div>
+      ${attentionRows}
+    </div>
+
+    <div class="ops-card">
+      <div class="ops-card-head">
+        <div>
+          <h3>Projects</h3>
+          <div class="ops-section-note">Showing the current project result set.</div>
+        </div>
+        <span class="count">${fmtInt(filteredProjects.length)} shown</span>
+      </div>
+      <div style="padding: 12px 12px 0;">
+        ${renderPortfolioFilterControl('landing')}
+      </div>
+      ${projectRows}
+    </div>
+
+    ${queue.length === 0 ? `
+      <div class="empty-state" style="height:auto; min-height:220px;">
+        <div class="empty-icon">∅</div>
+        <h2>No projects available</h2>
+        <p>Create a project to populate the current project result set.</p>
+        <button class="btn btn-accent btn-lg" id="btn-new-project-big" aria-label="Create a new project">+ Create project</button>
+      </div>
+    ` : ''}
   `;
 }
 
+function wirePortfolioFilters() {
+  document.querySelectorAll('.portfolio-filter-btn[data-portfolio-filter]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.portfolioFilter = btn.dataset.portfolioFilter || 'needs_attention';
+      renderProjects();
+      if (!state.selectedProjectId) {
+        renderMain();
+      }
+    });
+  });
+}
+
 function wirePortfolioOverview() {
-  document.querySelectorAll('.ops-list-item[data-pid]').forEach(item => {
+  wirePortfolioFilters();
+  document.querySelectorAll('.ops-list-item[data-pid], .attention-row[data-pid], .portfolio-project-row[data-pid]').forEach(item => {
     item.addEventListener('click', () => {
       const pid = item.dataset.pid;
       if (pid) routeTo(`project/${pid}`);
     });
   });
+  $('btn-new-project-big')?.addEventListener('click', openNewProjectModal);
 }
 
 function renderInputContractTags(workspace) {
@@ -4667,7 +4840,7 @@ function renderBudget(b) {
 }
 
 function renderTabs() {
-  const tabs = ['decide', 'evidence', 'outcomes', 'calibration', 'report', 'audit'];
+  const tabs = WORKSPACE_TABS;
   const bayesianCount = Array.isArray(state.project?.bayesian?.scenarios) ? state.project.bayesian.scenarios.length : 0;
   const calib = state.project?.calibration?.projectCalib;
   const calibN = (calib && typeof calib.n_resolved === 'number') ? calib.n_resolved : 0;
@@ -4676,12 +4849,11 @@ function renderTabs() {
   const evSources = state.project?.knowledge?.knowledge_layer?.sources?.length || 0;
   const evCount = evFiles + evSources;
   const badges = {
-    decide: state.dp.events.length ? String(state.dp.events.length) : '',
+    overview: state.dp.events.length ? String(state.dp.events.length) : '',
+    workflow: outcomeN ? String(outcomeN) : (calibN ? String(calibN) : ''),
     evidence: evCount ? String(evCount) : '',
-    outcomes: outcomeN ? String(outcomeN) : '',
-    calibration: calibN ? String(calibN) : '',
+    trace: state.project?.audit?.audit_log?.length ? String(state.project.audit.audit_log.length) : '',
     report: '',
-    audit: state.project?.audit?.audit_log?.length ? String(state.project.audit.audit_log.length) : '',
   };
   return `
     <div class="ws-tabs">
@@ -4696,13 +4868,11 @@ function renderTabs() {
 }
 
 function renderTabContent() {
-  if (state.activeTab === 'decide') return renderDecide();
+  if (state.activeTab === 'overview') return renderDecide();
+  if (state.activeTab === 'workflow') return renderOutcomesTab();
   if (state.activeTab === 'evidence') return renderEvidenceStub();
-  if (state.activeTab === 'outcomes') return renderOutcomesTab();
-  if (state.activeTab === 'bayesian') return renderBayesianTab();
-  if (state.activeTab === 'calibration') return renderCalibrationTab();
+  if (state.activeTab === 'trace') return renderAuditStub();
   if (state.activeTab === 'report') return renderReportStub();
-  if (state.activeTab === 'audit') return renderAuditStub();
   return '';
 }
 
@@ -6468,12 +6638,11 @@ function renderInspector() {
 
   const kicker = TAB_LABELS[state.activeTab] || state.activeTab;
   let sections = '';
-  if (state.activeTab === 'decide') sections = renderInspectorDecide();
+  if (state.activeTab === 'overview') sections = renderInspectorDecide();
+  else if (state.activeTab === 'workflow') sections = renderInspectorCalibration();
   else if (state.activeTab === 'evidence') sections = renderInspectorEvidence();
-  else if (state.activeTab === 'bayesian') sections = renderInspectorBayesian();
-  else if (state.activeTab === 'calibration' || state.activeTab === 'outcomes') sections = renderInspectorCalibration();
+  else if (state.activeTab === 'trace') sections = renderInspectorAudit();
   else if (state.activeTab === 'report') sections = renderInspectorReport();
-  else if (state.activeTab === 'audit') sections = renderInspectorAudit();
 
   pane.innerHTML = `
     <div class="ins">
@@ -7400,9 +7569,9 @@ async function refresh() {
   await loadLearningEngine();
   if (state.selectedProjectId) {
     await loadProject(state.selectedProjectId);
-    if (state.activeTab === 'decide' || state.activeTab === 'audit') await loadDecisionPlane(state.selectedProjectId);
+    if (state.activeTab === 'overview' || state.activeTab === 'trace') await loadDecisionPlane(state.selectedProjectId);
     if (state.activeTab === 'report') await loadReport(state.selectedProjectId);
-    if ((state.activeTab === 'calibration' || state.activeTab === 'outcomes') && state.project && !state.project.calibration) {
+    if (state.activeTab === 'workflow' && state.project && !state.project.calibration) {
       await loadCalibration(state.selectedProjectId);
     }
     renderMain();
@@ -7446,7 +7615,7 @@ function paletteBuildItems() {
 
   // Tabs — only when a project is selected
   if (hasProject) {
-    ['decide', 'evidence', 'outcomes', 'bayesian', 'calibration', 'report', 'audit'].forEach(t => {
+    WORKSPACE_TABS.forEach(t => {
       items.push({
         group: 'Jump to tab',
         icon: t === state.activeTab ? '●' : '○',
@@ -7486,7 +7655,7 @@ function paletteBuildItems() {
         run: () => {
           closePalette();
           state.dp.selectedEventId = e.event_id;
-          if (state.activeTab !== 'decide') routeTo(`project/${state.selectedProjectId}/decide`);
+          if (state.activeTab !== 'trace') routeTo(`project/${state.selectedProjectId}/trace`);
           else renderMain();
         },
         searchText: `${e.event_type} ${e.phase || ''} ${e.event_id} ${eventNamespace(e.event_type)}`,

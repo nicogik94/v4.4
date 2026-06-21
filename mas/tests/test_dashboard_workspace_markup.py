@@ -36,7 +36,7 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("v5 canonical dashboard", html)
         self.assertIn("canonical operator workflow", html)
         self.assertIn("classify, hypotheses, gauntlet, audit, strategy, sqi, monitor, report", html)
-        self.assertIn("Portfolio / Operator summary", html)
+        self.assertIn("Portfolio Operations", html)
         self.assertIn("command palette", html)
         self.assertIn("Operator review support", html)
         self.assertIn("Missing information for operator review", html)
@@ -60,6 +60,7 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertNotIn("controlled local demo", html)
         self.assertNotIn("canonical dashboard remains index.html", html)
         self.assertNotIn("v5 controlled local demo", html)
+        self.assertNotIn("Portfolio / Operator summary", html)
         self.assertNotIn("Follow-up questions", html)
         self.assertNotIn("chatbot", html)
         self.assertNotIn("workflow gate", html)
@@ -97,13 +98,28 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("http://localhost:8000", html)
 
         for tab_value, label in (
-            ("decide", "Overview"),
-            ("evidence", "Dossier"),
-            ("audit", "Control log"),
+            ("overview", "Overview"),
+            ("workflow", "Workflow"),
+            ("evidence", "Evidence & Risks"),
+            ("trace", "Decision Trace"),
+            ("report", "Report & Export"),
         ):
             self.assertIn(f"{tab_value}: '{label}'", html)
-        self.assertIn("const tabs = ['decide', 'evidence', 'outcomes', 'calibration', 'report', 'audit']", html)
+        self.assertIn("const WORKSPACE_TABS = ['overview', 'workflow', 'evidence', 'trace', 'report']", html)
+        self.assertIn("const tabs = WORKSPACE_TABS", html)
+        self.assertIn("normalizeWorkspaceTab", html)
+        for legacy_tab, current_tab in (
+            ("decide", "overview"),
+            ("outcomes", "overview"),
+            ("calibration", "overview"),
+            ("bayesian", "trace"),
+            ("audit", "trace"),
+        ):
+            self.assertIn(f"{legacy_tab}: '{current_tab}'", html)
         self.assertIn('data-tab="${t}"', html)
+        self.assertIn("WORKSPACE_TABS.forEach(t =>", html)
+        self.assertIn("title: `Go to ${TAB_LABELS[t]}`", html)
+        self.assertNotIn("const tabs = ['decide', 'evidence', 'outcomes', 'calibration', 'report', 'audit']", html)
 
         for phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor", "report"):
             self.assertIn(phase, html)
@@ -129,7 +145,86 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("runtimePreflightItems", html)
         self.assertIn("runtimeReleaseItems", html)
         self.assertIn("renderRuntimeReadinessPanel", html)
+        self.assertIn("renderRuntimeHealthPanel", html)
+        self.assertIn("runtime-health-panel", html)
+        self.assertIn("Runtime health", html)
+        self.assertIn("Global runtime only. This is separate from project lifecycle state.", html)
+        self.assertIn("Persistence / database", html)
+        self.assertIn("Durable run-state", html)
+        self.assertIn("Workflow queue", html)
+        self.assertIn("Release gate", html)
+        self.assertIn("Freshness", html)
+        self.assertIn("runtimeHealthSummary", html)
+        self.assertIn("syncRuntimeHealthPanel", html)
+        self.assertGreaterEqual(html.count("${renderRuntimeHealthPanel()}"), 2)
         self.assertNotIn("Runtime readiness details", html)
+
+    def test_portfolio_operations_landing_and_filters_are_present(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        for expected in (
+            "#/                    → Portfolio Operations landing view",
+            "renderPortfolioOverview",
+            "Portfolio Operations",
+            "Start from Portfolio signals on the left",
+            "portfolio-landing-card",
+            "Decision Attention Queue",
+            "Showing the current project result set.",
+        ):
+            self.assertIn(expected, html)
+
+        self.assertIn("const PORTFOLIO_FILTERS = [", html)
+        for filter_key, label in (
+            ("needs_attention", "Needs attention"),
+            ("active", "Active"),
+            ("complete", "Complete"),
+            ("all", "All"),
+        ):
+            self.assertIn(f"key: '{filter_key}', label: '{label}'", html)
+        self.assertIn("renderPortfolioFilterControl", html)
+        self.assertIn("data-portfolio-filter", html)
+        self.assertIn("portfolio-filter-btn", html)
+        self.assertIn("filterPortfolioProjects", html)
+
+        self.assertIn("function isCompletedProject(project)", html)
+        self.assertIn("project_status || '').toLowerCase() === 'completed'", html)
+        self.assertIn("if (isCompletedProject(project)) return [];", html)
+        self.assertIn("if (filterKey === 'complete') return rows.filter(isCompletedProject);", html)
+        self.assertIn("not complete and not attention", html)
+        self.assertIn("project_status completed", html)
+        self.assertIn("Open the project workspace to review report and exports.", html)
+
+        self.assertIn("function projectAttentionReasons(project)", html)
+        self.assertIn("function projectNeedsAttention(project)", html)
+        self.assertIn("attention-row", html)
+        self.assertIn("requires_approval", html)
+        self.assertIn("has_stale_downstream", html)
+        self.assertIn("active_risk_count", html)
+        self.assertIn("No projects currently match attention signals from queue fields.", html)
+
+    def test_workspace_tabs_use_portfolio_operations_structure(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        for expected in (
+            "activeTab: 'overview'",
+            "const WORKSPACE_TABS = ['overview', 'workflow', 'evidence', 'trace', 'report']",
+            "const tabs = WORKSPACE_TABS",
+            "if (state.activeTab === 'overview') return renderDecide();",
+            "if (state.activeTab === 'workflow') return renderOutcomesTab();",
+            "if (state.activeTab === 'evidence') return renderEvidenceStub();",
+            "if (state.activeTab === 'trace') return renderAuditStub();",
+            "if (state.activeTab === 'report') return renderReportStub();",
+            "if (state.activeTab === 'overview') sections = renderInspectorDecide();",
+            "else if (state.activeTab === 'workflow') sections = renderInspectorCalibration();",
+            "else if (state.activeTab === 'evidence') sections = renderInspectorEvidence();",
+            "else if (state.activeTab === 'trace') sections = renderInspectorAudit();",
+            "else if (state.activeTab === 'report') sections = renderInspectorReport();",
+        ):
+            self.assertIn(expected, html)
 
     def test_canonical_export_profile_controls_are_present(self):
         if not HTML_PATH.exists():
