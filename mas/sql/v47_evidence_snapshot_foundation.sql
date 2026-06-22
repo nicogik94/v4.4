@@ -32,11 +32,12 @@ BEGIN;
 DO $$
 DECLARE
     v_tables   int;
-    v_triggers int;
-    v_uniques  int;
-    v_fn       boolean;
-    v_total    int;
+    v_present  boolean;
+    v_fn_oid   oid;
+    r          record;
+    v_cols     text[];
 BEGIN
+    -- Count the five Slice A tables in the current schema.
     SELECT count(*) INTO v_tables
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -46,44 +47,148 @@ BEGIN
           'source_blob', 'source_snapshot', 'candidate_fact_revision',
           'evidence_retention_event', 'ingest_operation']);
 
-    SELECT count(*) INTO v_triggers
-    FROM pg_trigger t
-    JOIN pg_class c ON c.oid = t.tgrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = current_schema()
-      AND t.tgname = ANY (ARRAY[
-          'trg_source_blob_no_mutation', 'trg_source_snapshot_no_mutation',
-          'trg_cfr_no_mutation', 'trg_retention_no_mutation']);
+    -- Presence: do ANY Slice A objects (table, function, trigger, or named
+    -- constraint) already exist in this schema?
+    SELECT (v_tables > 0)
+        OR EXISTS (
+            SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = current_schema() AND p.proname = 'slicea_reject_mutation')
+        OR EXISTS (
+            SELECT 1 FROM pg_trigger t
+            JOIN pg_class c ON c.oid = t.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema()
+              AND t.tgname = ANY (ARRAY[
+                  'trg_source_blob_no_mutation', 'trg_source_snapshot_no_mutation',
+                  'trg_cfr_no_mutation', 'trg_retention_no_mutation']))
+        OR EXISTS (
+            SELECT 1 FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace
+            WHERE n.nspname = current_schema()
+              AND con.conname = ANY (ARRAY[
+                  'uq_source_blob_id_project', 'uq_source_snapshot_id_project', 'uq_cfr_id_project',
+                  'ck_retention_single_target', 'fk_snapshot_blob_project', 'fk_cfr_snapshot_project',
+                  'fk_ingest_snapshot_project', 'fk_ret_blob_project', 'fk_ret_snapshot_project',
+                  'fk_ret_fact_project']))
+        INTO v_present;
 
-    SELECT count(*) INTO v_uniques
-    FROM pg_constraint con
-    JOIN pg_namespace n ON n.oid = con.connamespace
-    WHERE n.nspname = current_schema()
-      AND con.conname = ANY (ARRAY[
-          'uq_source_blob_id_project', 'uq_source_snapshot_id_project', 'uq_cfr_id_project']);
+    IF NOT v_present THEN
+        -- Clean bootstrap: nothing exists yet; proceed to create everything.
+        RETURN;
+    END IF;
 
-    SELECT EXISTS (
-        SELECT 1 FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = current_schema() AND p.proname = 'slicea_reject_mutation'
-    ) INTO v_fn;
+    -- Something exists: the schema must satisfy the full v47 contract by
+    -- definition (not merely by object name) or the migration is refused.
+    -- Unknown partial/divergent schema is never silently repaired.
 
-    v_total := v_tables + v_triggers + v_uniques + (CASE WHEN v_fn THEN 1 ELSE 0 END);
-
-    IF v_total = 0 THEN
-        -- Clean bootstrap: nothing exists yet.
-        NULL;
-    ELSIF v_tables = 5 AND v_triggers = 4 AND v_uniques = 3 AND v_fn THEN
-        -- Complete and matching: downstream guarded DDL is a no-op.
-        NULL;
-    ELSE
+    -- All five tables must exist.
+    IF v_tables <> 5 THEN
         RAISE EXCEPTION
-            'v47 evidence snapshot migration refused: existing Slice A schema is partial or divergent '
-            '(tables=%/5, triggers=%/4, composite_uniques=%/3, reject_fn=%). '
-            'Resolve the schema manually; v47 will not silently repair it.',
-            v_tables, v_triggers, v_uniques, v_fn
+            'v47 contract violation: expected 5 Slice A tables, found % — schema is partial/divergent',
+            v_tables USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    -- The append-only guard function must exist.
+    SELECT p.oid INTO v_fn_oid
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = current_schema() AND p.proname = 'slicea_reject_mutation';
+    IF v_fn_oid IS NULL THEN
+        RAISE EXCEPTION 'v47 contract violation: slicea_reject_mutation() is missing'
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
+
+    -- The three composite unique constraints must reference exactly (id, project_id).
+    FOR r IN
+        SELECT * FROM (VALUES
+            ('uq_source_blob_id_project',     'source_blob'),
+            ('uq_source_snapshot_id_project', 'source_snapshot'),
+            ('uq_cfr_id_project',             'candidate_fact_revision')
+        ) AS x(cn, tbl)
+    LOOP
+        SELECT array_agg(a.attname::text ORDER BY a.attname) INTO v_cols
+        FROM pg_constraint con
+        JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)
+        WHERE con.conname = r.cn
+          AND con.contype = 'u'
+          AND con.conrelid = (current_schema() || '.' || r.tbl)::regclass;
+        IF v_cols IS DISTINCT FROM ARRAY['id', 'project_id'] THEN
+            RAISE EXCEPTION
+                'v47 contract violation: unique constraint % on % must be (id, project_id), found %',
+                r.cn, r.tbl, v_cols USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+    END LOOP;
+
+    -- The six project-consistent composite foreign keys must exist on the
+    -- intended tables/columns and reference parent (id, project_id).
+    FOR r IN
+        SELECT * FROM (VALUES
+            ('fk_snapshot_blob_project',    'source_snapshot',          'source_blob',             ARRAY['project_id', 'source_blob_id']),
+            ('fk_cfr_snapshot_project',     'candidate_fact_revision',  'source_snapshot',         ARRAY['project_id', 'source_snapshot_id']),
+            ('fk_ingest_snapshot_project',  'ingest_operation',         'source_snapshot',         ARRAY['project_id', 'source_snapshot_id']),
+            ('fk_ret_blob_project',         'evidence_retention_event', 'source_blob',             ARRAY['project_id', 'source_blob_id']),
+            ('fk_ret_snapshot_project',     'evidence_retention_event', 'source_snapshot',         ARRAY['project_id', 'source_snapshot_id']),
+            ('fk_ret_fact_project',         'evidence_retention_event', 'candidate_fact_revision', ARRAY['candidate_fact_revision_id', 'project_id'])
+        ) AS x(cn, tbl, reftbl, lcols)
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint con
+            WHERE con.conname = r.cn
+              AND con.contype = 'f'
+              AND con.conrelid = (current_schema() || '.' || r.tbl)::regclass
+              AND con.confrelid = (current_schema() || '.' || r.reftbl)::regclass
+              AND (SELECT array_agg(a.attname::text ORDER BY a.attname)
+                   FROM pg_attribute a
+                   WHERE a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)) = r.lcols
+              AND (SELECT array_agg(a.attname::text ORDER BY a.attname)
+                   FROM pg_attribute a
+                   WHERE a.attrelid = con.confrelid AND a.attnum = ANY (con.confkey)) = ARRAY['id', 'project_id']
+        ) THEN
+            RAISE EXCEPTION
+                'v47 contract violation: composite FK % on % -> % is missing or has wrong columns',
+                r.cn, r.tbl, r.reftbl USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+    END LOOP;
+
+    -- The four append-only triggers must be BEFORE UPDATE OR DELETE row triggers
+    -- attached to the correct tables and invoking slicea_reject_mutation().
+    FOR r IN
+        SELECT * FROM (VALUES
+            ('trg_source_blob_no_mutation',     'source_blob'),
+            ('trg_source_snapshot_no_mutation', 'source_snapshot'),
+            ('trg_cfr_no_mutation',             'candidate_fact_revision'),
+            ('trg_retention_no_mutation',       'evidence_retention_event')
+        ) AS x(tg, tbl)
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_trigger t
+            WHERE t.tgname = r.tg
+              AND t.tgrelid = (current_schema() || '.' || r.tbl)::regclass
+              AND NOT t.tgisinternal
+              AND (t.tgtype & 1) = 1    -- row-level
+              AND (t.tgtype & 2) = 2    -- BEFORE
+              AND (t.tgtype & 8) = 8    -- DELETE
+              AND (t.tgtype & 16) = 16  -- UPDATE
+              AND (t.tgtype & 4) = 0    -- not INSERT
+              AND t.tgfoid = v_fn_oid   -- invokes slicea_reject_mutation()
+        ) THEN
+            RAISE EXCEPTION
+                'v47 contract violation: append-only trigger % on % is missing or has wrong definition '
+                '(must be BEFORE UPDATE OR DELETE FOR EACH ROW EXECUTE slicea_reject_mutation)',
+                r.tg, r.tbl USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+    END LOOP;
+
+    -- The retention XOR check constraint must exist on evidence_retention_event.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint con
+        WHERE con.conname = 'ck_retention_single_target'
+          AND con.contype = 'c'
+          AND con.conrelid = (current_schema() || '.evidence_retention_event')::regclass
+    ) THEN
+        RAISE EXCEPTION 'v47 contract violation: ck_retention_single_target (XOR) is missing'
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    -- All contract checks passed: schema is complete; downstream guarded DDL is a no-op.
 END $$;
 
 -- ═══ Append-only guard function ═══

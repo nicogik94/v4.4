@@ -361,6 +361,39 @@ def test_v47_rejects_divergent_complete_schema(conn, schema):
         pg._restore_autocommit(conn, prior)
 
 
+def test_v47_rejects_definition_divergence_with_correct_names(conn, schema):
+    """All expected names exist, but definitions are wrong → v47 must reject.
+
+    This proves the migration validates the contract by catalog metadata, not by
+    object names: the name-based classifier still reports 'complete'.
+    """
+    assert pg.classify_schema(conn, schema) == "complete"
+    prior = pg._begin_autocommit(conn)
+    try:
+        # (a) uq_source_blob_id_project: same name, WRONG column pair.
+        conn.execute("ALTER TABLE source_blob DROP CONSTRAINT uq_source_blob_id_project CASCADE")
+        conn.execute("ALTER TABLE source_blob ADD CONSTRAINT uq_source_blob_id_project UNIQUE (id, hash_algorithm)")
+        # Restore the FK names dropped by CASCADE (definitions now diverge, names exist).
+        conn.execute("ALTER TABLE source_snapshot ADD CONSTRAINT fk_snapshot_blob_project "
+                     "FOREIGN KEY (source_blob_id) REFERENCES source_blob(id)")
+        conn.execute("ALTER TABLE evidence_retention_event ADD CONSTRAINT fk_ret_blob_project "
+                     "FOREIGN KEY (source_blob_id) REFERENCES source_blob(id)")
+        # (b) trg_cfr_no_mutation: same name, WRONG event (BEFORE INSERT, not UPDATE/DELETE).
+        conn.execute("DROP TRIGGER trg_cfr_no_mutation ON candidate_fact_revision")
+        conn.execute("CREATE TRIGGER trg_cfr_no_mutation BEFORE INSERT ON candidate_fact_revision "
+                     "FOR EACH ROW EXECUTE FUNCTION slicea_reject_mutation()")
+
+        # Name-only classification is fooled — every expected name is still present.
+        assert pg.classify_schema(conn, schema) == "complete"
+
+        # The real v47 migration rejects on definition mismatch.
+        with pytest.raises(Exception):
+            pg._run_script(conn, pg.V47_SQL)
+        conn.rollback()
+    finally:
+        pg._restore_autocommit(conn, prior)
+
+
 def test_v47_clean_bootstrap_and_complete_reapply_still_pass(conn):
     """Clean bootstrap succeeds; a complete re-apply is a verified no-op."""
     name = f"slicea_boot_{__import__('uuid').uuid4().hex[:12]}"
