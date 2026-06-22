@@ -372,6 +372,18 @@ def get_operator_auth_config() -> OperatorAuthConfig:
     )
 
 
+# ═══ Evidence Snapshot Foundation (Slice A) ═══
+# Off by default. When enabled, Slice A source-capture persistence uses the
+# existing authoritative MAS PostgreSQL database (DATABASE_URL) — there is no
+# separate evidence database and no in-memory fallback. When disabled, upload,
+# CSV, and deletion behavior are unchanged.
+EVIDENCE_SNAPSHOT_ENABLED_ENV = "MAS_EVIDENCE_SNAPSHOT_ENABLED"
+
+
+def evidence_snapshot_enabled() -> bool:
+    return _env_flag(EVIDENCE_SNAPSHOT_ENABLED_ENV, default=False)
+
+
 def _env_json_map(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:

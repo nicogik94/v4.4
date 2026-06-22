@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
+import logging
 from pathlib import Path
 import uuid
 
@@ -32,6 +33,8 @@ from state import (
 from .file_parsers import ParsedChunk, ParsedTable, UploadParseError, parse_upload_bytes
 from .freshness import build_knowledge_health
 from .registry import ensure_knowledge_layer, upsert_source_entry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -194,6 +197,27 @@ def ingest_uploaded_file(
         )
         _upsert_file_manifest(state, manifest)
         ensure_decision_objects(state, trigger="knowledge.file_upload")
+        # Slice A (additive, off by default): capture immutable source evidence
+        # from the genuine raw bytes and stable storage_ref. Capture failure must
+        # never break the upload and never claims durable evidence.
+        try:
+            from knowledge.evidence_snapshot import capture as _evidence_capture
+
+            _evidence_capture.capture_upload(
+                project_id=state.project_id,
+                content=content,
+                storage_ref=storage_ref,
+                source_kind="uploaded_file",
+                source_locator=f"upload:{file_id}",
+                actor=actor,
+            )
+        except Exception:
+            logger.warning(
+                "evidence-snapshot capture failed for upload %s; upload preserved, "
+                "no durable Slice A evidence recorded",
+                file_id,
+                exc_info=True,
+            )
         return FileUploadResult(
             manifest=manifest,
             source=source,
@@ -217,6 +241,13 @@ def delete_uploaded_file(state: ProjectState, file_id: str) -> dict:
     manifest = get_uploaded_file_manifest(state, file_id)
     if manifest is None:
         raise KeyError(file_id)
+
+    # Slice A (additive, off by default): guard deletion through the snapshot
+    # storage_ref. When enabled, refuse hard deletion of snapshot-linked storage
+    # and fail closed if linkage cannot be verified. No-op when disabled.
+    from knowledge.evidence_snapshot import capture as _evidence_capture
+
+    _evidence_capture.assert_safe_to_delete_storage_ref(manifest.storage_ref)
 
     _delete_storage_ref(manifest.storage_ref)
     layer.uploaded_files = [item for item in layer.uploaded_files if item.file_id != file_id]
