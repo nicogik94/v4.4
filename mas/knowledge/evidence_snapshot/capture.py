@@ -104,40 +104,45 @@ def capture_upload(
             conn.commit()
             return None
 
-        content_hash = hashlib.new(HASH_ALGORITHM, content).hexdigest()
-        blob_id = repo.insert_or_get_blob(
-            conn, project_id=project_id, content_hash=content_hash,
-            byte_size=len(content), hash_algorithm=HASH_ALGORITHM, created_by=actor,
-        )
-        snapshot_id = repo.insert_snapshot(
-            conn, source_blob_id=blob_id, project_id=project_id, storage_ref=storage_ref,
-            source_kind=source_kind, source_locator=source_locator,
-            ingest_operation_id=op_id, captured_by=actor,
-        )
-        repo.set_ingest_status(
-            conn, operation_pk=operation.id, status="committed", source_snapshot_id=snapshot_id,
-        )
+        # The IngestOperation row now exists (created or fetched) within this
+        # transaction. Wrap the Blob/Snapshot work in a savepoint so a later
+        # failure rolls back only the blob/snapshot/status changes — never
+        # leaving partial rows — while the operation row survives to be marked
+        # failed and committed as durable operational state.
+        conn.execute("SAVEPOINT slicea_capture")
+        try:
+            content_hash = hashlib.new(HASH_ALGORITHM, content).hexdigest()
+            blob_id = repo.insert_or_get_blob(
+                conn, project_id=project_id, content_hash=content_hash,
+                byte_size=len(content), hash_algorithm=HASH_ALGORITHM, created_by=actor,
+            )
+            snapshot_id = repo.insert_snapshot(
+                conn, source_blob_id=blob_id, project_id=project_id, storage_ref=storage_ref,
+                source_kind=source_kind, source_locator=source_locator,
+                ingest_operation_id=op_id, captured_by=actor,
+            )
+            repo.set_ingest_status(
+                conn, operation_pk=operation.id, status="committed", source_snapshot_id=snapshot_id,
+            )
+        except Exception as exc:
+            # Undo only the blob/snapshot/status work; keep the operation row.
+            conn.execute("ROLLBACK TO SAVEPOINT slicea_capture")
+            repo.set_ingest_status(
+                conn, operation_pk=operation.id, status="failed", detail=str(exc)[:500],
+            )
+            conn.commit()
+            raise CaptureError(str(exc)) from exc
+        conn.execute("RELEASE SAVEPOINT slicea_capture")
         conn.commit()
         return snapshot_id
+    except CaptureError:
+        raise
     except Exception as exc:
+        # Failure before/at operation creation: nothing durable to annotate.
         try:
             conn.rollback()
         except Exception:  # pragma: no cover - rollback best effort
             pass
-        # Best-effort: record the operational failure so it is never mistaken for
-        # durable, calculation-ready evidence.
-        try:
-            failed = repo.get_ingest_operation(conn, project_id=project_id, operation_id=op_id)
-            if failed is not None:
-                repo.set_ingest_status(
-                    conn, operation_pk=failed.id, status="failed", detail=str(exc)[:500],
-                )
-                conn.commit()
-        except Exception:  # pragma: no cover - failure annotation best effort
-            try:
-                conn.rollback()
-            except Exception:
-                pass
         raise CaptureError(str(exc)) from exc
     finally:
         if own_conn:

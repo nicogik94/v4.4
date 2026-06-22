@@ -93,7 +93,12 @@ def _begin_autocommit(conn) -> bool:
 
 
 def _restore_autocommit(conn, prior: bool) -> None:
-    conn.autocommit = prior
+    try:
+        conn.autocommit = prior
+    except Exception:
+        # An aborted (INERROR) transaction blocks toggling; clear and retry.
+        conn.rollback()
+        conn.autocommit = prior
 
 
 def _run_script(conn, path: Path) -> None:

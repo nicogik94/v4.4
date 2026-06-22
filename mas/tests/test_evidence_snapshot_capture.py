@@ -162,6 +162,43 @@ def test_delete_refused_for_snapshot_linked_storage(conn, schema, monkeypatch):
         assert Path(storage_ref).exists()
 
 
+# ── 3 (defect): failure after operation creation persists status=failed ──────
+
+def test_failed_capture_persists_failed_operation_then_retry_succeeds(conn, schema, monkeypatch):
+    pid = _new_project(conn)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("snapshot insert exploded after operation creation")
+
+    # Force failure after the IngestOperation row exists and the blob is inserted.
+    monkeypatch.setattr(repo, "insert_snapshot", boom)
+
+    with pytest.raises(capture.CaptureError):
+        capture.capture_upload(
+            project_id=pid, content=b"payload", storage_ref="/sp/1",
+            operation_id="op-sp", connection=conn,
+        )
+
+    # No Blob or Snapshot rows from the failed attempt …
+    assert _count(conn, "source_blob") == 0
+    assert _count(conn, "source_snapshot") == 0
+    # … but the operation persists as failed (DB stayed reachable).
+    op = repo.get_ingest_operation(conn, project_id=pid, operation_id="op-sp")
+    assert op is not None and op.status == "failed"
+
+    # A later retry of the same operation completes correctly.
+    monkeypatch.undo()
+    snap = capture.capture_upload(
+        project_id=pid, content=b"payload", storage_ref="/sp/1",
+        operation_id="op-sp", connection=conn,
+    )
+    assert snap is not None
+    assert _count(conn, "source_blob") == 1
+    assert _count(conn, "source_snapshot") == 1
+    op2 = repo.get_ingest_operation(conn, project_id=pid, operation_id="op-sp")
+    assert op2 is not None and op2.status == "committed" and op2.source_snapshot_id == snap
+
+
 def test_delete_fails_closed_when_linkage_unverifiable(conn, schema, monkeypatch):
     def explode(_conn, _ref):
         raise RuntimeError("cannot verify linkage")

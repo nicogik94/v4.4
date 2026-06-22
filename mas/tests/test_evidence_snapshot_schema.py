@@ -320,3 +320,129 @@ def test_partial_schema_is_detected(conn, schema):
         assert pg.classify_schema(conn, schema) == "partial"
     finally:
         pg._restore_autocommit(conn, prior)
+
+
+# ── 2 (defect): v47 itself rejects partial / divergent schema ───────────────
+
+def test_v47_rejects_partial_schema(conn):
+    """A stray Slice A object present, but not the complete contract → v47 fails."""
+    name = f"slicea_partial_{__import__('uuid').uuid4().hex[:12]}"
+    prior = pg._begin_autocommit(conn)
+    try:
+        conn.execute(f'CREATE SCHEMA "{name}"')
+        conn.execute(f'SET search_path TO "{name}"')
+        pg._run_script(conn, pg.INIT_SQL)
+        pg._run_script(conn, pg.OUTCOMES_SQL)
+        # Intentionally partial: one Slice A table exists, nothing else.
+        conn.execute("CREATE TABLE source_blob (id UUID PRIMARY KEY DEFAULT gen_random_uuid())")
+        assert pg.classify_schema(conn, name) == "partial"
+        with pytest.raises(Exception):  # preflight RAISE inside the migration
+            pg._run_script(conn, pg.V47_SQL)
+        conn.rollback()  # clear the aborted migration transaction
+        # Migration rolled back: still partial, not silently completed.
+        assert pg.classify_schema(conn, name) == "partial"
+    finally:
+        conn.rollback()
+        conn.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
+        pg._restore_autocommit(conn, prior)
+
+
+def test_v47_rejects_divergent_complete_schema(conn, schema):
+    """A complete schema with a missing trigger (divergent) → v47 fails."""
+    assert pg.classify_schema(conn, schema) == "complete"
+    prior = pg._begin_autocommit(conn)
+    try:
+        conn.execute("DROP TRIGGER trg_cfr_no_mutation ON candidate_fact_revision")
+        assert pg.classify_schema(conn, schema) == "partial"
+        with pytest.raises(Exception):
+            pg._run_script(conn, pg.V47_SQL)
+        conn.rollback()  # clear the aborted migration transaction
+    finally:
+        pg._restore_autocommit(conn, prior)
+
+
+def test_v47_clean_bootstrap_and_complete_reapply_still_pass(conn):
+    """Clean bootstrap succeeds; a complete re-apply is a verified no-op."""
+    name = f"slicea_boot_{__import__('uuid').uuid4().hex[:12]}"
+    prior = pg._begin_autocommit(conn)
+    try:
+        conn.execute(f'CREATE SCHEMA "{name}"')
+        conn.execute(f'SET search_path TO "{name}"')
+        pg._run_script(conn, pg.INIT_SQL)
+        pg._run_script(conn, pg.OUTCOMES_SQL)
+        pg._run_script(conn, pg.V47_SQL)          # clean bootstrap
+        assert pg.classify_schema(conn, name) == "complete"
+        pg._run_script(conn, pg.V47_SQL)          # complete re-apply: no-op
+        assert pg.classify_schema(conn, name) == "complete"
+    finally:
+        conn.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
+        pg._restore_autocommit(conn, prior)
+
+
+# ── 1 (defect): project-consistent composite FKs reject cross-project links ──
+
+def test_cross_project_snapshot_rejected(conn, schema):
+    pa = pg.insert_project(conn, name="A")
+    pb = pg.insert_project(conn, name="B")
+    conn.commit()
+    blob_a = repo.insert_or_get_blob(conn, project_id=pa, content_hash="x", byte_size=1)
+    conn.commit()
+    with pytest.raises(Exception):  # fk_snapshot_blob_project
+        conn.execute(
+            """INSERT INTO source_snapshot (source_blob_id, project_id, storage_ref)
+               VALUES (%s, %s, '/x')""",
+            (blob_a, pb),
+        )
+        conn.commit()
+    conn.rollback()
+
+
+def test_cross_project_fact_rejected(conn, schema):
+    pa = pg.insert_project(conn, name="A")
+    pb = pg.insert_project(conn, name="B")
+    conn.commit()
+    blob_a = repo.insert_or_get_blob(conn, project_id=pa, content_hash="x", byte_size=1)
+    snap_a = repo.insert_snapshot(conn, source_blob_id=blob_a, project_id=pa, storage_ref="/a")
+    conn.commit()
+    with pytest.raises(Exception):  # fk_cfr_snapshot_project
+        conn.execute(
+            """INSERT INTO candidate_fact_revision
+               (project_id, source_snapshot_id, fact_type, numeric_value, counted_entity)
+               VALUES (%s, %s, 'count', 1, 'x')""",
+            (pb, snap_a),
+        )
+        conn.commit()
+    conn.rollback()
+
+
+def test_cross_project_ingest_operation_rejected(conn, schema):
+    pa = pg.insert_project(conn, name="A")
+    pb = pg.insert_project(conn, name="B")
+    conn.commit()
+    blob_a = repo.insert_or_get_blob(conn, project_id=pa, content_hash="x", byte_size=1)
+    snap_a = repo.insert_snapshot(conn, source_blob_id=blob_a, project_id=pa, storage_ref="/a")
+    conn.commit()
+    with pytest.raises(Exception):  # fk_ingest_snapshot_project
+        conn.execute(
+            """INSERT INTO ingest_operation (project_id, operation_id, status, source_snapshot_id)
+               VALUES (%s, 'op-x', 'committed', %s)""",
+            (pb, snap_a),
+        )
+        conn.commit()
+    conn.rollback()
+
+
+def test_cross_project_retention_target_rejected(conn, schema):
+    pa = pg.insert_project(conn, name="A")
+    pb = pg.insert_project(conn, name="B")
+    conn.commit()
+    blob_a = repo.insert_or_get_blob(conn, project_id=pa, content_hash="x", byte_size=1)
+    conn.commit()
+    with pytest.raises(Exception):  # fk_ret_blob_project
+        conn.execute(
+            """INSERT INTO evidence_retention_event (project_id, event_type, source_blob_id)
+               VALUES (%s, 'tombstone', %s)""",
+            (pb, blob_a),
+        )
+        conn.commit()
+    conn.rollback()
