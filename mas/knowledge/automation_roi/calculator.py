@@ -78,6 +78,78 @@ class RoiInputShapeError(ValueError):
     """The supplied input set is not exactly the six required roles."""
 
 
+# ─────────────────────── frozen-input database-compatibility contract ───────────────────────
+# Stable, non-secret reason codes mirroring the immutable database value-shape
+# constraints enforced on ``approved_calculation_input``. These are codes only —
+# never SQL, paths, credentials, or dynamic detail — so callers can map them to
+# fixed operator-facing messages.
+COMPAT_RATE_UNIT = "fully_loaded_rate_per_hour_requires_per_hour"
+COMPAT_RATE_CURRENCY = "fully_loaded_rate_per_hour_requires_currency"
+COMPAT_HOURS_TIME_UNIT = "hours_role_requires_time_unit_hours"
+COMPAT_PERIODS_INTEGRAL = "periods_per_year_requires_integer_at_least_one"
+COMPAT_MONEY_CURRENCY = "money_role_requires_currency"
+COMPAT_NEGATIVE_VALUE = "value_must_be_non_negative"
+
+
+def input_compatibility_reason(
+    input_role: str,
+    *,
+    numeric_value,
+    unit: Optional[str] = None,
+    currency_code: Optional[str] = None,
+    time_unit: Optional[str] = None,
+) -> Optional[str]:
+    """Pure database-compatibility check for one frozen-input role.
+
+    Mirrors the immutable ``approved_calculation_input`` value-shape contract
+    exactly (no extra constraints) so an incompatible fact is rejected before the
+    INSERT instead of surfacing only as a generic database constraint violation:
+
+      * ``baseline_hours_per_period`` / ``post_automation_hours_per_period``:
+        ``time_unit == "hours"`` and ``numeric_value >= 0``;
+      * ``fully_loaded_rate_per_hour``: ``unit == "per_hour"``, a currency code,
+        and ``numeric_value >= 0``;
+      * ``periods_per_year``: integral ``numeric_value >= 1``;
+      * ``annual_recurring_cost`` / ``one_time_implementation_cost``: a currency
+        code and ``numeric_value >= 0``.
+
+    Returns ``None`` when compatible, otherwise a stable reason code. Roles outside
+    the canonical six are deferred to the database (defense in depth) by returning
+    ``None`` — this helper never widens the contract.
+    """
+    value = numeric_value if isinstance(numeric_value, Decimal) else Decimal(numeric_value)
+
+    if input_role in HOURS_ROLES:
+        if time_unit != "hours":
+            return COMPAT_HOURS_TIME_UNIT
+        if value < 0:
+            return COMPAT_NEGATIVE_VALUE
+        return None
+
+    if input_role == "fully_loaded_rate_per_hour":
+        if unit != "per_hour":
+            return COMPAT_RATE_UNIT
+        if not currency_code:
+            return COMPAT_RATE_CURRENCY
+        if value < 0:
+            return COMPAT_NEGATIVE_VALUE
+        return None
+
+    if input_role == "periods_per_year":
+        if value != value.to_integral_value() or value < 1:
+            return COMPAT_PERIODS_INTEGRAL
+        return None
+
+    if input_role in ("annual_recurring_cost", "one_time_implementation_cost"):
+        if not currency_code:
+            return COMPAT_MONEY_CURRENCY
+        if value < 0:
+            return COMPAT_NEGATIVE_VALUE
+        return None
+
+    return None
+
+
 def canonical_decimal(value: Decimal) -> str:
     """Stable, exponent-free Decimal text. ``-0`` normalizes to ``0``."""
     d = value if isinstance(value, Decimal) else Decimal(value)

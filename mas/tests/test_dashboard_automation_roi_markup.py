@@ -410,5 +410,60 @@ class TestAutomationRoiWorkspaceMarkup(unittest.TestCase):
         self.assertIn("state.roi = freshRoiState();", hash_change.group(0))
 
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Frozen-input database-compatibility UX mirror (non-authoritative): the
+    # dropdown for fully_loaded_rate_per_hour offers only compatible facts and
+    # shows the unit requirement; incompatible pending selections clear without a
+    # fallback. The server stays the sole authority (422 on incompatible freeze).
+    # ──────────────────────────────────────────────────────────────────────
+
+    # 31 — a pure compatibility helper mirrors the rate-role unit requirement
+    def test_freeze_compatibility_helper_present(self):
+        helper = re.search(r"function roiFactCompatibleForRole\(fact, role\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(helper)
+        body = helper.group(0)
+        self.assertIn("role === 'fully_loaded_rate_per_hour'", body)
+        self.assertIn("(fact.unit || '') === 'per_hour'", body)
+        # Other roles are not filtered out by the dashboard.
+        self.assertIn("return true;", body)
+
+    # 32 — the frozen dropdown options exclude incompatible approved facts
+    def test_frozen_dropdown_excludes_incompatible_facts(self):
+        frozen = re.search(r"function renderRoiFrozen\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(frozen)
+        body = frozen.group(0)
+        # Options are built from a compatibility-filtered list, not all approvedFacts.
+        self.assertIn(
+            "const selectableFacts = approvedFacts.filter(f => roiFactCompatibleForRole(f, role));",
+            body,
+        )
+        self.assertIn("const options = selectableFacts.map(f =>", body)
+        self.assertIn("const select = selectableFacts.length", body)
+        self.assertNotIn("const options = approvedFacts.map(f =>", body)
+
+    # 33 — the exact unit-requirement helper text renders for the rate role
+    def test_rate_role_shows_unit_requirement_helper_text(self):
+        self.assertIn("Requires unit: per_hour", self.html)
+        frozen = re.search(r"function renderRoiFrozen\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(frozen)
+        body = frozen.group(0)
+        self.assertIn("role === 'fully_loaded_rate_per_hour'", body)
+        self.assertIn("Requires unit: per_hour", body)
+
+    # 34 — stale OR incompatible selections clear, never replaced with a fallback
+    def test_resolve_freeze_draft_drops_incompatible_no_fallback(self):
+        res = re.search(r"function resolveRoiFreezeDraft\(.*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(res)
+        b = res.group(0)
+        # Compatibility is one of the clear conditions, alongside the existing ones.
+        self.assertIn("!roiFactCompatibleForRole(fact, role)", b)
+        self.assertIn("fact.decision_state !== 'approved'", b)
+        self.assertIn("!fact.active_approval_id", b)
+        self.assertIn("delete draft[role];", b)
+        # Still never auto-selects a replacement (delete-only; no assignment).
+        self.assertNotIn("draft[role] =", b)
+        self.assertNotIn("approvedFacts[0]", b)
+
+
 if __name__ == "__main__":
     unittest.main()

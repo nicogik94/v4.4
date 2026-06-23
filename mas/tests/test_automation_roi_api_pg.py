@@ -375,6 +375,80 @@ def test_calculation_wrong_role_input_is_422(client, conn, schema_b):
     assert resp.status_code == 422
 
 
+# ─────────────────────── frozen-input compatibility (422) ───────────────────────
+
+_RATE_UNIT_DETAIL = "Fully loaded rate per hour requires unit 'per_hour'."
+
+
+def _create_rate_fact_with_unit(client, pid, snap, *, unit, value="50", currency="USD"):
+    """Create + approve a money fact whose unit is operator-chosen (not 'per_hour')."""
+    body = {
+        "source_snapshot_id": snap,
+        "fact": {"fact_type": "money", "value": value, "currency_code": currency,
+                 "as_of_date": AS_OF, "unit": unit},
+        "subject_label": "Process X",
+        "metric_label": "fully_loaded_rate_per_hour",
+        "source_locator": "doc#rate",
+        "extraction_rationale": "operator extracted",
+    }
+    resp = client.post(f"/projects/{pid}/automation-roi/candidate-facts", json=body)
+    assert resp.status_code == 201, resp.text
+    fid = resp.json()["candidate_fact_revision_id"]
+    did = _approve(client, pid, fid)
+    return fid, did
+
+
+def _frozen_count(conn, pid):
+    return conn.execute(
+        "SELECT count(*) FROM approved_calculation_input WHERE project_id = %s", (pid,)
+    ).fetchone()[0]
+
+
+def test_freeze_rate_usd_per_hour_unit_is_422_and_persists_nothing(client, conn, schema_b):
+    pid = _seed_project(conn, name="compat-usdhour")
+    snap = _seed_snapshot(conn, pid, tag="usdhour")
+    fid, did = _create_rate_fact_with_unit(client, pid, snap, unit="USD/hour")
+    before = _frozen_count(conn, pid)
+    resp = client.post(
+        f"/projects/{pid}/automation-roi/inputs",
+        json={"candidate_fact_revision_id": fid, "approval_decision_id": did,
+              "input_role": "fully_loaded_rate_per_hour"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == _RATE_UNIT_DETAIL
+    assert _frozen_count(conn, pid) == before
+
+
+def test_freeze_rate_per_hou_unit_is_422_and_persists_nothing(client, conn, schema_b):
+    pid = _seed_project(conn, name="compat-perhou")
+    snap = _seed_snapshot(conn, pid, tag="perhou")
+    fid, did = _create_rate_fact_with_unit(client, pid, snap, unit="per_hou")
+    before = _frozen_count(conn, pid)
+    resp = client.post(
+        f"/projects/{pid}/automation-roi/inputs",
+        json={"candidate_fact_revision_id": fid, "approval_decision_id": did,
+              "input_role": "fully_loaded_rate_per_hour"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == _RATE_UNIT_DETAIL
+    assert _frozen_count(conn, pid) == before
+
+
+def test_freeze_rate_compatible_per_hour_unit_succeeds(client, conn, schema_b):
+    pid = _seed_project(conn, name="compat-ok")
+    snap = _seed_snapshot(conn, pid, tag="ok")
+    fid, did = _create_rate_fact_with_unit(client, pid, snap, unit="per_hour")
+    before = _frozen_count(conn, pid)
+    resp = client.post(
+        f"/projects/{pid}/automation-roi/inputs",
+        json={"candidate_fact_revision_id": fid, "approval_decision_id": did,
+              "input_role": "fully_loaded_rate_per_hour"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["input_role"] == "fully_loaded_rate_per_hour"
+    assert _frozen_count(conn, pid) == before + 1
+
+
 def test_result_not_found_is_404(client, conn, schema_b):
     pid = _seed_project(conn, name="missing-result")
     missing = "00000000-0000-0000-0000-0000000000cd"

@@ -8872,16 +8872,30 @@ function updateRoiFreezeDraft(event) {
   else delete state.roi.freezeDraft[role];
 }
 
+// Non-authoritative UX mirror of the server's frozen-input database-compatibility
+// contract. The server stays the sole authority (it returns 422 on an
+// incompatible freeze); this only keeps the operator from picking a fact that
+// could never be frozen for the role. Today only fully_loaded_rate_per_hour has a
+// dashboard-visible constraint (unit must be exactly 'per_hour').
+function roiFactCompatibleForRole(fact, role) {
+  if (role === 'fully_loaded_rate_per_hour') {
+    return (fact.unit || '') === 'per_hour';
+  }
+  return true;
+}
+
 // Drop pending freeze selections that are no longer valid against the current
-// workspace: the fact must still exist, be approved, have an active approval, and
-// be among the current freeze choices. Stale/invalid entries are deleted; this
-// never auto-selects a replacement fact.
+// workspace: the fact must still exist, be approved, have an active approval, be
+// among the current freeze choices, and remain compatible with the role. Stale,
+// unapproved, unavailable, or incompatible entries are deleted; this never
+// auto-selects a replacement fact.
 function resolveRoiFreezeDraft(approvedFacts) {
   const draft = state.roi.freezeDraft;
   const selectable = new Map((approvedFacts || []).map(f => [f.candidate_fact_revision_id, f]));
   for (const role of Object.keys(draft)) {
     const fact = selectable.get(draft[role]);
-    if (!fact || fact.decision_state !== 'approved' || !fact.active_approval_id) {
+    if (!fact || fact.decision_state !== 'approved' || !fact.active_approval_id
+        || !roiFactCompatibleForRole(fact, role)) {
       delete draft[role];
     }
   }
@@ -8904,10 +8918,16 @@ function renderRoiFrozen() {
       ? existing.map(fi => `<span class="roi-frozen-chip">${escapeHtml(fi.resolved_numeric_value || '')}${fi.resolved_unit ? ' ' + escapeHtml(fi.resolved_unit) : ''}${fi.resolved_currency_code ? ' ' + escapeHtml(fi.resolved_currency_code) : ''} ${roiAvailability(fi.available)}</span>`).join('')
       : '<span class="roi-muted">none frozen</span>';
     const chosen = state.roi.freezeDraft[role] || '';
-    const options = approvedFacts.map(f =>
+    // Non-authoritative UX filter: only offer approved facts that are compatible
+    // with this role; the server still enforces the contract on freeze.
+    const selectableFacts = approvedFacts.filter(f => roiFactCompatibleForRole(f, role));
+    const options = selectableFacts.map(f =>
       `<option value="${escapeHtml(f.candidate_fact_revision_id)}" ${f.candidate_fact_revision_id === chosen ? 'selected' : ''}>${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</option>`
     ).join('');
-    const select = approvedFacts.length
+    const compatHint = role === 'fully_loaded_rate_per_hour'
+      ? '<span class="roi-muted roi-compat-hint">Requires unit: per_hour</span>'
+      : '';
+    const select = selectableFacts.length
       ? `<select data-roi-freeze-role="${escapeHtml(role)}" ${busy ? 'disabled' : ''} aria-label="Approved fact to freeze for ${escapeHtml(ROI_ROLE_LABELS[role])}"><option value="">— select approved fact —</option>${options}</select>
          <button class="btn btn-sm" data-roi-freeze="${escapeHtml(role)}" type="button" ${busy ? 'disabled' : ''} aria-label="Freeze input for ${escapeHtml(ROI_ROLE_LABELS[role])}">Freeze</button>`
       : '<span class="roi-muted">no approved facts available</span>';
@@ -8915,7 +8935,7 @@ function renderRoiFrozen() {
       <li class="roi-row roi-frozen-role" data-roi-role="${escapeHtml(role)}">
         <span class="roi-label">${escapeHtml(ROI_ROLE_LABELS[role])}</span>
         <span class="roi-frozen-current">${existingHtml}</span>
-        <span class="roi-frozen-action">${select}</span>
+        <span class="roi-frozen-action">${select}${compatHint}</span>
       </li>`;
   }).join('');
 

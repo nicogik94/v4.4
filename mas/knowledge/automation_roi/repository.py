@@ -22,7 +22,24 @@ from knowledge.evidence_snapshot import repository as evidence_repo
 from knowledge.evidence_snapshot.validation import ValidatedFact
 
 from . import approvals
-from .calculator import ResolvedInput, RoiComputation
+from .calculator import ResolvedInput, RoiComputation, input_compatibility_reason
+
+
+class FrozenInputCompatibilityError(ValueError):
+    """An approved fact's immutable values violate the database compatibility
+    contract for the requested input role.
+
+    Raised *before* any INSERT so the failure is a deterministic, typed
+    compatibility error rather than a generic database constraint violation.
+    Subclasses ``ValueError`` so existing generic handling still treats it as a
+    bad request, but callers should catch it first to map it to its own status.
+    ``reason`` is a stable, non-secret code from the calculator contract.
+    """
+
+    def __init__(self, input_role: str, reason: str):
+        self.input_role = input_role
+        self.reason = reason
+        super().__init__(f"frozen input incompatible for role {input_role!r}: {reason}")
 
 
 @dataclass
@@ -127,6 +144,18 @@ def freeze_input(
         raise ValueError("fact is not ROI-eligible (no extraction context)")
 
     numeric_value, unit, currency_code, time_unit, as_of_date = fact
+    # Mirror the immutable database value-shape contract before INSERT so an
+    # incompatible fact surfaces as a typed compatibility error, not a raw
+    # constraint violation. The database constraint stays as defense in depth.
+    reason = input_compatibility_reason(
+        input_role,
+        numeric_value=numeric_value,
+        unit=unit,
+        currency_code=currency_code,
+        time_unit=time_unit,
+    )
+    if reason is not None:
+        raise FrozenInputCompatibilityError(input_role, reason)
     row = conn.execute(
         """
         INSERT INTO approved_calculation_input
