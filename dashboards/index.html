@@ -3862,6 +3862,32 @@ a:hover { text-decoration: underline; }
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* Automation ROI operator workspace */
+.roi-workspace { display: flex; flex-direction: column; gap: var(--sp-4); padding: var(--sp-3) 0; }
+.roi-unit { border: 1px solid var(--surface-3); border-radius: 10px; padding: var(--sp-3); background: var(--surface-2, #fff); }
+.roi-unit h3 { margin: 0 0 var(--sp-2); font-size: 14px; }
+.roi-unit h4 { margin: var(--sp-2) 0 var(--sp-1); font-size: 13px; }
+.roi-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.roi-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--surface-3, #f3f0ea); }
+.roi-label { font-weight: 600; }
+.roi-meta { color: var(--muted, #6b6b6b); font-size: 12px; }
+.roi-muted { color: var(--muted, #6b6b6b); font-style: italic; }
+.roi-state { text-transform: capitalize; font-size: 12px; }
+.roi-actions { display: flex; gap: 6px; margin-left: auto; }
+.roi-pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.roi-pill.ok { color: #2e7d32; }
+.roi-pill.warn { color: #b26a00; }
+.roi-status-valid { color: #2e7d32; }
+.roi-status-blocked { color: #b00020; }
+.roi-status-not_applicable { color: #b26a00; }
+.roi-fact-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin-top: var(--sp-3); }
+.roi-fact-form label { display: flex; flex-direction: column; font-size: 12px; gap: 3px; }
+.roi-fact-form button { grid-column: 1 / -1; justify-self: start; }
+.roi-frozen-role { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(140px, 1fr) minmax(220px, 1.4fr); }
+.roi-result-detail { margin-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-3); }
+.roi-result-values { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; }
+.roi-empty { padding: var(--sp-4); text-align: center; }
 </style>
 </head>
 <body>
@@ -4279,7 +4305,28 @@ const state = {
     approvals: [],
     policyDecisions: [],
   },
+  // Automation ROI operator workspace state (Slice B).
+  roi: freshRoiState(),
 };
+
+// All ROI operator state is authoritative-server-derived; the only browser-held
+// state is the operator's draft selections (the new-fact form and the role→input
+// calculation map). It is reset whenever the selected project changes.
+function freshRoiState() {
+  return {
+    workspace: null,       // authoritative navigation payload, or null
+    error: null,           // { title, detail } when the workspace read failed
+    loading: false,
+    busy: false,           // a mutation is in flight (disables write controls)
+    selectedSnapshotId: '',
+    calcMap: {},           // role → approved_calculation_input_id (operator draft)
+    freezeSelection: {},   // role → candidate_fact_revision_id (operator draft)
+    activeResultId: null,
+    operatorResult: null,  // operator projection for activeResultId
+    clientPreview: null,   // client-safe projection for activeResultId
+    previewError: null,
+  };
+}
 
 const TAB_LABELS = {
   overview: 'Overview',
@@ -4287,9 +4334,41 @@ const TAB_LABELS = {
   evidence: 'Evidence & Risks',
   trace: 'Decision Trace',
   report: 'Report & Export',
+  automation_roi: 'Automation ROI',
 };
 
 const WORKSPACE_TABS = ['overview', 'workflow', 'evidence', 'trace', 'report'];
+
+/* Automation ROI operator workspace (Slice B) — feature- and project-type gated.
+   The six calculation roles are server-owned; this is the fixed presentation
+   order. All ROI lifecycle data comes from the authoritative gated API; the
+   browser never calculates ROI, never parses source content, and never builds a
+   "client-safe" view itself (it calls the existing client projection endpoint). */
+const AUTOMATION_ROI_TAB = 'automation_roi';
+const ROI_FEATURE_OFF_MESSAGE = 'Automation ROI is not enabled in this environment.';
+const ROI_RECORD_GONE_MESSAGE = 'This ROI record is no longer available.';
+const ROI_TEMP_UNAVAILABLE_MESSAGE = 'Automation ROI data is temporarily unavailable.';
+const ROI_ROLES = [
+  'baseline_hours_per_period',
+  'post_automation_hours_per_period',
+  'fully_loaded_rate_per_hour',
+  'periods_per_year',
+  'annual_recurring_cost',
+  'one_time_implementation_cost',
+];
+const ROI_ROLE_LABELS = {
+  baseline_hours_per_period: 'Baseline hours per period',
+  post_automation_hours_per_period: 'Post-automation hours per period',
+  fully_loaded_rate_per_hour: 'Fully loaded rate per hour',
+  periods_per_year: 'Periods per year',
+  annual_recurring_cost: 'Annual recurring cost',
+  one_time_implementation_cost: 'One-time implementation cost',
+};
+const ROI_RESULT_STATUS_LABELS = {
+  valid: 'Valid',
+  blocked: 'Blocked',
+  not_applicable: 'Not applicable',
+};
 const LEGACY_TAB_ALIASES = {
   decide: 'overview',
   outcomes: 'overview',
@@ -4355,6 +4434,14 @@ function technologyReadinessWorkbookExportSupported() {
 function isTechnologyReadinessProject(project) {
   return classToken(project?.project_type) === 'technology_readiness';
 }
+function isAutomationRoiProject(project) {
+  return classToken(project?.project_type) === 'automation_roi';
+}
+function workspaceTabsForProject(project = state.project?.fullState) {
+  const tabs = WORKSPACE_TABS.slice();
+  if (isAutomationRoiProject(project)) tabs.push(AUTOMATION_ROI_TAB);
+  return tabs;
+}
 function exportProfileKeysForProject(project = state.project?.fullState) {
   const keys = STANDARD_EXPORT_PROFILE_KEYS.filter(exportProfileSupported);
   if (isTechnologyReadinessProject(project) && technologyReadinessWorkbookExportSupported()) {
@@ -4387,6 +4474,9 @@ function parseHash() {
 function normalizeWorkspaceTab(tab) {
   const raw = String(tab || '').trim();
   const mapped = LEGACY_TAB_ALIASES[raw] || raw;
+  // The Automation ROI tab is only valid for ROI projects; deep links to it from
+  // any other project fall back to overview.
+  if (mapped === AUTOMATION_ROI_TAB && isAutomationRoiProject()) return AUTOMATION_ROI_TAB;
   return WORKSPACE_TABS.includes(mapped) ? mapped : 'overview';
 }
 function routeTo(path) {
@@ -4411,12 +4501,16 @@ async function onHashChange() {
     // Reset project-scoped state whenever project changes.
     state.project = null;
     state.dp = { events: [], filter: 'all', selectedEventId: null, cursorFrom: null, cursorTo: null, diff: null, approvals: [], policyDecisions: [] };
+    state.roi = freshRoiState();
   }
 
   renderProjects();
 
   if (projectId) {
     if (projectChanged) await loadProject(projectId);
+    // Re-resolve the requested tab once the project type is known (a cold deep
+    // link to the Automation ROI tab cannot be validated before the load).
+    state.activeTab = normalizeWorkspaceTab(tab);
     renderMain();
     if ((state.activeTab === 'overview' || state.activeTab === 'trace') && state.project) {
       await loadDecisionPlane(projectId);
@@ -4428,6 +4522,10 @@ async function onHashChange() {
     }
     if (state.activeTab === 'report' && state.project && state.project.report == null) {
       await loadReport(projectId);
+      renderMain();
+    }
+    if (state.activeTab === AUTOMATION_ROI_TAB && state.project && state.roi.workspace == null && !state.roi.error) {
+      await loadAutomationRoiWorkspace(projectId);
       renderMain();
     }
   } else {
@@ -5063,6 +5161,7 @@ function renderMain() {
   if (state.activeTab === 'overview' || state.activeTab === 'trace') wireDecisionPlane();
   if (state.activeTab === 'evidence') wireEvidence();
   if (state.activeTab === 'workflow') wireCalibration();
+  if (state.activeTab === AUTOMATION_ROI_TAB) wireAutomationRoiWorkspace();
   renderInspector();
 }
 
@@ -5377,7 +5476,8 @@ function renderBudget(b) {
 }
 
 function renderTabs() {
-  const tabs = WORKSPACE_TABS;
+  const tabs = WORKSPACE_TABS.slice();
+  if (isAutomationRoiProject()) tabs.push(AUTOMATION_ROI_TAB);
   const bayesianCount = Array.isArray(state.project?.bayesian?.scenarios) ? state.project.bayesian.scenarios.length : 0;
   const calib = state.project?.calibration?.projectCalib;
   const calibN = (calib && typeof calib.n_resolved === 'number') ? calib.n_resolved : 0;
@@ -5410,6 +5510,7 @@ function renderTabContent() {
   if (state.activeTab === 'evidence') return renderEvidenceStub();
   if (state.activeTab === 'trace') return renderAuditStub();
   if (state.activeTab === 'report') return renderReportStub();
+  if (state.activeTab === AUTOMATION_ROI_TAB) return renderAutomationRoiWorkspace();
   return '';
 }
 
@@ -7469,6 +7570,7 @@ function renderInspector() {
   else if (state.activeTab === 'evidence') sections = renderInspectorEvidence();
   else if (state.activeTab === 'trace') sections = renderInspectorAudit();
   else if (state.activeTab === 'report') sections = renderInspectorReport();
+  else if (state.activeTab === AUTOMATION_ROI_TAB) sections = renderInspectorAutomationRoi();
 
   pane.innerHTML = `
     <div class="ins">
@@ -8388,6 +8490,566 @@ async function createProjectFromModal() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
+   Automation ROI operator workspace (Slice B)
+
+   Operator-only surface for the existing gated ROI lifecycle. Every value is
+   read from the authoritative API; the browser never calculates ROI, never
+   parses source content, never invents a client-safe view (it calls the
+   existing client projection endpoint), and never auto-retries a mutation.
+   After every mutation — success or ambiguous failure — it reloads the
+   authoritative workspace state. Opaque ids live only in data-* values and
+   in-memory draft state, never as display text.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+// Map a thrown apiGet/apiPost Error to a fixed, safe operator message. Raw
+// response bodies, ids, paths, SQL, and stack traces are never surfaced.
+function classifyRoiError(error, context) {
+  const { status } = parseApiError(error);
+  if (context === 'workspace') {
+    if (status === 404) return { title: ROI_FEATURE_OFF_MESSAGE, featureOff: true };
+    if (status === 503) return { title: ROI_TEMP_UNAVAILABLE_MESSAGE };
+    return { title: ROI_TEMP_UNAVAILABLE_MESSAGE };
+  }
+  if (context === 'preview') {
+    if (status === 404) return { title: ROI_RECORD_GONE_MESSAGE };
+    if (status === 503) return { title: ROI_TEMP_UNAVAILABLE_MESSAGE };
+    return { title: 'Client-safe preview is unavailable.' };
+  }
+  // record / mutation contexts
+  if (status === 404) return { title: ROI_RECORD_GONE_MESSAGE };
+  if (status === 409) return { title: 'This action conflicts with the current state. The workspace was refreshed.' };
+  if (status === 422) return { title: 'The information provided was incomplete or invalid.' };
+  if (status === 503) return { title: ROI_TEMP_UNAVAILABLE_MESSAGE };
+  return { title: 'The request could not be completed. The workspace was refreshed.' };
+}
+
+// Browser mirror of the server exact-six classifier — gates the Calculate action
+// only on role-map shape (never on evidence availability, which the server owns).
+function classifyRoiRoleMap(roles) {
+  const counts = {};
+  roles.forEach(r => { counts[r] = (counts[r] || 0) + 1; });
+  const present = Object.keys(counts);
+  const missing = ROI_ROLES.filter(r => !counts[r]);
+  const extra = present.filter(r => !ROI_ROLES.includes(r));
+  const duplicate = present.filter(r => counts[r] > 1 && ROI_ROLES.includes(r));
+  return {
+    complete: missing.length === 0 && extra.length === 0 && duplicate.length === 0,
+    missing, duplicate, extra,
+  };
+}
+
+function roiCalcMapComplete() {
+  const map = state.roi.calcMap || {};
+  const roles = ROI_ROLES.filter(r => map[r]);
+  return classifyRoiRoleMap(roles).complete;
+}
+
+function pruneRoiDrafts() {
+  const ws = state.roi.workspace;
+  if (!ws) return;
+  const inputIds = new Set((ws.frozen_inputs || []).map(fi => fi.approved_calculation_input_id));
+  const next = {};
+  ROI_ROLES.forEach(role => {
+    const chosen = state.roi.calcMap[role];
+    if (chosen && inputIds.has(chosen)) next[role] = chosen;
+  });
+  state.roi.calcMap = next;
+}
+
+async function loadAutomationRoiWorkspace(pid) {
+  state.roi.loading = true;
+  state.roi.error = null;
+  try {
+    const ws = await apiGet(`/projects/${encodeURIComponent(pid)}/automation-roi/workspace`);
+    state.roi.workspace = ws;
+    pruneRoiDrafts();
+  } catch (e) {
+    state.roi.workspace = null;
+    state.roi.error = classifyRoiError(e, 'workspace');
+  } finally {
+    state.roi.loading = false;
+  }
+}
+
+async function loadRoiResult(resultId) {
+  state.roi.activeResultId = resultId;
+  state.roi.operatorResult = null;
+  state.roi.clientPreview = null;
+  state.roi.previewError = null;
+  const pid = state.selectedProjectId;
+  const base = `/projects/${encodeURIComponent(pid)}/automation-roi/calculations/${encodeURIComponent(resultId)}`;
+  try {
+    state.roi.operatorResult = await apiGet(base);
+  } catch (e) {
+    state.roi.previewError = classifyRoiError(e, 'record');
+    renderMain();
+    return;
+  }
+  // The client-safe preview is ALWAYS the existing authoritative endpoint — the
+  // browser never derives a "safe" view from operator data.
+  try {
+    state.roi.clientPreview = await apiGet(`${base}/client`);
+  } catch (e) {
+    state.roi.clientPreview = null;
+    state.roi.previewError = classifyRoiError(e, 'preview');
+  }
+  renderMain();
+}
+
+// One mutation at a time; confirm first; never auto-retry; always reload after.
+async function roiMutate({ path, body, confirmMsg }) {
+  if (state.roi.busy) return false;
+  if (confirmMsg && !window.confirm(confirmMsg)) return false;
+  state.roi.busy = true;
+  renderMain();
+  let ok = false;
+  try {
+    await apiPost(path, body || {});
+    ok = true;
+  } catch (e) {
+    toast(classifyRoiError(e, 'mutation').title, 'err');
+  } finally {
+    if (state.selectedProjectId) await loadAutomationRoiWorkspace(state.selectedProjectId);
+    state.roi.busy = false;
+    renderMain();
+  }
+  return ok;
+}
+
+function renderAutomationRoiWorkspace() {
+  const roi = state.roi;
+  if (roi.error) {
+    // Feature-off or unavailable: a plain message and (for read failures) retry.
+    // No write controls are present in this state.
+    return `
+      <section class="roi-workspace" aria-label="Automation ROI workspace">
+        <div class="roi-empty taxonomy-note">
+          <div class="title">${escapeHtml(roi.error.title)}</div>
+        </div>
+        <button class="btn btn-secondary" data-roi-retry type="button" aria-label="Retry loading the Automation ROI workspace">Retry</button>
+      </section>`;
+  }
+  if (!roi.workspace) {
+    return `
+      <section class="roi-workspace" aria-label="Automation ROI workspace">
+        <div class="roi-empty"><span class="loading-dots">Loading Automation ROI workspace</span></div>
+      </section>`;
+  }
+  return `
+    <section class="roi-workspace" aria-label="Automation ROI workspace" aria-busy="${roi.busy ? 'true' : 'false'}">
+      ${renderRoiSnapshots()}
+      ${renderRoiFacts()}
+      ${renderRoiDecisions()}
+      ${renderRoiFrozen()}
+      ${renderRoiCalculate()}
+      ${renderRoiResults()}
+    </section>`;
+}
+
+function roiAvailability(available) {
+  return available
+    ? '<span class="roi-pill ok">available</span>'
+    : '<span class="roi-pill warn">unavailable</span>';
+}
+
+function renderRoiSnapshots() {
+  const snaps = state.roi.workspace.snapshots || [];
+  const rows = snaps.length ? snaps.map(s => `
+    <li class="roi-row">
+      <span class="roi-label">${escapeHtml(s.source_kind || 'Source snapshot')}</span>
+      <span class="roi-meta">${escapeHtml(s.captured_at || 'capture time not recorded')}</span>
+      ${roiAvailability(s.available)}
+    </li>`).join('') : '<li class="roi-row roi-muted">No evidence snapshots captured for this project.</li>';
+  return `
+    <div class="roi-unit" id="roi-snapshots">
+      <h3>1 · Evidence snapshots</h3>
+      <ul class="roi-list">${rows}</ul>
+    </div>`;
+}
+
+function renderRoiFactForm() {
+  const snaps = (state.roi.workspace.snapshots || []).filter(s => s.available);
+  const options = snaps.map(s =>
+    `<option value="${escapeHtml(s.source_snapshot_id)}">${escapeHtml(s.source_kind || 'Source snapshot')} · ${escapeHtml(s.captured_at || 'time n/a')}</option>`
+  ).join('');
+  const disabled = state.roi.busy ? 'disabled' : '';
+  if (!snaps.length) {
+    return `<p class="roi-muted">Capture or restore an available evidence snapshot before recording a candidate fact.</p>`;
+  }
+  return `
+    <form class="roi-fact-form" id="roi-fact-form" aria-label="Record a candidate fact">
+      <label>Evidence snapshot
+        <select id="roi-fact-snapshot" ${disabled} aria-label="Source snapshot for the new fact">${options}</select>
+      </label>
+      <label>Subject label
+        <input type="text" id="roi-fact-subject" ${disabled} maxlength="200" aria-label="Subject label" required>
+      </label>
+      <label>Metric label
+        <input type="text" id="roi-fact-metric" ${disabled} maxlength="200" aria-label="Metric label" required>
+      </label>
+      <label>Fact type
+        <select id="roi-fact-type" ${disabled} aria-label="Fact type">
+          <option value="count">count</option>
+          <option value="duration">duration</option>
+          <option value="money">money</option>
+          <option value="rate">rate</option>
+          <option value="percentage">percentage</option>
+        </select>
+      </label>
+      <label>Value
+        <input type="text" id="roi-fact-value" ${disabled} inputmode="decimal" aria-label="Numeric value (entered as text; never parsed from source)">
+      </label>
+      <label>Unit
+        <input type="text" id="roi-fact-unit" ${disabled} maxlength="60" aria-label="Unit">
+      </label>
+      <label>Currency code
+        <input type="text" id="roi-fact-currency" ${disabled} maxlength="3" aria-label="Currency code">
+      </label>
+      <label>Time unit
+        <input type="text" id="roi-fact-timeunit" ${disabled} maxlength="30" aria-label="Time unit">
+      </label>
+      <label>Counted entity
+        <input type="text" id="roi-fact-counted" ${disabled} maxlength="120" aria-label="Counted entity">
+      </label>
+      <label>As-of date
+        <input type="date" id="roi-fact-asof" ${disabled} aria-label="As-of date">
+      </label>
+      <label>Period basis
+        <input type="text" id="roi-fact-period" ${disabled} maxlength="60" aria-label="Period basis">
+      </label>
+      <label>Source pointer (page / row / section / quoted label)
+        <input type="text" id="roi-fact-locator" ${disabled} maxlength="200" aria-label="Safe source pointer">
+      </label>
+      <label>Rationale
+        <textarea id="roi-fact-rationale" ${disabled} maxlength="2000" aria-label="Extraction rationale"></textarea>
+      </label>
+      <button class="btn btn-accent" id="roi-fact-create" type="submit" ${disabled} aria-label="Create candidate fact">Create candidate fact</button>
+    </form>`;
+}
+
+function renderRoiFacts() {
+  const facts = state.roi.workspace.candidate_facts || [];
+  const rows = facts.length ? facts.map(f => `
+    <li class="roi-row roi-fact" data-roi-fact="${escapeHtml(f.candidate_fact_revision_id)}">
+      <span class="roi-label">${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</span>
+      <span class="roi-meta">${escapeHtml(f.fact_type || '')}${f.numeric_value != null ? ' · ' + escapeHtml(f.numeric_value) : ''}${f.unit ? ' ' + escapeHtml(f.unit) : ''}${f.currency_code ? ' ' + escapeHtml(f.currency_code) : ''}</span>
+      <span class="roi-state">${escapeHtml(f.decision_state)}</span>
+      ${roiAvailability(f.available)}
+      <button class="btn btn-secondary btn-sm" data-roi-correct="${escapeHtml(f.candidate_fact_revision_id)}" type="button" ${state.roi.busy ? 'disabled' : ''} aria-label="Create a correcting fact">Create correction</button>
+    </li>`).join('') : '<li class="roi-row roi-muted">No candidate facts yet.</li>';
+  return `
+    <div class="roi-unit" id="roi-facts">
+      <h3>2 · Candidate facts</h3>
+      <p class="roi-muted">Facts are immutable — corrections create a new fact, never an edit.</p>
+      <ul class="roi-list">${rows}</ul>
+      ${renderRoiFactForm()}
+    </div>`;
+}
+
+function renderRoiDecisions() {
+  const facts = state.roi.workspace.candidate_facts || [];
+  const busy = state.roi.busy;
+  const rows = facts.length ? facts.map(f => {
+    const actions = (f.permitted_actions || []).map(a => {
+      const label = a.charAt(0).toUpperCase() + a.slice(1);
+      return `<button class="btn btn-sm" data-roi-decision="${escapeHtml(a)}" data-fact="${escapeHtml(f.candidate_fact_revision_id)}" type="button" ${busy ? 'disabled' : ''} aria-label="${escapeHtml(label)} this fact">${escapeHtml(label)}</button>`;
+    }).join('');
+    return `
+      <li class="roi-row" data-roi-decision-fact="${escapeHtml(f.candidate_fact_revision_id)}">
+        <span class="roi-label">${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</span>
+        <span class="roi-state">${escapeHtml(f.decision_state)}</span>
+        <span class="roi-actions">${actions}</span>
+      </li>`;
+  }).join('') : '<li class="roi-row roi-muted">No facts to decide on.</li>';
+  return `
+    <div class="roi-unit" id="roi-decisions">
+      <h3>3 · Decisions</h3>
+      <p class="roi-muted">Decision state and permitted actions are server-derived.</p>
+      <ul class="roi-list">${rows}</ul>
+    </div>`;
+}
+
+function renderRoiFrozen() {
+  const ws = state.roi.workspace;
+  const facts = ws.candidate_facts || [];
+  const frozen = ws.frozen_inputs || [];
+  const readiness = ws.role_readiness || { roles: {}, missing_roles: [] };
+  const approvedFacts = facts.filter(f => f.decision_state === 'approved');
+  const busy = state.roi.busy;
+
+  const roleRows = ROI_ROLES.map(role => {
+    const roleInfo = (readiness.roles && readiness.roles[role]) || {};
+    const existing = frozen.filter(fi => fi.input_role === role);
+    const existingHtml = existing.length
+      ? existing.map(fi => `<span class="roi-frozen-chip">${escapeHtml(fi.resolved_numeric_value || '')}${fi.resolved_unit ? ' ' + escapeHtml(fi.resolved_unit) : ''}${fi.resolved_currency_code ? ' ' + escapeHtml(fi.resolved_currency_code) : ''} ${roiAvailability(fi.available)}</span>`).join('')
+      : '<span class="roi-muted">none frozen</span>';
+    const options = approvedFacts.map(f =>
+      `<option value="${escapeHtml(f.candidate_fact_revision_id)}">${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</option>`
+    ).join('');
+    const select = approvedFacts.length
+      ? `<select data-roi-freeze-role="${escapeHtml(role)}" ${busy ? 'disabled' : ''} aria-label="Approved fact to freeze for ${escapeHtml(ROI_ROLE_LABELS[role])}"><option value="">— select approved fact —</option>${options}</select>
+         <button class="btn btn-sm" data-roi-freeze="${escapeHtml(role)}" type="button" ${busy ? 'disabled' : ''} aria-label="Freeze input for ${escapeHtml(ROI_ROLE_LABELS[role])}">Freeze</button>`
+      : '<span class="roi-muted">no approved facts available</span>';
+    return `
+      <li class="roi-row roi-frozen-role" data-roi-role="${escapeHtml(role)}">
+        <span class="roi-label">${escapeHtml(ROI_ROLE_LABELS[role])}</span>
+        <span class="roi-frozen-current">${existingHtml}</span>
+        <span class="roi-frozen-action">${select}</span>
+      </li>`;
+  }).join('');
+
+  const missing = readiness.missing_roles || [];
+  const completeness = readiness.complete
+    ? '<span class="roi-pill ok">all six roles have a frozen input</span>'
+    : `<span class="roi-pill warn">missing: ${escapeHtml(missing.map(r => ROI_ROLE_LABELS[r] || r).join(', '))}</span>`;
+  return `
+    <div class="roi-unit" id="roi-frozen">
+      <h3>4 · Frozen six inputs</h3>
+      <div class="roi-readiness">${completeness}</div>
+      <ul class="roi-list roi-frozen-list">${roleRows}</ul>
+    </div>`;
+}
+
+function renderRoiCalculate() {
+  const frozen = state.roi.workspace.frozen_inputs || [];
+  const map = state.roi.calcMap || {};
+  const busy = state.roi.busy;
+  const roleRows = ROI_ROLES.map(role => {
+    const choices = frozen.filter(fi => fi.input_role === role);
+    const options = choices.map(fi => {
+      const warn = fi.consumable ? '' : ' (evidence unavailable — server decides)';
+      const value = `${fi.resolved_numeric_value || ''}${fi.resolved_unit ? ' ' + fi.resolved_unit : ''}${fi.resolved_currency_code ? ' ' + fi.resolved_currency_code : ''}`;
+      const sel = map[role] === fi.approved_calculation_input_id ? 'selected' : '';
+      return `<option value="${escapeHtml(fi.approved_calculation_input_id)}" ${sel}>${escapeHtml(value)}${escapeHtml(warn)}</option>`;
+    }).join('');
+    return `
+      <li class="roi-row" data-roi-calc-row="${escapeHtml(role)}">
+        <span class="roi-label">${escapeHtml(ROI_ROLE_LABELS[role])}</span>
+        <select data-roi-calc-role="${escapeHtml(role)}" ${busy ? 'disabled' : ''} aria-label="Frozen input for ${escapeHtml(ROI_ROLE_LABELS[role])}">
+          <option value="">— select frozen input —</option>
+          ${options}
+        </select>
+      </li>`;
+  }).join('');
+  const complete = roiCalcMapComplete();
+  const calcDisabled = (!complete || busy) ? 'disabled' : '';
+  return `
+    <div class="roi-unit" id="roi-calculate">
+      <h3>5 · Calculate</h3>
+      <p class="roi-muted">Select exactly one frozen input for each of the six roles. Calculation runs on the server; the browser never computes ROI.</p>
+      <ul class="roi-list">${roleRows}</ul>
+      <button class="btn btn-accent" id="roi-calculate-btn" type="button" ${calcDisabled} aria-label="Run server-side calculation">Calculate</button>
+    </div>`;
+}
+
+function renderRoiResultDetail() {
+  const op = state.roi.operatorResult;
+  if (!op) {
+    if (state.roi.previewError) return `<div class="taxonomy-note"><div class="title">${escapeHtml(state.roi.previewError.title)}</div></div>`;
+    return '<p class="roi-muted">Select a result to view operator detail and the client-safe preview.</p>';
+  }
+  const statusLabel = ROI_RESULT_STATUS_LABELS[op.status] || op.status;
+  const values = op.status === 'blocked' ? '' : `
+    <ul class="roi-result-values">
+      <li>Annual labor savings: ${escapeHtml(op.annual_labor_savings ?? '—')}</li>
+      <li>Annual net benefit: ${escapeHtml(op.annual_net_benefit ?? '—')}</li>
+      <li>First-year net benefit: ${escapeHtml(op.first_year_net_benefit ?? '—')}</li>
+      <li>First-year ROI %: ${escapeHtml(op.first_year_roi_percent ?? '—')}</li>
+    </ul>`;
+  const operatorBlock = `
+    <div class="roi-operator-result">
+      <h4>Operator result · <span class="roi-status roi-status-${escapeHtml(op.status)}">${escapeHtml(statusLabel)}</span></h4>
+      ${op.formula_version ? `<div class="roi-meta">Formula ${escapeHtml(op.formula_version)}</div>` : ''}
+      ${op.currency_code ? `<div class="roi-meta">Currency ${escapeHtml(op.currency_code)}</div>` : ''}
+      ${values}
+    </div>`;
+
+  let previewBlock;
+  const cp = state.roi.clientPreview;
+  if (!cp) {
+    const msg = state.roi.previewError ? state.roi.previewError.title : 'Client-safe preview is unavailable.';
+    previewBlock = `<div class="roi-client-preview"><h4>Client-safe preview</h4><p class="roi-muted">${escapeHtml(msg)}</p></div>`;
+  } else {
+    const assumptions = (cp.assumptions || []).map(a =>
+      `<li>${escapeHtml(ROI_ROLE_LABELS[a.role] || a.role)}: ${escapeHtml(a.value ?? '—')}${a.unit ? ' ' + escapeHtml(a.unit) : ''}${a.currency ? ' ' + escapeHtml(a.currency) : ''}${a.label ? ' — ' + escapeHtml(a.label) : ''}</li>`
+    ).join('');
+    const caveats = (cp.caveats || []).map(c => `<li>${escapeHtml(c)}</li>`).join('');
+    const result = cp.result ? `
+      <ul class="roi-result-values">
+        <li>Annual labor savings: ${escapeHtml(cp.result.annual_labor_savings ?? '—')}</li>
+        <li>Annual net benefit: ${escapeHtml(cp.result.annual_net_benefit ?? '—')}</li>
+        <li>First-year net benefit: ${escapeHtml(cp.result.first_year_net_benefit ?? '—')}</li>
+        <li>First-year ROI %: ${escapeHtml(cp.result.first_year_roi_percent ?? '—')}</li>
+      </ul>` : '';
+    previewBlock = `
+      <div class="roi-client-preview">
+        <h4>Client-safe preview · <span class="roi-status">${escapeHtml(ROI_RESULT_STATUS_LABELS[cp.status] || cp.status)}</span></h4>
+        ${result}
+        ${assumptions ? `<div class="roi-meta">Assumptions</div><ul class="roi-list">${assumptions}</ul>` : ''}
+        ${caveats ? `<div class="roi-meta">Caveats</div><ul class="roi-list">${caveats}</ul>` : ''}
+      </div>`;
+  }
+  return operatorBlock + previewBlock;
+}
+
+function renderRoiResults() {
+  const results = state.roi.workspace.results || [];
+  const active = state.roi.activeResultId;
+  const rows = results.length ? results.map(r => `
+    <li class="roi-row roi-result-row ${active === r.result_id ? 'selected' : ''}">
+      <button class="btn btn-link" data-roi-result="${escapeHtml(r.result_id)}" type="button" aria-label="Open result detail and client-safe preview">
+        <span class="roi-status roi-status-${escapeHtml(r.status)}">${escapeHtml(ROI_RESULT_STATUS_LABELS[r.status] || r.status)}</span>
+        <span class="roi-meta">${escapeHtml(r.computed_at || '')}</span>
+      </button>
+    </li>`).join('') : '<li class="roi-row roi-muted">No calculation results yet.</li>';
+  return `
+    <div class="roi-unit" id="roi-results">
+      <h3>6 · Result and client-safe preview</h3>
+      <ul class="roi-list">${rows}</ul>
+      <div class="roi-result-detail" id="roi-result-detail">${renderRoiResultDetail()}</div>
+    </div>`;
+}
+
+function readRoiFactForm() {
+  const val = id => (document.getElementById(id)?.value || '').trim();
+  const fact = { fact_type: val('roi-fact-type') };
+  const value = val('roi-fact-value');
+  if (value) fact.value = value;            // sent as string; never a JS number
+  const unit = val('roi-fact-unit'); if (unit) fact.unit = unit;
+  const currency = val('roi-fact-currency'); if (currency) fact.currency_code = currency;
+  const timeUnit = val('roi-fact-timeunit'); if (timeUnit) fact.time_unit = timeUnit;
+  const counted = val('roi-fact-counted'); if (counted) fact.counted_entity = counted;
+  const asof = val('roi-fact-asof'); if (asof) fact.as_of_date = asof;
+  const body = {
+    source_snapshot_id: val('roi-fact-snapshot'),
+    fact,
+    subject_label: val('roi-fact-subject'),
+    metric_label: val('roi-fact-metric'),
+  };
+  const period = val('roi-fact-period'); if (period) body.period_basis = period;
+  const locator = val('roi-fact-locator'); if (locator) body.source_locator = locator;
+  const rationale = val('roi-fact-rationale'); if (rationale) body.extraction_rationale = rationale;
+  return body;
+}
+
+function wireAutomationRoiWorkspace() {
+  const pid = state.selectedProjectId;
+  if (!pid) return;
+
+  document.querySelector('[data-roi-retry]')?.addEventListener('click', async () => {
+    await loadAutomationRoiWorkspace(pid);
+    renderMain();
+  });
+
+  const form = document.getElementById('roi-fact-form');
+  form?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = readRoiFactForm();
+    if (!body.source_snapshot_id || !body.subject_label || !body.metric_label) {
+      toast('Snapshot, subject, and metric are required.', 'err');
+      return;
+    }
+    await roiMutate({
+      path: `/projects/${encodeURIComponent(pid)}/automation-roi/candidate-facts`,
+      body,
+      confirmMsg: 'Create this candidate fact? Facts are immutable once created.',
+    });
+  });
+
+  document.querySelectorAll('[data-roi-correct]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fid = btn.getAttribute('data-roi-correct');
+      const fact = (state.roi.workspace.candidate_facts || []).find(f => f.candidate_fact_revision_id === fid);
+      if (!fact) return;
+      // A correction is a NEW fact — prefill the form, never edit the original.
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+      set('roi-fact-subject', fact.subject_label);
+      set('roi-fact-metric', fact.metric_label);
+      set('roi-fact-type', fact.fact_type);
+      document.getElementById('roi-fact-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      toast('Correction starts a new fact. Adjust the values and create it.', '');
+    });
+  });
+
+  document.querySelectorAll('[data-roi-decision]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const action = btn.getAttribute('data-roi-decision');
+      const fid = btn.getAttribute('data-fact');
+      await roiMutate({
+        path: `/projects/${encodeURIComponent(pid)}/automation-roi/candidate-facts/${encodeURIComponent(fid)}/decisions`,
+        body: { decision_type: action },
+        confirmMsg: `Record a "${action}" decision for this fact?`,
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-roi-freeze]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const role = btn.getAttribute('data-roi-freeze');
+      const sel = document.querySelector(`[data-roi-freeze-role="${role}"]`);
+      const factId = sel?.value;
+      if (!factId) { toast('Select an approved fact to freeze.', 'err'); return; }
+      const fact = (state.roi.workspace.candidate_facts || []).find(f => f.candidate_fact_revision_id === factId);
+      if (!fact || !fact.active_approval_id) { toast('This fact no longer has an active approval.', 'err'); return; }
+      await roiMutate({
+        path: `/projects/${encodeURIComponent(pid)}/automation-roi/inputs`,
+        body: {
+          candidate_fact_revision_id: factId,
+          approval_decision_id: fact.active_approval_id,
+          input_role: role,
+        },
+        confirmMsg: `Freeze this approved fact as ${ROI_ROLE_LABELS[role]}?`,
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-roi-calc-role]').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const role = sel.getAttribute('data-roi-calc-role');
+      if (sel.value) state.roi.calcMap[role] = sel.value;
+      else delete state.roi.calcMap[role];
+      renderMain();
+    });
+  });
+
+  const calcBtn = document.getElementById('roi-calculate-btn');
+  calcBtn?.addEventListener('click', async () => {
+    if (!roiCalcMapComplete()) return;
+    const inputs = {};
+    ROI_ROLES.forEach(role => { inputs[role] = state.roi.calcMap[role]; });
+    await roiMutate({
+      path: `/projects/${encodeURIComponent(pid)}/automation-roi/calculations`,
+      body: { inputs },
+      confirmMsg: 'Run the server-side calculation with the selected six inputs?',
+    });
+  });
+
+  document.querySelectorAll('[data-roi-result]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await loadRoiResult(btn.getAttribute('data-roi-result'));
+    });
+  });
+}
+
+function renderInspectorAutomationRoi() {
+  const ws = state.roi.workspace;
+  const items = ws ? [
+    ['Snapshots', String((ws.snapshots || []).length)],
+    ['Candidate facts', String((ws.candidate_facts || []).length)],
+    ['Frozen inputs', String((ws.frozen_inputs || []).length)],
+    ['Results', String((ws.results || []).length)],
+    ['Six-role readiness', ws.role_readiness?.complete ? 'complete' : 'incomplete'],
+  ] : [];
+  const rows = items.map(([k, v]) => `<div class="ins-kv"><span>${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`).join('');
+  return `
+    <div class="ins-section">
+      <div class="ins-section-head"><h5>Automation ROI</h5></div>
+      <p class="hint">Operator workspace for the gated ROI lifecycle. All values are server-derived; the browser never calculates ROI or builds a client-safe view.</p>
+      ${rows}
+    </div>`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
    Main refresh cycle
    ═══════════════════════════════════════════════════════════════════════ */
 async function refresh() {
@@ -8402,6 +9064,9 @@ async function refresh() {
     if (state.activeTab === 'report') await loadReport(state.selectedProjectId);
     if (state.activeTab === 'workflow' && state.project && !state.project.calibration) {
       await loadCalibration(state.selectedProjectId);
+    }
+    if (state.activeTab === AUTOMATION_ROI_TAB && isAutomationRoiProject()) {
+      await loadAutomationRoiWorkspace(state.selectedProjectId);
     }
     renderMain();
   }

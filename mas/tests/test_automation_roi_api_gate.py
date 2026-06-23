@@ -55,6 +55,7 @@ WRITE_REQUESTS = [
 READ_REQUESTS = [
     ("get", f"/projects/{PID}/automation-roi/calculations/{RID}", None),
     ("get", f"/projects/{PID}/automation-roi/calculations/{RID}/client", None),
+    ("get", f"/projects/{PID}/automation-roi/workspace", None),
 ]
 ALL_REQUESTS = WRITE_REQUESTS + READ_REQUESTS
 
