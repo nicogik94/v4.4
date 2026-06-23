@@ -4434,7 +4434,7 @@ function technologyReadinessWorkbookExportSupported() {
 function isTechnologyReadinessProject(project) {
   return classToken(project?.project_type) === 'technology_readiness';
 }
-function isAutomationRoiProject(project) {
+function isAutomationRoiProject(project = state.project?.fullState) {
   return classToken(project?.project_type) === 'automation_roi';
 }
 function workspaceTabsForProject(project = state.project?.fullState) {
