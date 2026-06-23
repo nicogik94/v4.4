@@ -2391,6 +2391,118 @@ a:hover { text-decoration: underline; }
   font-style: italic;
 }
 
+/* ─── Decision surfaces (Overview snapshot + dossier status) ─────────────
+   Read-only presentation of already-fetched /overview + /workspace data.
+   No control paths, no network writes. */
+.ds-snapshot {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  display: grid;
+  gap: var(--sp-4);
+}
+.ds-snapshot-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.ds-snapshot-head h3 { margin: 0; font-size: var(--fs-base); }
+.ds-block-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--mute);
+  margin-bottom: 6px;
+}
+.ds-rec-text {
+  font-size: var(--fs-base);
+  line-height: 1.6;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ds-states {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--sp-2);
+}
+.ds-state {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-1, var(--surface-2));
+  padding: 8px 10px;
+}
+.ds-state .ds-state-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--mute);
+  margin-bottom: 4px;
+}
+.ds-state .ds-state-val { font-size: var(--fs-sm); font-weight: 600; color: var(--ink); }
+.ds-state .ds-state-sub { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
+.ds-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+}
+.ds-pill.ok { color: var(--good); border-color: var(--good-bg); background: var(--good-bg); }
+.ds-pill.warn { color: var(--warn); border-color: var(--warn-bg); background: var(--warn-bg); }
+.ds-pill.bad { color: var(--bad); border-color: var(--bad-bg); background: var(--bad-bg); }
+.ds-pill.mute { color: var(--mute); }
+.ds-risks { display: grid; gap: 6px; }
+.ds-risk {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-1, var(--surface-2));
+}
+.ds-risk .ds-risk-title { font-size: var(--fs-sm); color: var(--ink); flex: 1; }
+.ds-sev {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--r-sm);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.ds-sev.critical { background: var(--bad-bg); color: var(--bad); }
+.ds-sev.high { background: var(--warn-bg); color: var(--warn); }
+.ds-sev.medium { background: var(--accent-bg); color: var(--accent); }
+.ds-sev.low { background: var(--surface-3); color: var(--ink-2); }
+.ds-dossier-link {
+  display: inline-block;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--accent);
+  text-decoration: none;
+}
+.ds-dossier-link:hover { text-decoration: underline; }
+.ds-expand { margin-top: 6px; }
+.ds-expand > summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  list-style: revert;
+}
+.ds-expand[open] > summary { margin-bottom: 6px; }
+.ds-muted { color: var(--mute); font-size: var(--fs-sm); font-style: italic; }
+
 /* Brief display */
 .ev-brief {
   font-size: var(--fs-base);
@@ -5565,6 +5677,159 @@ function renderClarificationPanel(clarifications) {
   `;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   Decision surfaces — read-only Overview snapshot + dossier status helpers.
+   Inputs are already-fetched /overview, /workspace, /state payloads. Every
+   API-derived string is treated as untrusted and passed through escapeHtml.
+   These functions return markup only; they never issue network requests and
+   never parse exports/PDFs or compute decision content in the browser.
+   ═══════════════════════════════════════════════════════════════════════ */
+const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+function severityRank(sev) { return SEVERITY_RANK[String(sev || '').toLowerCase()] || 0; }
+
+// Bounded preview with native, JS-free expand/collapse for long untrusted text.
+function dsBoundedText(text, max = 320) {
+  const full = String(text == null ? '' : text);
+  if (full.length <= max) return `<div class="ds-rec-text">${escapeHtml(full)}</div>`;
+  const head = full.slice(0, max).replace(/\s+\S*$/, '');
+  return `
+    <div class="ds-rec-text">${escapeHtml(head)}…</div>
+    <details class="ds-expand">
+      <summary>Show full text</summary>
+      <div class="ds-rec-text">${escapeHtml(full)}</div>
+    </details>`;
+}
+
+// Render one labelled availability pill. States are honest and distinct:
+// available | partial | not imported | not generated | unavailable | fetch failed
+function dsStatePill(stateKey, label) {
+  const map = {
+    'available':     'ok',
+    'partial':       'warn',
+    'not imported':  'mute',
+    'not generated': 'mute',
+    'unavailable':   'mute',
+    'fetch failed':  'bad',
+  };
+  const cls = map[stateKey] || 'mute';
+  return `<span class="ds-pill ${cls}">${escapeHtml(label || stateKey || 'unavailable')}</span>`;
+}
+
+// Top active risks for the snapshot: at most three. The server already orders
+// active_risks by severity then title; preserve that order when present, and
+// fall back to a stable severity→title sort only if the input looks unordered.
+function dsTopRisks(workspace) {
+  const risks = Array.isArray(workspace?.active_risks) ? workspace.active_risks.slice() : [];
+  const ranks = risks.map(r => severityRank(r?.severity));
+  const alreadyOrdered = ranks.every((v, i) => i === 0 || ranks[i - 1] >= v);
+  if (!alreadyOrdered) {
+    risks.sort((a, b) => severityRank(b?.severity) - severityRank(a?.severity)
+      || String(a?.title || '').toLowerCase().localeCompare(String(b?.title || '').toLowerCase()));
+  }
+  return risks.slice(0, 3);
+}
+
+function renderDecisionSnapshot(overview, workspace, overviewError) {
+  // Read-only decision snapshot for the Overview tab. Answers "what should the
+  // operator do now?" using server-provided fields only. The next-action panel
+  // (renderNextAction) is rendered separately above; risk/evidence detail lives
+  // in the dossier — this snapshot links there rather than duplicating it.
+  const pid = state.selectedProjectId || overview?.project_id || '';
+  const dossierLink = `<a class="ds-dossier-link" href="#/project/${escapeHtml(pid)}/evidence">Open Evidence &amp; Risks dossier →</a>`;
+
+  if (overviewError) {
+    return `
+      <div class="ds-snapshot">
+        <div class="ds-snapshot-head"><h3>Decision snapshot</h3>${dsStatePill('fetch failed')}</div>
+        <div class="ds-muted">The decision summary could not be loaded right now. Phase outputs remain available in the dossier.</div>
+        ${dossierLink}
+      </div>`;
+  }
+  if (!overview) {
+    return `
+      <div class="ds-snapshot">
+        <div class="ds-snapshot-head"><h3>Decision snapshot</h3></div>
+        <div class="ds-muted">Loading decision summary…</div>
+      </div>`;
+  }
+
+  const ws = workspace || overview.workspace || {};
+  const recommendation = overview.current_recommendation || 'No recommendation generated yet.';
+  const summary = overview.decision_summary || '';
+  const projStatus = overview.project_status || ws.project_status || '';
+
+  // Evidence maturity / client-use status — all server-computed.
+  const doh = ws.decision_object_health || {};
+  const kh = ws.knowledge_health || {};
+  const dr = ws.delivery_review_readiness || {};
+
+  const maturityState = doh.status === 'fresh' ? 'available'
+    : (doh.status === 'stale' ? 'partial' : 'not generated');
+  const maturityLabel = doh.status === 'fresh' ? 'current'
+    : (doh.status === 'stale' ? 'stale' : 'not generated');
+
+  const khState = kh.status === 'current' ? 'available'
+    : (kh.status === 'stale' ? 'partial'
+      : (kh.status === 'unconfigured' ? 'unavailable' : 'partial'));
+
+  const reviewReady = !!dr.review_ready;
+  const clientState = reviewReady ? 'available' : 'partial';
+  const clientLabel = reviewReady ? 'review-ready' : 'operator review needed';
+
+  const topRisks = dsTopRisks(ws);
+  const totalRisks = (ws.active_risk_count != null) ? ws.active_risk_count : topRisks.length;
+
+  return `
+    <div class="ds-snapshot">
+      <div class="ds-snapshot-head">
+        <h3>Decision snapshot</h3>
+        ${projStatus ? `<span class="ds-pill mute">status: ${escapeHtml(projStatus)}</span>` : ''}
+      </div>
+
+      <div>
+        <div class="ds-block-label">Current recommendation</div>
+        <div class="ds-rec-text">${escapeHtml(recommendation)}</div>
+        ${summary ? dsBoundedText(summary, 320) : ''}
+      </div>
+
+      <div>
+        <div class="ds-block-label">Evidence maturity &amp; client-use status</div>
+        <div class="ds-states">
+          <div class="ds-state">
+            <div class="ds-state-label">Evidence maturity</div>
+            <div class="ds-state-val">${dsStatePill(maturityState, maturityLabel)}</div>
+            <div class="ds-state-sub">${escapeHtml(String(doh.evidence_count ?? 0))} evidence · ${escapeHtml(String(doh.risk_count ?? 0))} risks</div>
+          </div>
+          <div class="ds-state">
+            <div class="ds-state-label">Knowledge sources</div>
+            <div class="ds-state-val">${dsStatePill(khState, kh.status || 'unconfigured')}</div>
+            <div class="ds-state-sub">${escapeHtml(String(kh.item_count ?? 0))} item(s) · ${escapeHtml(String(kh.source_count ?? 0))} source(s)</div>
+          </div>
+          <div class="ds-state">
+            <div class="ds-state-label">Client-use status</div>
+            <div class="ds-state-val">${dsStatePill(clientState, clientLabel)}</div>
+            <div class="ds-state-sub">${escapeHtml(dr.status || 'needs_operator_review')}</div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="ds-block-label">Top active risks${totalRisks > topRisks.length ? ` (${escapeHtml(String(topRisks.length))} of ${escapeHtml(String(totalRisks))})` : ''}</div>
+        ${topRisks.length ? `
+          <div class="ds-risks">
+            ${topRisks.map(r => `
+              <div class="ds-risk">
+                <span class="ds-sev ${escapeHtml(String(r.severity || 'medium').toLowerCase())}">${escapeHtml(r.severity || 'medium')}</span>
+                <span class="ds-risk-title">${escapeHtml(r.title || r.summary || 'Untitled risk')}</span>
+              </div>`).join('')}
+          </div>` : `<div class="ds-muted">No active risks recorded.</div>`}
+      </div>
+
+      ${dossierLink}
+    </div>
+  `;
+}
+
 function renderDecide() {
   const events = state.dp.events;
   const filter = state.dp.filter;
@@ -5577,6 +5842,7 @@ function renderDecide() {
 
   return `
     <div class="dp">
+      ${renderDecisionSnapshot(state.project?.overview, state.project?.workspace, state.project?.overviewError)}
       ${renderSQICard(state.project?.fullState?.sqi)}
       ${renderClarificationPanel(state.project?.clarifications)}
       <div class="dp-top">
@@ -5774,24 +6040,44 @@ function renderEvidenceStub() {
   if (!fs) return `<div class="view-stub"><div class="stub-tag">Loading</div><h3>Evidence</h3><p>Fetching project state…</p></div>`;
 
   const ptype = fs.project_type || 'strategic_audit';
-  const isStrategic = ptype === 'strategic_audit';
 
-  // Phase-output sections are template-aware: strategic-audit-specific
-  // sections (classify, hypotheses, audit, strategy, sqi, monitor) only
-  // render when the project type matches. Brief and assets are universal.
+  // Phase-output sections render whenever a phase produced structured output,
+  // independent of project_type. Completed non-strategic_audit templates (e.g.
+  // automation_roi) run the same phases and persist the same structures, so the
+  // rich dossier cards — "what did each completed phase conclude?" — apply to
+  // them too. Fall back to the compact phase table only when no rich phase
+  // output exists at all. Brief and assets are universal.
+  const hasHyps = Array.isArray(fs.hypotheses) && fs.hypotheses.length > 0;
+  const phaseSections = [];
+  if (fs.classify && (fs.classify.domain || fs.classify.justification)) {
+    phaseSections.push({ id: 'classify', label: 'Classify', body: renderEvClassify(fs.classify) });
+  }
+  if (hasHyps) {
+    phaseSections.push({ id: 'hypotheses', label: 'Hypotheses', body: renderEvHypotheses(fs.hypotheses, fs.gauntlet) });
+  }
+  if (fs.audit) {
+    phaseSections.push({ id: 'audit', label: 'Audit (FMEA etc)', body: renderEvAudit(fs.audit) });
+  }
+  if (fs.strategy) {
+    phaseSections.push({ id: 'strategy', label: 'Strategy', body: renderEvStrategy(fs.strategy) });
+  }
+  if (fs.sqi) {
+    phaseSections.push({ id: 'sqi', label: 'SQI', body: renderEvSQI(fs.sqi) });
+  }
+  if (fs.monitor) {
+    phaseSections.push({ id: 'monitor', label: 'Monitoring plan', body: renderEvMonitor(fs.monitor) });
+  }
+  if (fs.report) {
+    phaseSections.push({ id: 'report', label: 'Report', body: renderEvReportCard(fs) });
+  }
+  if (phaseSections.length === 0) {
+    phaseSections.push({ id: 'phases', label: 'Phase outputs', body: renderEvGenericPhases(fs, ptype) });
+  }
+
   const sections = [
-    { id: 'brief',      label: 'Brief & data',     body: renderEvBrief(fs) },
-    ...(isStrategic ? [
-      { id: 'classify',   label: 'Classify',         body: renderEvClassify(fs.classify) },
-      { id: 'hypotheses', label: 'Hypotheses',       body: renderEvHypotheses(fs.hypotheses, fs.gauntlet) },
-      { id: 'audit',      label: 'Audit (FMEA etc)', body: renderEvAudit(fs.audit) },
-      { id: 'strategy',   label: 'Strategy',         body: renderEvStrategy(fs.strategy) },
-      { id: 'sqi',        label: 'SQI',              body: renderEvSQI(fs.sqi) },
-      { id: 'monitor',    label: 'Monitoring plan',  body: renderEvMonitor(fs.monitor) },
-    ] : [
-      { id: 'phases',     label: 'Phase outputs',    body: renderEvGenericPhases(fs, ptype) },
-    ]),
-    { id: 'assets',     label: 'Files & knowledge', body: renderEvAssets(state.project?.files, state.project?.knowledge) },
+    { id: 'brief',  label: 'Brief & data',         body: renderEvBrief(fs) },
+    ...phaseSections,
+    { id: 'assets', label: 'Evidence & knowledge',  body: renderEvAssets(state.project?.files, state.project?.knowledge) },
   ];
 
   return `
@@ -5903,11 +6189,24 @@ function renderEvAudit(a) {
   if (!a) return `<div class="ev-section-empty">Audit phase has not run yet.</div>`;
   const fmea = Array.isArray(a.fmea) ? a.fmea.slice().sort((x, y) => (y.rpn || 0) - (x.rpn || 0)) : [];
   const findings = Array.isArray(a.top_findings) ? a.top_findings : [];
+  const observationNeeds = Array.isArray(a.observation_needs) ? a.observation_needs : [];
+  // Principal risks = the highest-RPN FMEA rows, drawn from this audit payload.
+  const principalRisks = fmea.slice(0, 3);
   return `
     ${findings.length ? `
       <div class="ev-brief">
         <div class="ev-brief-label">Top findings</div>
         <ul class="ev-list">${findings.map(f => `<li class="highlight">${escapeHtml(f)}</li>`).join('')}</ul>
+      </div>` : ''}
+    ${principalRisks.length ? `
+      <div class="ev-brief">
+        <div class="ev-brief-label">Principal risks</div>
+        <ul class="ev-list">${principalRisks.map(r => `<li><strong>${escapeHtml(r.component || r.failure_mode || 'Risk')}</strong>${r.failure_mode && r.component ? ` — ${escapeHtml(r.failure_mode)}` : ''}${r.effect ? `: ${escapeHtml(r.effect)}` : ''} <span class="ds-pill ${Number(r.rpn || 0) >= 200 ? 'bad' : (Number(r.rpn || 0) >= 100 ? 'warn' : 'mute')}">RPN ${escapeHtml(String(Number(r.rpn || 0)))}</span></li>`).join('')}</ul>
+      </div>` : ''}
+    ${observationNeeds.length ? `
+      <div class="ev-brief">
+        <div class="ev-brief-label">Observation needs</div>
+        <ul class="ev-list">${observationNeeds.map(o => `<li>${escapeHtml(o)}</li>`).join('')}</ul>
       </div>` : ''}
     ${fmea.length ? `
       <div class="ev-table-wrap">
@@ -6091,6 +6390,107 @@ function renderEvGenericPhases(fs, ptype) {
   `;
 }
 
+function renderEvReportCard(fs) {
+  // Concise phase card for the report — a short, bounded preview plus a link to
+  // the Report tab. The full long-form narrative stays in the Report tab and is
+  // never duplicated here. Report text is server-provided but treated as
+  // untrusted and escaped; it is not parsed or interpreted in the browser.
+  const report = String(fs?.report || '').trim();
+  const pid = state.selectedProjectId || fs?.project_id || '';
+  if (!report) return `<div class="ev-section-empty">Report has not been generated yet.</div>`;
+  const lines = report.split('\n').map(l => l.trim()).filter(Boolean);
+  const heading = (lines.find(l => l.startsWith('#')) || lines[0] || 'Report').replace(/^#+\s*/, '');
+  const body = lines.filter(l => !l.startsWith('#')).join(' ');
+  const preview = body.length > 240 ? body.slice(0, 240).replace(/\s+\S*$/, '') + '…' : body;
+  return `
+    <div class="ev-brief">
+      <div class="ev-brief-label">${escapeHtml(heading)}</div>
+      ${preview ? `<div class="ev-text-block">${escapeHtml(preview)}</div>` : ''}
+      <div style="margin-top: 8px;">
+        <a class="ds-dossier-link" href="#/project/${escapeHtml(pid)}/report">View full report &amp; export →</a>
+      </div>
+    </div>`;
+}
+
+function renderEvKnowledgeStatus(overview, workspace, filesRes, filesError, overviewError) {
+  // Read-only "what evidence exists and how trustworthy is it?" status strip.
+  // Sources: /overview (sanitized file rows) and /workspace health summaries.
+  // Uses safe display labels and counts only — never raw storage references,
+  // file paths, raw payloads, or source content. States are honest and distinct.
+  const ws = workspace || overview?.workspace || {};
+  const doh = ws.decision_object_health || {};
+  const kh = ws.knowledge_health || {};
+
+  const ovFiles = Array.isArray(overview?.files) ? overview.files : null;
+  const rawFiles = Array.isArray(filesRes?.files) ? filesRes.files : [];
+  const fileCount = ovFiles ? ovFiles.length : rawFiles.length;
+
+  // Parse status — prefer sanitized overview rows; fall back to raw manifest
+  // parse status only (never any storage field).
+  const parseSource = ovFiles || rawFiles.map(f => ({ parse_status: f.parse_summary?.status || f.parse_status }));
+  let parsed = 0;
+  let pending = 0;
+  for (const f of parseSource) {
+    const st = String(f.parse_status || '').toLowerCase();
+    if (st === 'completed' || st === 'parsed' || st === 'ok') parsed++;
+    else pending++;
+  }
+
+  const sumOv = (key) => (ovFiles || []).reduce((n, f) => n + (Number(f[key]) || 0), 0);
+  const importedEvidence = ovFiles ? sumOv('evidence_count') : (Number(doh.evidence_count) || 0);
+  const importedSignals = ovFiles ? sumOv('signal_count') : (Number(doh.signal_count) || 0);
+  const knowledgeItems = ovFiles ? sumOv('knowledge_item_count') : (Number(kh.item_count) || 0);
+
+  const filesState = filesError ? 'fetch failed'
+    : (fileCount === 0 ? 'not generated' : (pending > 0 ? 'partial' : 'available'));
+  const filesLabel = filesError ? 'fetch failed'
+    : (fileCount === 0 ? 'no files' : `${parsed}/${fileCount} parsed`);
+
+  const maturityState = doh.status === 'fresh' ? 'available'
+    : (doh.status === 'stale' ? 'partial' : 'not generated');
+  const maturityLabel = doh.status || 'not generated';
+
+  const evidenceState = overviewError ? 'fetch failed' : (importedEvidence > 0 ? 'available' : 'not imported');
+  const signalState = overviewError ? 'fetch failed' : (importedSignals > 0 ? 'available' : 'not imported');
+
+  const locatorState = kh.status === 'unconfigured' ? 'unavailable'
+    : (knowledgeItems > 0 ? 'available' : 'not generated');
+  const locatorLabel = kh.status === 'unconfigured' ? 'unconfigured' : `${knowledgeItems} item(s)`;
+
+  return `
+    <div class="ev-brief" style="border-left-color: var(--accent);">
+      <div class="ev-brief-label">Evidence &amp; knowledge status</div>
+      <div class="ds-states">
+        <div class="ds-state">
+          <div class="ds-state-label">Uploaded files</div>
+          <div class="ds-state-val">${dsStatePill(filesState, filesLabel)}</div>
+          <div class="ds-state-sub">${escapeHtml(String(fileCount))} file(s)</div>
+        </div>
+        <div class="ds-state">
+          <div class="ds-state-label">Evidence maturity</div>
+          <div class="ds-state-val">${dsStatePill(maturityState, maturityLabel)}</div>
+          <div class="ds-state-sub">${escapeHtml(String(doh.evidence_count ?? 0))} evidence object(s)</div>
+        </div>
+        <div class="ds-state">
+          <div class="ds-state-label">Imported evidence</div>
+          <div class="ds-state-val">${dsStatePill(evidenceState, evidenceState === 'available' ? `${importedEvidence} imported` : evidenceState)}</div>
+          <div class="ds-state-sub">from uploaded files</div>
+        </div>
+        <div class="ds-state">
+          <div class="ds-state-label">Imported signals</div>
+          <div class="ds-state-val">${dsStatePill(signalState, signalState === 'available' ? `${importedSignals} imported` : signalState)}</div>
+          <div class="ds-state-sub">from uploaded files</div>
+        </div>
+        <div class="ds-state">
+          <div class="ds-state-label">Source locators</div>
+          <div class="ds-state-val">${dsStatePill(locatorState, locatorLabel)}</div>
+          <div class="ds-state-sub">knowledge items</div>
+        </div>
+      </div>
+      <div class="ds-muted" style="margin-top: 6px;">States: available · partial · not imported · not generated · unavailable · fetch failed.</div>
+    </div>`;
+}
+
 function renderEvAssets(filesRes, knowledgeRes) {
   const filesError = state.project?.filesError || null;
   const files = Array.isArray(filesRes?.files) ? filesRes.files : [];
@@ -6187,6 +6587,7 @@ function renderEvAssets(filesRes, knowledgeRes) {
 
   return `
     ${renderEvUploadPanel()}
+    ${renderEvKnowledgeStatus(state.project?.overview, state.project?.workspace, filesRes, filesError, state.project?.overviewError)}
     ${fileTaxonomy}
     ${summary && (summary.sources_total != null || summary.chunks_indexed != null) ? `
       <div class="ev-classify-grid" style="margin-bottom: var(--sp-4);">
