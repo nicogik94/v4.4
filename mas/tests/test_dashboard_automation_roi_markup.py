@@ -31,9 +31,20 @@ class TestAutomationRoiWorkspaceMarkup(unittest.TestCase):
 
     # 1 — workspace appears only for Automation ROI projects
     def test_workspace_is_project_type_and_feature_gated(self):
-        self.assertIn("function isAutomationRoiProject(project)", self.html)
+        # Regression: isAutomationRoiProject() is called with no argument from
+        # renderTabs/normalizeWorkspaceTab, so it MUST default to the currently
+        # loaded project — otherwise the tab never renders for ROI projects.
+        self.assertIn(
+            "function isAutomationRoiProject(project = state.project?.fullState) {",
+            self.html,
+        )
+        self.assertNotIn("function isAutomationRoiProject(project) {", self.html)
         self.assertIn("classToken(project?.project_type) === 'automation_roi'", self.html)
         self.assertIn("function workspaceTabsForProject", self.html)
+        # renderTabs gates the Automation ROI tab on the (argument-less) check.
+        render_tabs = re.search(r"function renderTabs\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(render_tabs)
+        self.assertIn("if (isAutomationRoiProject()) tabs.push(AUTOMATION_ROI_TAB);", render_tabs.group(0))
         self.assertIn("if (isAutomationRoiProject()) tabs.push(AUTOMATION_ROI_TAB);", self.html)
         self.assertIn("const AUTOMATION_ROI_TAB = 'automation_roi';", self.html)
         # WORKSPACE_TABS itself is never mutated (other markup tests rely on it).
