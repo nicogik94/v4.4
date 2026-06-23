@@ -1,4 +1,5 @@
 """Lightweight dashboard markup regression checks for the canonical workspace UI."""
+import re
 import unittest
 from pathlib import Path
 
@@ -204,6 +205,80 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("active_risk_count", html)
         self.assertIn("No projects currently match attention signals from queue fields.", html)
 
+    def test_portfolio_v3_visual_hooks_preserve_live_markup(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        for expected in (
+            "--shell: #211F1B",
+            "--surface-3: #ECE7DE",
+            ".portfolio-filter-btn[data-portfolio-filter=\"needs_attention\"].active",
+            ".portfolio-filter-btn[data-portfolio-filter=\"active\"].active",
+            ".portfolio-filter-btn[data-portfolio-filter=\"complete\"].active",
+            ".attention-row::before",
+            ".attention-row.attention-blocked::before",
+            ".attention-row.attention-approval::before",
+            ".portfolio-project-row.completed::before",
+            ".portfolio-project-row.review-required::before",
+            ".portfolio-project-row.selected",
+            ".project-row.completed .project-name",
+            ".project-row.review-required .project-name",
+            ".signal.warn",
+            ".signal.bad",
+            "function attentionToneClass(project)",
+            "function projectRowStateClasses(project)",
+        ):
+            self.assertIn(expected, html)
+
+        self.assertIn('button class="portfolio-project-row ${escapeHtml(projectRowStateClasses(p))}" type="button" data-pid=', html)
+        self.assertIn('button class="attention-row ${escapeHtml(attentionToneClass(p))}', html)
+        self.assertIn("document.querySelectorAll('.ops-list-item[data-pid], .attention-row[data-pid], .portfolio-project-row[data-pid]')", html)
+        self.assertIn("routeTo(`project/${pid}`)", html)
+        self.assertIn("if (filterKey === 'complete') return rows.filter(isCompletedProject);", html)
+        self.assertIn("if (isCompletedProject(project)) return [];", html)
+
+    def test_runtime_health_v3_visual_hooks_are_present(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        for expected in (
+            ".runtime-health-panel",
+            ".runtime-health-panel.ok",
+            ".runtime-health-panel.warn",
+            ".runtime-health-panel.err",
+            '.runtime-health-panel[data-runtime-status="fetch_failed"]',
+            ".runtime-health-head",
+            ".runtime-health-grid",
+            ".runtime-health-item",
+            ".runtime-health-item.ok .value",
+            ".runtime-health-item.warn .value",
+            ".runtime-health-item.err .value",
+            'data-runtime-status="${escapeHtml(summary.status)}"',
+            "Runtime health",
+            "Global runtime only. This is separate from project lifecycle state.",
+            "fetch failed",
+        ):
+            self.assertIn(expected, html)
+
+        self.assertNotIn("runtime retry", html.lower())
+        self.assertNotIn("Retry runtime", html)
+
+    def test_v3_prototype_only_controls_and_copy_are_absent(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        for forbidden in (
+            "Review States",
+            "All values illustrative",
+            "Analysis Type",
+            "illustrative mock",
+            "api.decide.local:8800",
+        ):
+            self.assertNotIn(forbidden, html)
+
     def test_workspace_tabs_use_portfolio_operations_structure(self):
         if not HTML_PATH.exists():
             self.skipTest("dashboard bundle is not mounted in this execution environment")
@@ -276,6 +351,36 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
             "Operator monitoring template",
         ):
             self.assertNotIn(old_label, html)
+
+    def test_export_profile_selector_renders_unique_supported_options(self):
+        if not HTML_PATH.exists():
+            self.skipTest("dashboard bundle is not mounted in this execution environment")
+        html = HTML_PATH.read_text(encoding="utf-8")
+
+        standard_keys_match = re.search(r"const STANDARD_EXPORT_PROFILE_KEYS = \[(.*?)\];", html)
+        self.assertIsNotNone(standard_keys_match)
+        standard_keys = re.findall(r"'([^']+)'", standard_keys_match.group(1))
+        self.assertEqual(standard_keys, ["report", "operator_dossier", "machine_archive"])
+
+        labels = []
+        for key in standard_keys:
+            profile_match = re.search(rf"\n  {re.escape(key)}: \{{(.*?)\n  \}},", html, re.DOTALL)
+            self.assertIsNotNone(profile_match, key)
+            label_match = re.search(r"label: '([^']+)'", profile_match.group(1))
+            self.assertIsNotNone(label_match, key)
+            labels.append(label_match.group(1))
+
+        self.assertEqual(labels.count("Client-safe after review"), 1)
+        self.assertEqual(labels.count("Operator-only"), 1)
+        self.assertEqual(labels.count("Internal archive"), 1)
+        self.assertIn("const profiles = exportProfilesForProject();", html)
+        self.assertIn("profiles.map(([value, config])", html)
+        self.assertNotIn("Object.entries(EXPORT_PROFILES).map", html)
+
+        self.assertIn("function isTechnologyReadinessProject(project)", html)
+        self.assertIn("function technologyReadinessWorkbookExportSupported()", html)
+        self.assertIn("isTechnologyReadinessProject(project) && technologyReadinessWorkbookExportSupported()", html)
+        self.assertIn("keys.push(TECHNOLOGY_READINESS_EXPORT_PROFILE_KEY)", html)
 
     def test_dashboard_surfaces_supported_input_contract_labels_only(self):
         if not HTML_PATH.exists():
