@@ -384,6 +384,19 @@ def evidence_snapshot_enabled() -> bool:
     return _env_flag(EVIDENCE_SNAPSHOT_ENABLED_ENV, default=False)
 
 
+# ═══ Automation ROI Foundation (Slice B) ═══
+# Off by default. When enabled, Slice B turns approved Slice A evidence into
+# deterministic Automation ROI results, persisted in the same authoritative MAS
+# PostgreSQL database (DATABASE_URL) — no separate database, no in-memory
+# fallback. PR1 ships the schema, deterministic engine, and repositories only;
+# the gated API and projections are PR2. When disabled, no Slice B behavior runs.
+AUTOMATION_ROI_ENABLED_ENV = "MAS_AUTOMATION_ROI_ENABLED"
+
+
+def automation_roi_enabled() -> bool:
+    return _env_flag(AUTOMATION_ROI_ENABLED_ENV, default=False)
+
+
 def _env_json_map(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:

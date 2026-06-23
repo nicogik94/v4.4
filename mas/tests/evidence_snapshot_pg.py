@@ -26,6 +26,16 @@ SQL_DIR = ROOT / "sql"
 INIT_SQL = SQL_DIR / "init.sql"
 OUTCOMES_SQL = SQL_DIR / "outcomes.sql"
 V47_SQL = SQL_DIR / "v47_evidence_snapshot_foundation.sql"
+V48_SQL = SQL_DIR / "v48_automation_roi_foundation.sql"
+
+# Slice B (Automation ROI) objects — used by the v48 schema tests.
+SLICE_B_TABLES = (
+    "candidate_fact_extraction_context",
+    "candidate_fact_approval_decision",
+    "approved_calculation_input",
+    "calculation_result",
+    "calculation_result_input",
+)
 
 DSN_ENV = "TEST_EVIDENCE_PG_DSN"
 
@@ -124,6 +134,18 @@ def apply_v47(conn) -> None:
     prior = _begin_autocommit(conn)
     _run_script(conn, V47_SQL)
     _restore_autocommit(conn, prior)
+
+
+def apply_v48(conn) -> None:
+    """(Re)apply only the Slice B migration into the current search_path schema."""
+    prior = _begin_autocommit(conn)
+    _run_script(conn, V48_SQL)
+    _restore_autocommit(conn, prior)
+
+
+def slice_b_tables_present(conn, schema: str) -> int:
+    """Count how many of the five Slice B tables exist in ``schema``."""
+    return sum(1 for t in SLICE_B_TABLES if table_exists(conn, schema, t))
 
 
 def drop_schema(conn, schema: str) -> None:
