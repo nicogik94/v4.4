@@ -1,5 +1,6 @@
 """Focused tests for the upload foundation and overview surface."""
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -14,8 +15,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import api  # noqa: E402
+import config  # noqa: E402
 from config import UPLOAD_LAYER  # noqa: E402
 from extensions.connectors import CSVColumnMapping  # noqa: E402
+from knowledge.evidence_snapshot.capture import DeletionBlockedError  # noqa: E402
 from knowledge.file_parsers import UploadParseError, parse_upload_bytes  # noqa: E402
 from knowledge.files import UploadStorageError, delete_uploaded_file, ingest_uploaded_file  # noqa: E402
 from knowledge.retrieval import evaluate_phase_retrieval  # noqa: E402
@@ -270,6 +273,86 @@ class TestUploadApiAndOverview(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Traceback", detail)
         self.assertNotIn("Input/output error", detail)
         self.assertNotIn("C:\\", detail)
+
+
+class TestDeleteApiSnapshotGuard(unittest.IsolatedAsyncioTestCase):
+    """Regression tests for the Slice A deletion guard at the DELETE API boundary."""
+
+    async def asyncSetUp(self):
+        api.running.clear()
+
+    async def asyncTearDown(self):
+        api.running.clear()
+
+    def _state_with_one_upload(self, name: str, tempdir: str):
+        state = make_state(name)
+        with patch.object(UPLOAD_LAYER, "storage_dir", tempdir):
+            result = ingest_uploaded_file(
+                state,
+                filename="evidence.txt",
+                media_type="text/plain",
+                content=b"context linked to an evidence snapshot",
+                actor="operator",
+            )
+        return state, result.manifest
+
+    async def test_linked_upload_delete_returns_409_and_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as tempdir, patch.object(UPLOAD_LAYER, "storage_dir", tempdir):
+            state, manifest = self._state_with_one_upload("delete-linked", tempdir)
+            files_before = len(state.knowledge_layer.uploaded_files)
+
+            with patch("api.store.load", new=AsyncMock(return_value=state)), \
+                    patch("api.store.save", new=AsyncMock()) as save_mock, \
+                    patch(
+                        "knowledge.evidence_snapshot.capture.assert_safe_to_delete_storage_ref",
+                        side_effect=DeletionBlockedError("linked to snapshot"),
+                    ):
+                with self.assertRaises(api.HTTPException) as ctx:
+                    await api.delete_project_file(state.project_id, manifest.file_id)
+
+            # Boundary translated to a clear 409 with a safe, concise message.
+            self.assertEqual(ctx.exception.status_code, 409)
+            detail = str(ctx.exception.detail)
+            self.assertIn("evidence snapshot", detail.lower())
+            self.assertNotIn("Traceback", detail)
+            # Fail-closed: no storage deletion, no state mutation, no persistence.
+            self.assertTrue(Path(manifest.storage_ref).exists())
+            self.assertEqual(len(state.knowledge_layer.uploaded_files), files_before)
+            save_mock.assert_not_awaited()
+
+    async def test_unlinked_upload_delete_succeeds(self):
+        with tempfile.TemporaryDirectory() as tempdir, patch.object(UPLOAD_LAYER, "storage_dir", tempdir):
+            state, manifest = self._state_with_one_upload("delete-unlinked", tempdir)
+
+            # Flag-on but the storage_ref is not snapshot-linked: guard is a no-op.
+            with patch("api.store.load", new=AsyncMock(return_value=state)), \
+                    patch("api.store.save", new=AsyncMock()) as save_mock, \
+                    patch(
+                        "knowledge.evidence_snapshot.capture.assert_safe_to_delete_storage_ref",
+                        return_value=None,
+                    ):
+                result = await api.delete_project_file(state.project_id, manifest.file_id)
+
+            self.assertTrue(result["deleted"])
+            self.assertFalse(Path(manifest.storage_ref).exists())
+            self.assertEqual(len(state.knowledge_layer.uploaded_files), 0)
+            save_mock.assert_awaited()
+
+    async def test_flag_off_delete_behaves_normally(self):
+        with tempfile.TemporaryDirectory() as tempdir, patch.object(UPLOAD_LAYER, "storage_dir", tempdir), \
+                patch.dict(os.environ, {"MAS_EVIDENCE_SNAPSHOT_ENABLED": "false"}):
+            # Genuine flag-off path: the real guard short-circuits to a no-op.
+            self.assertFalse(config.evidence_snapshot_enabled())
+            state, manifest = self._state_with_one_upload("delete-flag-off", tempdir)
+
+            with patch("api.store.load", new=AsyncMock(return_value=state)), \
+                    patch("api.store.save", new=AsyncMock()) as save_mock:
+                result = await api.delete_project_file(state.project_id, manifest.file_id)
+
+            self.assertTrue(result["deleted"])
+            self.assertFalse(Path(manifest.storage_ref).exists())
+            self.assertEqual(len(state.knowledge_layer.uploaded_files), 0)
+            save_mock.assert_awaited()
 
 
 def _contains_bytes(value) -> bool:
