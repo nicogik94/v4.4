@@ -121,6 +121,7 @@ from workflow_templates import (
     list_workflow_templates,
 )
 import observability
+from automation_roi_api import router as automation_roi_router
 
 logger = logging.getLogger("v4-api")
 
@@ -183,6 +184,12 @@ async def require_operator_auth(
     supplied_key = (operator_key or "").strip()
     if not supplied_key or not secrets.compare_digest(supplied_key, expected_key):
         raise HTTPException(401, "Operator authentication required")
+
+
+# Slice B (Automation ROI) PR2 operator API. Inherits the operator-auth control
+# plane; each route is additionally gated by MAS_AUTOMATION_ROI_ENABLED and
+# returns 404 while the flag is off, before any project lookup or database write.
+app.include_router(automation_roi_router, dependencies=[Depends(require_operator_auth)])
 
 
 class CreateProjectRequest(BaseModel):
