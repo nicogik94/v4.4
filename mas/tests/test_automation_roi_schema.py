@@ -257,6 +257,45 @@ def test_per_role_typing_check(conn, schema_b):
     conn.rollback()
 
 
+@pytest.mark.parametrize(
+    "resolved_numeric, resolved_unit, label",
+    [
+        (999, "", "wrong_numeric_value"),   # source fact value is 52
+        (52, "bogus_unit", "wrong_unit"),   # source fact unit is ''
+    ],
+)
+def test_value_copy_trigger_rejects_mismatch(conn, schema_b, resolved_numeric, resolved_unit, label):
+    """slicebo_assert_frozen_matches_fact rejects a frozen input whose resolved_*
+    diverges from the immutable source fact, and no invalid row persists."""
+    pid = pg.insert_project(conn, name=f"value-copy-{label}")
+    conn.commit()
+    # An eligible count fact: numeric_value=52, unit='', no currency/time_unit/period.
+    cfr, _ = fx.seed_eligible_fact(conn, pid, "periods_per_year")
+    approve = approvals.append_decision(
+        conn, project_id=pid, candidate_fact_revision_id=cfr, decision_type="approve")
+    conn.commit()
+
+    with pytest.raises(Exception) as ei:
+        conn.execute(
+            "INSERT INTO approved_calculation_input "
+            "(project_id, input_role, candidate_fact_revision_id, approval_decision_id, "
+            " resolved_numeric_value, resolved_unit) "
+            "VALUES (%s, 'periods_per_year', %s, %s, %s, %s)",
+            (pid, cfr, approve, resolved_numeric, resolved_unit),
+        )
+        conn.commit()
+    # Specific to the value-copy trigger (SQLSTATE 23514 check_violation), not the
+    # role-typing CHECK: periods_per_year typing accepts 999/'' and ignores unit.
+    assert "must equal the source fact" in str(ei.value) or getattr(ei.value, "sqlstate", "") == "23514"
+    conn.rollback()
+
+    remaining = conn.execute(
+        "SELECT count(*) FROM approved_calculation_input WHERE candidate_fact_revision_id = %s",
+        (cfr,),
+    ).fetchone()[0]
+    assert remaining == 0
+
+
 # ── Result-input role match + deferred invariant ──────────────────────────────
 
 def test_result_input_role_match_and_duplicate(conn, schema_b):

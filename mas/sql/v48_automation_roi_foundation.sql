@@ -110,7 +110,6 @@ RETURNS TRIGGER AS $$
 DECLARE
     f         candidate_fact_revision%ROWTYPE;
     v_period  text;
-    v_has_ctx boolean := false;
 BEGIN
     SELECT * INTO f FROM candidate_fact_revision
      WHERE id = NEW.candidate_fact_revision_id AND project_id = NEW.project_id;
@@ -119,10 +118,13 @@ BEGIN
             NEW.candidate_fact_revision_id, NEW.project_id USING ERRCODE = 'foreign_key_violation';
     END IF;
 
-    SELECT period_basis, true INTO v_period, v_has_ctx
+    SELECT period_basis INTO v_period
     FROM candidate_fact_extraction_context
     WHERE candidate_fact_revision_id = NEW.candidate_fact_revision_id AND project_id = NEW.project_id;
-    IF NOT v_has_ctx THEN
+    -- FOUND reliably reflects whether a context row exists (the nullable
+    -- period_basis is not a presence signal). The fk_aci_eligible_context FK
+    -- remains the primary eligibility enforcement; this is defense-in-depth.
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'frozen input fact % has no extraction context (ROI-ineligible)',
             NEW.candidate_fact_revision_id USING ERRCODE = 'check_violation';
     END IF;
