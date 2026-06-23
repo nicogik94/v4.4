@@ -73,6 +73,7 @@ from knowledge import (
     sync_offline_source,
     upsert_source_entry,
 )
+from knowledge.evidence_snapshot.capture import DeletionBlockedError
 from knowledge.file_parsers import UploadParseError
 from knowledge.freshness import build_knowledge_health
 from overview import OperatorOverviewSummary, build_operator_overview
@@ -930,7 +931,19 @@ async def delete_project_file(project_id: str, file_id: str):
     manifest = get_uploaded_file_manifest(state, file_id)
     if manifest is None:
         raise HTTPException(404, "Uploaded file not found")
-    result = delete_uploaded_file(state, file_id)
+    try:
+        result = delete_uploaded_file(state, file_id)
+    except DeletionBlockedError as exc:
+        # Slice A fail-closed deletion guard: the stored file is linked to a
+        # retained evidence snapshot. No storage, project state, or evidence has
+        # been mutated. Translate the boundary into a clear 409 rather than an
+        # opaque 500. No-op (this branch never triggers) when the feature flag is
+        # off, preserving prior deletion behavior exactly.
+        raise HTTPException(
+            409,
+            "Upload retained: it is linked to an evidence snapshot and cannot be "
+            "deleted through this endpoint.",
+        ) from exc
     _log_knowledge_event(
         state,
         "uploaded_file_deleted",
