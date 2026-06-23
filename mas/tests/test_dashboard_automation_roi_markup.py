@@ -239,7 +239,9 @@ class TestAutomationRoiWorkspaceMarkup(unittest.TestCase):
         refresh = re.search(r"async function refresh\(\).*?\n}", self.html, re.DOTALL)
         self.assertIsNotNone(refresh)
         body = refresh.group(0)
-        self.assertIn("if (state.activeTab === AUTOMATION_ROI_TAB) captureRoiFactDraft();", body)
+        # The capture is gated on the active ROI tab and runs before any await.
+        self.assertIn("if (state.activeTab === AUTOMATION_ROI_TAB) {", body)
+        self.assertIn("captureRoiFactDraft();", body)
         capture_at = body.index("captureRoiFactDraft();")
         self.assertLess(capture_at, body.index("loadAutomationRoiWorkspace("))
         self.assertLess(capture_at, body.index("renderMain();"))
@@ -303,6 +305,109 @@ class TestAutomationRoiWorkspaceMarkup(unittest.TestCase):
         # The old direct-DOM prefill is gone, and no opaque id is restored.
         self.assertNotIn("set('roi-fact-subject', fact.subject_label)", body)
         self.assertNotIn("draft.candidate_fact_revision_id", body)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Section 4 frozen-input pending selection preservation across refresh
+    # (companion regression): state.roi.freezeDraft (role → fact id) survives a
+    # scheduled/manual refresh until Freeze is clicked.
+    # ──────────────────────────────────────────────────────────────────────
+
+    # 23 — fresh ROI state starts with an empty freeze draft
+    def test_freeze_draft_in_fresh_roi_state(self):
+        fresh = re.search(r"function freshRoiState\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(fresh)
+        self.assertIn("freezeDraft: {}", fresh.group(0))
+
+    # 24 — frozen-input dropdowns render their selection from freezeDraft
+    def test_frozen_dropdown_renders_from_freeze_draft(self):
+        frozen = re.search(r"function renderRoiFrozen\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(frozen)
+        body = frozen.group(0)
+        # Stale entries are resolved before rendering.
+        self.assertIn("resolveRoiFreezeDraft(approvedFacts);", body)
+        # Each dropdown's selection comes from freezeDraft[role].
+        self.assertIn("const chosen = state.roi.freezeDraft[role] || '';", body)
+        self.assertIn("f.candidate_fact_revision_id === chosen ? 'selected' : ''", body)
+
+    # 25 — a freeze-role select change updates only that role's draft entry
+    def test_freeze_select_change_updates_only_its_role(self):
+        upd = re.search(r"function updateRoiFreezeDraft\(.*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(upd)
+        b = upd.group(0)
+        self.assertIn("sel.getAttribute('data-roi-freeze-role')", b)
+        self.assertIn("state.roi.freezeDraft[role] = sel.value;", b)
+        self.assertIn("delete state.roi.freezeDraft[role];", b)
+        wire = re.search(r"function wireAutomationRoiWorkspace\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(wire)
+        self.assertIn("document.querySelectorAll('[data-roi-freeze-role]').forEach(sel =>", wire.group(0))
+        self.assertIn("sel.addEventListener('change', updateRoiFreezeDraft);", wire.group(0))
+
+    # 26 — stale/unapproved/unavailable selections are cleared, never replaced
+    def test_stale_freeze_selections_cleared_no_fallback(self):
+        res = re.search(r"function resolveRoiFreezeDraft\(.*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(res)
+        b = res.group(0)
+        self.assertIn("fact.decision_state !== 'approved'", b)
+        self.assertIn("!fact.active_approval_id", b)
+        self.assertIn("delete draft[role];", b)
+        # Never auto-selects a replacement (only deletes; no assignment, no first-fact).
+        self.assertNotIn("draft[role] =", b)
+        self.assertNotIn("approvedFacts[0]", b)
+
+    # 27 — capture reads rendered freeze selects; blank clears only that role
+    def test_capture_freeze_draft_helper(self):
+        cap = re.search(r"function captureRoiFreezeDraft\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(cap)
+        b = cap.group(0)
+        self.assertIn("document.querySelectorAll('[data-roi-freeze-role]')", b)
+        self.assertIn("state.roi.freezeDraft[role] = sel.value;", b)
+        self.assertIn("delete state.roi.freezeDraft[role];", b)
+
+    # 28 — refresh captures freeze selections before async work and re-checks busy
+    def test_refresh_captures_and_rechecks_busy_for_freeze(self):
+        refresh = re.search(r"async function refresh\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(refresh)
+        b = refresh.group(0)
+        self.assertIn("captureRoiFreezeDraft();", b)
+        self.assertLess(b.index("captureRoiFreezeDraft();"), b.index("await loadHealth();"))
+        # The busy guard appears twice: before async work AND before ROI load/render.
+        guard = "if (state.activeTab === AUTOMATION_ROI_TAB && state.roi.busy) return;"
+        self.assertEqual(b.count(guard), 2)
+        # The second guard sits immediately before the ROI workspace load + render.
+        self.assertLess(b.rindex(guard), b.index("loadAutomationRoiWorkspace("))
+        self.assertLess(b.rindex(guard), b.index("renderMain();"))
+
+    # 29 — successful freeze clears only the selected role; failure preserves it
+    def test_freeze_success_clears_only_selected_role(self):
+        wire = re.search(r"function wireAutomationRoiWorkspace\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(wire)
+        freeze = re.search(r"querySelectorAll\('\[data-roi-freeze\]'\)\.forEach.*?\n  \}\);",
+                           wire.group(0), re.DOTALL)
+        self.assertIsNotNone(freeze)
+        fb = freeze.group(0)
+        # The Freeze button reads the pending selection from the draft.
+        self.assertIn("const factId = state.roi.freezeDraft[role];", fb)
+        self.assertIn("const ok = await roiMutate({", fb)
+        self.assertIn("if (ok) {", fb)
+        self.assertIn("delete state.roi.freezeDraft[role];", fb)
+        # The clear is gated by success and happens strictly after the mutate.
+        self.assertLess(fb.index("const ok = await roiMutate({"), fb.index("delete state.roi.freezeDraft[role];"))
+        self.assertLess(fb.index("if (ok) {"), fb.index("delete state.roi.freezeDraft[role];"))
+        # Only the selected role is cleared — never a blanket reset of all roles.
+        self.assertNotIn("state.roi.freezeDraft = {}", fb)
+        # The single write path never touches freezeDraft, so a failure/cancel keeps it.
+        mutate = re.search(r"async function roiMutate\(.*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(mutate)
+        self.assertNotIn("freezeDraft", mutate.group(0))
+
+    # 30 — switching projects clears all freeze draft entries (fresh ROI state path)
+    def test_project_switch_resets_freeze_draft(self):
+        fresh = re.search(r"function freshRoiState\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(fresh)
+        self.assertIn("freezeDraft: {}", fresh.group(0))
+        hash_change = re.search(r"async function onHashChange\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(hash_change)
+        self.assertIn("state.roi = freshRoiState();", hash_change.group(0))
 
 
 if __name__ == "__main__":

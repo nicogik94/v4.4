@@ -4322,6 +4322,7 @@ function freshRoiState() {
     calcMap: {},           // role → approved_calculation_input_id (operator draft)
     freezeSelection: {},   // role → candidate_fact_revision_id (operator draft)
     factDraft: freshRoiFactDraft(), // unsaved candidate-fact form state (survives refresh)
+    freezeDraft: {},       // role → candidate_fact_revision_id (pending Freeze selection, survives refresh)
     activeResultId: null,
     operatorResult: null,  // operator projection for activeResultId
     clientPreview: null,   // client-safe projection for activeResultId
@@ -8848,12 +8849,52 @@ function renderRoiDecisions() {
     </div>`;
 }
 
+// Pending "freeze this approved fact" selections (Section 4) live in state — keyed
+// by ROI role — so a scheduled/manual refresh that rebuilds the workspace keeps the
+// operator's choice until Freeze is clicked. Mirrors the candidate-fact draft
+// pattern; reset with the project through freshRoiState().
+function captureRoiFreezeDraft() {
+  document.querySelectorAll('[data-roi-freeze-role]').forEach(sel => {
+    const role = sel.getAttribute('data-roi-freeze-role');
+    if (!role) return;
+    // Blank only clears the rendered role; never touch roles whose select is absent.
+    if (sel.value) state.roi.freezeDraft[role] = sel.value;
+    else delete state.roi.freezeDraft[role];
+  });
+}
+
+// Update a single role's pending freeze selection from a change event.
+function updateRoiFreezeDraft(event) {
+  const sel = event && event.target;
+  const role = sel && sel.getAttribute ? sel.getAttribute('data-roi-freeze-role') : null;
+  if (!role) return;
+  if (sel.value) state.roi.freezeDraft[role] = sel.value;
+  else delete state.roi.freezeDraft[role];
+}
+
+// Drop pending freeze selections that are no longer valid against the current
+// workspace: the fact must still exist, be approved, have an active approval, and
+// be among the current freeze choices. Stale/invalid entries are deleted; this
+// never auto-selects a replacement fact.
+function resolveRoiFreezeDraft(approvedFacts) {
+  const draft = state.roi.freezeDraft;
+  const selectable = new Map((approvedFacts || []).map(f => [f.candidate_fact_revision_id, f]));
+  for (const role of Object.keys(draft)) {
+    const fact = selectable.get(draft[role]);
+    if (!fact || fact.decision_state !== 'approved' || !fact.active_approval_id) {
+      delete draft[role];
+    }
+  }
+}
+
 function renderRoiFrozen() {
   const ws = state.roi.workspace;
   const facts = ws.candidate_facts || [];
   const frozen = ws.frozen_inputs || [];
   const readiness = ws.role_readiness || { roles: {}, missing_roles: [] };
   const approvedFacts = facts.filter(f => f.decision_state === 'approved');
+  // Drop stale pending selections before rendering each dropdown from freezeDraft.
+  resolveRoiFreezeDraft(approvedFacts);
   const busy = state.roi.busy;
 
   const roleRows = ROI_ROLES.map(role => {
@@ -8862,8 +8903,9 @@ function renderRoiFrozen() {
     const existingHtml = existing.length
       ? existing.map(fi => `<span class="roi-frozen-chip">${escapeHtml(fi.resolved_numeric_value || '')}${fi.resolved_unit ? ' ' + escapeHtml(fi.resolved_unit) : ''}${fi.resolved_currency_code ? ' ' + escapeHtml(fi.resolved_currency_code) : ''} ${roiAvailability(fi.available)}</span>`).join('')
       : '<span class="roi-muted">none frozen</span>';
+    const chosen = state.roi.freezeDraft[role] || '';
     const options = approvedFacts.map(f =>
-      `<option value="${escapeHtml(f.candidate_fact_revision_id)}">${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</option>`
+      `<option value="${escapeHtml(f.candidate_fact_revision_id)}" ${f.candidate_fact_revision_id === chosen ? 'selected' : ''}>${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</option>`
     ).join('');
     const select = approvedFacts.length
       ? `<select data-roi-freeze-role="${escapeHtml(role)}" ${busy ? 'disabled' : ''} aria-label="Approved fact to freeze for ${escapeHtml(ROI_ROLE_LABELS[role])}"><option value="">— select approved fact —</option>${options}</select>
@@ -9087,15 +9129,21 @@ function wireAutomationRoiWorkspace() {
     });
   });
 
+  // Each freeze-role select feeds state.roi.freezeDraft on change, so a pending
+  // selection survives refresh until Freeze is clicked. Updates only that role.
+  document.querySelectorAll('[data-roi-freeze-role]').forEach(sel => {
+    sel.addEventListener('change', updateRoiFreezeDraft);
+  });
+
   document.querySelectorAll('[data-roi-freeze]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const role = btn.getAttribute('data-roi-freeze');
-      const sel = document.querySelector(`[data-roi-freeze-role="${role}"]`);
-      const factId = sel?.value;
+      captureRoiFreezeDraft();
+      const factId = state.roi.freezeDraft[role];
       if (!factId) { toast('Select an approved fact to freeze.', 'err'); return; }
       const fact = (state.roi.workspace.candidate_facts || []).find(f => f.candidate_fact_revision_id === factId);
       if (!fact || !fact.active_approval_id) { toast('This fact no longer has an active approval.', 'err'); return; }
-      await roiMutate({
+      const ok = await roiMutate({
         path: `/projects/${encodeURIComponent(pid)}/automation-roi/inputs`,
         body: {
           candidate_fact_revision_id: factId,
@@ -9104,6 +9152,13 @@ function wireAutomationRoiWorkspace() {
         },
         confirmMsg: `Freeze this approved fact as ${ROI_ROLE_LABELS[role]}?`,
       });
+      // Clear ONLY this role's pending selection after a confirmed success, then
+      // render once more; the other five roles' drafts are preserved. Any
+      // failure/cancel keeps the selection (roiMutate never touches freezeDraft).
+      if (ok) {
+        delete state.roi.freezeDraft[role];
+        renderMain();
+      }
     });
   });
 
@@ -9157,9 +9212,13 @@ function renderInspectorAutomationRoi() {
    Main refresh cycle
    ═══════════════════════════════════════════════════════════════════════ */
 async function refresh() {
-  // Capture the operator's unsaved Automation ROI candidate-fact draft BEFORE any
-  // async load or render, so rebuilding the workspace never loses in-progress entries.
-  if (state.activeTab === AUTOMATION_ROI_TAB) captureRoiFactDraft();
+  // Capture the operator's unsaved Automation ROI drafts (candidate-fact form AND
+  // pending freeze selections) synchronously BEFORE the first await, so rebuilding
+  // the workspace never loses in-progress entries.
+  if (state.activeTab === AUTOMATION_ROI_TAB) {
+    captureRoiFactDraft();
+    captureRoiFreezeDraft();
+  }
   const now = new Date();
   $('last-refresh').textContent = `updated ${now.toLocaleTimeString()}`;
   await loadHealth();
@@ -9176,6 +9235,9 @@ async function refresh() {
     if (state.activeTab === 'workflow' && state.project && !state.project.calibration) {
       await loadCalibration(state.selectedProjectId);
     }
+    // Re-check immediately before ROI workspace load + final render: a Freeze (or
+    // other) mutation may have begun during the awaits above, flipping busy.
+    if (state.activeTab === AUTOMATION_ROI_TAB && state.roi.busy) return;
     if (state.activeTab === AUTOMATION_ROI_TAB && isAutomationRoiProject()) {
       await loadAutomationRoiWorkspace(state.selectedProjectId);
     }
