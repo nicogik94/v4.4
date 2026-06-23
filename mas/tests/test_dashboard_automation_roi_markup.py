@@ -1,0 +1,157 @@
+"""Markup/behavior regression checks for the Automation ROI operator workspace UI.
+
+These assert the canonical dashboard wires the Slice B operator workspace safely:
+project-type + feature gating, the exact six roles, no manual result/provenance/
+formula/sequence inputs, permitted-API-only writes, no auto-retry, authoritative
+reload after every mutation, completeness-only calculate gating, safe error
+mapping, escaping, and read-only rendering/refresh.
+"""
+import re
+import unittest
+from pathlib import Path
+
+
+_HERE = Path(__file__).resolve()
+HTML_PATH = None
+for root in (_HERE.parents[1], _HERE.parents[2]):
+    candidate = root / "dashboards" / "index.html"
+    if candidate.exists():
+        HTML_PATH = candidate
+        break
+if HTML_PATH is None:
+    HTML_PATH = _HERE.parents[1] / "dashboards" / "index.html"
+
+
+class TestAutomationRoiWorkspaceMarkup(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not HTML_PATH.exists():
+            raise unittest.SkipTest("dashboard bundle is not mounted in this environment")
+        cls.html = HTML_PATH.read_text(encoding="utf-8")
+
+    # 1 — workspace appears only for Automation ROI projects
+    def test_workspace_is_project_type_and_feature_gated(self):
+        self.assertIn("function isAutomationRoiProject(project)", self.html)
+        self.assertIn("classToken(project?.project_type) === 'automation_roi'", self.html)
+        self.assertIn("function workspaceTabsForProject", self.html)
+        self.assertIn("if (isAutomationRoiProject()) tabs.push(AUTOMATION_ROI_TAB);", self.html)
+        self.assertIn("const AUTOMATION_ROI_TAB = 'automation_roi';", self.html)
+        # WORKSPACE_TABS itself is never mutated (other markup tests rely on it).
+        self.assertIn("const WORKSPACE_TABS = ['overview', 'workflow', 'evidence', 'trace', 'report']", self.html)
+        self.assertIn("if (state.activeTab === AUTOMATION_ROI_TAB) return renderAutomationRoiWorkspace();", self.html)
+
+    # 2 — all six roles render exactly once
+    def test_six_roles_present_exactly_once(self):
+        roles = [
+            "baseline_hours_per_period",
+            "post_automation_hours_per_period",
+            "fully_loaded_rate_per_hour",
+            "periods_per_year",
+            "annual_recurring_cost",
+            "one_time_implementation_cost",
+        ]
+        match = re.search(r"const ROI_ROLES = \[(.*?)\];", self.html, re.DOTALL)
+        self.assertIsNotNone(match)
+        listed = re.findall(r"'([^']+)'", match.group(1))
+        self.assertEqual(listed, roles)
+        self.assertEqual(len(listed), len(set(listed)))
+        for role in roles:
+            self.assertIn(f"{role}:", self.html)  # has a ROI_ROLE_LABELS entry
+        # The frozen-six and calculate sections iterate the canonical role list.
+        self.assertIn("ROI_ROLES.map(role =>", self.html)
+
+    # 3 — no manual result/provenance/formula/sequence fields exist
+    def test_no_manual_result_provenance_formula_sequence_inputs(self):
+        for forbidden in ("provenance_fingerprint", "formula_input_digest", "decision_seq", "storage_ref"):
+            self.assertNotIn(forbidden, self.html)
+        # No editable inputs for resolved value / provenance / formula in the fact form.
+        for field_id in ('id="roi-fact-resolved', 'id="roi-fact-provenance', 'id="roi-fact-formula', 'id="roi-fact-status'):
+            self.assertNotIn(field_id, self.html)
+
+    # 4 — write requests use only permitted API fields
+    def test_writes_use_only_permitted_api_fields(self):
+        self.assertIn("function readRoiFactForm()", self.html)
+        self.assertIn("body: { decision_type: action },", self.html)
+        self.assertIn("input_role: role,", self.html)
+        self.assertIn("approval_decision_id: fact.active_approval_id,", self.html)
+        self.assertIn("body: { inputs },", self.html)
+        # The fact value is sent as a string, never a JS number.
+        self.assertIn("if (value) fact.value = value;", self.html)
+
+    # 5 — no automatic mutation retry
+    def test_no_automatic_mutation_retry(self):
+        self.assertIn("never auto-retry", self.html)
+        self.assertIn("async function roiMutate", self.html)
+        # The mutate helper does not schedule a retry.
+        mutate = re.search(r"async function roiMutate\(.*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(mutate)
+        self.assertNotIn("setTimeout", mutate.group(0))
+
+    # 6 — every mutation reloads authoritative workspace state
+    def test_mutation_reloads_authoritative_state(self):
+        self.assertIn(
+            "if (state.selectedProjectId) await loadAutomationRoiWorkspace(state.selectedProjectId);",
+            self.html,
+        )
+
+    # 7 — incomplete/duplicate/extra maps disable calculate
+    def test_calculate_gated_on_role_map_completeness(self):
+        self.assertIn("function classifyRoiRoleMap(roles)", self.html)
+        self.assertIn("function roiCalcMapComplete()", self.html)
+        self.assertIn("const complete = roiCalcMapComplete();", self.html)
+        self.assertIn("const calcDisabled = (!complete || busy) ? 'disabled' : '';", self.html)
+        self.assertIn("if (!roiCalcMapComplete()) return;", self.html)
+
+    # 8 — six-role maps with availability warnings still allow server submission
+    def test_calculate_not_gated_on_availability(self):
+        # Gating depends only on map shape; availability is shown as a warning but
+        # never disables submission (the server owns blocked / not_applicable).
+        self.assertIn("gates the Calculate action", self.html)
+        self.assertIn("never on evidence availability", self.html)
+        self.assertIn("evidence unavailable — server decides", self.html)
+
+    # 9 — 404 / 409 / 422 / 503 map to safe messages
+    def test_error_status_mapping_is_safe(self):
+        self.assertIn("function classifyRoiError(error, context)", self.html)
+        self.assertIn("Automation ROI is not enabled in this environment.", self.html)
+        self.assertIn("This ROI record is no longer available.", self.html)
+        self.assertIn("Automation ROI data is temporarily unavailable.", self.html)
+        self.assertIn("The information provided was incomplete or invalid.", self.html)
+        self.assertIn("This action conflicts with the current state. The workspace was refreshed.", self.html)
+        # Raw response detail is never rendered for ROI errors (title only).
+        self.assertIn("toast(classifyRoiError(e, 'mutation').title, 'err');", self.html)
+
+    # 10 — hostile text is escaped
+    def test_api_derived_text_is_escaped(self):
+        self.assertIn("escapeHtml(f.subject_label", self.html)
+        self.assertIn("escapeHtml(roi.error.title)", self.html)
+        self.assertIn("escapeHtml(s.source_kind", self.html)
+        self.assertIn("escapeHtml(c)", self.html)  # client caveats
+
+    # 11 — opaque ids live in data-* values, not as display text
+    def test_opaque_ids_only_in_data_values(self):
+        self.assertIn('data-roi-fact="${escapeHtml(f.candidate_fact_revision_id)}"', self.html)
+        self.assertIn('data-roi-result="${escapeHtml(r.result_id)}"', self.html)
+        self.assertIn('data-fact="${escapeHtml(f.candidate_fact_revision_id)}"', self.html)
+        # Immutability + correction-not-edit affordance.
+        self.assertIn("Create correction", self.html)
+        self.assertIn("corrections create a new fact, never an edit", self.html)
+
+    # 12 — rendering and refresh issue no writes (read-only GET only)
+    def test_workspace_load_is_read_only(self):
+        self.assertIn(
+            "await apiGet(`/projects/${encodeURIComponent(pid)}/automation-roi/workspace`);",
+            self.html,
+        )
+        # The client-safe preview is the existing authoritative endpoint, not a
+        # browser-built transform of operator data.
+        self.assertIn("await apiGet(`${base}/client`);", self.html)
+        self.assertIn("browser never derives a", self.html)
+        # The render function itself performs no POSTs.
+        render = re.search(r"function renderAutomationRoiWorkspace\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(render)
+        self.assertNotIn("apiPost", render.group(0))
+
+
+if __name__ == "__main__":
+    unittest.main()

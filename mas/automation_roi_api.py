@@ -31,7 +31,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 import config
-from knowledge.automation_roi import approvals, projections, repository as repo, service
+from knowledge.automation_roi import (
+    approvals,
+    projections,
+    repository as repo,
+    service,
+    workspace,
+)
 from knowledge.automation_roi.calculator import ROLES
 from knowledge.evidence_snapshot import repository as evidence_repo
 from knowledge.evidence_snapshot.validation import FactValidationError, validate_fact
@@ -480,3 +486,26 @@ def get_calculation_client(project_id: str, result_id: str) -> dict[str, Any]:
         if bundle is None:
             raise HTTPException(status_code=404, detail="Calculation result not found")
         return projections.client_projection(bundle)
+
+
+# ─────────────────────────────── operator workspace ───────────────────────────────
+
+@router.get(
+    "/projects/{project_id}/automation-roi/workspace",
+    dependencies=[Depends(require_roi_enabled)],
+)
+def get_workspace(project_id: str) -> dict[str, Any]:
+    """Operator-safe navigation data for the Automation ROI workspace.
+
+    Read-only: lists this project's snapshots, ROI-eligible candidate facts and
+    their server-derived decision state, frozen inputs, exact-six readiness, and
+    calculation-result history. It performs no writes, runs no calculation, and
+    never reimplements the client-safe projection (the dashboard calls the
+    existing ``/calculations/{id}/client`` endpoint for previews). It returns no
+    storage refs, paths, raw source content, actor identity, or decision
+    sequence numbers; opaque ids are values only.
+    """
+    _uuid_or_404(project_id, "Project not found")
+    with _read_conn() as conn:
+        _require_project(conn, project_id)
+        return workspace.load_workspace(conn, project_id=project_id)
