@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 import config
 from knowledge.automation_roi import (
     approvals,
+    calculator,
     projections,
     repository as repo,
     service,
@@ -50,6 +51,13 @@ _ACTOR = "operator"
 # Fixed, non-secret messages — never interpolate SQL, paths, or exception text.
 _DB_UNAVAILABLE = "Automation ROI storage is unavailable"
 _CONFLICT = "Request conflicts with the current Automation ROI lifecycle state"
+
+# Fixed, non-secret messages for frozen-input compatibility failures (422). Keyed
+# by the calculator's stable reason codes; never interpolate dynamic detail.
+_COMPAT_DETAILS = {
+    calculator.COMPAT_RATE_UNIT: "Fully loaded rate per hour requires unit 'per_hour'.",
+}
+_COMPAT_DEFAULT = "The fact's values are incompatible with this input role."
 
 _RoleLiteral = Literal[
     "baseline_hours_per_period",
@@ -403,6 +411,12 @@ def freeze_input(project_id: str, body: FreezeInputRequest) -> dict[str, Any]:
                 conn, project_id=project_id, candidate_fact_revision_id=fact_id,
                 input_role=body.input_role, approval_decision_id=decision_id, frozen_by=_ACTOR,
             )
+        except repo.FrozenInputCompatibilityError as exc:
+            # Database-compatibility failure: reject before any insert (422), with a
+            # fixed message — never expose SQL, the database error, or paths.
+            raise HTTPException(
+                status_code=422, detail=_COMPAT_DETAILS.get(exc.reason, _COMPAT_DEFAULT)
+            ) from None
         except ValueError:
             raise HTTPException(
                 status_code=409, detail="Fact cannot be frozen for this role"

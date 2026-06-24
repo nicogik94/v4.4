@@ -124,6 +124,33 @@ def test_freeze_without_approval_raises(conn, schema_b):
     conn.rollback()
 
 
+def test_freeze_incompatible_rate_unit_raises_typed_error(conn, schema_b):
+    pid = pg.insert_project(conn, name="compat")
+    conn.commit()
+    # An approved money fact whose unit is not 'per_hour' must be rejected before
+    # INSERT with the typed compatibility error, leaving no frozen input behind.
+    from knowledge.evidence_snapshot import repository as ev_repo
+    from knowledge.evidence_snapshot.validation import validate_fact
+    fact = validate_fact("money", value=Decimal("50"), currency_code="USD",
+                         as_of_date=fx.AS_OF, unit="USD/hour")
+    blob = ev_repo.insert_or_get_blob(conn, project_id=pid, content_hash="h-compat", byte_size=8)
+    snap = ev_repo.insert_snapshot(conn, source_blob_id=blob, project_id=pid, storage_ref="/store/compat")
+    cfr, _ctx = repo.create_eligible_fact(
+        conn, project_id=pid, source_snapshot_id=snap, fact=fact,
+        subject_label="X", metric_label="fully_loaded_rate_per_hour", actor="op")
+    approvals.append_decision(
+        conn, project_id=pid, candidate_fact_revision_id=cfr, decision_type="approve", actor="op")
+    conn.commit()
+    with pytest.raises(repo.FrozenInputCompatibilityError):
+        repo.freeze_input(
+            conn, project_id=pid, candidate_fact_revision_id=cfr,
+            input_role="fully_loaded_rate_per_hour", frozen_by="op")
+    conn.rollback()
+    count = conn.execute(
+        "SELECT count(*) FROM approved_calculation_input WHERE project_id = %s", (pid,)).fetchone()[0]
+    assert count == 0
+
+
 def test_effective_status_transitions(conn, schema_b):
     pid = pg.insert_project(conn, name="status")
     conn.commit()

@@ -12,12 +12,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from knowledge.automation_roi.calculator import (  # noqa: E402
+    COMPAT_HOURS_TIME_UNIT,
+    COMPAT_MONEY_CURRENCY,
+    COMPAT_NEGATIVE_VALUE,
+    COMPAT_PERIODS_INTEGRAL,
+    COMPAT_RATE_CURRENCY,
+    COMPAT_RATE_UNIT,
     FORMULA_VERSION,
     ResolvedInput,
     RoiInputShapeError,
     canonical_decimal,
     compute_automation_roi,
     formula_input_digest,
+    input_compatibility_reason,
     provenance_fingerprint,
 )
 
@@ -148,6 +155,117 @@ class TestCanonicalDecimal(unittest.TestCase):
         self.assertEqual(canonical_decimal(Decimal("0.425")), "0.425")
         self.assertEqual(canonical_decimal(Decimal("20800")), "20800")
         self.assertEqual(canonical_decimal(Decimal("1E+2")), "100")
+
+
+class TestInputCompatibility(unittest.TestCase):
+    """The shared frozen-input database-compatibility contract (pure, no I/O)."""
+
+    # ─── hours roles: time_unit == 'hours' and value >= 0 ───
+    def test_hours_roles_compatible(self):
+        for role in ("baseline_hours_per_period", "post_automation_hours_per_period"):
+            self.assertIsNone(input_compatibility_reason(
+                role, numeric_value=Decimal("0"), time_unit="hours"))
+            self.assertIsNone(input_compatibility_reason(
+                role, numeric_value=Decimal("10"), time_unit="hours"))
+
+    def test_hours_roles_wrong_time_unit_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "baseline_hours_per_period", numeric_value=Decimal("10"), time_unit="minutes"),
+            COMPAT_HOURS_TIME_UNIT,
+        )
+
+    def test_hours_roles_negative_value_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "post_automation_hours_per_period", numeric_value=Decimal("-1"), time_unit="hours"),
+            COMPAT_NEGATIVE_VALUE,
+        )
+
+    # ─── fully_loaded_rate_per_hour: unit == 'per_hour' + currency + value >= 0 ───
+    def test_rate_per_hour_with_usd_and_non_negative_is_compatible(self):
+        self.assertIsNone(input_compatibility_reason(
+            "fully_loaded_rate_per_hour", numeric_value=Decimal("50"),
+            unit="per_hour", currency_code="USD"))
+        self.assertIsNone(input_compatibility_reason(
+            "fully_loaded_rate_per_hour", numeric_value=Decimal("0"),
+            unit="per_hour", currency_code="USD"))
+
+    def test_rate_usd_per_hour_unit_is_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "fully_loaded_rate_per_hour", numeric_value=Decimal("50"),
+                unit="USD/hour", currency_code="USD"),
+            COMPAT_RATE_UNIT,
+        )
+
+    def test_rate_per_hou_unit_is_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "fully_loaded_rate_per_hour", numeric_value=Decimal("50"),
+                unit="per_hou", currency_code="USD"),
+            COMPAT_RATE_UNIT,
+        )
+
+    def test_rate_without_currency_is_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "fully_loaded_rate_per_hour", numeric_value=Decimal("50"),
+                unit="per_hour", currency_code=None),
+            COMPAT_RATE_CURRENCY,
+        )
+
+    def test_rate_negative_value_is_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "fully_loaded_rate_per_hour", numeric_value=Decimal("-1"),
+                unit="per_hour", currency_code="USD"),
+            COMPAT_NEGATIVE_VALUE,
+        )
+
+    # ─── periods_per_year: integral value >= 1 ───
+    def test_periods_per_year_compatible(self):
+        self.assertIsNone(input_compatibility_reason(
+            "periods_per_year", numeric_value=Decimal("52")))
+        self.assertIsNone(input_compatibility_reason(
+            "periods_per_year", numeric_value=Decimal("1")))
+
+    def test_periods_per_year_non_integral_or_below_one_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason("periods_per_year", numeric_value=Decimal("52.5")),
+            COMPAT_PERIODS_INTEGRAL,
+        )
+        self.assertEqual(
+            input_compatibility_reason("periods_per_year", numeric_value=Decimal("0")),
+            COMPAT_PERIODS_INTEGRAL,
+        )
+
+    # ─── annual_recurring_cost / one_time_implementation_cost: currency + value >= 0 ───
+    def test_money_roles_compatible(self):
+        for role in ("annual_recurring_cost", "one_time_implementation_cost"):
+            self.assertIsNone(input_compatibility_reason(
+                role, numeric_value=Decimal("0"), currency_code="USD"))
+            self.assertIsNone(input_compatibility_reason(
+                role, numeric_value=Decimal("1000"), currency_code="USD"))
+
+    def test_money_roles_without_currency_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "annual_recurring_cost", numeric_value=Decimal("1000"), currency_code=None),
+            COMPAT_MONEY_CURRENCY,
+        )
+
+    def test_money_roles_negative_value_incompatible(self):
+        self.assertEqual(
+            input_compatibility_reason(
+                "one_time_implementation_cost", numeric_value=Decimal("-5"), currency_code="USD"),
+            COMPAT_NEGATIVE_VALUE,
+        )
+
+    def test_unknown_role_defers_to_database(self):
+        # Roles outside the canonical six are not widened by this helper.
+        self.assertIsNone(input_compatibility_reason(
+            "not_a_real_role", numeric_value=Decimal("1")))
 
 
 if __name__ == "__main__":

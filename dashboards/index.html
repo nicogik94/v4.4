@@ -4321,10 +4321,33 @@ function freshRoiState() {
     selectedSnapshotId: '',
     calcMap: {},           // role → approved_calculation_input_id (operator draft)
     freezeSelection: {},   // role → candidate_fact_revision_id (operator draft)
+    factDraft: freshRoiFactDraft(), // unsaved candidate-fact form state (survives refresh)
+    freezeDraft: {},       // role → candidate_fact_revision_id (pending Freeze selection, survives refresh)
     activeResultId: null,
     operatorResult: null,  // operator projection for activeResultId
     clientPreview: null,   // client-safe projection for activeResultId
     previewError: null,
+  };
+}
+
+// The unsaved candidate-fact form lives entirely in state (the DOM is never the
+// source of truth) so a scheduled/manual refresh can rebuild the ROI workspace
+// without discarding the operator's in-progress entries. Reset with the project.
+function freshRoiFactDraft() {
+  return {
+    source_snapshot_id: '',
+    subject_label: '',
+    metric_label: '',
+    fact_type: 'count',
+    value: '',
+    unit: '',
+    currency_code: '',
+    time_unit: '',
+    counted_entity: '',
+    as_of_date: '',
+    period_basis: '',
+    source_locator: '',
+    extraction_rationale: '',
   };
 }
 
@@ -4369,6 +4392,27 @@ const ROI_RESULT_STATUS_LABELS = {
   blocked: 'Blocked',
   not_applicable: 'Not applicable',
 };
+// One source of truth for the candidate-fact form control ids ↔ draft fields,
+// shared by render, capture, and the per-control input/change listeners so the
+// rendered form and state.roi.factDraft can never drift apart.
+const ROI_FACT_FIELD_IDS = {
+  source_snapshot_id: 'roi-fact-snapshot',
+  subject_label: 'roi-fact-subject',
+  metric_label: 'roi-fact-metric',
+  fact_type: 'roi-fact-type',
+  value: 'roi-fact-value',
+  unit: 'roi-fact-unit',
+  currency_code: 'roi-fact-currency',
+  time_unit: 'roi-fact-timeunit',
+  counted_entity: 'roi-fact-counted',
+  as_of_date: 'roi-fact-asof',
+  period_basis: 'roi-fact-period',
+  source_locator: 'roi-fact-locator',
+  extraction_rationale: 'roi-fact-rationale',
+};
+const ROI_FACT_FIELD_BY_ID = Object.fromEntries(
+  Object.entries(ROI_FACT_FIELD_IDS).map(([field, id]) => [id, field])
+);
 const LEGACY_TAB_ALIASES = {
   decide: 'overview',
   outcomes: 'overview',
@@ -8667,61 +8711,97 @@ function renderRoiSnapshots() {
     </div>`;
 }
 
+// Read the currently rendered candidate-fact form into state.roi.factDraft.
+// No-op when the form is not mounted (e.g. another tab, or no available snapshot).
+function captureRoiFactDraft() {
+  if (!document.getElementById('roi-fact-form')) return;
+  const draft = state.roi.factDraft;
+  for (const [field, id] of Object.entries(ROI_FACT_FIELD_IDS)) {
+    const el = document.getElementById(id);
+    if (el) draft[field] = el.value;
+  }
+}
+
+// Update a single draft field from an input/change event on a form control.
+function updateRoiFactDraft(event) {
+  const el = event && event.target;
+  if (!el || !el.id) return;
+  const field = ROI_FACT_FIELD_BY_ID[el.id];
+  if (field) state.roi.factDraft[field] = el.value;
+}
+
+// Keep the drafted snapshot only while it is still available; otherwise fall back
+// to the first available snapshot; when none are available, leave it blank. The
+// resolved choice is persisted into the draft so capture/submit stay consistent.
+function resolveRoiDraftSnapshot() {
+  const ws = state.roi.workspace;
+  const availableIds = ((ws && ws.snapshots) || [])
+    .filter(s => s.available)
+    .map(s => s.source_snapshot_id);
+  const draft = state.roi.factDraft;
+  if (draft.source_snapshot_id && availableIds.includes(draft.source_snapshot_id)) {
+    return draft.source_snapshot_id;
+  }
+  draft.source_snapshot_id = availableIds.length ? availableIds[0] : '';
+  return draft.source_snapshot_id;
+}
+
 function renderRoiFactForm() {
   const snaps = (state.roi.workspace.snapshots || []).filter(s => s.available);
-  const options = snaps.map(s =>
-    `<option value="${escapeHtml(s.source_snapshot_id)}">${escapeHtml(s.source_kind || 'Source snapshot')} · ${escapeHtml(s.captured_at || 'time n/a')}</option>`
-  ).join('');
   const disabled = state.roi.busy ? 'disabled' : '';
   if (!snaps.length) {
     return `<p class="roi-muted">Capture or restore an available evidence snapshot before recording a candidate fact.</p>`;
   }
+  // Every control renders from state.roi.factDraft — never a hard-coded blank — so
+  // a refresh that rebuilds this form restores the operator's unsaved entries.
+  const draft = state.roi.factDraft;
+  const chosenSnapshot = resolveRoiDraftSnapshot();
+  const options = snaps.map(s =>
+    `<option value="${escapeHtml(s.source_snapshot_id)}" ${s.source_snapshot_id === chosenSnapshot ? 'selected' : ''}>${escapeHtml(s.source_kind || 'Source snapshot')} · ${escapeHtml(s.captured_at || 'time n/a')}</option>`
+  ).join('');
+  const factTypeOptions = ['count', 'duration', 'money', 'rate', 'percentage'].map(t =>
+    `<option value="${t}" ${draft.fact_type === t ? 'selected' : ''}>${t}</option>`
+  ).join('');
   return `
     <form class="roi-fact-form" id="roi-fact-form" aria-label="Record a candidate fact">
       <label>Evidence snapshot
         <select id="roi-fact-snapshot" ${disabled} aria-label="Source snapshot for the new fact">${options}</select>
       </label>
       <label>Subject label
-        <input type="text" id="roi-fact-subject" ${disabled} maxlength="200" aria-label="Subject label" required>
+        <input type="text" id="roi-fact-subject" ${disabled} maxlength="200" aria-label="Subject label" value="${escapeHtml(draft.subject_label)}" required>
       </label>
       <label>Metric label
-        <input type="text" id="roi-fact-metric" ${disabled} maxlength="200" aria-label="Metric label" required>
+        <input type="text" id="roi-fact-metric" ${disabled} maxlength="200" aria-label="Metric label" value="${escapeHtml(draft.metric_label)}" required>
       </label>
       <label>Fact type
-        <select id="roi-fact-type" ${disabled} aria-label="Fact type">
-          <option value="count">count</option>
-          <option value="duration">duration</option>
-          <option value="money">money</option>
-          <option value="rate">rate</option>
-          <option value="percentage">percentage</option>
-        </select>
+        <select id="roi-fact-type" ${disabled} aria-label="Fact type">${factTypeOptions}</select>
       </label>
       <label>Value
-        <input type="text" id="roi-fact-value" ${disabled} inputmode="decimal" aria-label="Numeric value (entered as text; never parsed from source)">
+        <input type="text" id="roi-fact-value" ${disabled} inputmode="decimal" aria-label="Numeric value (entered as text; never parsed from source)" value="${escapeHtml(draft.value)}">
       </label>
       <label>Unit
-        <input type="text" id="roi-fact-unit" ${disabled} maxlength="60" aria-label="Unit">
+        <input type="text" id="roi-fact-unit" ${disabled} maxlength="60" aria-label="Unit" value="${escapeHtml(draft.unit)}">
       </label>
       <label>Currency code
-        <input type="text" id="roi-fact-currency" ${disabled} maxlength="3" aria-label="Currency code">
+        <input type="text" id="roi-fact-currency" ${disabled} maxlength="3" aria-label="Currency code" value="${escapeHtml(draft.currency_code)}">
       </label>
       <label>Time unit
-        <input type="text" id="roi-fact-timeunit" ${disabled} maxlength="30" aria-label="Time unit">
+        <input type="text" id="roi-fact-timeunit" ${disabled} maxlength="30" aria-label="Time unit" value="${escapeHtml(draft.time_unit)}">
       </label>
       <label>Counted entity
-        <input type="text" id="roi-fact-counted" ${disabled} maxlength="120" aria-label="Counted entity">
+        <input type="text" id="roi-fact-counted" ${disabled} maxlength="120" aria-label="Counted entity" value="${escapeHtml(draft.counted_entity)}">
       </label>
       <label>As-of date
-        <input type="date" id="roi-fact-asof" ${disabled} aria-label="As-of date">
+        <input type="date" id="roi-fact-asof" ${disabled} aria-label="As-of date" value="${escapeHtml(draft.as_of_date)}">
       </label>
       <label>Period basis
-        <input type="text" id="roi-fact-period" ${disabled} maxlength="60" aria-label="Period basis">
+        <input type="text" id="roi-fact-period" ${disabled} maxlength="60" aria-label="Period basis" value="${escapeHtml(draft.period_basis)}">
       </label>
       <label>Source pointer (page / row / section / quoted label)
-        <input type="text" id="roi-fact-locator" ${disabled} maxlength="200" aria-label="Safe source pointer">
+        <input type="text" id="roi-fact-locator" ${disabled} maxlength="200" aria-label="Safe source pointer" value="${escapeHtml(draft.source_locator)}">
       </label>
       <label>Rationale
-        <textarea id="roi-fact-rationale" ${disabled} maxlength="2000" aria-label="Extraction rationale"></textarea>
+        <textarea id="roi-fact-rationale" ${disabled} maxlength="2000" aria-label="Extraction rationale">${escapeHtml(draft.extraction_rationale)}</textarea>
       </label>
       <button class="btn btn-accent" id="roi-fact-create" type="submit" ${disabled} aria-label="Create candidate fact">Create candidate fact</button>
     </form>`;
@@ -8769,12 +8849,66 @@ function renderRoiDecisions() {
     </div>`;
 }
 
+// Pending "freeze this approved fact" selections (Section 4) live in state — keyed
+// by ROI role — so a scheduled/manual refresh that rebuilds the workspace keeps the
+// operator's choice until Freeze is clicked. Mirrors the candidate-fact draft
+// pattern; reset with the project through freshRoiState().
+function captureRoiFreezeDraft() {
+  document.querySelectorAll('[data-roi-freeze-role]').forEach(sel => {
+    const role = sel.getAttribute('data-roi-freeze-role');
+    if (!role) return;
+    // Blank only clears the rendered role; never touch roles whose select is absent.
+    if (sel.value) state.roi.freezeDraft[role] = sel.value;
+    else delete state.roi.freezeDraft[role];
+  });
+}
+
+// Update a single role's pending freeze selection from a change event.
+function updateRoiFreezeDraft(event) {
+  const sel = event && event.target;
+  const role = sel && sel.getAttribute ? sel.getAttribute('data-roi-freeze-role') : null;
+  if (!role) return;
+  if (sel.value) state.roi.freezeDraft[role] = sel.value;
+  else delete state.roi.freezeDraft[role];
+}
+
+// Non-authoritative UX mirror of the server's frozen-input database-compatibility
+// contract. The server stays the sole authority (it returns 422 on an
+// incompatible freeze); this only keeps the operator from picking a fact that
+// could never be frozen for the role. Today only fully_loaded_rate_per_hour has a
+// dashboard-visible constraint (unit must be exactly 'per_hour').
+function roiFactCompatibleForRole(fact, role) {
+  if (role === 'fully_loaded_rate_per_hour') {
+    return (fact.unit || '') === 'per_hour';
+  }
+  return true;
+}
+
+// Drop pending freeze selections that are no longer valid against the current
+// workspace: the fact must still exist, be approved, have an active approval, be
+// among the current freeze choices, and remain compatible with the role. Stale,
+// unapproved, unavailable, or incompatible entries are deleted; this never
+// auto-selects a replacement fact.
+function resolveRoiFreezeDraft(approvedFacts) {
+  const draft = state.roi.freezeDraft;
+  const selectable = new Map((approvedFacts || []).map(f => [f.candidate_fact_revision_id, f]));
+  for (const role of Object.keys(draft)) {
+    const fact = selectable.get(draft[role]);
+    if (!fact || fact.decision_state !== 'approved' || !fact.active_approval_id
+        || !roiFactCompatibleForRole(fact, role)) {
+      delete draft[role];
+    }
+  }
+}
+
 function renderRoiFrozen() {
   const ws = state.roi.workspace;
   const facts = ws.candidate_facts || [];
   const frozen = ws.frozen_inputs || [];
   const readiness = ws.role_readiness || { roles: {}, missing_roles: [] };
   const approvedFacts = facts.filter(f => f.decision_state === 'approved');
+  // Drop stale pending selections before rendering each dropdown from freezeDraft.
+  resolveRoiFreezeDraft(approvedFacts);
   const busy = state.roi.busy;
 
   const roleRows = ROI_ROLES.map(role => {
@@ -8783,10 +8917,17 @@ function renderRoiFrozen() {
     const existingHtml = existing.length
       ? existing.map(fi => `<span class="roi-frozen-chip">${escapeHtml(fi.resolved_numeric_value || '')}${fi.resolved_unit ? ' ' + escapeHtml(fi.resolved_unit) : ''}${fi.resolved_currency_code ? ' ' + escapeHtml(fi.resolved_currency_code) : ''} ${roiAvailability(fi.available)}</span>`).join('')
       : '<span class="roi-muted">none frozen</span>';
-    const options = approvedFacts.map(f =>
-      `<option value="${escapeHtml(f.candidate_fact_revision_id)}">${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</option>`
+    const chosen = state.roi.freezeDraft[role] || '';
+    // Non-authoritative UX filter: only offer approved facts that are compatible
+    // with this role; the server still enforces the contract on freeze.
+    const selectableFacts = approvedFacts.filter(f => roiFactCompatibleForRole(f, role));
+    const options = selectableFacts.map(f =>
+      `<option value="${escapeHtml(f.candidate_fact_revision_id)}" ${f.candidate_fact_revision_id === chosen ? 'selected' : ''}>${escapeHtml(f.subject_label || '')} — ${escapeHtml(f.metric_label || '')}</option>`
     ).join('');
-    const select = approvedFacts.length
+    const compatHint = role === 'fully_loaded_rate_per_hour'
+      ? '<span class="roi-muted roi-compat-hint">Requires unit: per_hour</span>'
+      : '';
+    const select = selectableFacts.length
       ? `<select data-roi-freeze-role="${escapeHtml(role)}" ${busy ? 'disabled' : ''} aria-label="Approved fact to freeze for ${escapeHtml(ROI_ROLE_LABELS[role])}"><option value="">— select approved fact —</option>${options}</select>
          <button class="btn btn-sm" data-roi-freeze="${escapeHtml(role)}" type="button" ${busy ? 'disabled' : ''} aria-label="Freeze input for ${escapeHtml(ROI_ROLE_LABELS[role])}">Freeze</button>`
       : '<span class="roi-muted">no approved facts available</span>';
@@ -8794,7 +8935,7 @@ function renderRoiFrozen() {
       <li class="roi-row roi-frozen-role" data-roi-role="${escapeHtml(role)}">
         <span class="roi-label">${escapeHtml(ROI_ROLE_LABELS[role])}</span>
         <span class="roi-frozen-current">${existingHtml}</span>
-        <span class="roi-frozen-action">${select}</span>
+        <span class="roi-frozen-action">${select}${compatHint}</span>
       </li>`;
   }).join('');
 
@@ -8911,24 +9052,26 @@ function renderRoiResults() {
 }
 
 function readRoiFactForm() {
-  const val = id => (document.getElementById(id)?.value || '').trim();
-  const fact = { fact_type: val('roi-fact-type') };
-  const value = val('roi-fact-value');
+  // The draft (not the live DOM) is the source of truth for the submitted body.
+  const draft = state.roi.factDraft || freshRoiFactDraft();
+  const val = key => (draft[key] == null ? '' : String(draft[key])).trim();
+  const fact = { fact_type: val('fact_type') };
+  const value = val('value');
   if (value) fact.value = value;            // sent as string; never a JS number
-  const unit = val('roi-fact-unit'); if (unit) fact.unit = unit;
-  const currency = val('roi-fact-currency'); if (currency) fact.currency_code = currency;
-  const timeUnit = val('roi-fact-timeunit'); if (timeUnit) fact.time_unit = timeUnit;
-  const counted = val('roi-fact-counted'); if (counted) fact.counted_entity = counted;
-  const asof = val('roi-fact-asof'); if (asof) fact.as_of_date = asof;
+  const unit = val('unit'); if (unit) fact.unit = unit;
+  const currency = val('currency_code'); if (currency) fact.currency_code = currency;
+  const timeUnit = val('time_unit'); if (timeUnit) fact.time_unit = timeUnit;
+  const counted = val('counted_entity'); if (counted) fact.counted_entity = counted;
+  const asof = val('as_of_date'); if (asof) fact.as_of_date = asof;
   const body = {
-    source_snapshot_id: val('roi-fact-snapshot'),
+    source_snapshot_id: val('source_snapshot_id'),
     fact,
-    subject_label: val('roi-fact-subject'),
-    metric_label: val('roi-fact-metric'),
+    subject_label: val('subject_label'),
+    metric_label: val('metric_label'),
   };
-  const period = val('roi-fact-period'); if (period) body.period_basis = period;
-  const locator = val('roi-fact-locator'); if (locator) body.source_locator = locator;
-  const rationale = val('roi-fact-rationale'); if (rationale) body.extraction_rationale = rationale;
+  const period = val('period_basis'); if (period) body.period_basis = period;
+  const locator = val('source_locator'); if (locator) body.source_locator = locator;
+  const rationale = val('extraction_rationale'); if (rationale) body.extraction_rationale = rationale;
   return body;
 }
 
@@ -8942,18 +9085,33 @@ function wireAutomationRoiWorkspace() {
   });
 
   const form = document.getElementById('roi-fact-form');
+  // Every candidate-fact control feeds state.roi.factDraft on input/change, so the
+  // draft always mirrors what the operator typed — even before submit or refresh.
+  Object.values(ROI_FACT_FIELD_IDS).forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', updateRoiFactDraft);
+    el.addEventListener('change', updateRoiFactDraft);
+  });
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();
+    captureRoiFactDraft();
     const body = readRoiFactForm();
     if (!body.source_snapshot_id || !body.subject_label || !body.metric_label) {
       toast('Snapshot, subject, and metric are required.', 'err');
       return;
     }
-    await roiMutate({
+    const ok = await roiMutate({
       path: `/projects/${encodeURIComponent(pid)}/automation-roi/candidate-facts`,
       body,
       confirmMsg: 'Create this candidate fact? Facts are immutable once created.',
     });
+    // Clear the draft ONLY after a confirmed successful write, then render once
+    // more so the form is visibly empty. Any failure/cancel preserves the draft.
+    if (ok) {
+      state.roi.factDraft = freshRoiFactDraft();
+      renderMain();
+    }
   });
 
   document.querySelectorAll('[data-roi-correct]').forEach(btn => {
@@ -8961,11 +9119,19 @@ function wireAutomationRoiWorkspace() {
       const fid = btn.getAttribute('data-roi-correct');
       const fact = (state.roi.workspace.candidate_facts || []).find(f => f.candidate_fact_revision_id === fid);
       if (!fact) return;
-      // A correction is a NEW fact — prefill the form, never edit the original.
-      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
-      set('roi-fact-subject', fact.subject_label);
-      set('roi-fact-metric', fact.metric_label);
-      set('roi-fact-type', fact.fact_type);
+      // A correction is a NEW fact: restore only safe, form-compatible values into
+      // the draft (never ids, provenance, approvals, decision state, or errors),
+      // then re-render. The snapshot stays valid through resolveRoiDraftSnapshot().
+      const draft = freshRoiFactDraft();
+      draft.subject_label = fact.subject_label || '';
+      draft.metric_label = fact.metric_label || '';
+      if (fact.fact_type) draft.fact_type = fact.fact_type;
+      if (fact.numeric_value != null) draft.value = String(fact.numeric_value);
+      if (fact.unit) draft.unit = fact.unit;
+      if (fact.currency_code) draft.currency_code = fact.currency_code;
+      state.roi.factDraft = draft;
+      resolveRoiDraftSnapshot();
+      renderMain();
       document.getElementById('roi-fact-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       toast('Correction starts a new fact. Adjust the values and create it.', '');
     });
@@ -8983,15 +9149,21 @@ function wireAutomationRoiWorkspace() {
     });
   });
 
+  // Each freeze-role select feeds state.roi.freezeDraft on change, so a pending
+  // selection survives refresh until Freeze is clicked. Updates only that role.
+  document.querySelectorAll('[data-roi-freeze-role]').forEach(sel => {
+    sel.addEventListener('change', updateRoiFreezeDraft);
+  });
+
   document.querySelectorAll('[data-roi-freeze]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const role = btn.getAttribute('data-roi-freeze');
-      const sel = document.querySelector(`[data-roi-freeze-role="${role}"]`);
-      const factId = sel?.value;
+      captureRoiFreezeDraft();
+      const factId = state.roi.freezeDraft[role];
       if (!factId) { toast('Select an approved fact to freeze.', 'err'); return; }
       const fact = (state.roi.workspace.candidate_facts || []).find(f => f.candidate_fact_revision_id === factId);
       if (!fact || !fact.active_approval_id) { toast('This fact no longer has an active approval.', 'err'); return; }
-      await roiMutate({
+      const ok = await roiMutate({
         path: `/projects/${encodeURIComponent(pid)}/automation-roi/inputs`,
         body: {
           candidate_fact_revision_id: factId,
@@ -9000,6 +9172,13 @@ function wireAutomationRoiWorkspace() {
         },
         confirmMsg: `Freeze this approved fact as ${ROI_ROLE_LABELS[role]}?`,
       });
+      // Clear ONLY this role's pending selection after a confirmed success, then
+      // render once more; the other five roles' drafts are preserved. Any
+      // failure/cancel keeps the selection (roiMutate never touches freezeDraft).
+      if (ok) {
+        delete state.roi.freezeDraft[role];
+        renderMain();
+      }
     });
   });
 
@@ -9053,18 +9232,32 @@ function renderInspectorAutomationRoi() {
    Main refresh cycle
    ═══════════════════════════════════════════════════════════════════════ */
 async function refresh() {
+  // Capture the operator's unsaved Automation ROI drafts (candidate-fact form AND
+  // pending freeze selections) synchronously BEFORE the first await, so rebuilding
+  // the workspace never loses in-progress entries.
+  if (state.activeTab === AUTOMATION_ROI_TAB) {
+    captureRoiFactDraft();
+    captureRoiFreezeDraft();
+  }
   const now = new Date();
   $('last-refresh').textContent = `updated ${now.toLocaleTimeString()}`;
   await loadHealth();
   await loadProjects();
   await loadLearningEngine();
   if (state.selectedProjectId) {
+    // A ROI mutation in flight owns its own authoritative reload + render via
+    // roiMutate(); the global refresh must not reload or rerender the ROI
+    // workspace underneath it while state.roi.busy is true.
+    if (state.activeTab === AUTOMATION_ROI_TAB && state.roi.busy) return;
     await loadProject(state.selectedProjectId);
     if (state.activeTab === 'overview' || state.activeTab === 'trace') await loadDecisionPlane(state.selectedProjectId);
     if (state.activeTab === 'report') await loadReport(state.selectedProjectId);
     if (state.activeTab === 'workflow' && state.project && !state.project.calibration) {
       await loadCalibration(state.selectedProjectId);
     }
+    // Re-check immediately before ROI workspace load + final render: a Freeze (or
+    // other) mutation may have begun during the awaits above, flipping busy.
+    if (state.activeTab === AUTOMATION_ROI_TAB && state.roi.busy) return;
     if (state.activeTab === AUTOMATION_ROI_TAB && isAutomationRoiProject()) {
       await loadAutomationRoiWorkspace(state.selectedProjectId);
     }
