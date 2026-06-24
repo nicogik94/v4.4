@@ -28,6 +28,7 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/v4_test
+      TEST_EVIDENCE_PG_DSN: postgresql://postgres:postgres@localhost:5432/v4_test
 
     steps:
       - uses: actions/checkout@v4
