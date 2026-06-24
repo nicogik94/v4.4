@@ -47,6 +47,15 @@ def schema_b(conn):
         yield s
 
 
+@pytest.fixture
+def schema_b49(conn):
+    """Fresh init+outcomes+v47 schema with v48 and v49 applied on top."""
+    with pg.fresh_schema(conn) as s:
+        pg.apply_v48(conn)
+        pg.apply_v49(conn)
+        yield s
+
+
 # ── Migration ───────────────────────────────────────────────────────────────
 
 def test_fresh_apply_creates_complete_slice_b(conn, schema_b):
@@ -389,6 +398,155 @@ def test_blocked_result_allows_unavailable_input(conn, schema_b):
             "VALUES (%s,%s,%s,%s)", (pid, rid, seeded[role]["input"], role))
     conn.commit()  # blocked is exempt from the active/available requirement
     assert repo.get_result(conn, project_id=pid, result_id=rid)["status"] == "blocked"
+
+
+# ── v49 calculation_request migration contract ────────────────────────────────
+
+DIGEST_A = "a" * 64
+DIGEST_B = "b" * 64
+
+
+def test_v49_fresh_apply_creates_request_objects(conn, schema_b49):
+    assert pg.table_exists(conn, schema_b49, "calculation_request")
+    assert pg.function_exists(conn, schema_b49, "sliceb_creq_guard")
+    assert pg.trigger_exists(
+        conn, schema_b49, "trg_creq_controlled_transition", "calculation_request")
+    for c in ("uq_creq_request_identity", "uq_creq_operation_identity",
+              "fk_creq_result_project", "ck_creq_status_shape"):
+        assert pg.constraint_exists(conn, schema_b49, c), c
+
+
+def test_v49_complete_reapply_is_noop(conn, schema_b49):
+    pg.apply_v49(conn)  # must not raise
+    assert pg.table_exists(conn, schema_b49, "calculation_request")
+
+
+def test_v49_requires_complete_v48(conn, schema_b):
+    # v48 present but incomplete (drop a Slice B table) → v49 refuses.
+    prior = pg._begin_autocommit(conn)
+    conn.execute("DROP TABLE calculation_result_input")
+    pg._restore_autocommit(conn, prior)
+    with pytest.raises(Exception) as ei:
+        pg.apply_v49(conn)
+    assert "requires v48" in str(ei.value)
+
+
+def test_v49_partial_schema_is_rejected(conn, schema_b49):
+    # Remove the guard trigger → reapply must refuse the partial/divergent v49.
+    prior = pg._begin_autocommit(conn)
+    conn.execute("DROP TRIGGER trg_creq_controlled_transition ON calculation_request")
+    pg._restore_autocommit(conn, prior)
+    with pytest.raises(Exception) as ei:
+        pg.apply_v49(conn)
+    assert "partial/divergent" in str(ei.value) or "contract violation" in str(ei.value)
+
+
+# ── v49 controlled-transition guard ───────────────────────────────────────────
+
+def _insert_pending(conn, pid, *, key, digest=DIGEST_A):
+    return conn.execute(
+        "INSERT INTO calculation_request "
+        "(project_id, formula_version, idempotency_key, canonical_request_digest, status) "
+        "VALUES (%s, 'automation_roi.v1', %s, %s, 'pending') RETURNING id::text",
+        (pid, key, digest),
+    ).fetchone()[0]
+
+
+def test_guard_rejects_delete_of_pending(conn, schema_b49):
+    pid = pg.insert_project(conn, name="guard-del")
+    conn.commit()
+    _insert_pending(conn, pid, key="k-del")
+    conn.commit()
+    with pytest.raises(Exception):
+        conn.execute("DELETE FROM calculation_request")
+        conn.commit()
+    conn.rollback()
+
+
+def test_guard_rejects_non_pending_to_committed_update(conn, schema_b49):
+    pid = pg.insert_project(conn, name="guard-stay")
+    conn.commit()
+    req = _insert_pending(conn, pid, key="k-stay")
+    conn.commit()
+    # Staying pending (here: changing an immutable field) is not the allowed
+    # transition and is rejected.
+    with pytest.raises(Exception):
+        conn.execute(
+            "UPDATE calculation_request SET idempotency_key = 'changed' WHERE id = %s", (req,))
+        conn.commit()
+    conn.rollback()
+
+
+def test_guard_allows_pending_to_committed_then_freezes(conn, schema_b49):
+    from knowledge.automation_roi import service
+    pid = pg.insert_project(conn, name="guard-commit")
+    conn.commit()
+    seeded = fx.seed_six(conn, pid)
+    conn.commit()
+    # A real result to link.
+    rid = service.compute_and_persist(
+        conn, project_id=pid, inputs_by_role=fx.input_map(seeded), computed_by="op")
+    conn.commit()
+
+    req = _insert_pending(conn, pid, key="k-commit", digest=DIGEST_A)
+    conn.commit()
+    # Valid transition pending -> committed with the result link → permitted.
+    conn.execute(
+        "UPDATE calculation_request SET status='committed', "
+        "result_calculation_result_id=%s, committed_at=NOW() WHERE id=%s", (rid, req))
+    conn.commit()
+    row = conn.execute(
+        "SELECT status, result_calculation_result_id::text FROM calculation_request WHERE id=%s",
+        (req,)).fetchone()
+    assert row[0] == "committed" and row[1] == rid
+
+    # Any further mutation of a committed row is rejected.
+    with pytest.raises(Exception):
+        conn.execute("UPDATE calculation_request SET requested_by='x' WHERE id=%s", (req,))
+        conn.commit()
+    conn.rollback()
+    with pytest.raises(Exception):
+        conn.execute("DELETE FROM calculation_request WHERE id=%s", (req,))
+        conn.commit()
+    conn.rollback()
+
+
+def test_guard_rejects_immutable_field_change_on_commit(conn, schema_b49):
+    from knowledge.automation_roi import service
+    pid = pg.insert_project(conn, name="guard-immutable")
+    conn.commit()
+    seeded = fx.seed_six(conn, pid)
+    conn.commit()
+    rid = service.compute_and_persist(
+        conn, project_id=pid, inputs_by_role=fx.input_map(seeded), computed_by="op")
+    conn.commit()
+    req = _insert_pending(conn, pid, key="k-immut", digest=DIGEST_B)
+    conn.commit()
+    # Transition is otherwise valid, but it also mutates an immutable field → reject.
+    with pytest.raises(Exception):
+        conn.execute(
+            "UPDATE calculation_request SET status='committed', "
+            "result_calculation_result_id=%s, committed_at=NOW(), formula_version='x' WHERE id=%s",
+            (rid, req))
+        conn.commit()
+    conn.rollback()
+
+
+def test_request_dual_unique_identities(conn, schema_b49):
+    pid = pg.insert_project(conn, name="dual-unique")
+    conn.commit()
+    _insert_pending(conn, pid, key="dup-key", digest=DIGEST_A)
+    conn.commit()
+    # Same (project, idempotency_key) → request-identity unique violation.
+    with pytest.raises(Exception):
+        _insert_pending(conn, pid, key="dup-key", digest=DIGEST_B)
+        conn.commit()
+    conn.rollback()
+    # Same (project, canonical_request_digest) → operation-identity unique violation.
+    with pytest.raises(Exception):
+        _insert_pending(conn, pid, key="other-key", digest=DIGEST_A)
+        conn.commit()
+    conn.rollback()
 
 
 if __name__ == "__main__":

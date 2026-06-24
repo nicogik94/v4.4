@@ -27,6 +27,7 @@ INIT_SQL = SQL_DIR / "init.sql"
 OUTCOMES_SQL = SQL_DIR / "outcomes.sql"
 V47_SQL = SQL_DIR / "v47_evidence_snapshot_foundation.sql"
 V48_SQL = SQL_DIR / "v48_automation_roi_foundation.sql"
+V49_SQL = SQL_DIR / "v49_automation_roi_calculation_idempotency.sql"
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -140,6 +141,13 @@ def apply_v48(conn) -> None:
     """(Re)apply only the Slice B migration into the current search_path schema."""
     prior = _begin_autocommit(conn)
     _run_script(conn, V48_SQL)
+    _restore_autocommit(conn, prior)
+
+
+def apply_v49(conn) -> None:
+    """(Re)apply only the Slice B v49 idempotency migration into the current schema."""
+    prior = _begin_autocommit(conn)
+    _run_script(conn, V49_SQL)
     _restore_autocommit(conn, prior)
 
 

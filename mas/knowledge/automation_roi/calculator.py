@@ -205,6 +205,37 @@ def provenance_fingerprint(inputs: Mapping[str, ResolvedInput]) -> str:
     return hashlib.sha256(_REC_SEP.join(parts).encode("utf-8")).hexdigest()
 
 
+def canonical_request_digest(project_id: str, inputs_by_role: Mapping[str, str]) -> str:
+    """Exact calculation-operation identity for the idempotent calculate action.
+
+    Binds ``project_id`` + ``FORMULA_VERSION`` + the ``input_role ->
+    approved_calculation_input_id`` map, serialized in canonical (sorted) role
+    order. Because frozen inputs are immutable and each transitively pins its fact,
+    decision, and resolved values, the six ids are a sufficient and minimal
+    operation identity.
+
+    This digest is deliberately provenance-bearing: it identifies *which* frozen
+    inputs are used, not merely their values. ``formula_input_digest`` must never
+    serve as a uniqueness key — it is value-based and provenance-insensitive, so
+    distinct frozen inputs with equal values share it and would be wrongly
+    deduplicated into a single result.
+
+    Raises ``ValueError`` unless exactly the six required roles are present.
+    """
+    keys = set(inputs_by_role)
+    if keys != set(ROLES):
+        missing = sorted(set(ROLES) - keys)
+        extra = sorted(keys - set(ROLES))
+        raise ValueError(
+            f"canonical_request_digest requires exactly the six roles; "
+            f"missing={missing} extra={extra}"
+        )
+    parts = [str(project_id), FORMULA_VERSION]
+    for role in sorted(ROLES):
+        parts.append(_FIELD_SEP.join((role, str(inputs_by_role[role]))))
+    return hashlib.sha256(_REC_SEP.join(parts).encode("utf-8")).hexdigest()
+
+
 def compute_automation_roi(
     inputs: Mapping[str, ResolvedInput],
     *,

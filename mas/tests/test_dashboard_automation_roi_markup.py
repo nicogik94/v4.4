@@ -450,6 +450,49 @@ class TestAutomationRoiWorkspaceMarkup(unittest.TestCase):
         self.assertIn("role === 'fully_loaded_rate_per_hour'", body)
         self.assertIn("Requires unit: per_hour", body)
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Calculation idempotency (v49): the Calculate action mints a fresh key per
+    # deliberate click, sends it as the Idempotency-Key header, keeps the busy
+    # guard, and always reloads authoritative state via roiMutate.
+    # ──────────────────────────────────────────────────────────────────────
+
+    # 35 — the Calculate click generates a fresh idempotency key and sends the header
+    def test_calculate_sends_fresh_idempotency_key_header(self):
+        wire = re.search(r"function wireAutomationRoiWorkspace\(\).*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(wire)
+        body = wire.group(0)
+        calc = re.search(r"calcBtn\?\.addEventListener\('click'.*?\n  \}\);", body, re.DOTALL)
+        self.assertIsNotNone(calc)
+        cb = calc.group(0)
+        # A fresh UUID per deliberate click...
+        self.assertIn("const idempotencyKey = crypto.randomUUID();", cb)
+        # ...sent as the Idempotency-Key header through roiMutate.
+        self.assertIn("headers: { 'Idempotency-Key': idempotencyKey },", cb)
+        # The completeness gate still guards submission.
+        self.assertIn("if (!roiCalcMapComplete()) return;", cb)
+
+    # 36 — apiPost forwards extra headers; roiMutate threads them through
+    def test_post_helpers_forward_idempotency_header(self):
+        self.assertIn("async function apiPost(path, body, extraHeaders) {", self.html)
+        self.assertIn("...(extraHeaders || {})", self.html)
+        self.assertIn("async function roiMutate({ path, body, confirmMsg, headers }) {", self.html)
+        self.assertIn("await apiPost(path, body || {}, headers);", self.html)
+
+    # 37 — the busy guard is retained and authoritative state reloads after every write
+    def test_calculate_retains_busy_guard_and_reloads(self):
+        mutate = re.search(r"async function roiMutate\(.*?\n}", self.html, re.DOTALL)
+        self.assertIsNotNone(mutate)
+        body = mutate.group(0)
+        # Busy guard preserved.
+        self.assertIn("if (state.roi.busy) return false;", body)
+        self.assertIn("state.roi.busy = true;", body)
+        # Authoritative reload runs in finally → after success OR failure/timeout.
+        self.assertIn("} finally {", body)
+        self.assertIn(
+            "if (state.selectedProjectId) await loadAutomationRoiWorkspace(state.selectedProjectId);",
+            body,
+        )
+
     # 34 — stale OR incompatible selections clear, never replaced with a fallback
     def test_resolve_freeze_draft_drops_incompatible_no_fallback(self):
         res = re.search(r"function resolveRoiFreezeDraft\(.*?\n}", self.html, re.DOTALL)

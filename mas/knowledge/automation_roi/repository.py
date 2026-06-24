@@ -280,3 +280,83 @@ def list_result_input_ids(conn, *, project_id: str, result_id: str) -> dict[str,
         (result_id, project_id),
     ).fetchall()
     return {r[0]: r[1] for r in rows}
+
+
+# ─────────────────────── Calculation requests (idempotency, v49) ───────────────────────
+# calculation_request is the only mutable Slice B table: a pending reservation is
+# claimed conflict-free, then transitioned pending -> committed once the single
+# result it owns is persisted. The two unique identities live on the table:
+#   request identity    UNIQUE (project_id, idempotency_key)
+#   operation identity  UNIQUE (project_id, canonical_request_digest)
+
+def claim_request(
+    conn,
+    *,
+    project_id: str,
+    idempotency_key: str,
+    formula_version: str,
+    canonical_request_digest: str,
+    requested_by: str = "",
+) -> Optional[str]:
+    """Insert a pending request reservation.
+
+    Returns the new request id when this caller wins the claim, or ``None`` when a
+    conflicting row already exists (same idempotency key or same canonical digest).
+    Uses ``ON CONFLICT DO NOTHING`` so a conflict never aborts the transaction; a
+    concurrent in-flight claim blocks this INSERT until that transaction commits or
+    rolls back, after which the conflicting row (if any) is committed-visible.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO calculation_request
+            (project_id, formula_version, idempotency_key, canonical_request_digest, status)
+        VALUES (%s, %s, %s, %s, 'pending')
+        ON CONFLICT DO NOTHING
+        RETURNING id::text
+        """,
+        (project_id, formula_version, idempotency_key, canonical_request_digest),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def commit_request(conn, *, project_id: str, request_id: str, result_id: str) -> None:
+    """Transition a claimed pending request to committed, linking its single result.
+
+    The database controlled-transition guard permits only this exact change.
+    """
+    conn.execute(
+        """
+        UPDATE calculation_request
+        SET status = 'committed',
+            result_calculation_result_id = %s,
+            committed_at = NOW()
+        WHERE id = %s AND project_id = %s
+        """,
+        (result_id, request_id, project_id),
+    )
+
+
+def get_request_by_key(conn, *, project_id: str, idempotency_key: str) -> Optional[dict]:
+    row = conn.execute(
+        """
+        SELECT id::text, canonical_request_digest, status, result_calculation_result_id::text
+        FROM calculation_request WHERE project_id = %s AND idempotency_key = %s
+        """,
+        (project_id, idempotency_key),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "canonical_request_digest": row[1], "status": row[2], "result_id": row[3]}
+
+
+def get_request_by_digest(conn, *, project_id: str, canonical_request_digest: str) -> Optional[dict]:
+    row = conn.execute(
+        """
+        SELECT id::text, idempotency_key, status, result_calculation_result_id::text
+        FROM calculation_request WHERE project_id = %s AND canonical_request_digest = %s
+        """,
+        (project_id, canonical_request_digest),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "idempotency_key": row[1], "status": row[2], "result_id": row[3]}
