@@ -39,6 +39,8 @@ DO $$
 DECLARE
     v_b_tables  int;
     v_fn_count  int;
+    v_trg_count int;
+    v_creq_con  int;
     v_present   boolean;
 BEGIN
     -- v48 dependency: the five Slice B tables, the two Slice B guard functions,
@@ -60,6 +62,31 @@ BEGIN
       AND p.proname = ANY (ARRAY['slicebo_assert_frozen_matches_fact', 'slicebo_assert_result_invariant']);
     IF v_fn_count <> 2 THEN
         RAISE EXCEPTION 'v49 requires v48: Slice B guard functions are missing (found %) — apply v48 first', v_fn_count
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    -- All seven v48 triggers must exist on their correct target tables. Counting
+    -- tables and functions alone does not prove the append-only / integrity guards
+    -- are actually attached to the right relations.
+    SELECT count(*) INTO v_trg_count
+    FROM (VALUES
+        ('trg_cfec_no_mutation',    'candidate_fact_extraction_context'),
+        ('trg_cfad_no_mutation',    'candidate_fact_approval_decision'),
+        ('trg_aci_no_mutation',     'approved_calculation_input'),
+        ('trg_cr_no_mutation',      'calculation_result'),
+        ('trg_cri_no_mutation',     'calculation_result_input'),
+        ('trg_aci_value_copy',      'approved_calculation_input'),
+        ('trg_cr_result_invariant', 'calculation_result')
+    ) AS expected(tgname, relname)
+    WHERE EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema() AND NOT t.tgisinternal
+          AND t.tgname = expected.tgname AND c.relname = expected.relname
+    );
+    IF v_trg_count <> 7 THEN
+        RAISE EXCEPTION 'v49 requires v48: expected 7 Slice B triggers on their target tables, found % — apply v48 first', v_trg_count
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
 
@@ -90,8 +117,8 @@ BEGIN
         RETURN;  -- clean bootstrap: nothing exists yet; create everything.
     END IF;
 
-    -- Something exists: it must satisfy the full v49 contract or the migration is
-    -- refused. Unknown partial/divergent schema is never silently repaired.
+    -- Something exists: it must satisfy the FULL v49 contract or the migration is
+    -- refused. A malformed/partial pre-existing schema is never silently accepted.
     IF NOT EXISTS (
         SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE c.relkind = 'r' AND n.nspname = current_schema() AND c.relname = 'calculation_request'
@@ -106,13 +133,40 @@ BEGIN
         RAISE EXCEPTION 'v49 contract violation: sliceb_creq_guard() missing — schema is partial/divergent'
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
+    -- The controlled-transition trigger must exist on calculation_request AND
+    -- actually execute sliceb_creq_guard (not some other or stale function).
     IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_proc p ON p.oid = t.tgfoid
         WHERE n.nspname = current_schema() AND NOT t.tgisinternal
           AND t.tgname = 'trg_creq_controlled_transition'
+          AND c.relname = 'calculation_request'
+          AND p.proname = 'sliceb_creq_guard'
     ) THEN
-        RAISE EXCEPTION 'v49 contract violation: trg_creq_controlled_transition missing — schema is partial/divergent'
+        RAISE EXCEPTION 'v49 contract violation: trg_creq_controlled_transition missing or not bound to sliceb_creq_guard on calculation_request — schema is partial/divergent'
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+    -- Every required constraint must be present on calculation_request.
+    SELECT count(*) INTO v_creq_con
+    FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND c.relname = 'calculation_request'
+      AND con.conname = ANY (ARRAY[
+          'uq_creq_request_identity', 'uq_creq_operation_identity', 'uq_creq_id_project',
+          'fk_creq_result_project', 'ck_creq_status_shape']);
+    IF v_creq_con <> 5 THEN
+        RAISE EXCEPTION 'v49 contract violation: expected 5 calculation_request constraints, found % — schema is partial/divergent', v_creq_con
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+    -- The project index must exist.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class i JOIN pg_namespace n ON n.oid = i.relnamespace
+        WHERE i.relkind = 'i' AND n.nspname = current_schema() AND i.relname = 'idx_creq_project'
+    ) THEN
+        RAISE EXCEPTION 'v49 contract violation: idx_creq_project missing — schema is partial/divergent'
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
     -- Complete: downstream guarded DDL is a no-op.

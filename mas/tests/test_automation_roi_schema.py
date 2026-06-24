@@ -441,6 +441,63 @@ def test_v49_partial_schema_is_rejected(conn, schema_b49):
     assert "partial/divergent" in str(ei.value) or "contract violation" in str(ei.value)
 
 
+def test_v49_refuses_when_a_v48_trigger_is_missing(conn, schema_b):
+    # v48 tables/functions present but a v48 trigger is missing → v49 refuses, even
+    # though the table/function counts still pass.
+    prior = pg._begin_autocommit(conn)
+    conn.execute("DROP TRIGGER trg_cr_result_invariant ON calculation_result")
+    pg._restore_autocommit(conn, prior)
+    with pytest.raises(Exception) as ei:
+        pg.apply_v49(conn)
+    assert "requires v48" in str(ei.value) and "7 Slice B triggers" in str(ei.value)
+
+
+def test_v49_refuses_when_a_v49_constraint_is_missing(conn, schema_b49):
+    # Drop one required calculation_request constraint → reapply must refuse.
+    prior = pg._begin_autocommit(conn)
+    conn.execute("ALTER TABLE calculation_request DROP CONSTRAINT ck_creq_status_shape")
+    pg._restore_autocommit(conn, prior)
+    with pytest.raises(Exception) as ei:
+        pg.apply_v49(conn)
+    assert "contract violation" in str(ei.value) and "constraints" in str(ei.value)
+
+
+def test_v49_refuses_when_trigger_bound_to_wrong_function(conn, schema_b49):
+    # The trigger exists by name but executes a different function → refuse.
+    prior = pg._begin_autocommit(conn)
+    conn.execute("DROP TRIGGER trg_creq_controlled_transition ON calculation_request")
+    conn.execute(
+        "CREATE TRIGGER trg_creq_controlled_transition "
+        "BEFORE UPDATE OR DELETE ON calculation_request "
+        "FOR EACH ROW EXECUTE FUNCTION slicea_reject_mutation()")
+    pg._restore_autocommit(conn, prior)
+    with pytest.raises(Exception) as ei:
+        pg.apply_v49(conn)
+    assert "not bound to sliceb_creq_guard" in str(ei.value) or "contract violation" in str(ei.value)
+
+
+def test_v49_refuses_when_index_is_missing(conn, schema_b49):
+    prior = pg._begin_autocommit(conn)
+    conn.execute("DROP INDEX idx_creq_project")
+    pg._restore_autocommit(conn, prior)
+    with pytest.raises(Exception) as ei:
+        pg.apply_v49(conn)
+    assert "idx_creq_project" in str(ei.value)
+
+
+def test_request_persists_requested_by(conn, schema_b49):
+    pid = pg.insert_project(conn, name="requested-by")
+    conn.commit()
+    req = repo.claim_request(
+        conn, project_id=pid, idempotency_key="rb-key",
+        formula_version="automation_roi.v1", canonical_request_digest=DIGEST_A,
+        requested_by="operator-X")
+    conn.commit()
+    row = conn.execute(
+        "SELECT requested_by FROM calculation_request WHERE id = %s", (req,)).fetchone()
+    assert row[0] == "operator-X"
+
+
 # ── v49 controlled-transition guard ───────────────────────────────────────────
 
 def _insert_pending(conn, pid, *, key, digest=DIGEST_A):

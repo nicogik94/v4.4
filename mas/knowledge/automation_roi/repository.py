@@ -309,12 +309,13 @@ def claim_request(
     row = conn.execute(
         """
         INSERT INTO calculation_request
-            (project_id, formula_version, idempotency_key, canonical_request_digest, status)
-        VALUES (%s, %s, %s, %s, 'pending')
+            (project_id, formula_version, idempotency_key, canonical_request_digest,
+             requested_by, status)
+        VALUES (%s, %s, %s, %s, %s, 'pending')
         ON CONFLICT DO NOTHING
         RETURNING id::text
         """,
-        (project_id, formula_version, idempotency_key, canonical_request_digest),
+        (project_id, formula_version, idempotency_key, canonical_request_digest, requested_by),
     ).fetchone()
     return row[0] if row else None
 
