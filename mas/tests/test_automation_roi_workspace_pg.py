@@ -30,6 +30,7 @@ from knowledge.evidence_snapshot import repository as ev_repo  # noqa: E402
 # Reuse the established lifecycle helpers verbatim (no parallel seeding logic).
 from tests.test_automation_roi_api_pg import (  # noqa: E402
     _approve,
+    _calc,
     _create_fact,
     _freeze_six,
     _seed_project,
@@ -65,6 +66,7 @@ def conn():
 def schema_b(conn):
     with pg.fresh_schema(conn) as s:
         pg.apply_v48(conn)
+        pg.apply_v49(conn)
         yield s
 
 
@@ -209,9 +211,9 @@ def test_workspace_read_performs_no_writes(client, conn, schema_b):
 def test_e2e_valid_result_listed_in_history(client, conn, schema_b):
     pid = _seed_project(conn, name="e2e-valid")
     inputs, _ = _freeze_six(client, conn, pid)
-    rid = client.post(
-        f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs}
-    ).json()["result_id"]
+    resp = _calc(client, pid, inputs)
+    assert resp.status_code == 201, resp.text
+    rid = resp.json()["result_id"]
 
     ws = _workspace(client, pid)
     result = next(r for r in ws["results"] if r["result_id"] == rid)
@@ -222,9 +224,9 @@ def test_e2e_valid_result_listed_in_history(client, conn, schema_b):
 def test_e2e_zero_cost_persists_not_applicable(client, conn, schema_b):
     pid = _seed_project(conn, name="e2e-na")
     inputs, _ = _freeze_six(client, conn, pid, overrides={"one_time_implementation_cost": "0"})
-    rid = client.post(
-        f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs}
-    ).json()["result_id"]
+    resp = _calc(client, pid, inputs)
+    assert resp.status_code == 201, resp.text
+    rid = resp.json()["result_id"]
     ws = _workspace(client, pid)
     assert next(r for r in ws["results"] if r["result_id"] == rid)["status"] == "not_applicable"
 
@@ -237,9 +239,9 @@ def test_e2e_unavailable_evidence_persists_blocked(client, conn, schema_b):
         conn, project_id=pid, event_type="tombstone", source_snapshot_id=snap, reason="redacted",
     )
     conn.commit()
-    rid = client.post(
-        f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs}
-    ).json()["result_id"]
+    resp = _calc(client, pid, inputs)
+    assert resp.status_code == 201, resp.text
+    rid = resp.json()["result_id"]
     ws = _workspace(client, pid)
     assert next(r for r in ws["results"] if r["result_id"] == rid)["status"] == "blocked"
 
@@ -248,7 +250,7 @@ def test_e2e_malformed_role_map_is_422_and_persists_nothing(client, conn, schema
     pid = _seed_project(conn, name="e2e-422")
     inputs, _ = _freeze_six(client, conn, pid)
     bad = {k: v for k, v in inputs.items() if k != "periods_per_year"}  # missing one role
-    resp = client.post(f"/projects/{pid}/automation-roi/calculations", json={"inputs": bad})
+    resp = _calc(client, pid, bad, key="malformed-role-map")
     assert resp.status_code == 422
     ws = _workspace(client, pid)
     assert ws["results"] == []
@@ -257,9 +259,9 @@ def test_e2e_malformed_role_map_is_422_and_persists_nothing(client, conn, schema
 def test_e2e_client_preview_excludes_forbidden_fields(client, conn, schema_b):
     pid = _seed_project(conn, name="e2e-client")
     inputs, _ = _freeze_six(client, conn, pid)
-    rid = client.post(
-        f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs}
-    ).json()["result_id"]
+    resp = _calc(client, pid, inputs)
+    assert resp.status_code == 201, resp.text
+    rid = resp.json()["result_id"]
     cl = client.get(f"/projects/{pid}/automation-roi/calculations/{rid}/client").json()
     blob = json.dumps(cl)
     for forbidden in ("storage_ref", "/store/", "source_locator", "doc#",

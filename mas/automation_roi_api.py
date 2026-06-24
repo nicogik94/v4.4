@@ -27,7 +27,7 @@ import uuid
 from datetime import date
 from typing import Any, Iterator, Literal, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 import config
@@ -434,9 +434,24 @@ def freeze_input(project_id: str, body: FreezeInputRequest) -> dict[str, Any]:
     status_code=201,
     dependencies=[Depends(require_roi_enabled)],
 )
-def create_calculation(project_id: str, body: CalculationCreateRequest) -> dict[str, Any]:
-    """Persist one deterministic CalculationResult from exactly the six frozen inputs."""
+def create_calculation(
+    project_id: str,
+    body: CalculationCreateRequest,
+    response: Response,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    """Persist one deterministic CalculationResult from exactly the six frozen inputs.
+
+    Idempotent: a required ``Idempotency-Key`` header gives the request a durable
+    identity, and the six frozen-input ids give the operation a canonical identity.
+    Same key + same operation, or a different key for the same operation, replays
+    the existing result (200); the same key reused for a different operation is a
+    409; a genuinely new operation creates a result (201).
+    """
     _uuid_or_404(project_id, "Project not found")
+    key = (idempotency_key or "").strip()
+    if not key or len(key) > 200:
+        raise HTTPException(status_code=422, detail="Idempotency-Key header is required")
     inputs_by_role = body.inputs.model_dump()
     for role in ROLES:
         _uuid_or_422(inputs_by_role[role], "Invalid approved input id in calculation map")
@@ -444,9 +459,14 @@ def create_calculation(project_id: str, body: CalculationCreateRequest) -> dict[
     with _write_txn() as conn:
         _require_project(conn, project_id)
         try:
-            result_id = service.compute_and_persist(
-                conn, project_id=project_id, inputs_by_role=inputs_by_role, computed_by=_ACTOR,
+            outcome = service.request_calculation(
+                conn, project_id=project_id, inputs_by_role=inputs_by_role,
+                idempotency_key=key, computed_by=_ACTOR,
             )
+        except service.RequestKeyConflict:
+            raise HTTPException(
+                status_code=409, detail="Idempotency-Key already used for a different calculation"
+            ) from None
         except service.CalculationRequestError:
             raise HTTPException(
                 status_code=422, detail="Invalid calculation input set"
@@ -458,10 +478,11 @@ def create_calculation(project_id: str, body: CalculationCreateRequest) -> dict[
             ) from None
 
         bundle = projections.load_result_bundle(
-            conn, project_id=project_id, result_id=result_id
+            conn, project_id=project_id, result_id=outcome.result_id
         )
-        response = projections.operator_projection(bundle)
-    return response
+        result = projections.operator_projection(bundle)
+    response.status_code = 200 if outcome.replayed else 201
+    return result
 
 
 # ─────────────────────────────── read projections ───────────────────────────────

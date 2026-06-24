@@ -19,9 +19,11 @@ from knowledge.automation_roi.calculator import (  # noqa: E402
     COMPAT_RATE_CURRENCY,
     COMPAT_RATE_UNIT,
     FORMULA_VERSION,
+    ROLES,
     ResolvedInput,
     RoiInputShapeError,
     canonical_decimal,
+    canonical_request_digest,
     compute_automation_roi,
     formula_input_digest,
     input_compatibility_reason,
@@ -146,6 +148,63 @@ class TestFingerprints(unittest.TestCase):
             formula_input_digest(_inputs(rate="50")),
             formula_input_digest(_inputs(rate="60")),
         )
+
+
+class TestCanonicalRequestDigest(unittest.TestCase):
+    """The exact calculation-operation identity (v49 idempotency)."""
+
+    PID = "11111111-1111-1111-1111-111111111111"
+
+    def _map(self, **over):
+        base = {role: f"aci-{role}" for role in ROLES}
+        base.update(over)
+        return base
+
+    def test_stable_under_role_insertion_order(self):
+        ordered = {role: f"aci-{role}" for role in ROLES}
+        shuffled = {role: f"aci-{role}" for role in reversed(ROLES)}
+        self.assertEqual(
+            canonical_request_digest(self.PID, ordered),
+            canonical_request_digest(self.PID, shuffled),
+        )
+
+    def test_is_64_char_hex(self):
+        d = canonical_request_digest(self.PID, self._map())
+        self.assertEqual(len(d), 64)
+        int(d, 16)  # hex
+
+    def test_changing_one_input_id_changes_digest(self):
+        self.assertNotEqual(
+            canonical_request_digest(self.PID, self._map()),
+            canonical_request_digest(self.PID, self._map(periods_per_year="aci-OTHER")),
+        )
+
+    def test_changing_project_changes_digest(self):
+        other = "22222222-2222-2222-2222-222222222222"
+        self.assertNotEqual(
+            canonical_request_digest(self.PID, self._map()),
+            canonical_request_digest(other, self._map()),
+        )
+
+    def test_distinct_ids_same_values_differ(self):
+        # Two operations whose VALUES are identical but whose frozen-input ids
+        # differ must produce different operation identities — this is exactly the
+        # case the value-based formula_input_digest cannot separate, which is why it
+        # must never be a uniqueness key.
+        a = self._map()
+        b = {role: f"other-{role}" for role in ROLES}
+        self.assertNotEqual(
+            canonical_request_digest(self.PID, a),
+            canonical_request_digest(self.PID, b),
+        )
+
+    def test_requires_exactly_six_roles(self):
+        short = {role: f"aci-{role}" for role in list(ROLES)[:5]}
+        with self.assertRaises(ValueError):
+            canonical_request_digest(self.PID, short)
+        extra = self._map(seventh="aci-x")
+        with self.assertRaises(ValueError):
+            canonical_request_digest(self.PID, extra)
 
 
 class TestCanonicalDecimal(unittest.TestCase):

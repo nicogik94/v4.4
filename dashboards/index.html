@@ -4170,11 +4170,11 @@ async function apiGet(path) {
     return handleNetworkError(path, e);
   }
 }
-async function apiPost(path, body) {
+async function apiPost(path, body, extraHeaders) {
   try {
     const r = await fetch(apiUrl() + path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(extraHeaders || {}) },
       body: JSON.stringify(body || {}),
     });
     if (!r.ok) return handleApiError(path, r);
@@ -8641,18 +8641,20 @@ async function loadRoiResult(resultId) {
 }
 
 // One mutation at a time; confirm first; never auto-retry; always reload after.
-async function roiMutate({ path, body, confirmMsg }) {
+async function roiMutate({ path, body, confirmMsg, headers }) {
   if (state.roi.busy) return false;
   if (confirmMsg && !window.confirm(confirmMsg)) return false;
   state.roi.busy = true;
   renderMain();
   let ok = false;
   try {
-    await apiPost(path, body || {});
+    await apiPost(path, body || {}, headers);
     ok = true;
   } catch (e) {
     toast(classifyRoiError(e, 'mutation').title, 'err');
   } finally {
+    // Always reload authoritative workspace state after success OR failure, so the
+    // UI never diverges from the server (a lost/timed-out response self-heals).
     if (state.selectedProjectId) await loadAutomationRoiWorkspace(state.selectedProjectId);
     state.roi.busy = false;
     renderMain();
@@ -9196,9 +9198,15 @@ function wireAutomationRoiWorkspace() {
     if (!roiCalcMapComplete()) return;
     const inputs = {};
     ROI_ROLES.forEach(role => { inputs[role] = state.roi.calcMap[role]; });
+    // One fresh idempotency key per DELIBERATE Calculate click. Retries the operator
+    // initiates (re-click, or a browser reload that regenerates a key) are protected
+    // by the server's canonical request digest: the same six inputs replay the same
+    // result, so a new key never produces a duplicate calculation.
+    const idempotencyKey = crypto.randomUUID();
     await roiMutate({
       path: `/projects/${encodeURIComponent(pid)}/automation-roi/calculations`,
       body: { inputs },
+      headers: { 'Idempotency-Key': idempotencyKey },
       confirmMsg: 'Run the server-side calculation with the selected six inputs?',
     });
   });

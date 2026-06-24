@@ -73,6 +73,7 @@ def conn():
 def schema_b(conn):
     with pg.fresh_schema(conn) as s:
         pg.apply_v48(conn)
+        pg.apply_v49(conn)
         yield s
 
 
@@ -157,13 +158,22 @@ def _freeze_six(client, conn, pid, *, overrides=None):
     return inputs, facts
 
 
+def _calc(client, pid, inputs, *, key="op-key-1"):
+    """POST a calculation with a required Idempotency-Key header."""
+    return client.post(
+        f"/projects/{pid}/automation-roi/calculations",
+        json={"inputs": inputs},
+        headers={"Idempotency-Key": key},
+    )
+
+
 # ─────────────────────────────── happy path ───────────────────────────────
 
 def test_full_lifecycle_operator_and_client_reads(client, conn, schema_b):
     pid = _seed_project(conn)
     inputs, _facts = _freeze_six(client, conn, pid)
 
-    resp = client.post(f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs})
+    resp = _calc(client, pid, inputs)
     assert resp.status_code == 201, resp.text
     created = resp.json()
     rid = created["result_id"]
@@ -197,7 +207,7 @@ def test_full_lifecycle_operator_and_client_reads(client, conn, schema_b):
 def test_zero_one_time_cost_is_not_applicable(client, conn, schema_b):
     pid = _seed_project(conn, name="zero-cost")
     inputs, _ = _freeze_six(client, conn, pid, overrides={"one_time_implementation_cost": "0"})
-    resp = client.post(f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs})
+    resp = _calc(client, pid, inputs)
     assert resp.status_code == 201, resp.text
     rid = resp.json()["result_id"]
     cl = client.get(f"/projects/{pid}/automation-roi/calculations/{rid}/client").json()
@@ -217,7 +227,7 @@ def test_withdrawn_input_yields_blocked_client_view(client, conn, schema_b):
     )
     assert wd.status_code == 201, wd.text
 
-    resp = client.post(f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs})
+    resp = _calc(client, pid, inputs)
     assert resp.status_code == 201, resp.text
     rid = resp.json()["result_id"]
     assert resp.json()["status"] == "blocked"
@@ -358,10 +368,14 @@ def test_calculation_unknown_input_id_is_422_and_persists_nothing(client, conn, 
     inputs, _ = _freeze_six(client, conn, pid)
     bad = dict(inputs)
     bad["periods_per_year"] = "00000000-0000-0000-0000-0000000000ab"  # valid uuid, unknown row
-    resp = client.post(f"/projects/{pid}/automation-roi/calculations", json={"inputs": bad})
+    resp = _calc(client, pid, bad)
     assert resp.status_code == 422
     count = conn.execute("SELECT count(*) FROM calculation_result WHERE project_id = %s", (pid,)).fetchone()[0]
     assert count == 0
+    # The failed request leaves no reservation behind (claim rolled back).
+    reqs = conn.execute(
+        "SELECT count(*) FROM calculation_request WHERE project_id = %s", (pid,)).fetchone()[0]
+    assert reqs == 0
 
 
 def test_calculation_wrong_role_input_is_422(client, conn, schema_b):
@@ -371,7 +385,7 @@ def test_calculation_wrong_role_input_is_422(client, conn, schema_b):
     swapped["periods_per_year"], swapped["annual_recurring_cost"] = (
         inputs["annual_recurring_cost"], inputs["periods_per_year"],
     )
-    resp = client.post(f"/projects/{pid}/automation-roi/calculations", json={"inputs": swapped})
+    resp = _calc(client, pid, swapped)
     assert resp.status_code == 422
 
 
@@ -447,6 +461,72 @@ def test_freeze_rate_compatible_per_hour_unit_succeeds(client, conn, schema_b):
     assert resp.status_code == 201, resp.text
     assert resp.json()["input_role"] == "fully_loaded_rate_per_hour"
     assert _frozen_count(conn, pid) == before + 1
+
+
+# ─────────────────────────── idempotency (header contract) ───────────────────────────
+
+def test_calculation_missing_idempotency_key_is_422(client, conn, schema_b):
+    pid = _seed_project(conn, name="no-key")
+    inputs, _ = _freeze_six(client, conn, pid)
+    # No header at all.
+    resp = client.post(f"/projects/{pid}/automation-roi/calculations", json={"inputs": inputs})
+    assert resp.status_code == 422
+    # Empty/whitespace header.
+    resp = client.post(
+        f"/projects/{pid}/automation-roi/calculations",
+        json={"inputs": inputs}, headers={"Idempotency-Key": "   "})
+    assert resp.status_code == 422
+    count = conn.execute(
+        "SELECT count(*) FROM calculation_result WHERE project_id = %s", (pid,)).fetchone()[0]
+    assert count == 0
+
+
+def test_calculation_same_key_same_inputs_replays_200(client, conn, schema_b):
+    pid = _seed_project(conn, name="replay-same")
+    inputs, _ = _freeze_six(client, conn, pid)
+    first = _calc(client, pid, inputs, key="K1")
+    assert first.status_code == 201, first.text
+    second = _calc(client, pid, inputs, key="K1")
+    assert second.status_code == 200, second.text
+    assert second.json()["result_id"] == first.json()["result_id"]
+    count = conn.execute(
+        "SELECT count(*) FROM calculation_result WHERE project_id = %s", (pid,)).fetchone()[0]
+    assert count == 1
+
+
+def test_calculation_same_key_different_inputs_is_409(client, conn, schema_b):
+    pid = _seed_project(conn, name="key-conflict")
+    a, _ = _freeze_six(client, conn, pid)
+    b, _ = _freeze_six(client, conn, pid)  # a second, distinct six-input set
+    assert _calc(client, pid, a, key="K1").status_code == 201
+    conflict = _calc(client, pid, b, key="K1")
+    assert conflict.status_code == 409, conflict.text
+
+
+def test_calculation_different_key_same_inputs_replays_200(client, conn, schema_b):
+    pid = _seed_project(conn, name="replay-diffkey")
+    inputs, _ = _freeze_six(client, conn, pid)
+    first = _calc(client, pid, inputs, key="K1")
+    assert first.status_code == 201, first.text
+    second = _calc(client, pid, inputs, key="K2")
+    assert second.status_code == 200, second.text
+    assert second.json()["result_id"] == first.json()["result_id"]
+    count = conn.execute(
+        "SELECT count(*) FROM calculation_result WHERE project_id = %s", (pid,)).fetchone()[0]
+    assert count == 1
+
+
+def test_calculation_different_key_different_inputs_is_new_201(client, conn, schema_b):
+    pid = _seed_project(conn, name="new-op")
+    a, _ = _freeze_six(client, conn, pid)
+    b, _ = _freeze_six(client, conn, pid)
+    r1 = _calc(client, pid, a, key="K1")
+    r2 = _calc(client, pid, b, key="K2")
+    assert r1.status_code == 201 and r2.status_code == 201
+    assert r1.json()["result_id"] != r2.json()["result_id"]
+    count = conn.execute(
+        "SELECT count(*) FROM calculation_result WHERE project_id = %s", (pid,)).fetchone()[0]
+    assert count == 2
 
 
 def test_result_not_found_is_404(client, conn, schema_b):
