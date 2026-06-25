@@ -397,6 +397,21 @@ def automation_roi_enabled() -> bool:
     return _env_flag(AUTOMATION_ROI_ENABLED_ENV, default=False)
 
 
+# ═══ Agent Blueprint Studio (S1 — Draft-only Foundation) ═══
+# Off by default. When enabled, the additive Agent Blueprint Studio vertical
+# (operator-authored agent blueprints) becomes available. S1 is draft-only: it
+# makes no released / validated / high-quality / runtime-tested claim, deploys or
+# tests no external agent, and does not touch the Decision Engine. Studio persists
+# to the authoritative MAS PostgreSQL database when it is available and migrated;
+# otherwise it operates in an explicit, sticky EPHEMERAL DRAFT mode (single
+# process, restart-lost, non-shareable). When disabled, no Studio behavior runs.
+AGENT_BLUEPRINT_STUDIO_ENABLED_ENV = "MAS_AGENT_BLUEPRINT_STUDIO_ENABLED"
+
+
+def agent_blueprint_studio_enabled() -> bool:
+    return _env_flag(AGENT_BLUEPRINT_STUDIO_ENABLED_ENV, default=False)
+
+
 def _env_json_map(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:
