@@ -15,6 +15,7 @@ from research_evidence.models import SourceMetadataRevisionCreate  # noqa: E402
 from research_evidence.service import (  # noqa: E402
     ResearchEvidenceDisabled,
     create_source_metadata_revision,
+    withdraw_entity,
 )
 
 
@@ -54,4 +55,14 @@ def test_service_writes_fail_closed_when_disabled(monkeypatch):
                 project_id="00000000-0000-0000-0000-000000000001",
                 source_snapshot_id="00000000-0000-0000-0000-000000000002",
             ),
+        )
+
+    with pytest.raises(ResearchEvidenceDisabled):
+        withdraw_entity(
+            TripwireConn(),
+            project_id="00000000-0000-0000-0000-000000000001",
+            entity_type="claim_draft",
+            entity_id="00000000-0000-0000-0000-000000000002",
+            actor="operator",
+            reason="withdrawn",
         )

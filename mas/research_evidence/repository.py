@@ -164,17 +164,11 @@ def insert_event(
     if event_type not in EVENT_TYPES:
         raise SidecarIntegrityError(f"unknown event_type: {event_type}")
     _require_project(conn, project_id)
-    sequence = next_event_sequence(
-        conn,
-        project_id=project_id,
-        entity_type=entity_type,
-        entity_id=entity_id,
-    )
     row = conn.execute(
         """
         INSERT INTO research_evidence_event
-            (project_id, entity_type, entity_id, event_type, event_sequence, actor, details_json)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            (project_id, entity_type, entity_id, event_type, actor, details_json)
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
         RETURNING id::text, project_id::text, entity_type, entity_id::text,
                   event_type, event_sequence, occurred_at, actor, details_json
         """,
@@ -183,26 +177,11 @@ def insert_event(
             entity_type,
             entity_id,
             event_type,
-            sequence,
             actor,
             _json_object(details_json or {}),
         ),
     ).fetchone()
     return _event_from_row(row)
-
-
-def next_event_sequence(conn, *, project_id: str, entity_type: str, entity_id: str) -> int:
-    row = conn.execute(
-        """
-        SELECT COALESCE(MAX(event_sequence), 0) + 1
-        FROM research_evidence_event
-        WHERE project_id = %s AND entity_type = %s AND entity_id = %s
-        """,
-        (project_id, entity_type, entity_id),
-    ).fetchone()
-    return int(row[0])
-
-
 def list_source_metadata_revisions(
     conn,
     *,

@@ -15,6 +15,7 @@ from research_evidence.models import (  # noqa: E402
     ClaimDraftCreate,
     FactMetadataRevisionCreate,
     SourceMetadataRevisionCreate,
+    WithdrawalCommand,
 )
 
 
@@ -68,3 +69,15 @@ def test_claim_draft_is_isolated_from_sources_and_facts():
     assert "source_snapshot_id" not in fields
     assert "candidate_fact_revision_id" not in fields
     assert "citation_locator" not in fields
+
+
+def test_public_commands_reject_caller_supplied_event_sequence():
+    with pytest.raises(ValidationError):
+        WithdrawalCommand(
+            project_id="00000000-0000-0000-0000-000000000001",
+            entity_type="claim_draft",
+            entity_id="00000000-0000-0000-0000-000000000002",
+            actor="operator",
+            reason="withdrawn",
+            event_sequence=99,
+        )

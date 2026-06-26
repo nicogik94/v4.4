@@ -32,9 +32,10 @@ def conn():
 
 
 @pytest.fixture
-def schema_r51(conn):
+def schema_r52(conn):
     with pg.fresh_schema(conn) as s:
         pg.apply_v51_research(conn)
+        pg.apply_v52_research(conn)
         yield s
 
 
@@ -66,7 +67,7 @@ def _seed_snapshot_fact(conn, project_id: str):
     return snapshot_id, fact_id
 
 
-def test_source_metadata_requires_existing_same_project_snapshot(conn, schema_r51):
+def test_source_metadata_requires_existing_same_project_snapshot(conn, schema_r52):
     project_a = pg.insert_project(conn, name="project-a")
     project_b = pg.insert_project(conn, name="project-b")
     conn.commit()
@@ -82,7 +83,7 @@ def test_source_metadata_requires_existing_same_project_snapshot(conn, schema_r5
         )
 
 
-def test_fact_metadata_requires_existing_same_project_fact(conn, schema_r51):
+def test_fact_metadata_requires_existing_same_project_fact(conn, schema_r52):
     project_a = pg.insert_project(conn, name="project-a")
     project_b = pg.insert_project(conn, name="project-b")
     conn.commit()
@@ -98,7 +99,7 @@ def test_fact_metadata_requires_existing_same_project_fact(conn, schema_r51):
         )
 
 
-def test_service_source_metadata_creates_event_in_same_transaction(conn, schema_r51):
+def test_service_source_metadata_creates_event_in_same_transaction(conn, schema_r52):
     project_id = pg.insert_project(conn, name="source-service")
     conn.commit()
     snapshot_id, _fact_id = _seed_snapshot_fact(conn, project_id)
@@ -128,7 +129,49 @@ def test_service_source_metadata_creates_event_in_same_transaction(conn, schema_
     assert repo.list_events(conn, project_id=project_id) == []
 
 
-def test_fact_metadata_corrections_create_superseding_rows(conn, schema_r51):
+def test_source_metadata_correction_cross_links_both_events(conn, schema_r52):
+    project_id = pg.insert_project(conn, name="source-correction")
+    conn.commit()
+    snapshot_id, _fact_id = _seed_snapshot_fact(conn, project_id)
+    first = service.create_source_metadata_revision(
+        conn,
+        SourceMetadataRevisionCreate(
+            project_id=project_id,
+            source_snapshot_id=snapshot_id,
+            citation_label="original",
+            created_by="operator",
+        ),
+    )
+    second = service.create_source_metadata_revision(
+        conn,
+        SourceMetadataRevisionCreate(
+            project_id=project_id,
+            source_snapshot_id=snapshot_id,
+            citation_label="corrected",
+            supersedes_metadata_revision_id=first.id,
+            created_by="operator",
+        ),
+    )
+
+    first_events = repo.list_events(
+        conn,
+        project_id=project_id,
+        entity_type="source_metadata_revision",
+        entity_id=first.id,
+    )
+    second_events = repo.list_events(
+        conn,
+        project_id=project_id,
+        entity_type="source_metadata_revision",
+        entity_id=second.id,
+    )
+    assert [event.event_type for event in first_events] == ["created", "superseded"]
+    assert first_events[1].details_json == {"superseded_by_entity_id": second.id}
+    assert [event.event_type for event in second_events] == ["correction_recorded"]
+    assert second_events[0].details_json["supersedes_entity_id"] == first.id
+
+
+def test_fact_metadata_corrections_create_superseding_rows(conn, schema_r52):
     project_id = pg.insert_project(conn, name="fact-correction")
     conn.commit()
     _snapshot_id, fact_id = _seed_snapshot_fact(conn, project_id)
@@ -163,11 +206,25 @@ def test_fact_metadata_corrections_create_superseding_rows(conn, schema_r51):
     assert [r.id for r in revisions] == [first.id, second.id]
     assert revisions[0].stable_fact_key == "metric-a"
     assert revisions[1].supersedes_metadata_revision_id == first.id
-    events = repo.list_events(conn, project_id=project_id)
-    assert [e.event_type for e in events] == ["created", "correction_recorded"]
+    first_events = repo.list_events(
+        conn,
+        project_id=project_id,
+        entity_type="fact_metadata_revision",
+        entity_id=first.id,
+    )
+    second_events = repo.list_events(
+        conn,
+        project_id=project_id,
+        entity_type="fact_metadata_revision",
+        entity_id=second.id,
+    )
+    assert [e.event_type for e in first_events] == ["created", "superseded"]
+    assert first_events[1].details_json == {"superseded_by_entity_id": second.id}
+    assert [e.event_type for e in second_events] == ["correction_recorded"]
+    assert second_events[0].details_json["supersedes_entity_id"] == first.id
 
 
-def test_claims_remain_isolated_and_events_are_sequenced(conn, schema_r51):
+def test_claims_remain_isolated_and_events_are_sequenced(conn, schema_r52):
     project_id = pg.insert_project(conn, name="claim-service")
     conn.commit()
 
@@ -180,14 +237,33 @@ def test_claims_remain_isolated_and_events_are_sequenced(conn, schema_r51):
             created_by="operator",
         ),
     )
-    repo.insert_event(
+    before = conn.execute(
+        """
+        SELECT project_id::text, claim_text, claim_category, supersedes_claim_id::text,
+               created_by, created_at
+        FROM research_claim_draft
+        WHERE id = %s
+        """,
+        (first.id,),
+    ).fetchone()
+    service.withdraw_entity(
         conn,
         project_id=project_id,
         entity_type="claim_draft",
         entity_id=first.id,
-        event_type="withdrawn",
         actor="operator",
+        reason="retracted by operator",
     )
+    after = conn.execute(
+        """
+        SELECT project_id::text, claim_text, claim_category, supersedes_claim_id::text,
+               created_by, created_at
+        FROM research_claim_draft
+        WHERE id = %s
+        """,
+        (first.id,),
+    ).fetchone()
+    assert after == before
     second = service.create_claim_draft(
         conn,
         ClaimDraftCreate(
@@ -209,5 +285,15 @@ def test_claims_remain_isolated_and_events_are_sequenced(conn, schema_r51):
         entity_type="claim_draft",
         entity_id=first.id,
     )
-    assert [e.event_sequence for e in first_events] == [1, 2]
-    assert [e.event_type for e in first_events] == ["created", "withdrawn"]
+    assert [e.event_sequence for e in first_events] == [1, 2, 3]
+    assert [e.event_type for e in first_events] == ["created", "withdrawn", "superseded"]
+    assert first_events[1].details_json == {"reason": "retracted by operator"}
+    assert first_events[2].details_json == {"superseded_by_entity_id": second.id}
+    second_events = repo.list_events(
+        conn,
+        project_id=project_id,
+        entity_type="claim_draft",
+        entity_id=second.id,
+    )
+    assert [event.event_type for event in second_events] == ["correction_recorded"]
+    assert second_events[0].details_json == {"supersedes_entity_id": first.id}

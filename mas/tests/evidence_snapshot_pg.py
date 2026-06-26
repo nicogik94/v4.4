@@ -29,6 +29,7 @@ V47_SQL = SQL_DIR / "v47_evidence_snapshot_foundation.sql"
 V48_SQL = SQL_DIR / "v48_automation_roi_foundation.sql"
 V49_SQL = SQL_DIR / "v49_automation_roi_calculation_idempotency.sql"
 V51_RESEARCH_SQL = SQL_DIR / "v51_research_evidence_sidecar_foundation.sql"
+V52_RESEARCH_SQL = SQL_DIR / "v52_research_evidence_audit_integrity.sql"
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -156,6 +157,13 @@ def apply_v51_research(conn) -> None:
     """(Re)apply only the R1.1 research sidecar migration into the current schema."""
     prior = _begin_autocommit(conn)
     _run_script(conn, V51_RESEARCH_SQL)
+    _restore_autocommit(conn, prior)
+
+
+def apply_v52_research(conn) -> None:
+    """(Re)apply only the v52 research audit-integrity migration."""
+    prior = _begin_autocommit(conn)
+    _run_script(conn, V52_RESEARCH_SQL)
     _restore_autocommit(conn, prior)
 
 

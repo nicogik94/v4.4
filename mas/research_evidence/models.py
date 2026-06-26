@@ -76,16 +76,21 @@ class ClaimDraftRecord(ClaimDraftCreate):
     created_at: datetime
 
 
-class EvidenceEventCreate(_StrictModel):
+class EvidenceEventRecord(_StrictModel):
+    id: str
     project_id: str
     entity_type: str
     entity_id: str
     event_type: str
     event_sequence: int
+    occurred_at: datetime
     actor: str = ""
     details_json: dict[str, Any] = Field(default_factory=dict)
 
 
-class EvidenceEventRecord(EvidenceEventCreate):
-    id: str
-    occurred_at: datetime
+class WithdrawalCommand(_StrictModel):
+    project_id: str
+    entity_type: str
+    entity_id: str
+    actor: str = ""
+    reason: str = ""
