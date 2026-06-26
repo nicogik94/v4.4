@@ -384,6 +384,19 @@ def evidence_snapshot_enabled() -> bool:
     return _env_flag(EVIDENCE_SNAPSHOT_ENABLED_ENV, default=False)
 
 
+# ═══ Research Evidence Metadata Sidecar (R1.1) ═══
+# Off by default. When enabled, operator-led service writes may attach
+# append-only, operator-declared metadata sidecars to existing Slice A
+# source_snapshot and candidate_fact_revision rows. It does not create a
+# parallel evidence store, alter source capture, or affect calculations, reports,
+# scenarios, prompts, retrieval, uploads, or ProjectState.
+RESEARCH_EVIDENCE_ENABLED_ENV = "MAS_RESEARCH_EVIDENCE_ENABLED"
+
+
+def research_evidence_enabled() -> bool:
+    return _env_flag(RESEARCH_EVIDENCE_ENABLED_ENV, default=False)
+
+
 # ═══ Automation ROI Foundation (Slice B) ═══
 # Off by default. When enabled, Slice B turns approved Slice A evidence into
 # deterministic Automation ROI results, persisted in the same authoritative MAS
