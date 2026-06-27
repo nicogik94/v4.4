@@ -384,6 +384,19 @@ def evidence_snapshot_enabled() -> bool:
     return _env_flag(EVIDENCE_SNAPSHOT_ENABLED_ENV, default=False)
 
 
+# ═══ Research Evidence Metadata Sidecar (R1.1) ═══
+# Off by default. When enabled, operator-led service writes may attach
+# append-only, operator-declared metadata sidecars to existing Slice A
+# source_snapshot and candidate_fact_revision rows. It does not create a
+# parallel evidence store, alter source capture, or affect calculations, reports,
+# scenarios, prompts, retrieval, uploads, or ProjectState.
+RESEARCH_EVIDENCE_ENABLED_ENV = "MAS_RESEARCH_EVIDENCE_ENABLED"
+
+
+def research_evidence_enabled() -> bool:
+    return _env_flag(RESEARCH_EVIDENCE_ENABLED_ENV, default=False)
+
+
 # ═══ Automation ROI Foundation (Slice B) ═══
 # Off by default. When enabled, Slice B turns approved Slice A evidence into
 # deterministic Automation ROI results, persisted in the same authoritative MAS
@@ -395,6 +408,21 @@ AUTOMATION_ROI_ENABLED_ENV = "MAS_AUTOMATION_ROI_ENABLED"
 
 def automation_roi_enabled() -> bool:
     return _env_flag(AUTOMATION_ROI_ENABLED_ENV, default=False)
+
+
+# ═══ Agent Blueprint Studio (S1 — Draft-only Foundation) ═══
+# Off by default. When enabled, the additive Agent Blueprint Studio vertical
+# (operator-authored agent blueprints) becomes available. S1 is draft-only: it
+# makes no released / validated / high-quality / runtime-tested claim, deploys or
+# tests no external agent, and does not touch the Decision Engine. Studio persists
+# to the authoritative MAS PostgreSQL database when it is available and migrated;
+# otherwise it operates in an explicit, sticky EPHEMERAL DRAFT mode (single
+# process, restart-lost, non-shareable). When disabled, no Studio behavior runs.
+AGENT_BLUEPRINT_STUDIO_ENABLED_ENV = "MAS_AGENT_BLUEPRINT_STUDIO_ENABLED"
+
+
+def agent_blueprint_studio_enabled() -> bool:
+    return _env_flag(AGENT_BLUEPRINT_STUDIO_ENABLED_ENV, default=False)
 
 
 def _env_json_map(name: str) -> dict[str, str]:
