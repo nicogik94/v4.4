@@ -203,9 +203,12 @@ def test_fact_metadata_corrections_create_superseding_rows(conn, schema_r52):
         project_id=project_id,
         candidate_fact_revision_id=fact_id,
     )
-    assert [r.id for r in revisions] == [first.id, second.id]
-    assert revisions[0].stable_fact_key == "metric-a"
-    assert revisions[1].supersedes_metadata_revision_id == first.id
+    assert {r.id for r in revisions} == {first.id, second.id}
+
+    by_id = {revision.id: revision for revision in revisions}
+    assert by_id[first.id].stable_fact_key == "metric-a"
+    assert by_id[first.id].supersedes_metadata_revision_id is None
+    assert by_id[second.id].supersedes_metadata_revision_id == first.id
     first_events = repo.list_events(
         conn,
         project_id=project_id,
