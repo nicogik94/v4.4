@@ -110,6 +110,69 @@ def test_v52_rejects_partial_state(conn, schema_v52):
         pg.apply_v52_research(conn)
 
 
+@pytest.mark.parametrize(
+    ("constraint_name", "replacement", "message"),
+    [
+        (
+            "fk_reesa_project",
+            """
+            ALTER TABLE research_evidence_event_sequence_allocator
+            ADD CONSTRAINT fk_reesa_project
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            """,
+            "divergent allocator foreign key",
+        ),
+        (
+            "ck_reesa_entity_type",
+            """
+            ALTER TABLE research_evidence_event_sequence_allocator
+            ADD CONSTRAINT ck_reesa_entity_type CHECK (
+                entity_type IN (
+                    'source_metadata_revision',
+                    'fact_metadata_revision',
+                    'claim_draft',
+                    'unexpected_type'
+                )
+            )
+            """,
+            "divergent allocator entity-type check",
+        ),
+        (
+            "ck_reesa_last_sequence",
+            """
+            ALTER TABLE research_evidence_event_sequence_allocator
+            ADD CONSTRAINT ck_reesa_last_sequence CHECK (last_sequence >= 0)
+            """,
+            "divergent allocator last-sequence check",
+        ),
+        (
+            "research_evidence_event_sequence_allocator_pkey",
+            """
+            ALTER TABLE research_evidence_event_sequence_allocator
+            ADD CONSTRAINT research_evidence_event_sequence_allocator_pkey
+            PRIMARY KEY (project_id, entity_type)
+            """,
+            "divergent allocator primary key",
+        ),
+    ],
+    ids=("foreign-key", "entity-type-check", "last-sequence-check", "primary-key"),
+)
+def test_v52_reapply_rejects_altered_allocator_constraint(
+    conn, schema_v52, constraint_name, replacement, message
+):
+    conn.execute(
+        f"""
+        ALTER TABLE research_evidence_event_sequence_allocator
+        DROP CONSTRAINT {constraint_name}
+        """
+    )
+    conn.execute(replacement)
+    conn.commit()
+
+    with pytest.raises(Exception, match=message):
+        pg.apply_v52_research(conn)
+
+
 def test_allocator_initializes_from_existing_maximum(conn):
     with pg.fresh_schema(conn):
         pg.apply_v51_research(conn)

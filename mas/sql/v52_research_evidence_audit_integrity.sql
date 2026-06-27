@@ -187,6 +187,127 @@ BEGIN
 
         IF NOT EXISTS (
             SELECT 1
+            FROM pg_constraint con
+            WHERE con.connamespace = current_schema()::regnamespace
+              AND con.conname = 'fk_reesa_project'
+              AND con.contype = 'f'
+              AND con.conrelid =
+                  'research_evidence_event_sequence_allocator'::regclass
+              AND con.confrelid = 'projects'::regclass
+              AND con.conkey = ARRAY[(
+                  SELECT attnum
+                  FROM pg_attribute
+                  WHERE attrelid =
+                      'research_evidence_event_sequence_allocator'::regclass
+                    AND attname = 'project_id'
+                    AND NOT attisdropped
+              )]::smallint[]
+              AND con.confkey = ARRAY[(
+                  SELECT attnum
+                  FROM pg_attribute
+                  WHERE attrelid = 'projects'::regclass
+                    AND attname = 'id'
+                    AND NOT attisdropped
+              )]::smallint[]
+              AND con.confdeltype = 'r'
+              AND con.convalidated
+        ) THEN
+            RAISE EXCEPTION 'v52 contract violation: divergent allocator foreign key'
+                USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint con
+            WHERE con.connamespace = current_schema()::regnamespace
+              AND con.conname = 'ck_reesa_entity_type'
+              AND con.contype = 'c'
+              AND con.conrelid =
+                  'research_evidence_event_sequence_allocator'::regclass
+              AND con.convalidated
+              AND replace(
+                  translate(
+                      regexp_replace(
+                          pg_get_expr(con.conbin, con.conrelid, true),
+                          '[[:space:]]+', '', 'g'
+                      ),
+                      '()', ''
+                  ),
+                  '::text', ''
+              ) =
+                  'entity_type=ANYARRAY['
+                  || '''source_metadata_revision'','
+                  || '''fact_metadata_revision'','
+                  || '''claim_draft'']'
+        ) THEN
+            RAISE EXCEPTION 'v52 contract violation: divergent allocator entity-type check'
+                USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint con
+            WHERE con.connamespace = current_schema()::regnamespace
+              AND con.conname = 'ck_reesa_last_sequence'
+              AND con.contype = 'c'
+              AND con.conrelid =
+                  'research_evidence_event_sequence_allocator'::regclass
+              AND con.convalidated
+              AND translate(
+                  regexp_replace(
+                      pg_get_expr(con.conbin, con.conrelid, true),
+                      '[[:space:]]+', '', 'g'
+                  ),
+                  '()', ''
+              ) = 'last_sequence>=1'
+        ) THEN
+            RAISE EXCEPTION 'v52 contract violation: divergent allocator last-sequence check'
+                USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint con
+            WHERE con.connamespace = current_schema()::regnamespace
+              AND con.conname =
+                  'research_evidence_event_sequence_allocator_pkey'
+              AND con.contype = 'p'
+              AND con.conrelid =
+                  'research_evidence_event_sequence_allocator'::regclass
+              AND con.conkey = ARRAY[
+                  (
+                      SELECT attnum
+                      FROM pg_attribute
+                      WHERE attrelid =
+                          'research_evidence_event_sequence_allocator'::regclass
+                        AND attname = 'project_id'
+                        AND NOT attisdropped
+                  ),
+                  (
+                      SELECT attnum
+                      FROM pg_attribute
+                      WHERE attrelid =
+                          'research_evidence_event_sequence_allocator'::regclass
+                        AND attname = 'entity_type'
+                        AND NOT attisdropped
+                  ),
+                  (
+                      SELECT attnum
+                      FROM pg_attribute
+                      WHERE attrelid =
+                          'research_evidence_event_sequence_allocator'::regclass
+                        AND attname = 'entity_id'
+                        AND NOT attisdropped
+                  )
+              ]::smallint[]
+              AND con.convalidated
+        ) THEN
+            RAISE EXCEPTION 'v52 contract violation: divergent allocator primary key'
+                USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
             FROM pg_trigger t
             JOIN pg_class c ON c.oid = t.tgrelid
             JOIN pg_namespace n ON n.oid = c.relnamespace

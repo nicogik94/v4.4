@@ -54,6 +54,38 @@ def test_v52_is_bounded_to_allocator_function_and_trigger():
         assert forbidden not in V52
 
 
+def test_v52_validates_allocator_constraint_definitions_from_catalogs():
+    for required in (
+        "FROM pg_constraint con",
+        "FROM pg_attribute",
+        "con.contype = 'f'",
+        "con.confrelid = 'projects'::regclass",
+        "con.conkey = ARRAY[",
+        "con.confkey = ARRAY[",
+        "con.confdeltype = 'r'",
+        "pg_get_expr(con.conbin, con.conrelid, true)",
+        "con.contype = 'c'",
+        "source_metadata_revision",
+        "fact_metadata_revision",
+        "claim_draft",
+        "last_sequence>=1",
+        "con.contype = 'p'",
+        "'project_id'",
+        "'entity_type'",
+        "'entity_id'",
+    ):
+        assert required in V52
+    assert V52.count("USING ERRCODE = 'invalid_schema_definition'") >= 4
+
+
+def test_withdrawal_model_declares_required_nonblank_reason():
+    withdrawal = MODELS.split("class WithdrawalCommand", 1)[1]
+    assert "reason: str\n" in withdrawal
+    assert 'field_validator("reason")' in withdrawal
+    assert "value.strip()" in withdrawal
+    assert "withdrawal reason must not be blank" in withdrawal
+
+
 def test_event_sequence_is_database_allocated_only():
     insert_event = REPOSITORY.split("def insert_event(", 1)[1].split(
         "def list_source_metadata_revisions(", 1

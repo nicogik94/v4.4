@@ -93,4 +93,12 @@ class WithdrawalCommand(_StrictModel):
     entity_type: str
     entity_id: str
     actor: str = ""
-    reason: str = ""
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def _require_meaningful_reason(cls, value: str) -> str:
+        reason = value.strip()
+        if not reason:
+            raise ValueError("withdrawal reason must not be blank")
+        return reason

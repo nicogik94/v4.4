@@ -17,6 +17,7 @@ from research_evidence.models import (  # noqa: E402
     SourceMetadataRevisionCreate,
     WithdrawalCommand,
 )
+from research_evidence.service import withdraw_entity  # noqa: E402
 
 
 def test_source_metadata_timestamps_must_be_timezone_aware():
@@ -80,4 +81,36 @@ def test_public_commands_reject_caller_supplied_event_sequence():
             actor="operator",
             reason="withdrawn",
             event_sequence=99,
+        )
+
+
+@pytest.mark.parametrize("reason", [None, "", " ", "\t\n"])
+def test_withdrawal_command_requires_meaningful_reason(reason):
+    values = {
+        "project_id": "00000000-0000-0000-0000-000000000001",
+        "entity_type": "claim_draft",
+        "entity_id": "00000000-0000-0000-0000-000000000002",
+    }
+    if reason is not None:
+        values["reason"] = reason
+    with pytest.raises(ValidationError):
+        WithdrawalCommand(**values)
+
+
+def test_invalid_withdrawal_reason_does_not_touch_connection(monkeypatch):
+    class TripwireConn:
+        def __getattribute__(self, name):
+            if name.startswith("__"):
+                return super().__getattribute__(name)
+            raise AssertionError("invalid withdrawal must not inspect or write the connection")
+
+    monkeypatch.setenv("MAS_RESEARCH_EVIDENCE_ENABLED", "true")
+    with pytest.raises(ValidationError):
+        withdraw_entity(
+            TripwireConn(),
+            project_id="00000000-0000-0000-0000-000000000001",
+            entity_type="claim_draft",
+            entity_id="00000000-0000-0000-0000-000000000002",
+            actor="operator",
+            reason="   ",
         )
