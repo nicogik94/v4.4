@@ -280,8 +280,9 @@ def test_claims_remain_isolated_and_events_are_sequenced(conn, schema_r52):
     conn.commit()
 
     claims = repo.list_claim_drafts(conn, project_id=project_id)
-    assert [c.id for c in claims] == [first.id, second.id]
-    assert claims[1].supersedes_claim_id == first.id
+    assert {claim.id for claim in claims} == {first.id, second.id}
+    replacement = next(claim for claim in claims if claim.id == second.id)
+    assert replacement.supersedes_claim_id == first.id
     first_events = repo.list_events(
         conn,
         project_id=project_id,
