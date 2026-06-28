@@ -32,6 +32,9 @@ V51_RESEARCH_SQL = SQL_DIR / "v51_research_evidence_sidecar_foundation.sql"
 V52_RESEARCH_SQL = SQL_DIR / "v52_research_evidence_audit_integrity.sql"
 V53_RESEARCH_INTAKE_SQL = SQL_DIR / "v53_research_evidence_intake_foundation.sql"
 V54_RESEARCH_REVIEW_SQL = SQL_DIR / "v54_research_evidence_review_foundation.sql"
+V55_RESEARCH_FRESHNESS_SQL = (
+    SQL_DIR / "v55_research_evidence_freshness_foundation.sql"
+)
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -180,6 +183,13 @@ def apply_v54_research_review(conn) -> None:
     """(Re)apply only the v54 controlled item-review migration."""
     prior = _begin_autocommit(conn)
     _run_script(conn, V54_RESEARCH_REVIEW_SQL)
+    _restore_autocommit(conn, prior)
+
+
+def apply_v55_research_freshness(conn) -> None:
+    """(Re)apply only the v55 item freshness/drift migration."""
+    prior = _begin_autocommit(conn)
+    _run_script(conn, V55_RESEARCH_FRESHNESS_SQL)
     _restore_autocommit(conn, prior)
 
 
