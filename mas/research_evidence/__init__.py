@@ -1,7 +1,8 @@
-"""Research Evidence metadata, intake, review, freshness, and claim support.
+"""Research Evidence metadata, assessments, and consumer-input bindings.
 
 This package attaches operator-declared metadata and draft-only intake groupings
-to existing Slice A provenance and records item- and pair-scoped assessments.
+to existing Slice A provenance and records item-, pair-, and consumer-input
+scoped assessments.
 It creates no parallel blob, snapshot, fact, retention, calculation, report,
 scenario, prompt, retrieval, or downstream-use system.
 """
@@ -9,6 +10,29 @@ from __future__ import annotations
 
 import config
 
+from .binding_models import (
+    BindingReviewStatus,
+    ConsumerContract,
+    ConsumerDisposition,
+    ResearchEvidenceConsumerInputBindingCreate,
+    ResearchEvidenceConsumerInputBindingRecord,
+)
+from .binding_service import (
+    ResearchEvidenceBindingDisabled,
+    ResearchEvidenceBindingTransactionError,
+    binding_availability_status,
+    binding_consumer_disposition,
+    binding_drift_status,
+    binding_evidence_linkage,
+    binding_freshness_status,
+    binding_lineage_is_current,
+    binding_locator_resolution,
+    binding_retention_basis,
+    binding_review_status,
+    binding_semantic_relationship,
+    get_effective_consumer_input_binding,
+    record_consumer_input_binding,
+)
 from .claim_support_models import (
     EvidenceLinkage,
     LocatorResolution,
@@ -78,6 +102,7 @@ FRESHNESS_SCHEMA_MIGRATION = "v55_research_evidence_freshness_foundation.sql"
 CLAIM_SUPPORT_SCHEMA_MIGRATION = (
     "v56_research_evidence_claim_support_foundation.sql"
 )
+BINDING_SCHEMA_MIGRATION = "v57_research_evidence_binding_foundation.sql"
 
 
 def is_enabled() -> bool:
@@ -85,7 +110,11 @@ def is_enabled() -> bool:
 
 
 __all__ = [
+    "BINDING_SCHEMA_MIGRATION",
+    "BindingReviewStatus",
     "CLAIM_SUPPORT_SCHEMA_MIGRATION",
+    "ConsumerContract",
+    "ConsumerDisposition",
     "DriftStatus",
     "EvidenceLinkage",
     "FRESHNESS_SCHEMA_MIGRATION",
@@ -99,6 +128,10 @@ __all__ = [
     "ResearchEvidenceClaimSupportAssessmentRecord",
     "ResearchEvidenceClaimSupportDisabled",
     "ResearchEvidenceClaimSupportTransactionError",
+    "ResearchEvidenceConsumerInputBindingCreate",
+    "ResearchEvidenceConsumerInputBindingRecord",
+    "ResearchEvidenceBindingDisabled",
+    "ResearchEvidenceBindingTransactionError",
     "ResearchEvidenceIntakeCreate",
     "ResearchEvidenceFreshnessDisabled",
     "ResearchEvidenceFreshnessNotApplicable",
@@ -126,14 +159,26 @@ __all__ = [
     "claim_support_evidence_review_decision",
     "claim_support_locator_resolution",
     "claim_support_semantic_relationship",
+    "binding_availability_status",
+    "binding_consumer_disposition",
+    "binding_drift_status",
+    "binding_evidence_linkage",
+    "binding_freshness_status",
+    "binding_lineage_is_current",
+    "binding_locator_resolution",
+    "binding_retention_basis",
+    "binding_review_status",
+    "binding_semantic_relationship",
     "create_intake",
     "create_intake_item",
     "get_effective_claim_support_assessment",
+    "get_effective_consumer_input_binding",
     "item_freshness_status_as_of",
     "item_is_eligible_for_future_use",
     "is_enabled",
     "list_effective_claim_support_assessments",
     "record_claim_support_assessment",
+    "record_consumer_input_binding",
     "record_item_review_decision",
     "record_item_freshness_assessment",
 ]

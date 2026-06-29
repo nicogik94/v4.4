@@ -38,6 +38,9 @@ V55_RESEARCH_FRESHNESS_SQL = (
 V56_RESEARCH_CLAIM_SUPPORT_SQL = (
     SQL_DIR / "v56_research_evidence_claim_support_foundation.sql"
 )
+V57_RESEARCH_BINDING_SQL = (
+    SQL_DIR / "v57_research_evidence_binding_foundation.sql"
+)
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -200,6 +203,13 @@ def apply_v56_research_claim_support(conn) -> None:
     """(Re)apply only the v56 pair-scoped claim-support migration."""
     prior = _begin_autocommit(conn)
     _run_script(conn, V56_RESEARCH_CLAIM_SUPPORT_SQL)
+    _restore_autocommit(conn, prior)
+
+
+def apply_v57_research_binding(conn) -> None:
+    """(Re)apply only the v57 consumer-input binding migration."""
+    prior = _begin_autocommit(conn)
+    _run_script(conn, V57_RESEARCH_BINDING_SQL)
     _restore_autocommit(conn, prior)
 
 
