@@ -17,6 +17,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
 
+from psycopg import sql
+
 from .validation import ValidatedFact
 
 # Retention event types that block future *use* via the availability resolver.
@@ -271,6 +273,56 @@ def insert_retention_event(
 # Availability is derived, never stored. legal_hold never affects availability;
 # only tombstone/redact do.
 
+
+@dataclass(frozen=True)
+class FactAvailabilitySql:
+    """Parameterized canonical fact-availability expression.
+
+    ``expression`` is safe to compose only because callers must provide a
+    psycopg ``Composable`` fact reference. Runtime values remain in ``params``.
+    """
+
+    expression: sql.Composable
+    params: tuple[Any, ...]
+
+
+def fact_availability_sql(
+    fact_id_expression: sql.Composable,
+    *,
+    fact_id_params: tuple[Any, ...] = (),
+) -> FactAvailabilitySql:
+    """Return canonical fact availability as a composable SQL expression."""
+    if not isinstance(
+        fact_id_expression, (sql.Identifier, sql.Placeholder)
+    ):
+        raise TypeError(
+            "fact_id_expression must be a psycopg Identifier or Placeholder"
+        )
+    return FactAvailabilitySql(
+        expression=sql.SQL(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM candidate_fact_revision f
+                JOIN source_snapshot s ON s.id = f.source_snapshot_id
+                JOIN evidence_retention_event e
+                  ON e.event_type = ANY({blocking_event_types})
+                 AND (
+                       e.candidate_fact_revision_id = f.id
+                    OR e.source_snapshot_id = s.id
+                    OR e.source_blob_id = s.source_blob_id
+                 )
+                WHERE f.id = {fact_id}
+            )
+            """
+        ).format(
+            blocking_event_types=sql.Placeholder(),
+            fact_id=fact_id_expression,
+        ),
+        params=(list(_BLOCKING_EVENT_TYPES), *fact_id_params),
+    )
+
+
 def snapshot_available(conn, snapshot_id: str) -> bool:
     """A snapshot is unavailable when it, or its blob, is tombstoned or redacted."""
     row = conn.execute(
@@ -291,22 +343,12 @@ def snapshot_available(conn, snapshot_id: str) -> bool:
 
 def fact_available(conn, fact_id: str) -> bool:
     """A fact is unavailable when the fact, its snapshot, or its blob is tombstoned or redacted."""
+    component = fact_availability_sql(
+        sql.Placeholder(),
+        fact_id_params=(fact_id,),
+    )
     row = conn.execute(
-        """
-        SELECT NOT EXISTS (
-            SELECT 1
-            FROM candidate_fact_revision f
-            JOIN source_snapshot s ON s.id = f.source_snapshot_id
-            JOIN evidence_retention_event e
-              ON e.event_type = ANY(%s)
-             AND (
-                   e.candidate_fact_revision_id = f.id
-                OR e.source_snapshot_id = s.id
-                OR e.source_blob_id = s.source_blob_id
-             )
-            WHERE f.id = %s
-        )
-        """,
-        (list(_BLOCKING_EVENT_TYPES), fact_id),
+        sql.SQL("SELECT {}").format(component.expression),
+        component.params,
     ).fetchone()
     return bool(row[0])
