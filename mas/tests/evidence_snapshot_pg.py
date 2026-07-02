@@ -41,6 +41,10 @@ V56_RESEARCH_CLAIM_SUPPORT_SQL = (
 V57_RESEARCH_BINDING_SQL = (
     SQL_DIR / "v57_research_evidence_binding_foundation.sql"
 )
+V58_RESEARCH_SCENARIO_INPUT_EVALUATION_SQL = (
+    SQL_DIR
+    / "v58_research_evidence_scenario_input_evaluation_foundation.sql"
+)
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -211,6 +215,18 @@ def apply_v57_research_binding(conn) -> None:
     prior = _begin_autocommit(conn)
     _run_script(conn, V57_RESEARCH_BINDING_SQL)
     _restore_autocommit(conn, prior)
+
+
+def apply_v58_research_scenario_input_evaluation(conn) -> None:
+    """(Re)apply only the v58 scenario-input evaluation migration."""
+    prior = _begin_autocommit(conn)
+    try:
+        _run_script(conn, V58_RESEARCH_SCENARIO_INPUT_EVALUATION_SQL)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _restore_autocommit(conn, prior)
 
 
 def slice_b_tables_present(conn, schema: str) -> int:

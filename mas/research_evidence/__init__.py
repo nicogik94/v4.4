@@ -94,6 +94,34 @@ from .review_service import (
     item_is_eligible_for_future_use,
     record_item_review_decision,
 )
+from .scenario_input_evaluation_models import (
+    DependenceDeclaration,
+    EVALUATION_POLICY_CANONICAL_JSON,
+    EVALUATION_POLICY_FINGERPRINT,
+    EVALUATION_POLICY_IDENTIFIER,
+    EVALUATION_POLICY_PARAMETERS,
+    EVALUATION_POLICY_VERSION,
+    EVALUATOR_VERSION,
+    OpaqueHypothesisDescriptor,
+    REASON_ORDER,
+    STATUS_PRECEDENCE,
+    ScenarioInputBindingSelection,
+    ScenarioInputEvaluationInputRecord,
+    ScenarioInputEvaluationRecord,
+    ScenarioInputEvaluationRequest,
+    ScenarioInputEvaluationStatus,
+    ScenarioInputManifestItemRecord,
+    ScenarioInputManifestRecord,
+    ScenarioInputManifestRegistration,
+    canonical_manifest_descriptor,
+    manifest_fingerprint,
+)
+from .scenario_input_evaluation_service import (
+    ScenarioInputEvaluationDisabled,
+    ScenarioInputEvaluationTransactionError,
+    create_scenario_input_evaluation,
+    register_scenario_input_manifest,
+)
 
 SCHEMA_MIGRATION = "v51_research_evidence_sidecar_foundation.sql"
 INTAKE_SCHEMA_MIGRATION = "v53_research_evidence_intake_foundation.sql"
@@ -103,6 +131,9 @@ CLAIM_SUPPORT_SCHEMA_MIGRATION = (
     "v56_research_evidence_claim_support_foundation.sql"
 )
 BINDING_SCHEMA_MIGRATION = "v57_research_evidence_binding_foundation.sql"
+SCENARIO_INPUT_EVALUATION_SCHEMA_MIGRATION = (
+    "v58_research_evidence_scenario_input_evaluation_foundation.sql"
+)
 
 
 def is_enabled() -> bool:
@@ -115,14 +146,25 @@ __all__ = [
     "CLAIM_SUPPORT_SCHEMA_MIGRATION",
     "ConsumerContract",
     "ConsumerDisposition",
+    "DependenceDeclaration",
     "DriftStatus",
     "EvidenceLinkage",
+    "EVALUATION_POLICY_CANONICAL_JSON",
+    "EVALUATION_POLICY_FINGERPRINT",
+    "EVALUATION_POLICY_IDENTIFIER",
+    "EVALUATION_POLICY_PARAMETERS",
+    "EVALUATION_POLICY_VERSION",
+    "EVALUATOR_VERSION",
     "FRESHNESS_SCHEMA_MIGRATION",
     "FreshnessStatus",
     "INTAKE_SCHEMA_MIGRATION",
     "LocatorResolution",
+    "OpaqueHypothesisDescriptor",
+    "REASON_ORDER",
     "REVIEW_SCHEMA_MIGRATION",
     "SCHEMA_MIGRATION",
+    "SCENARIO_INPUT_EVALUATION_SCHEMA_MIGRATION",
+    "STATUS_PRECEDENCE",
     "SemanticRelationship",
     "ResearchEvidenceClaimSupportAssessmentCreate",
     "ResearchEvidenceClaimSupportAssessmentRecord",
@@ -149,6 +191,16 @@ __all__ = [
     "ResearchEvidenceReviewDisabled",
     "ResearchEvidenceReviewTransactionError",
     "ResearchEvidenceReviewUnavailable",
+    "ScenarioInputBindingSelection",
+    "ScenarioInputEvaluationDisabled",
+    "ScenarioInputEvaluationInputRecord",
+    "ScenarioInputEvaluationRecord",
+    "ScenarioInputEvaluationRequest",
+    "ScenarioInputEvaluationStatus",
+    "ScenarioInputEvaluationTransactionError",
+    "ScenarioInputManifestItemRecord",
+    "ScenarioInputManifestRecord",
+    "ScenarioInputManifestRegistration",
     "claim_support_claim_is_available",
     "claim_support_claim_lineage_is_current",
     "claim_support_claim_review_decision",
@@ -171,6 +223,7 @@ __all__ = [
     "binding_semantic_relationship",
     "create_intake",
     "create_intake_item",
+    "create_scenario_input_evaluation",
     "get_effective_claim_support_assessment",
     "get_effective_consumer_input_binding",
     "item_freshness_status_as_of",
@@ -181,4 +234,7 @@ __all__ = [
     "record_consumer_input_binding",
     "record_item_review_decision",
     "record_item_freshness_assessment",
+    "register_scenario_input_manifest",
+    "canonical_manifest_descriptor",
+    "manifest_fingerprint",
 ]
