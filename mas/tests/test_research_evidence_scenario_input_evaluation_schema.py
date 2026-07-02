@@ -2442,6 +2442,68 @@ def test_v58_reapply_rejects_function_trigger_and_history_drift(
         pg.apply_v58_research_scenario_input_evaluation(conn)
 
 
+def test_v58_reapply_rejects_trigger_update_scope_drift(conn, schema_v58):
+    pg.apply_v58_research_scenario_input_evaluation(conn)
+
+    def trigger_contract():
+        return conn.execute(
+            """
+            SELECT n.nspname, c.relname, t.tgname, t.tgtype, p.proname,
+                   t.tgenabled, t.tgisinternal, t.tgnargs, t.tgqual,
+                   t.tgoldtable, t.tgnewtable, t.tgconstraint <> 0,
+                   t.tgdeferrable, t.tginitdeferred, t.tgattr::text
+            FROM pg_trigger t
+            JOIN pg_class c ON c.oid = t.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_proc p ON p.oid = t.tgfoid
+            WHERE n.nspname = current_schema()
+              AND c.relname =
+                  'research_evidence_scenario_input_manifest_item'
+              AND t.tgname = 'trg_resimi_no_mutation'
+              AND NOT t.tgisinternal
+            """
+        ).fetchone()
+
+    baseline = trigger_contract()
+    assert baseline is not None
+    assert baseline[-1] == ""
+
+    prior = pg._begin_autocommit(conn)
+    try:
+        conn.execute(
+            """
+            DROP TRIGGER trg_resimi_no_mutation
+            ON research_evidence_scenario_input_manifest_item
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER trg_resimi_no_mutation
+            BEFORE DELETE OR UPDATE OF input_key
+            ON research_evidence_scenario_input_manifest_item
+            FOR EACH ROW
+            EXECUTE FUNCTION slicea_reject_mutation()
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE research_evidence_scenario_input_manifest_item
+            ENABLE ALWAYS TRIGGER trg_resimi_no_mutation
+            """
+        )
+        mutated = trigger_contract()
+    finally:
+        pg._restore_autocommit(conn, prior)
+
+    assert mutated is not None
+    assert mutated[-1] != baseline[-1]
+    assert mutated[:-1] == baseline[:-1]
+    with pytest.raises(
+        Exception, match="v58 contract violation: divergent triggers"
+    ):
+        pg.apply_v58_research_scenario_input_evaluation(conn)
+
+
 @pytest.mark.parametrize(
     ("category", "mutation_sql"),
     (
@@ -3034,8 +3096,8 @@ def test_closed_v58_object_inventory_and_clean_reapply(conn, schema_v58):
     }
     trigger_rows = conn.execute(
         """
-        SELECT t.tgname, c.relname, p.proname, t.tgtype, t.tgenabled,
-               t.tgnargs, t.tgqual, t.tgoldtable, t.tgnewtable,
+        SELECT t.tgname, c.relname, p.proname, t.tgtype, t.tgattr::text,
+               t.tgenabled, t.tgnargs, t.tgqual, t.tgoldtable, t.tgnewtable,
                t.tgconstraint <> 0, t.tgdeferrable, t.tginitdeferred
         FROM pg_trigger t
         JOIN pg_class c ON c.oid = t.tgrelid
@@ -3047,8 +3109,9 @@ def test_closed_v58_object_inventory_and_clean_reapply(conn, schema_v58):
     triggers = {row[0] for row in trigger_rows}
     for row in trigger_rows:
         (
-            name, table, function, trigger_type, enabled, nargs, condition,
-            old_transition, new_transition, constraint_trigger,
+            name, table, function, trigger_type, trigger_attributes,
+            enabled, nargs, condition, old_transition, new_transition,
+            constraint_trigger,
             deferrable, initially_deferred,
         ) = row
         expected_type = (
@@ -3066,6 +3129,7 @@ def test_closed_v58_object_inventory_and_clean_reapply(conn, schema_v58):
         assert condition is None
         assert old_transition is None
         assert new_transition is None
+        assert trigger_attributes == ""
         is_complete = name.endswith("complete")
         assert (constraint_trigger, deferrable, initially_deferred) == (
             is_complete, is_complete, is_complete

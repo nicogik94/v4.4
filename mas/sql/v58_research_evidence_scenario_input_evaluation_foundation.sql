@@ -703,47 +703,59 @@ BEGIN
     FROM (VALUES
         ('trg_resim_prepare_insert'::text,
          'research_evidence_scenario_input_manifest'::text, 7::smallint,
-         'research_evidence_prepare_scenario_input_manifest'::text),
+         'research_evidence_prepare_scenario_input_manifest'::text,
+         ''::int2vector),
         ('trg_resim_link_items',
          'research_evidence_scenario_input_manifest', 5::smallint,
-         'research_evidence_link_scenario_input_manifest_items'),
+         'research_evidence_link_scenario_input_manifest_items',
+         ''::int2vector),
         ('trg_resim_no_mutation',
          'research_evidence_scenario_input_manifest', 27::smallint,
-         'slicea_reject_mutation'),
+         'slicea_reject_mutation', ''::int2vector),
         ('trg_resimi_prepare_insert',
          'research_evidence_scenario_input_manifest_item', 7::smallint,
-         'research_evidence_prepare_scenario_input_manifest_item'),
+         'research_evidence_prepare_scenario_input_manifest_item',
+         ''::int2vector),
         ('trg_resimi_no_mutation',
          'research_evidence_scenario_input_manifest_item', 27::smallint,
-         'slicea_reject_mutation'),
+         'slicea_reject_mutation', ''::int2vector),
         ('trg_resim_complete',
          'research_evidence_scenario_input_manifest', 5::smallint,
-         'research_evidence_check_scenario_input_manifest'),
+         'research_evidence_check_scenario_input_manifest',
+         ''::int2vector),
         ('trg_resimi_complete',
          'research_evidence_scenario_input_manifest_item', 5::smallint,
-         'research_evidence_check_scenario_input_manifest'),
+         'research_evidence_check_scenario_input_manifest',
+         ''::int2vector),
         ('trg_resie_prepare_insert',
          'research_evidence_scenario_input_evaluation', 7::smallint,
-         'research_evidence_prepare_scenario_input_evaluation'),
+         'research_evidence_prepare_scenario_input_evaluation',
+         ''::int2vector),
         ('trg_resie_link_inputs',
          'research_evidence_scenario_input_evaluation', 5::smallint,
-         'research_evidence_link_scenario_input_evaluation_inputs'),
+         'research_evidence_link_scenario_input_evaluation_inputs',
+         ''::int2vector),
         ('trg_resie_no_mutation',
          'research_evidence_scenario_input_evaluation', 27::smallint,
-         'slicea_reject_mutation'),
+         'slicea_reject_mutation', ''::int2vector),
         ('trg_resiei_prepare_insert',
          'research_evidence_scenario_input_evaluation_input', 7::smallint,
-         'research_evidence_prepare_scenario_input_evaluation_input'),
+         'research_evidence_prepare_scenario_input_evaluation_input',
+         ''::int2vector),
         ('trg_resiei_no_mutation',
          'research_evidence_scenario_input_evaluation_input', 27::smallint,
-         'slicea_reject_mutation'),
+         'slicea_reject_mutation', ''::int2vector),
         ('trg_resie_complete',
          'research_evidence_scenario_input_evaluation', 5::smallint,
-         'research_evidence_check_scenario_input_evaluation'),
+         'research_evidence_check_scenario_input_evaluation',
+         ''::int2vector),
         ('trg_resiei_complete',
          'research_evidence_scenario_input_evaluation_input', 5::smallint,
-         'research_evidence_check_scenario_input_evaluation')
-    ) expected(name, table_name, trigger_type, function_name)
+         'research_evidence_check_scenario_input_evaluation',
+         ''::int2vector)
+    ) expected(
+        name, table_name, trigger_type, function_name, trigger_attributes
+    )
     WHERE NOT EXISTS (
         SELECT 1
         FROM pg_trigger t
@@ -755,6 +767,7 @@ BEGIN
           AND t.tgname = expected.name
           AND t.tgtype = expected.trigger_type
           AND p.proname = expected.function_name
+          AND t.tgattr = expected.trigger_attributes
           AND t.tgenabled = 'A'
           AND NOT t.tgisinternal
           AND t.tgnargs = 0

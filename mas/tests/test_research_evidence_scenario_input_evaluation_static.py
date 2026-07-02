@@ -31,10 +31,16 @@ REPOSITORY_PATH = (
 SERVICE_PATH = (
     ROOT / "research_evidence" / "scenario_input_evaluation_service.py"
 )
+SCHEMA_TEST_PATH = (
+    ROOT
+    / "tests"
+    / "test_research_evidence_scenario_input_evaluation_schema.py"
+)
 SQL_RAW = SQL_PATH.read_text(encoding="utf-8")
 MODEL_TEXT = MODEL_PATH.read_text(encoding="utf-8")
 REPOSITORY_TEXT = REPOSITORY_PATH.read_text(encoding="utf-8")
 SERVICE_TEXT = SERVICE_PATH.read_text(encoding="utf-8")
+SCHEMA_TEST_TEXT = SCHEMA_TEST_PATH.read_text(encoding="utf-8")
 PACKAGE_TEXT = MODEL_TEXT + REPOSITORY_TEXT + SERVICE_TEXT
 
 
@@ -225,6 +231,41 @@ def test_reapply_checks_same_name_definition_and_integrity_drift():
         "indoption::smallint[]",
     ):
         assert sentinel in SQL_RAW
+
+
+def test_trigger_inventory_closes_column_specific_update_scope_drift():
+    assert SQL_RAW.count("''::int2vector") == 14
+    assert re.search(
+        r"expected\(\s*name,\s*table_name,\s*trigger_type,\s*"
+        r"function_name,\s*trigger_attributes\s*\)",
+        SQL_RAW,
+    )
+    assert "t.tgattr = expected.trigger_attributes" in SQL_RAW
+
+    schema_module = ast.parse(SCHEMA_TEST_TEXT)
+    drift_tests = [
+        node
+        for node in schema_module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_v58_reapply_rejects_trigger_update_scope_drift"
+    ]
+    assert len(drift_tests) == 1
+    drift_test_text = ast.get_source_segment(SCHEMA_TEST_TEXT, drift_tests[0])
+    assert drift_test_text is not None
+    assert re.search(
+        r"BEFORE\s+DELETE\s+OR\s+UPDATE\s+OF\s+input_key",
+        drift_test_text,
+    )
+    assert re.search(
+        r"ALTER\s+TABLE\s+"
+        r"research_evidence_scenario_input_manifest_item\s+"
+        r"ENABLE\s+ALWAYS\s+TRIGGER\s+trg_resimi_no_mutation",
+        drift_test_text,
+    )
+    assert (
+        'match="v58 contract violation: divergent triggers"'
+        in drift_test_text
+    )
 
 
 def test_v58_acl_boundary_is_owner_admin_only_and_has_no_runtime_role_claim():
