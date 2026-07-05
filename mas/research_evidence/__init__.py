@@ -10,6 +10,34 @@ from __future__ import annotations
 
 import config
 
+from .automation_roi_use_models import (
+    AutomationRoiInputSnapshotBindingRecord,
+    AutomationRoiInputSnapshotCreate,
+    AutomationRoiInputSnapshotRecord,
+    CompletenessStatus,
+    PolicyEvaluationStatus,
+)
+from .automation_roi_use_policy import (
+    CONSUMER_CONTRACT as AUTOMATION_ROI_CONSUMER_CONTRACT,
+    CONSUMER_CONTRACT_VERSION as AUTOMATION_ROI_CONSUMER_CONTRACT_VERSION,
+    EVALUATOR_VERSION as AUTOMATION_ROI_EVALUATOR_VERSION,
+    POLICY_FINGERPRINT as AUTOMATION_ROI_POLICY_FINGERPRINT,
+    POLICY_IDENTIFIER as AUTOMATION_ROI_POLICY_IDENTIFIER,
+    POLICY_PARAMETERS as AUTOMATION_ROI_POLICY_PARAMETERS,
+    POLICY_VERSION as AUTOMATION_ROI_POLICY_VERSION,
+    REQUIRED_ROLES as AUTOMATION_ROI_REQUIRED_ROLES,
+)
+from .automation_roi_use_repository import (
+    AutomationRoiBindingSetIncomplete,
+    AutomationRoiSnapshotIntegrityError,
+    AutomationRoiSnapshotRequestConflict,
+    AutomationRoiUseRepositoryError,
+)
+from .automation_roi_use_service import (
+    AutomationRoiUseDisabled,
+    AutomationRoiUseTransactionError,
+    record_automation_roi_input_snapshot,
+)
 from .binding_models import (
     BindingReviewStatus,
     ConsumerContract,
@@ -134,6 +162,9 @@ BINDING_SCHEMA_MIGRATION = "v57_research_evidence_binding_foundation.sql"
 SCENARIO_INPUT_EVALUATION_SCHEMA_MIGRATION = (
     "v58_research_evidence_scenario_input_evaluation_foundation.sql"
 )
+AUTOMATION_ROI_USE_SCHEMA_MIGRATION = (
+    "v59_research_evidence_automation_roi_input_snapshot.sql"
+)
 
 
 def is_enabled() -> bool:
@@ -141,11 +172,30 @@ def is_enabled() -> bool:
 
 
 __all__ = [
+    "AUTOMATION_ROI_CONSUMER_CONTRACT",
+    "AUTOMATION_ROI_CONSUMER_CONTRACT_VERSION",
+    "AUTOMATION_ROI_EVALUATOR_VERSION",
+    "AUTOMATION_ROI_POLICY_FINGERPRINT",
+    "AUTOMATION_ROI_POLICY_IDENTIFIER",
+    "AUTOMATION_ROI_POLICY_PARAMETERS",
+    "AUTOMATION_ROI_POLICY_VERSION",
+    "AUTOMATION_ROI_REQUIRED_ROLES",
+    "AUTOMATION_ROI_USE_SCHEMA_MIGRATION",
+    "AutomationRoiBindingSetIncomplete",
+    "AutomationRoiInputSnapshotBindingRecord",
+    "AutomationRoiInputSnapshotCreate",
+    "AutomationRoiInputSnapshotRecord",
+    "AutomationRoiSnapshotIntegrityError",
+    "AutomationRoiSnapshotRequestConflict",
+    "AutomationRoiUseDisabled",
+    "AutomationRoiUseRepositoryError",
+    "AutomationRoiUseTransactionError",
     "BINDING_SCHEMA_MIGRATION",
     "BindingReviewStatus",
     "CLAIM_SUPPORT_SCHEMA_MIGRATION",
     "ConsumerContract",
     "ConsumerDisposition",
+    "CompletenessStatus",
     "DependenceDeclaration",
     "DriftStatus",
     "EvidenceLinkage",
@@ -160,6 +210,7 @@ __all__ = [
     "INTAKE_SCHEMA_MIGRATION",
     "LocatorResolution",
     "OpaqueHypothesisDescriptor",
+    "PolicyEvaluationStatus",
     "REASON_ORDER",
     "REVIEW_SCHEMA_MIGRATION",
     "SCHEMA_MIGRATION",
@@ -231,6 +282,7 @@ __all__ = [
     "is_enabled",
     "list_effective_claim_support_assessments",
     "record_claim_support_assessment",
+    "record_automation_roi_input_snapshot",
     "record_consumer_input_binding",
     "record_item_review_decision",
     "record_item_freshness_assessment",
