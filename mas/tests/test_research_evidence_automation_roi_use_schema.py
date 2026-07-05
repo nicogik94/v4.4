@@ -106,6 +106,7 @@ def _migration_login(schema):
 
 def _ensure_separate_roles(conn):
     """Provision canonical roles only inside an approved disposable database."""
+    psycopg = pg.psycopg_module()
     prior = pg._begin_autocommit(conn)
     try:
         conn.execute(
@@ -165,8 +166,35 @@ def _ensure_separate_roles(conn):
             $$;
             """
         )
+        database = conn.execute(
+            "SELECT pg_catalog.current_database()"
+        ).fetchone()[0]
+        conn.execute(
+            psycopg.sql.SQL(
+                "REVOKE CREATE ON DATABASE {} FROM PUBLIC, {}, {}"
+            ).format(
+                psycopg.sql.Identifier(database),
+                psycopg.sql.Identifier(MIGRATION_OWNER),
+                psycopg.sql.Identifier(RUNTIME_ROLE),
+            )
+        )
     finally:
         pg._restore_autocommit(conn, prior)
+
+
+def _prepare_v59_foundation(conn, schema, *, provision_dedicated=True):
+    pg.apply_v48(conn)
+    pg.apply_v51_research(conn)
+    pg.apply_v52_research(conn)
+    pg.apply_v53_research_intake(conn)
+    pg.apply_v54_research_review(conn)
+    pg.apply_v55_research_freshness(conn)
+    pg.apply_v56_research_claim_support(conn)
+    pg.apply_v57_research_binding(conn)
+    pg.apply_v58_research_scenario_input_evaluation(conn)
+    pg.assign_v59_upstream_migration_ownership(conn, schema)
+    if provision_dedicated:
+        pg.provision_v59_dedicated_schema(conn)
 
 
 @pytest.fixture
@@ -175,9 +203,9 @@ def conn():
     connection = pg.connect()
     try:
         _ensure_separate_roles(connection)
-        prior = pg._begin_autocommit(connection)
-        connection.execute(f"SET ROLE {MIGRATION_OWNER}")
-        pg._restore_autocommit(connection, prior)
+        assert connection.execute(
+            "SELECT session_user, current_user"
+        ).fetchone() == ("postgres", "postgres")
         yield connection
     finally:
         with contextlib.suppress(Exception):
@@ -189,15 +217,7 @@ def conn():
 @pytest.fixture
 def schema_v59(conn):
     with pg.fresh_schema(conn) as schema:
-        pg.apply_v48(conn)
-        pg.apply_v51_research(conn)
-        pg.apply_v52_research(conn)
-        pg.apply_v53_research_intake(conn)
-        pg.apply_v54_research_review(conn)
-        pg.apply_v55_research_freshness(conn)
-        pg.apply_v56_research_claim_support(conn)
-        pg.apply_v57_research_binding(conn)
-        pg.apply_v58_research_scenario_input_evaluation(conn)
+        _prepare_v59_foundation(conn, schema)
         pg.apply_v59_research_automation_roi_use(conn)
         try:
             yield schema
@@ -205,7 +225,7 @@ def schema_v59(conn):
             prior = pg._begin_autocommit(conn)
             conn.execute(f"SET ROLE {FUNCTION_OWNER}")
             conn.execute(f'DROP SCHEMA IF EXISTS "{OBJECT_SCHEMA}" CASCADE')
-            conn.execute(f"SET ROLE {MIGRATION_OWNER}")
+            conn.execute("RESET ROLE")
             pg._restore_autocommit(conn, prior)
 
 
@@ -316,15 +336,7 @@ def test_allocator_relation_uses_only_canonical_identifier(conn, schema_v59):
 
 def test_v59_applies_from_canonical_migration_login(conn):
     with pg.fresh_schema(conn) as upstream_schema:
-        pg.apply_v48(conn)
-        pg.apply_v51_research(conn)
-        pg.apply_v52_research(conn)
-        pg.apply_v53_research_intake(conn)
-        pg.apply_v54_research_review(conn)
-        pg.apply_v55_research_freshness(conn)
-        pg.apply_v56_research_claim_support(conn)
-        pg.apply_v57_research_binding(conn)
-        pg.apply_v58_research_scenario_input_evaluation(conn)
+        _prepare_v59_foundation(conn, upstream_schema)
         try:
             with _migration_login(upstream_schema) as migration:
                 role_contract = migration.execute(
@@ -357,6 +369,15 @@ def test_v59_applies_from_canonical_migration_login(conn):
                     """,
                     (FUNCTION_OWNER,),
                 ).fetchone()[0]
+                assert not migration.execute(
+                    """
+                    SELECT has_database_privilege(
+                        current_user,
+                        current_database(),
+                        'CREATE'
+                    )
+                    """
+                ).fetchone()[0]
                 pg.apply_v59_research_automation_roi_use(migration)
         finally:
             prior = pg._begin_autocommit(conn)
@@ -365,7 +386,7 @@ def test_v59_applies_from_canonical_migration_login(conn):
                 conn.execute(
                     f"DROP SCHEMA IF EXISTS {OBJECT_SCHEMA} CASCADE"
                 )
-                conn.execute(f"SET ROLE {MIGRATION_OWNER}")
+                conn.execute("RESET ROLE")
             finally:
                 pg._restore_autocommit(conn, prior)
 
@@ -394,6 +415,40 @@ def test_migration_owner_without_set_role_cannot_change_dedicated_acl(
         """,
         (RUNTIME_ROLE,),
     ).fetchone()[0]
+
+
+@pytest.mark.parametrize(
+    "grant_statement",
+    [
+        f"""
+        GRANT SELECT ON TABLE {OBJECT_SCHEMA}.
+            research_evidence_automation_roi_input_snapshot
+        TO {MIGRATION_OWNER}
+        """,
+        f"""
+        GRANT EXECUTE ON FUNCTION {OBJECT_SCHEMA}.
+            research_evidence_validate_automation_roi_snapshot(uuid)
+        TO {MIGRATION_OWNER}
+        """,
+    ],
+)
+def test_v59_reapply_rejects_migration_owner_direct_object_acl(
+    conn,
+    schema_v59,
+    grant_statement,
+):
+    prior = pg._begin_autocommit(conn)
+    try:
+        conn.execute(f"SET ROLE {FUNCTION_OWNER}")
+        conn.execute(grant_statement)
+        conn.execute("RESET ROLE")
+    finally:
+        pg._restore_autocommit(conn, prior)
+    with pytest.raises(
+        Exception,
+        match="migration-owner direct dedicated-object access",
+    ):
+        pg.apply_v59_research_automation_roi_use(conn)
 
 
 def test_v59_reapply_uses_oid_acl_probes_without_migration_schema_usage(
@@ -458,15 +513,7 @@ def test_v59_reapply_preserves_dedicated_acl_drift_after_rejection(
 
 def test_v59_applies_without_owner_ambient_upstream_schema(conn):
     with pg.fresh_schema(conn) as upstream_schema:
-        pg.apply_v48(conn)
-        pg.apply_v51_research(conn)
-        pg.apply_v52_research(conn)
-        pg.apply_v53_research_intake(conn)
-        pg.apply_v54_research_review(conn)
-        pg.apply_v55_research_freshness(conn)
-        pg.apply_v56_research_claim_support(conn)
-        pg.apply_v57_research_binding(conn)
-        pg.apply_v58_research_scenario_input_evaluation(conn)
+        _prepare_v59_foundation(conn, upstream_schema)
         prior = pg._begin_autocommit(conn)
         try:
             conn.execute(
@@ -490,7 +537,107 @@ def test_v59_applies_without_owner_ambient_upstream_schema(conn):
                 conn.execute(
                     f"DROP SCHEMA IF EXISTS {OBJECT_SCHEMA} CASCADE"
                 )
-                conn.execute(f"SET ROLE {MIGRATION_OWNER}")
+                conn.execute("RESET ROLE")
+            finally:
+                pg._restore_autocommit(conn, prior)
+
+
+def test_v59_rejects_absent_preprovisioned_dedicated_schema(conn):
+    prior = pg._begin_autocommit(conn)
+    try:
+        conn.execute(
+            f"DROP SCHEMA IF EXISTS {OBJECT_SCHEMA} CASCADE"
+        )
+    finally:
+        pg._restore_autocommit(conn, prior)
+    with pg.fresh_schema(conn) as upstream_schema:
+        _prepare_v59_foundation(
+            conn,
+            upstream_schema,
+            provision_dedicated=False,
+        )
+        assert conn.execute(
+            "SELECT pg_catalog.to_regnamespace(%s)",
+            (OBJECT_SCHEMA,),
+        ).fetchone() == (None,)
+        with pytest.raises(
+            Exception,
+            match="requires pre-provisioned dedicated schema",
+        ):
+            pg.apply_v59_research_automation_roi_use(conn)
+        assert conn.execute(
+            "SELECT pg_catalog.to_regnamespace(%s)",
+            (OBJECT_SCHEMA,),
+        ).fetchone() == (None,)
+
+
+def test_v59_rejects_wrong_preprovisioned_dedicated_schema_owner(conn):
+    with pg.fresh_schema(conn) as upstream_schema:
+        _prepare_v59_foundation(conn, upstream_schema)
+        prior = pg._begin_autocommit(conn)
+        try:
+            conn.execute(
+                f"ALTER SCHEMA {OBJECT_SCHEMA} OWNER TO postgres"
+            )
+        finally:
+            pg._restore_autocommit(conn, prior)
+        try:
+            with pytest.raises(
+                Exception,
+                match="trusted-schema owner drift",
+            ):
+                pg.apply_v59_research_automation_roi_use(conn)
+            assert conn.execute(
+                """
+                SELECT owner_role.rolname
+                FROM pg_catalog.pg_namespace namespace
+                JOIN pg_catalog.pg_roles owner_role
+                  ON owner_role.oid = namespace.nspowner
+                WHERE namespace.nspname = %s
+                """,
+                (OBJECT_SCHEMA,),
+            ).fetchone() == ("postgres",)
+        finally:
+            prior = pg._begin_autocommit(conn)
+            try:
+                conn.execute(
+                    f"DROP SCHEMA IF EXISTS {OBJECT_SCHEMA} CASCADE"
+                )
+            finally:
+                pg._restore_autocommit(conn, prior)
+
+
+def test_v59_rejects_conflicting_first_apply_dedicated_inventory(conn):
+    with pg.fresh_schema(conn) as upstream_schema:
+        _prepare_v59_foundation(conn, upstream_schema)
+        prior = pg._begin_autocommit(conn)
+        try:
+            conn.execute(f"SET ROLE {FUNCTION_OWNER}")
+            conn.execute(
+                f"CREATE TABLE {OBJECT_SCHEMA}.unexpected_object (id integer)"
+            )
+            conn.execute("RESET ROLE")
+        finally:
+            pg._restore_autocommit(conn, prior)
+        try:
+            with pytest.raises(
+                Exception,
+                match="conflicting first-apply dedicated-object inventory",
+            ):
+                pg.apply_v59_research_automation_roi_use(conn)
+            assert pg.table_exists(
+                conn,
+                OBJECT_SCHEMA,
+                "unexpected_object",
+            )
+        finally:
+            prior = pg._begin_autocommit(conn)
+            try:
+                conn.execute(f"SET ROLE {FUNCTION_OWNER}")
+                conn.execute(
+                    f"DROP SCHEMA IF EXISTS {OBJECT_SCHEMA} CASCADE"
+                )
+                conn.execute("RESET ROLE")
             finally:
                 pg._restore_autocommit(conn, prior)
 
@@ -617,6 +764,61 @@ def test_canonical_role_graph_and_dedicated_schema_acl(conn, schema_v59):
             "true" if options_supported else None,
         )
     ]
+    for restricted_role in (MIGRATION_OWNER, RUNTIME_ROLE):
+        assert not conn.execute(
+            """
+            SELECT pg_catalog.has_database_privilege(
+                %s,
+                pg_catalog.current_database(),
+                'CREATE'
+            )
+            """,
+            (restricted_role,),
+        ).fetchone()[0]
+    assert not conn.execute(
+        """
+        SELECT pg_catalog.has_schema_privilege(%s, %s, 'USAGE')
+        """,
+        (MIGRATION_OWNER, OBJECT_SCHEMA),
+    ).fetchone()[0]
+    migration_acl = conn.execute(
+        """
+        SELECT relation.relname, acl.privilege_type
+        FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = relation.relnamespace
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(
+                relation.relacl,
+                pg_catalog.acldefault('r', relation.relowner)
+            )
+        ) acl
+        JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee
+        WHERE namespace.nspname = %s
+          AND grantee.rolname = %s
+        UNION ALL
+        SELECT function_info.proname, acl.privilege_type
+        FROM pg_catalog.pg_proc function_info
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = function_info.pronamespace
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(
+                function_info.proacl,
+                pg_catalog.acldefault('f', function_info.proowner)
+            )
+        ) acl
+        JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee
+        WHERE namespace.nspname = %s
+          AND grantee.rolname = %s
+        """,
+        (
+            OBJECT_SCHEMA,
+            MIGRATION_OWNER,
+            OBJECT_SCHEMA,
+            MIGRATION_OWNER,
+        ),
+    ).fetchall()
+    assert migration_acl == []
 
     schema_acl = conn.execute(
         """
@@ -1027,6 +1229,61 @@ def test_runtime_can_use_only_controlled_entry_function(
         with pytest.raises(Exception):
             runtime.execute(statement)
         runtime.rollback()
+
+
+def test_v59_reapply_rejects_allocator_history_drift_and_preserves_it(
+    conn,
+    schema_v59,
+    runtime,
+):
+    project, binding_set, records, _ = _binding_set(
+        conn,
+        tag="allocator-drift",
+    )
+    conn.commit()
+    created = record_automation_roi_input_snapshot(
+        runtime,
+        _snapshot_command(
+            project,
+            binding_set,
+            records,
+            request_id="allocator-drift-snapshot",
+        ),
+    )
+    assert created.snapshot_sequence == 1
+    runtime.commit()
+
+    prior = pg._begin_autocommit(conn)
+    try:
+        conn.execute(f"SET ROLE {FUNCTION_OWNER}")
+        conn.execute(
+            f"""
+            UPDATE {OBJECT_SCHEMA}.
+                automation_roi_input_snapshot_sequence_allocator
+            SET last_sequence = last_sequence + 1
+            WHERE project_id = %s
+              AND consumer_contract = %s
+              AND binding_set_id = %s
+            """,
+            (project, CONSUMER_CONTRACT, binding_set),
+        )
+        conn.execute("RESET ROLE")
+    finally:
+        pg._restore_autocommit(conn, prior)
+
+    with pytest.raises(Exception, match="allocator integrity drift"):
+        pg.apply_v59_research_automation_roi_use(conn)
+    assert conn.execute(
+        f"""
+        SELECT last_sequence
+        FROM {OBJECT_SCHEMA}.
+            automation_roi_input_snapshot_sequence_allocator
+        WHERE project_id = %s
+          AND consumer_contract = %s
+          AND binding_set_id = %s
+        """,
+        (project, CONSUMER_CONTRACT, binding_set),
+    ).fetchone() == (2,)
 
 
 def test_runtime_entry_ignores_session_catalog_shadows(
@@ -2207,3 +2464,37 @@ def test_v59_inventory_ignores_same_named_objects_in_other_schema(
     )
     conn.commit()
     pg.apply_v59_research_automation_roi_use(conn)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            """
+            CREATE TABLE research_evidence_automation_roi.
+                unexpected_dedicated_relation (id integer)
+            """,
+            "divergent dedicated relation inventory",
+        ),
+        (
+            """
+            CREATE FUNCTION research_evidence_automation_roi.
+                unexpected_dedicated_function()
+            RETURNS void LANGUAGE sql AS 'SELECT NULL'
+            """,
+            "divergent function inventory",
+        ),
+    ],
+)
+def test_v59_reapply_rejects_extra_dedicated_object_inventory(
+    conn,
+    schema_v59,
+    mutation,
+    message,
+):
+    conn.execute(f"SET ROLE {FUNCTION_OWNER}")
+    conn.execute(mutation)
+    conn.commit()
+    conn.execute(f"SET ROLE {MIGRATION_OWNER}")
+    with pytest.raises(Exception, match=message):
+        pg.apply_v59_research_automation_roi_use(conn)

@@ -239,6 +239,92 @@ def apply_v58_research_scenario_input_evaluation(conn) -> None:
         _restore_autocommit(conn, prior)
 
 
+def assign_v59_upstream_migration_ownership(conn, schema: str) -> None:
+    """Model production ownership after bootstrap creates disposable topology."""
+    psycopg = psycopg_module()
+    prior = _begin_autocommit(conn)
+    try:
+        conn.execute(
+            psycopg.sql.SQL("ALTER SCHEMA {} OWNER TO {}").format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier(MIGRATION_OWNER),
+            )
+        )
+        for relation in (
+            "projects",
+            "approved_calculation_input",
+            "research_evidence_consumer_input_binding",
+            "research_evidence_consumer_input_binding_sequence_allocator",
+        ):
+            conn.execute(
+                psycopg.sql.SQL("ALTER TABLE {}.{} OWNER TO {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(relation),
+                    psycopg.sql.Identifier(MIGRATION_OWNER),
+                )
+            )
+        conn.execute(
+            psycopg.sql.SQL("ALTER FUNCTION {}.{}() OWNER TO {}").format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier("slicea_reject_mutation"),
+                psycopg.sql.Identifier(MIGRATION_OWNER),
+            )
+        )
+    finally:
+        _restore_autocommit(conn, prior)
+
+
+def provision_v59_dedicated_schema(conn) -> None:
+    """Pre-provision the empty trusted schema without database CREATE grants."""
+    psycopg = psycopg_module()
+    schema = "research_evidence_automation_roi"
+    owner = "workflow_research_evidence_owner"
+    runtime = "workflow_automation_roi_runtime"
+    prior = _begin_autocommit(conn)
+    try:
+        conn.execute(
+            psycopg.sql.SQL(
+                "CREATE SCHEMA IF NOT EXISTS {} AUTHORIZATION {}"
+            ).format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier(owner),
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("ALTER SCHEMA {} OWNER TO {}").format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier(owner),
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("SET ROLE {}").format(
+                psycopg.sql.Identifier(owner)
+            )
+        )
+        try:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "REVOKE ALL ON SCHEMA {} FROM PUBLIC"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT USAGE ON SCHEMA {} TO {}"
+                ).format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(runtime),
+                )
+            )
+            conn.execute(
+                "ALTER DEFAULT PRIVILEGES "
+                "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
+            )
+        finally:
+            conn.execute("RESET ROLE")
+    finally:
+        _restore_autocommit(conn, prior)
+
+
 def assert_single_v59_upstream_schema(conn) -> str:
     """Require one OID-validated v59 upstream before applying the migration."""
     rows = conn.execute(

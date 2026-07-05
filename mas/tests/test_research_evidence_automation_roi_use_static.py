@@ -29,6 +29,9 @@ PG_HELPER = (ROOT / "tests" / "evidence_snapshot_pg.py").read_text(
 SCHEMA_TEST = (
     ROOT / "tests" / "test_research_evidence_automation_roi_use_schema.py"
 ).read_text(encoding="utf-8")
+CI_WORKFLOW = (
+    ROOT.parent / ".github" / "workflows" / "tests.yml"
+).read_text(encoding="utf-8")
 PACKAGE = POLICY + MODELS + REPOSITORY + SERVICE
 
 R1_6A_IDENTIFIERS = (
@@ -503,7 +506,11 @@ def test_canonical_roles_and_owner_contract_are_explicit():
     assert "divergent functions" in SQL_RAW
     assert "p.proowner" in SQL_RAW
     assert "p.prosecdef" in SQL_RAW
-    assert "CREATE SCHEMA IF NOT EXISTS research_evidence_automation_roi" in SQL_RAW
+    assert "requires pre-provisioned dedicated schema" in SQL_RAW
+    assert not any(
+        statement.startswith("CREATE SCHEMA")
+        for statement in _sql_statements(SQL_RAW)
+    )
     assert "namespace.nspowner" in SQL_RAW
     assert "exact canonical role-membership graph" in SQL_RAW
     for attribute in (
@@ -1119,9 +1126,7 @@ def test_reapply_authority_map_has_one_read_only_owner_validation_window():
         "DO $migration_context_restored$",
         owner_end,
     )
-    first_repair = SQL_RAW.index(
-        "CREATE SCHEMA IF NOT EXISTS research_evidence_automation_roi"
-    )
+    first_repair = SQL_RAW.index("DO $temporary_upstream_acl$")
     assert owner_start < owner_end < restored < first_repair
     restoration = SQL_RAW[restored:first_repair]
     assert "session_user <> 'workflow_migration_owner'" in restoration
@@ -1134,7 +1139,7 @@ def test_reapply_authority_map_has_one_read_only_owner_validation_window():
 
 def test_trusted_schema_reapply_uses_literal_normalized_acl_inventory():
     validation = SQL_RAW.split(
-        "IF pg_catalog.to_regnamespace(v_object_schema) IS NOT NULL THEN", 1
+        "IF v_object_schema_oid IS NOT NULL THEN", 1
     )[1].split("IF v_tables = 3 THEN", 1)[0]
     assert "SELECT namespace.nspacl::text" in validation
     assert "INTO v_schema_acl_raw" in validation
@@ -1185,8 +1190,13 @@ def test_schema_tests_cover_security_and_reapply_drift_matrix():
         "test_v59_reapply_rejects_default_acl_drift_without_repair",
         "test_v59_reapply_rejects_extra_active_column_before_repair",
         "test_v59_reapply_rejects_check_drift_without_repair",
+        "test_v59_rejects_absent_preprovisioned_dedicated_schema",
+        "test_v59_rejects_wrong_preprovisioned_dedicated_schema_owner",
+        "test_v59_rejects_conflicting_first_apply_dedicated_inventory",
+        "test_v59_reapply_rejects_migration_owner_direct_object_acl",
         "test_v59_reapply_uses_oid_acl_probes_without_migration_schema_usage",
         "test_v59_owner_read_validation_context_and_restoration",
+        "test_v59_reapply_rejects_allocator_history_drift_and_preserves_it",
         "test_v59_reapply_rejects_runtime_membership_escalation",
         "test_v59_reapply_rejects_role_attribute_drift",
         "test_v59_reapply_rejects_membership_option_drift",
@@ -1198,6 +1208,7 @@ def test_schema_tests_cover_security_and_reapply_drift_matrix():
         "test_v59_reapply_rejects_relation_state_drift",
         "test_v59_reapply_rejects_missing_or_extra_upstream_acl",
         "test_v59_reapply_rejects_complete_index_inventory_drift",
+        "test_v59_reapply_rejects_extra_dedicated_object_inventory",
         "test_v59_inventory_ignores_same_named_objects_in_other_schema",
     ):
         assert f"def {required_test}" in SCHEMA_TEST
@@ -1240,6 +1251,7 @@ def test_schema_tests_cover_security_and_reapply_drift_matrix():
 
 
 def test_v59_harness_requires_one_oid_validated_upstream_before_apply():
+    bootstrap_fixture = _function_body(SCHEMA_TEST, "conn")
     assertion = _function_body(
         PG_HELPER, "assert_single_v59_upstream_schema"
     )
@@ -1248,6 +1260,12 @@ def test_v59_harness_requires_one_oid_validated_upstream_before_apply():
     )
     migration_connection = _function_body(
         PG_HELPER, "v59_migration_connection"
+    )
+    upstream_ownership = _function_body(
+        PG_HELPER, "assign_v59_upstream_migration_ownership"
+    )
+    dedicated_schema = _function_body(
+        PG_HELPER, "provision_v59_dedicated_schema"
     )
     for catalog in (
         "pg_catalog.pg_constraint",
@@ -1285,6 +1303,90 @@ def test_v59_harness_requires_one_oid_validated_upstream_before_apply():
     ) < apply_v59.index(
         'conn.execute("RESET ROLE")'
     )
+    bootstrap_setup = bootstrap_fixture.split("yield connection", 1)[0]
+    assert "_ensure_separate_roles(connection)" in bootstrap_setup
+    assert "SELECT session_user, current_user" in bootstrap_setup
+    assert '== ("postgres", "postgres")' in bootstrap_setup
+    assert 'connection.execute(f"SET ROLE' not in bootstrap_setup
+    assert "workflow_migration_owner" not in bootstrap_setup
+    assert "workflow_automation_roi_runtime" not in bootstrap_setup
+    assert "ALTER SCHEMA {} OWNER TO {}" in upstream_ownership
+    assert "ALTER TABLE {}.{} OWNER TO {}" in upstream_ownership
+    assert "ALTER FUNCTION {}.{}() OWNER TO {}" in upstream_ownership
+    assert "GRANT" not in upstream_ownership
+    assert "SET ROLE" not in upstream_ownership
+    assert (
+        "assign_v59_upstream_migration_ownership(conn, schema)"
+        in SCHEMA_TEST
+    )
+    assert "CREATE SCHEMA IF NOT EXISTS {} AUTHORIZATION {}" in dedicated_schema
+    assert "GRANT USAGE ON SCHEMA {} TO {}" in dedicated_schema
+    assert "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC" in dedicated_schema
+    assert "GRANT CREATE" not in dedicated_schema
+    assert "SET ROLE {}" in dedicated_schema
+    assert "RESET ROLE" in dedicated_schema
+    assert "workflow_migration_owner" not in dedicated_schema
+    assert "provision_v59_dedicated_schema(conn)" in SCHEMA_TEST
+    assert not any(
+        statement.startswith("CREATE SCHEMA")
+        for statement in _sql_statements(SQL_RAW)
+    )
+    assert "requires pre-provisioned dedicated schema" in SQL_RAW
+    assert "pg_catalog.pg_database" in SQL_RAW
+    assert "v_database_oid" in SQL_RAW
+    assert "v_migration_role_oid" in SQL_RAW
+    assert "v_object_schema_oid" in SQL_RAW
+    assert "v_function_owner_oid" in SQL_RAW
+    assert "v_object_schema_owner_oid" in SQL_RAW
+    assert "object_schema.nspowner" in SQL_RAW
+    assert (
+        "v_object_schema_owner_oid IS DISTINCT FROM v_function_owner_oid"
+        in SQL_RAW
+    )
+    assert "has_database_privilege" in SQL_RAW
+    assert "has_schema_privilege" in SQL_RAW
+    assert "migration-owner direct dedicated-object access" in SQL_RAW
+    assert "conflicting first-apply dedicated-object inventory" in SQL_RAW
+    assert "divergent dedicated relation inventory" in SQL_RAW
+    assert (
+        "test_v59_rejects_absent_preprovisioned_dedicated_schema"
+        in SCHEMA_TEST
+    )
+    assert (
+        "test_v59_rejects_wrong_preprovisioned_dedicated_schema_owner"
+        in SCHEMA_TEST
+    )
+    assert (
+        "test_v59_rejects_conflicting_first_apply_dedicated_inventory"
+        in SCHEMA_TEST
+    )
+    assert (
+        "test_v59_reapply_rejects_extra_dedicated_object_inventory"
+        in SCHEMA_TEST
+    )
+
+
+def test_ci_preprovisions_dedicated_schema_and_ephemeral_logins():
+    assert "Provision R1.6A authenticated test roles" in CI_WORKFLOW
+    assert "workflow_research_evidence_owner" in CI_WORKFLOW
+    assert "CREATE SCHEMA IF NOT EXISTS" in CI_WORKFLOW
+    assert "AUTHORIZATION" in CI_WORKFLOW
+    assert "TEST_EVIDENCE_MIGRATION_PG_DSN" in CI_WORKFLOW
+    assert "TEST_EVIDENCE_RUNTIME_PG_DSN" in CI_WORKFLOW
+    assert "secrets.token_urlsafe" in CI_WORKFLOW
+    assert "sql.Literal(password)" in CI_WORKFLOW
+    assert "::add-mask::" in CI_WORKFLOW
+    assert "REVOKE CREATE ON DATABASE" in CI_WORKFLOW
+    assert "FROM PUBLIC, {}, {}" in CI_WORKFLOW
+    assert "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE" in CI_WORKFLOW
+    assert "GRANT CREATE ON DATABASE" not in CI_WORKFLOW
+    assert "ALTER DATABASE" not in CI_WORKFLOW
+    assert re.search(r"(?<!NO)\bCREATEDB\b", CI_WORKFLOW) is None
+    assert re.search(r"(?<!NO)\bSUPERUSER\b", CI_WORKFLOW) is None
+    assert "SET ROLE workflow_migration_owner" not in CI_WORKFLOW
+    assert "SET ROLE workflow_automation_roi_runtime" not in CI_WORKFLOW
+    assert "print(environment)" not in CI_WORKFLOW
+    assert "print(os.environ)" not in CI_WORKFLOW
 
 
 def test_r1_6a_functional_harness_uses_genuine_runtime_login():

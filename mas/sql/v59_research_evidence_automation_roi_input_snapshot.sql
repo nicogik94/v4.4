@@ -6,6 +6,8 @@
 --   workflow_migration_owner          LOGIN NOINHERIT, deployment only
 --   workflow_research_evidence_owner  NOLOGIN NOINHERIT, object owner
 --   workflow_automation_roi_runtime    LOGIN NOINHERIT, restricted caller
+-- Required provisioned schema:
+--   research_evidence_automation_roi owned by workflow_research_evidence_owner
 --
 -- Non-goals: no calculation execution or result linkage; no scenario, report,
 -- API, UI, export, retrieval, workflow, prompt, or monitoring changes.
@@ -25,6 +27,11 @@ DECLARE
     v_schema_acl_raw text;
     v_membership_options_supported boolean;
     v_membership_options_valid boolean;
+    v_database_oid oid;
+    v_migration_role_oid oid;
+    v_function_owner_oid oid;
+    v_object_schema_oid oid;
+    v_object_schema_owner_oid oid;
 BEGIN
     IF current_user <> 'workflow_migration_owner' THEN
         RAISE EXCEPTION
@@ -53,6 +60,44 @@ BEGIN
     ) THEN
         RAISE EXCEPTION
             'v59 requires the canonical migration, function-owner, and runtime roles'
+            USING ERRCODE = '42501';
+    END IF;
+
+    SELECT database_info.oid,
+           migration_role.oid,
+           function_owner.oid,
+           object_schema.oid,
+           object_schema.nspowner
+    INTO v_database_oid,
+         v_migration_role_oid,
+         v_function_owner_oid,
+         v_object_schema_oid,
+         v_object_schema_owner_oid
+    FROM pg_catalog.pg_database database_info
+    JOIN pg_catalog.pg_roles migration_role
+      ON migration_role.rolname = 'workflow_migration_owner'
+    JOIN pg_catalog.pg_roles function_owner
+      ON function_owner.rolname = 'workflow_research_evidence_owner'
+    LEFT JOIN pg_catalog.pg_namespace object_schema
+      ON object_schema.nspname = v_object_schema
+    WHERE database_info.datname = pg_catalog.current_database();
+
+    IF v_object_schema_oid IS NULL THEN
+        RAISE EXCEPTION
+            'v59 requires pre-provisioned dedicated schema %',
+            v_object_schema
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+    IF v_object_schema_owner_oid IS DISTINCT FROM v_function_owner_oid THEN
+        RAISE EXCEPTION
+            'v59 contract violation: trusted-schema owner drift'
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+    IF pg_catalog.has_database_privilege(
+           v_migration_role_oid, v_database_oid, 'CREATE'
+       ) THEN
+        RAISE EXCEPTION
+            'v59 rejects migration-owner database CREATE'
             USING ERRCODE = '42501';
     END IF;
 
@@ -287,26 +332,28 @@ BEGIN
             'v59 contract violation: partial Automation ROI snapshot functions'
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
-
-    IF pg_catalog.to_regnamespace(v_object_schema) IS NOT NULL THEN
-        IF NOT EXISTS (
+    IF v_tables = 0 AND (
+        EXISTS (
             SELECT 1
-            FROM pg_catalog.pg_namespace namespace
-            JOIN pg_catalog.pg_roles owner_role ON owner_role.oid = namespace.nspowner
-            WHERE namespace.nspname = v_object_schema
-              AND namespace.oid = pg_catalog.to_regnamespace(v_object_schema)
-              AND owner_role.rolname = 'workflow_research_evidence_owner'
-        ) THEN
-            RAISE EXCEPTION
-                'v59 contract violation: trusted-schema owner drift'
-                USING ERRCODE = 'invalid_schema_definition';
-        END IF;
+            FROM pg_catalog.pg_class relation
+            WHERE relation.relnamespace = v_object_schema_oid
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_proc function_info
+            WHERE function_info.pronamespace = v_object_schema_oid
+        )
+    ) THEN
+        RAISE EXCEPTION
+            'v59 contract violation: conflicting first-apply dedicated-object inventory'
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
 
+    IF v_object_schema_oid IS NOT NULL THEN
         SELECT namespace.nspacl::text
         INTO v_schema_acl_raw
         FROM pg_catalog.pg_namespace namespace
-        WHERE namespace.nspname = v_object_schema
-          AND namespace.oid = pg_catalog.to_regnamespace(v_object_schema);
+        WHERE namespace.oid = v_object_schema_oid;
 
         IF EXISTS (
             WITH expected(
@@ -349,9 +396,7 @@ BEGIN
                   ON grantee_role.oid = acl.grantee
                 LEFT JOIN pg_catalog.pg_roles grantor_role
                   ON grantor_role.oid = acl.grantor
-                WHERE namespace.nspname = v_object_schema
-                  AND namespace.oid =
-                      pg_catalog.to_regnamespace(v_object_schema)
+                WHERE namespace.oid = v_object_schema_oid
             ),
             differences AS (
                 (SELECT * FROM expected EXCEPT SELECT * FROM actual)
@@ -434,6 +479,43 @@ BEGIN
                 'v59 contract violation: trusted-schema default ACL drift'
                 USING ERRCODE = 'invalid_schema_definition';
         END IF;
+    END IF;
+
+    IF pg_catalog.has_schema_privilege(
+           v_migration_role_oid, v_object_schema_oid, 'USAGE'
+       ) THEN
+        RAISE EXCEPTION
+            'v59 rejects migration-owner dedicated-schema USAGE'
+            USING ERRCODE = '42501';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class relation
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(
+                relation.relacl,
+                pg_catalog.acldefault('r', relation.relowner)
+            )
+        ) acl
+        WHERE relation.relnamespace = v_object_schema_oid
+          AND acl.grantee = v_migration_role_oid
+          AND relation.relowner <> v_migration_role_oid
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc function_info
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(
+                function_info.proacl,
+                pg_catalog.acldefault('f', function_info.proowner)
+            )
+        ) acl
+        WHERE function_info.pronamespace = v_object_schema_oid
+          AND acl.grantee = v_migration_role_oid
+          AND function_info.proowner <> v_migration_role_oid
+    ) THEN
+        RAISE EXCEPTION
+            'v59 rejects migration-owner direct dedicated-object access'
+            USING ERRCODE = '42501';
     END IF;
 
     IF v_tables = 3 THEN
@@ -855,6 +937,31 @@ BEGIN
             RAISE EXCEPTION 'v59 contract violation: divergent indexes'
                 USING ERRCODE = 'invalid_schema_definition';
         END IF;
+        IF EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_class relation
+            WHERE relation.relnamespace = v_object_schema_oid
+              AND relation.relname <> ALL (ARRAY[
+                  'research_evidence_automation_roi_input_snapshot',
+                  'research_evidence_automation_roi_input_snapshot_binding',
+                  'automation_roi_input_snapshot_sequence_allocator',
+                  'research_evidence_automation_roi_input_snapshot_pkey',
+                  'uq_rearois_id_project_scope',
+                  'uq_rearois_scope_sequence',
+                  'uq_rearois_scope_request',
+                  'uq_rearois_supersedes_once',
+                  'pk_rearoisa',
+                  'research_evidence_automation_roi_input_snapshot_binding_pkey',
+                  'uq_rearoisb_snapshot_role',
+                  'uq_rearoisb_snapshot_binding',
+                  'idx_rearois_scope_sequence',
+                  'idx_rearoisb_binding'
+              ])
+        ) THEN
+            RAISE EXCEPTION
+                'v59 contract violation: divergent dedicated relation inventory'
+                USING ERRCODE = 'invalid_schema_definition';
+        END IF;
 
         SELECT string_agg(
             expected.constraint_name,
@@ -1078,14 +1185,6 @@ BEGIN
             JOIN pg_catalog.pg_namespace namespace
               ON namespace.oid = function_info.pronamespace
             WHERE namespace.nspname = v_object_schema
-              AND function_info.proname = ANY (ARRAY[
-                  'research_evidence_prepare_automation_roi_snapshot',
-                  'research_evidence_prepare_automation_roi_snapshot_binding',
-                  'research_evidence_evaluate_automation_roi_bindings',
-                  'research_evidence_validate_automation_roi_snapshot',
-                  'research_evidence_assert_automation_roi_snapshot',
-                  'research_evidence_create_automation_roi_snapshot'
-              ])
         ) <> 6 THEN
             RAISE EXCEPTION
                 'v59 contract violation: divergent function inventory'
@@ -1775,9 +1874,6 @@ BEGIN
     END IF;
 END;
 $migration_context_restored$;
-
-CREATE SCHEMA IF NOT EXISTS research_evidence_automation_roi
-    AUTHORIZATION workflow_research_evidence_owner;
 
 DO $temporary_upstream_acl$
 DECLARE
