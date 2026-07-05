@@ -8,7 +8,10 @@ complete-reapply, and partial-schema state.
 This helper exists only under tests/. It is NOT a production migration runner and
 ships no runtime schema-state management. The disposable database DSN is supplied
 via the TEST_EVIDENCE_PG_DSN environment variable (dependency injection); when it
-is unset the Slice A PostgreSQL tests are skipped.
+is unset the Slice A PostgreSQL tests are skipped. R1.6A v59 migrations use the
+separate TEST_EVIDENCE_MIGRATION_PG_DSN variable so PostgreSQL authenticates a
+genuine workflow_migration_owner login instead of a bootstrap session using
+SET ROLE.
 """
 from __future__ import annotations
 
@@ -45,6 +48,9 @@ V58_RESEARCH_SCENARIO_INPUT_EVALUATION_SQL = (
     SQL_DIR
     / "v58_research_evidence_scenario_input_evaluation_foundation.sql"
 )
+V59_RESEARCH_AUTOMATION_ROI_USE_SQL = (
+    SQL_DIR / "v59_research_evidence_automation_roi_input_snapshot.sql"
+)
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -56,6 +62,10 @@ SLICE_B_TABLES = (
 )
 
 DSN_ENV = "TEST_EVIDENCE_PG_DSN"
+MIGRATION_DSN_ENV = "TEST_EVIDENCE_MIGRATION_PG_DSN"
+MIGRATION_OWNER = "workflow_migration_owner"
+RUNTIME_DSN_ENV = "TEST_EVIDENCE_RUNTIME_PG_DSN"
+RUNTIME_ROLE = "workflow_automation_roi_runtime"
 
 SLICE_A_TABLES = (
     "source_blob",
@@ -227,6 +237,214 @@ def apply_v58_research_scenario_input_evaluation(conn) -> None:
         raise
     finally:
         _restore_autocommit(conn, prior)
+
+
+def assign_v59_upstream_migration_ownership(conn, schema: str) -> None:
+    """Model production ownership after bootstrap creates disposable topology."""
+    psycopg = psycopg_module()
+    prior = _begin_autocommit(conn)
+    try:
+        conn.execute(
+            psycopg.sql.SQL("ALTER SCHEMA {} OWNER TO {}").format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier(MIGRATION_OWNER),
+            )
+        )
+        for relation in (
+            "projects",
+            "approved_calculation_input",
+            "research_evidence_consumer_input_binding",
+            "research_evidence_consumer_input_binding_sequence_allocator",
+        ):
+            conn.execute(
+                psycopg.sql.SQL("ALTER TABLE {}.{} OWNER TO {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(relation),
+                    psycopg.sql.Identifier(MIGRATION_OWNER),
+                )
+            )
+        conn.execute(
+            psycopg.sql.SQL("ALTER FUNCTION {}.{}() OWNER TO {}").format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier("slicea_reject_mutation"),
+                psycopg.sql.Identifier(MIGRATION_OWNER),
+            )
+        )
+    finally:
+        _restore_autocommit(conn, prior)
+
+
+def provision_v59_dedicated_schema(conn) -> None:
+    """Pre-provision the empty trusted schema without database CREATE grants."""
+    psycopg = psycopg_module()
+    schema = "research_evidence_automation_roi"
+    owner = "workflow_research_evidence_owner"
+    runtime = "workflow_automation_roi_runtime"
+    prior = _begin_autocommit(conn)
+    try:
+        conn.execute(
+            psycopg.sql.SQL(
+                "CREATE SCHEMA IF NOT EXISTS {} AUTHORIZATION {}"
+            ).format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier(owner),
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("ALTER SCHEMA {} OWNER TO {}").format(
+                psycopg.sql.Identifier(schema),
+                psycopg.sql.Identifier(owner),
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("SET ROLE {}").format(
+                psycopg.sql.Identifier(owner)
+            )
+        )
+        try:
+            conn.execute(
+                psycopg.sql.SQL(
+                    "REVOKE ALL ON SCHEMA {} FROM PUBLIC"
+                ).format(psycopg.sql.Identifier(schema))
+            )
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT USAGE ON SCHEMA {} TO {}"
+                ).format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(runtime),
+                )
+            )
+            conn.execute(
+                "ALTER DEFAULT PRIVILEGES "
+                "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
+            )
+        finally:
+            conn.execute("RESET ROLE")
+    finally:
+        _restore_autocommit(conn, prior)
+
+
+def assert_single_v59_upstream_schema(conn) -> str:
+    """Require one OID-validated v59 upstream before applying the migration."""
+    rows = conn.execute(
+        """
+        SELECT upstream_namespace.nspname
+        FROM pg_catalog.pg_constraint constraint_info
+        JOIN pg_catalog.pg_class binding_relation
+          ON binding_relation.oid = constraint_info.conrelid
+        JOIN pg_catalog.pg_namespace binding_namespace
+          ON binding_namespace.oid = binding_relation.relnamespace
+        JOIN pg_catalog.pg_class upstream_relation
+          ON upstream_relation.oid = constraint_info.confrelid
+        JOIN pg_catalog.pg_namespace upstream_namespace
+          ON upstream_namespace.oid = upstream_relation.relnamespace
+        WHERE constraint_info.conname =
+                  'fk_recib_calculation_input_role'
+          AND constraint_info.contype = 'f'
+          AND constraint_info.connamespace = binding_namespace.oid
+          AND binding_relation.relname =
+                  'research_evidence_consumer_input_binding'
+          AND binding_relation.relkind = 'r'
+          AND upstream_relation.relname = 'approved_calculation_input'
+          AND upstream_relation.relkind = 'r'
+          AND upstream_namespace.oid = binding_namespace.oid
+        ORDER BY upstream_namespace.oid
+        """
+    ).fetchall()
+    if len(rows) != 1 or rows[0][0] is None:
+        raise RuntimeError(
+            "v59 requires exactly one validated upstream schema "
+            f"(pytest harness found {len(rows)})"
+        )
+    return rows[0][0]
+
+
+@contextlib.contextmanager
+def v59_migration_connection(upstream_schema: str):
+    """Open the genuine migration-owner login required by the v59 contract."""
+    migration_dsn = os.getenv(MIGRATION_DSN_ENV)
+    if not migration_dsn:
+        raise RuntimeError(f"{MIGRATION_DSN_ENV} is required for v59")
+    psycopg = psycopg_module()
+    connection = psycopg.connect(migration_dsn)
+    try:
+        connection.autocommit = True
+        connection.execute(
+            psycopg.sql.SQL("SET search_path TO {}").format(
+                psycopg.sql.Identifier(upstream_schema)
+            )
+        )
+        identity = connection.execute(
+            """
+            SELECT
+                session_user = 'workflow_migration_owner',
+                current_user = 'workflow_migration_owner'
+            """
+        ).fetchone()
+        if identity != (True, True):
+            raise RuntimeError(
+                "v59 requires a genuine workflow_migration_owner login"
+            )
+        yield connection
+    finally:
+        with contextlib.suppress(Exception):
+            connection.rollback()
+        connection.close()
+
+
+@contextlib.contextmanager
+def runtime_connection(upstream_schema: str):
+    """Open the genuine runtime login used by R1.6A functional tests."""
+    runtime_dsn = os.getenv(RUNTIME_DSN_ENV)
+    if not runtime_dsn:
+        raise RuntimeError(f"{RUNTIME_DSN_ENV} is required for R1.6A runtime tests")
+    psycopg = psycopg_module()
+    connection = psycopg.connect(runtime_dsn)
+    try:
+        connection.execute(
+            psycopg.sql.SQL("SET search_path TO {}").format(
+                psycopg.sql.Identifier(upstream_schema)
+            )
+        )
+        identity = connection.execute(
+            """
+            SELECT
+                session_user = 'workflow_automation_roi_runtime',
+                current_user = 'workflow_automation_roi_runtime'
+            """
+        ).fetchone()
+        if identity != (True, True):
+            raise RuntimeError(
+                "R1.6A functional tests require a genuine runtime login"
+            )
+        connection.commit()
+        yield connection
+    finally:
+        with contextlib.suppress(Exception):
+            connection.rollback()
+        connection.close()
+
+
+def apply_v59_research_automation_roi_use(conn) -> None:
+    """Apply v59 through a genuine migration-owner login connection."""
+    prior = _begin_autocommit(conn)
+    try:
+        upstream_schema = assert_single_v59_upstream_schema(conn)
+    finally:
+        _restore_autocommit(conn, prior)
+    try:
+        with v59_migration_connection(upstream_schema) as migration:
+            _run_script(migration, V59_RESEARCH_AUTOMATION_ROI_USE_SQL)
+    finally:
+        # v59 used to execute on this bootstrap session and its final
+        # RESET ROLE restored session_user. Preserve that fixture boundary
+        # now that migration execution uses a separate authenticated login.
+        prior = _begin_autocommit(conn)
+        try:
+            conn.execute("RESET ROLE")
+        finally:
+            _restore_autocommit(conn, prior)
 
 
 def slice_b_tables_present(conn, schema: str) -> int:
