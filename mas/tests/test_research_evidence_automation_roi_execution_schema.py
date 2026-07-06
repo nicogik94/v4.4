@@ -533,6 +533,56 @@ def test_reapply_rejects_function_trigger_and_acl_drift(
         pg.apply_v60_research_automation_roi_execution(conn)
 
 
+def test_reapply_rejects_same_shape_wrong_trigger_function_drift(
+    conn, schema_v60
+):
+    pg.apply_v60_research_automation_roi_execution(conn)
+    prior = pg._begin_autocommit(conn)
+    conn.execute(f"SET ROLE {FUNCTION_OWNER}")
+    conn.execute(
+        f"DROP TRIGGER trg_rearoicr_no_mutation ON "
+        f"{OBJECT_SCHEMA}.automation_roi_calculation_result"
+    )
+    conn.execute(
+        f"CREATE TRIGGER trg_rearoicr_no_mutation "
+        f"BEFORE UPDATE OR DELETE ON "
+        f"{OBJECT_SCHEMA}.automation_roi_calculation_result "
+        f"FOR EACH ROW EXECUTE FUNCTION {OBJECT_SCHEMA}."
+        "research_evidence_prepare_automation_roi_result()"
+    )
+    conn.execute("RESET ROLE")
+    pg._restore_autocommit(conn, prior)
+
+    def trigger_and_wrong_function_oids():
+        return conn.execute(
+            """
+            SELECT trigger_info.tgfoid, wrong_function.oid
+            FROM pg_catalog.pg_trigger trigger_info
+            JOIN pg_catalog.pg_class relation
+              ON relation.oid = trigger_info.tgrelid
+            JOIN pg_catalog.pg_namespace namespace
+              ON namespace.oid = relation.relnamespace
+            JOIN pg_catalog.pg_proc wrong_function
+              ON wrong_function.pronamespace = namespace.oid
+             AND wrong_function.proname =
+                 'research_evidence_prepare_automation_roi_result'
+             AND pg_catalog.pg_get_function_identity_arguments(
+                 wrong_function.oid
+             ) = ''
+            WHERE namespace.nspname = %s
+              AND relation.relname = 'automation_roi_calculation_result'
+              AND trigger_info.tgname = 'trg_rearoicr_no_mutation'
+            """,
+            (OBJECT_SCHEMA,),
+        ).fetchone()
+
+    drifted_oids = trigger_and_wrong_function_oids()
+    assert drifted_oids[0] == drifted_oids[1]
+    with pytest.raises(Exception, match="result trigger drift"):
+        pg.apply_v60_research_automation_roi_execution(conn)
+    assert trigger_and_wrong_function_oids() == drifted_oids
+
+
 def test_reapply_rejects_partial_and_extra_object_state(conn, schema_v60):
     prior = pg._begin_autocommit(conn)
     conn.execute(f"SET ROLE {FUNCTION_OWNER}")

@@ -16,6 +16,7 @@ DECLARE
     v_result_oid oid;
     v_execute_oid oid;
     v_prepare_oid oid;
+    v_mutation_guard_oid oid;
 BEGIN
     IF session_user <> 'workflow_migration_owner'
        OR current_user <> 'workflow_migration_owner' THEN
@@ -204,6 +205,32 @@ BEGIN
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
 
+    SELECT mutation_guard.oid
+    INTO v_mutation_guard_oid
+    FROM pg_catalog.pg_constraint constraint_info
+    JOIN pg_catalog.pg_class child_relation
+      ON child_relation.oid = constraint_info.conrelid
+    JOIN pg_catalog.pg_namespace child_namespace
+      ON child_namespace.oid = child_relation.relnamespace
+    JOIN pg_catalog.pg_class upstream_relation
+      ON upstream_relation.oid = constraint_info.confrelid
+    JOIN pg_catalog.pg_namespace upstream_namespace
+      ON upstream_namespace.oid = upstream_relation.relnamespace
+    JOIN pg_catalog.pg_proc mutation_guard
+      ON mutation_guard.pronamespace = upstream_namespace.oid
+     AND mutation_guard.proname = 'slicea_reject_mutation'
+     AND pg_catalog.pg_get_function_identity_arguments(
+         mutation_guard.oid
+     ) = ''
+    WHERE child_namespace.oid = v_schema_oid
+      AND child_relation.relname =
+          'research_evidence_automation_roi_input_snapshot_binding'
+      AND constraint_info.conname = 'fk_rearoisb_binding_scope';
+    IF v_mutation_guard_oid IS NULL THEN
+        RAISE EXCEPTION 'v60 requires the exact upstream mutation guard'
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
     SELECT count(*), min(relation.oid)
     INTO v_result_tables, v_result_oid
     FROM pg_catalog.pg_class relation
@@ -320,6 +347,7 @@ BEGIN
               AND trigger_info.tgname = 'trg_rearoicr_prepare_insert'
               AND trigger_info.tgenabled = 'A'
               AND trigger_info.tgtype = 7
+              AND trigger_info.tgattr = ''::int2vector
               AND NOT trigger_info.tgisinternal
         ) OR NOT EXISTS (
             SELECT 1
@@ -328,6 +356,8 @@ BEGIN
               AND trigger_info.tgname = 'trg_rearoicr_no_mutation'
               AND trigger_info.tgenabled = 'O'
               AND trigger_info.tgtype = 27
+              AND trigger_info.tgfoid = v_mutation_guard_oid
+              AND trigger_info.tgattr = ''::int2vector
               AND NOT trigger_info.tgisinternal
         ) THEN
             RAISE EXCEPTION 'v60 contract violation: result trigger drift'

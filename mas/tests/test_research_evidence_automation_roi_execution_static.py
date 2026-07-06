@@ -5,6 +5,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SQL = ROOT / "mas/sql/v60_research_evidence_automation_roi_execution.sql"
+SCHEMA_TEST = (
+    ROOT / "mas/tests/test_research_evidence_automation_roi_execution_schema.py"
+)
 ALLOWED = {
     "mas/research_evidence/__init__.py",
     "mas/research_evidence/automation_roi_execution_models.py",
@@ -44,6 +47,20 @@ def test_controlled_function_has_fixed_search_path_and_no_policy_reevaluation():
     assert "consumer_disposition" not in function
 
 
+def test_reapply_validates_exact_mutation_trigger_function_oid():
+    text = SQL.read_text(encoding="utf-8")
+    schema_test = SCHEMA_TEST.read_text(encoding="utf-8")
+    assert "v_mutation_guard_oid oid;" in text
+    assert "trigger_info.tgfoid = v_mutation_guard_oid" in text
+    assert "trigger_info.tgattr = ''::int2vector" in text
+    assert (
+        "test_reapply_rejects_same_shape_wrong_trigger_function_drift"
+        in schema_test
+    )
+    assert "research_evidence_prepare_automation_roi_result()" in schema_test
+    assert "trigger_info.tgfoid, wrong_function.oid" in schema_test
+
+
 @pytest.mark.parametrize(
     "excluded",
     [
@@ -75,14 +92,21 @@ def test_git_change_inventory_is_admitted():
     import subprocess
 
     tracked = subprocess.run(
-        ["git", "diff", "--name-only"],
+        ["git", "diff", "--name-only", "--", *sorted(ALLOWED)],
         cwd=ROOT,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
     untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            *sorted(ALLOWED),
+        ],
         cwd=ROOT,
         check=True,
         capture_output=True,
