@@ -51,6 +51,9 @@ V58_RESEARCH_SCENARIO_INPUT_EVALUATION_SQL = (
 V59_RESEARCH_AUTOMATION_ROI_USE_SQL = (
     SQL_DIR / "v59_research_evidence_automation_roi_input_snapshot.sql"
 )
+V60_RESEARCH_AUTOMATION_ROI_EXECUTION_SQL = (
+    SQL_DIR / "v60_research_evidence_automation_roi_execution.sql"
+)
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -445,6 +448,17 @@ def apply_v59_research_automation_roi_use(conn) -> None:
             conn.execute("RESET ROLE")
         finally:
             _restore_autocommit(conn, prior)
+
+
+def apply_v60_research_automation_roi_execution(conn) -> None:
+    """Apply v60 through the genuine migration-owner login connection."""
+    prior = _begin_autocommit(conn)
+    try:
+        upstream_schema = assert_single_v59_upstream_schema(conn)
+    finally:
+        _restore_autocommit(conn, prior)
+    with v59_migration_connection(upstream_schema) as migration:
+        _run_script(migration, V60_RESEARCH_AUTOMATION_ROI_EXECUTION_SQL)
 
 
 def slice_b_tables_present(conn, schema: str) -> int:
