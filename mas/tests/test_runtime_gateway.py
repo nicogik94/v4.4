@@ -1,4 +1,5 @@
 """Tests for runtime gateway and semantic cache compatibility."""
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -701,6 +702,35 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.text, "llm ok")
         self.assertEqual(response.provider_used, "anthropic")
         self.assertEqual(response.model_used, MODEL_ROUTING["classify"].model)
+
+
+def test_call_llm_default_shadow_store_uses_pytest_temp_sqlite(scenario_shadow_sqlite_path):
+    fake_response = llm_client.LLMResponse(
+        text="llm shadow ok",
+        ok=True,
+        model_used=MODEL_ROUTING["classify"].model,
+        provider_used="anthropic",
+        input_tokens=10,
+        output_tokens=5,
+        cost_usd=0.01,
+        latency_ms=5,
+    )
+
+    async def exercise_gateway_default_shadow_store():
+        with (
+            patch("llm_client.ANTHROPIC_API_KEY", "test-key"),
+            patch("llm_client._call_anthropic", new=AsyncMock(return_value=fake_response)),
+        ):
+            return await llm_client.call_llm("classify", "system", "prompt")
+
+    scenario_config = llm_client.run_shadow_evaluation.__globals__["SCENARIO_SHADOW"]
+    assert Path(scenario_config.sqlite_path) == scenario_shadow_sqlite_path
+    assert not scenario_shadow_sqlite_path.exists()
+
+    response = asyncio.run(exercise_gateway_default_shadow_store())
+
+    assert response.ok
+    assert scenario_shadow_sqlite_path.is_file()
 
 
 class TestOpenAICompatibility(unittest.IsolatedAsyncioTestCase):
