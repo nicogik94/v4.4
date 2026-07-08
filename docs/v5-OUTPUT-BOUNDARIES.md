@@ -9,6 +9,7 @@ Human review remains required before any client delivery.
 | Profile | Formats | Intended audience | Boundary |
 |---|---:|---|---|
 | `report` | DOCX, PDF | Client-safe after human review | Final report only, with client-facing cleanup and operator/runtime diagnostics removed. |
+| `decision_memo_pilot_plan` | DOCX, PDF | Client-safe after human review | Available only when `report_output_mode=decision_memo_pilot_plan`; exports the stored decision memo with the technical appendix separated. |
 | `client_dossier` | DOCX, PDF | Client-safe after human review | Structured client dossier with client-safe metadata, open client-visible clarification questions, and client-safe evidence wording. |
 | `client_monitoring_template` | XLSX | Client-safe after human review | Monitoring worksheet without operator trace columns or explicit internal/runtime/operator-only metadata. |
 | `operator_dossier` | DOCX, PDF | Operator-only | Preserves operator diagnostics after unsafe string redaction, including quality warnings, policy summaries, trace summaries, and freshness metadata. |
@@ -20,6 +21,7 @@ Human review remains required before any client delivery.
 The client-safe profiles are:
 
 - `report`
+- `decision_memo_pilot_plan`
 - `client_dossier`
 - `client_monitoring_template`
 
@@ -32,6 +34,19 @@ Client outputs may include:
 - client-visible open clarification questions
 - monitoring signals, owners, cadence, thresholds, and actions after client cleanup
 - evidence maturity and source-locator status phrased for review
+
+## Output Configuration Metadata
+
+Projects support `output_language` (`en`, `es-MX`) and `report_mode`
+(`standard`, `decision_memo_pilot_plan`). Existing projects and callers default
+to `en` and `standard`.
+
+Generated reports also store `report_output_language` and
+`report_output_mode`. Export and dashboard behavior that depends on the report
+mode uses the generated metadata, not the current desired configuration. If a
+project setting changes after report generation, the old report is not
+re-labeled; the dashboard should show that a report rerun is required for the
+new setting to affect the report.
 
 ## Operator-Only Profiles
 

@@ -59,6 +59,7 @@ from state import (
     Priority,
     Provenance,
     ProjectState,
+    REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
     SQIDimension,
     SQIOutput,
     StrategyAction,
@@ -538,6 +539,37 @@ class TestWorkflowHelpers(unittest.TestCase):
         )
         positions = [prompt.index(heading) for heading in headings]
         self.assertEqual(positions, sorted(positions))
+
+    def test_decision_memo_report_prompt_uses_es_mx_headings_and_claim_policy(self):
+        state = make_completed_state("report-decision-memo-es")
+        state.output_language = "es-MX"
+        state.report_mode = REPORT_MODE_DECISION_MEMO_PILOT_PLAN
+
+        prompt = build_report_prompt(state)
+
+        headings = (
+            "# Decisión",
+            "# Recomendación",
+            "# Por qué se recomienda",
+            "# Hechos proporcionados por el operador",
+            "# Hipótesis y supuestos propuestos",
+            "# Desconocidos / no proporcionados",
+            "# Madurez de la evidencia",
+            "# Siguientes acciones",
+            "# Señales de monitoreo",
+            "# Umbrales para cambiar de curso",
+            "# Apéndice: Análisis técnico",
+        )
+        positions = [prompt.index(heading) for heading in headings]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("REPORT MODE: decision_memo_pilot_plan", prompt)
+        self.assertIn("PROJECT OUTPUT LANGUAGE: es-MX", prompt)
+        self.assertIn("Hecho proporcionado por el operador", prompt)
+        self.assertIn("Afirmación respaldada por fuente", prompt)
+        self.assertIn("Umbral propuesto por el operador", prompt)
+        self.assertIn("Locator resolvability provides traceability only", prompt)
+        self.assertIn("Technical methods, framework names, FMEA, SQI, BF, DQ, RPN, rho, H_norm", prompt)
+        self.assertNotIn("# Executive Summary", prompt)
 
     def test_report_prompt_includes_client_artifact_constraints(self):
         prompt = build_report_prompt(make_completed_state("report-client-artifact-constraints"))
@@ -1717,6 +1749,8 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         state = make_completed_state("report-generation-metadata")
         state.phase_status["report"] = PhaseStatus.PENDING
         state.report = None
+        state.output_language = "es-MX"
+        state.report_mode = REPORT_MODE_DECISION_MEMO_PILOT_PLAN
         response = make_response("new report body", 14, 7, 0.03)
 
         with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
@@ -1736,6 +1770,12 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(details["code_version"], report_freshness.UNKNOWN_CODE_VERSION)
         self.assertEqual(details["report_sha256"], report_freshness.report_sha256("new report body"))
         self.assertEqual(details["report_length"], len("new report body"))
+        self.assertEqual(updated.report_output_language, "es-MX")
+        self.assertEqual(updated.report_output_mode, REPORT_MODE_DECISION_MEMO_PILOT_PLAN)
+        self.assertEqual(details["report_output_language"], "es-MX")
+        self.assertEqual(details["report_output_mode"], REPORT_MODE_DECISION_MEMO_PILOT_PLAN)
+        self.assertIn("decision_memo_quality", details)
+        self.assertTrue(details["decision_memo_quality"]["checked"])
         self.assertTrue(details["generated_at"])
 
     async def test_report_regeneration_records_updated_generation_metadata(self):

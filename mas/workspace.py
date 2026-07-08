@@ -12,7 +12,16 @@ from delivery_readiness import DeliveryReviewReadiness, build_delivery_review_re
 from ingestion_contract import DEFAULT_INGESTION_SOURCE, LEGACY_CONTRACT_VERSION
 from knowledge.freshness import build_knowledge_health
 from knowledge.retrieval import RetrievalPhaseImpactSummary, build_prompt_facing_retrieval_impact
-from state import ApprovalRecord, DecisionObjectStatus, Evidence, ProjectState, Risk
+from report_quality import assess_decision_memo_pilot_plan_quality
+from state import (
+    DEFAULT_OUTPUT_LANGUAGE,
+    DEFAULT_REPORT_MODE,
+    ApprovalRecord,
+    DecisionObjectStatus,
+    Evidence,
+    ProjectState,
+    Risk,
+)
 
 
 class ScoreSummary(BaseModel):
@@ -78,6 +87,33 @@ class WorkspaceResponseMetadata(BaseModel):
     input_contract_version: str = LEGACY_CONTRACT_VERSION
 
 
+class WorkspaceReportOutputMetadata(BaseModel):
+    current_output_language: str = DEFAULT_OUTPUT_LANGUAGE
+    current_report_mode: str = DEFAULT_REPORT_MODE
+    metadata_status: str = "not_generated"
+    generated_output_language: Optional[str] = None
+    generated_report_mode: Optional[str] = None
+    rerun_required: bool = False
+    rerun_notice: str = ""
+
+
+class WorkspaceReportQualityFinding(BaseModel):
+    rule_name: str
+    message: str
+    location: str = ""
+    excerpt: str = ""
+    severity: str = "advisory"
+
+
+class WorkspaceReportQualitySummary(BaseModel):
+    checked: bool = False
+    status: str = "not_applicable"
+    report_mode: str = DEFAULT_REPORT_MODE
+    output_language: str = DEFAULT_OUTPUT_LANGUAGE
+    finding_count: int = 0
+    findings: list[WorkspaceReportQualityFinding] = Field(default_factory=list)
+
+
 class WorkspaceSummary(BaseModel):
     project_id: str
     project_name: str
@@ -85,6 +121,8 @@ class WorkspaceSummary(BaseModel):
     project_status: str
     input_contract: WorkspaceInputContract = Field(default_factory=WorkspaceInputContract)
     response_metadata: WorkspaceResponseMetadata = Field(default_factory=WorkspaceResponseMetadata)
+    report_output: WorkspaceReportOutputMetadata = Field(default_factory=WorkspaceReportOutputMetadata)
+    report_quality: WorkspaceReportQualitySummary = Field(default_factory=WorkspaceReportQualitySummary)
     workflow_running: bool = False
     phase_statuses: dict[str, str] = Field(default_factory=dict)
     blocking_reasons: list[str] = Field(default_factory=list)
@@ -170,6 +208,8 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
     retrieval_visibility = build_prompt_facing_retrieval_impact(state)
     project_status = _project_status(state, blocking_reasons, requires_approval, has_stale_downstream)
     input_contract = _input_contract(state)
+    report_output = _report_output_metadata(state)
+    report_quality = _report_quality_summary(state)
     active_risks = sorted(
         [risk for risk in decision_objects.risks if risk.status == "active"],
         key=lambda risk: (_severity_rank(risk.severity), risk.title.lower()),
@@ -205,6 +245,8 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         project_status=project_status,
         input_contract=input_contract,
         response_metadata=_response_metadata("workspace.summary.v1", input_contract),
+        report_output=report_output,
+        report_quality=report_quality,
         workflow_running=workflow_running,
         phase_statuses=phase_statuses,
         blocking_reasons=blocking_reasons,
@@ -299,6 +341,70 @@ def _blocking_reasons(state: ProjectState, health: DecisionObjectHealth) -> list
         if (breaker or {}).get("state") == "open":
             reasons.append(f"Phase breaker open: {phase_name}")
     return reasons
+
+
+def _report_output_metadata(state: ProjectState) -> WorkspaceReportOutputMetadata:
+    current_language = str(getattr(state, "output_language", DEFAULT_OUTPUT_LANGUAGE) or DEFAULT_OUTPUT_LANGUAGE)
+    current_mode = str(getattr(state, "report_mode", DEFAULT_REPORT_MODE) or DEFAULT_REPORT_MODE)
+    generated_language = _generated_report_metadata_value(getattr(state, "report_output_language", None))
+    generated_mode = _generated_report_metadata_value(getattr(state, "report_output_mode", None))
+    report_exists = bool(getattr(state, "report", None))
+    if not report_exists:
+        metadata_status = "not_generated"
+        rerun_required = False
+    elif generated_language is None or generated_mode is None:
+        metadata_status = "legacy_metadata_unknown"
+        rerun_required = True
+    else:
+        metadata_status = "generated"
+        rerun_required = current_language != generated_language or current_mode != generated_mode
+    notice = ""
+    if metadata_status == "legacy_metadata_unknown":
+        notice = (
+            "Report was generated before output metadata was recorded. "
+            f"Rerun the report phase for {current_language} / {current_mode} before using mode-specific exports."
+        )
+    elif rerun_required:
+        notice = (
+            f"Report was generated with {generated_language} / {generated_mode}. "
+            f"Rerun the report phase for {current_language} / {current_mode} to affect the report."
+        )
+    return WorkspaceReportOutputMetadata(
+        current_output_language=current_language,
+        current_report_mode=current_mode,
+        metadata_status=metadata_status,
+        generated_output_language=generated_language,
+        generated_report_mode=generated_mode,
+        rerun_required=rerun_required,
+        rerun_notice=notice,
+    )
+
+
+def _generated_report_metadata_value(value: object) -> str | None:
+    normalized = str(value).strip() if isinstance(value, str) else ""
+    return normalized or None
+
+
+def _report_quality_summary(state: ProjectState) -> WorkspaceReportQualitySummary:
+    result = assess_decision_memo_pilot_plan_quality(state)
+    findings = [
+        WorkspaceReportQualityFinding(
+            rule_name=finding.rule_name,
+            message=finding.message,
+            location=finding.location,
+            excerpt=finding.excerpt,
+            severity=finding.severity,
+        )
+        for finding in result.findings[:25]
+    ]
+    return WorkspaceReportQualitySummary(
+        checked=result.checked,
+        status=result.status,
+        report_mode=result.report_mode,
+        output_language=result.output_language,
+        finding_count=len(result.findings),
+        findings=findings,
+    )
 
 
 def _project_status(

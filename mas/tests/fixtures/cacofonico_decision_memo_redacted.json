@@ -1,0 +1,38 @@
+{
+  "project_id": "cacofonico-redacted",
+  "project_name": "CACOFONICO abstracted pilot decision",
+  "output_language": "es-MX",
+  "report_mode": "decision_memo_pilot_plan",
+  "brief": "Decidir si se debe ejecutar un piloto acotado de mejora operativa para una oferta cultural local. Datos sensibles y nombres reales fueron removidos.",
+  "operator_supplied_facts": [
+    "El operador reporto dos sedes candidatas para el piloto.",
+    "El operador pidio no iniciar una campana amplia antes de validar senales basicas."
+  ],
+  "sources": [
+    {
+      "evidence_id": "ev-pilot-summary",
+      "title": "Resumen operativo redactado",
+      "filename": "resumen_operativo_redactado.md",
+      "locator": "chunk=2"
+    }
+  ],
+  "inferences": [
+    "La opcion de piloto reduce exposicion porque limita alcance, presupuesto y numero de decisiones simultaneas."
+  ],
+  "unknowns": [
+    "No se proporciono presupuesto aprobado.",
+    "No se proporciono responsable final de seguimiento."
+  ],
+  "proposed_thresholds": [
+    "Umbral propuesto por el operador: revisar el curso si la asistencia validada no alcanza 20 registros al dia 14."
+  ],
+  "visible_monitoring_rows": [
+    {
+      "metric_signal": "Asistencia validada",
+      "decision_or_hypothesis": "Validar demanda inicial del piloto",
+      "cadence": "Semanal",
+      "stop_change_threshold": "Umbral propuesto por el operador: menos de 20 registros al dia 14"
+    }
+  ],
+  "report": "# Decisión\nHecho proporcionado por el operador: decidir si se ejecuta un piloto acotado antes de ampliar la iniciativa.\n\n# Recomendación\nInferencia: ejecutar un piloto pequeno y revisado por el operador antes de invertir en una ampliacion.\n\n# Por qué se recomienda\nAfirmación respaldada por fuente: el resumen operativo redactado identifica restricciones de capacidad para la ejecucion inicial. Resumen operativo redactado [Evidence: ev-pilot-summary | chunk=2]\nInferencia: un piloto acotado reduce el riesgo de comprometer recursos antes de validar la respuesta del publico.\n\n# Hechos proporcionados por el operador\nHecho proporcionado por el operador: el operador reporto dos sedes candidatas para el piloto.\nHecho proporcionado por el operador: el operador pidio no iniciar una campana amplia antes de validar senales basicas.\n\n# Hipótesis y supuestos propuestos\nInferencia: la asistencia validada es una senal temprana razonable para decidir si continuar.\nSupuesto propuesto para el operador: el equipo puede revisar resultados semanalmente durante el piloto.\n\n# Desconocidos / no proporcionados\nDesconocido / no proporcionado: no se proporciono presupuesto aprobado.\nDesconocido / no proporcionado: no se proporciono responsable final de seguimiento.\n\n# Madurez de la evidencia\nInferencia: la evidencia es parcial; hay una fuente redactada con locator concreto y faltan datos operativos finales.\n\n# Siguientes acciones\n- Hecho proporcionado por el operador: confirmar las dos sedes candidatas.\n- Supuesto propuesto para el operador: asignar responsable de seguimiento antes de iniciar.\n- Umbral propuesto por el operador: revisar el curso si la asistencia validada no alcanza 20 registros al dia 14.\n\n# Señales de monitoreo\n- Umbral propuesto por el operador: Asistencia validada; menos de 20 registros al dia 14 activa revision.\n\n# Umbrales para cambiar de curso\nUmbral propuesto por el operador: menos de 20 registros validados al dia 14 requiere revisar o detener la ampliacion.\n\n# Apéndice: Análisis técnico\nNotas tecnicas: el analisis estructural y los metodos diagnosticos quedan en este apendice. Los valores numericos no se tratan como hechos validados sin evidencia adicional.\n"
+}

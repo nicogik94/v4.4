@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
+import unicodedata
 from typing import Any
 
 
@@ -481,6 +482,29 @@ class ConstraintAdherenceProjection:
             "contradiction_signals": list(self.contradiction_signals),
             "operator_context_preview": self.operator_context_preview,
         }
+
+
+@dataclass(frozen=True)
+class DecisionMemoQualityFinding:
+    rule_name: str
+    message: str
+    location: str = ""
+    excerpt: str = ""
+    severity: str = "advisory"
+
+
+@dataclass(frozen=True)
+class DecisionMemoQualityResult:
+    checked: bool
+    report_mode: str = "standard"
+    output_language: str = "en"
+    findings: tuple[DecisionMemoQualityFinding, ...] = ()
+
+    @property
+    def status(self) -> str:
+        if not self.checked:
+            return "not_applicable"
+        return "advisory_findings" if self.findings else "ok"
 
 
 def assess_report_quality_context(state: Any) -> ReportQualityContext:
@@ -1608,6 +1632,737 @@ def monitor_success_metric_lines(monitor: Any, limit: int = 8) -> list[str]:
         if trip:
             lines.append(f"circuit breaker: {trip}")
     return lines[:limit]
+
+
+def assess_decision_memo_pilot_plan_quality(state: Any) -> DecisionMemoQualityResult:
+    """Return advisory deterministic QA findings for decision memo / pilot reports.
+
+    The checks are structural and heuristic. They do not verify semantic truth
+    and do not block report completion.
+    """
+    report = str(getattr(state, "report", "") or "")
+    report_mode = _decision_memo_generated_report_mode(state)
+    output_language = _decision_memo_generated_output_language(state)
+    if report_mode != "decision_memo_pilot_plan" or not report.strip():
+        return DecisionMemoQualityResult(
+            checked=False,
+            report_mode=report_mode,
+            output_language=output_language,
+        )
+
+    headings = _decision_memo_expected_headings(output_language)
+    heading_entries = _decision_memo_heading_entries(report)
+    sections = _decision_memo_sections(heading_entries)
+    appendix_key = _decision_memo_heading_key(headings[-1])
+    main_text = _decision_memo_main_text(report, heading_entries, appendix_key)
+    exact_markers = _decision_memo_exact_citation_markers(state)
+    findings: list[DecisionMemoQualityFinding] = []
+
+    _decision_memo_check_required_sections(findings, headings, sections)
+    _decision_memo_check_appendix(findings, report, heading_entries, appendix_key)
+    _decision_memo_check_duplicate_headings(findings, heading_entries)
+    _decision_memo_check_empty_headings(findings, heading_entries)
+    _decision_memo_check_markdown_tables(findings, report)
+    _decision_memo_check_truncation(findings, report)
+    _decision_memo_check_contradictory_counts(findings, main_text)
+    _decision_memo_check_unsupported_numeric_claims(findings, main_text, exact_markers, output_language)
+    _decision_memo_check_source_supported_locators(findings, main_text, exact_markers, output_language)
+    _decision_memo_check_evidence_certainty_mismatch(findings, main_text, sections, output_language)
+    _decision_memo_check_heading_language(findings, heading_entries, output_language)
+    _decision_memo_check_monitoring_rows(findings, state, sections, output_language)
+
+    return DecisionMemoQualityResult(
+        checked=True,
+        report_mode=report_mode,
+        output_language=output_language,
+        findings=tuple(findings),
+    )
+
+
+def _decision_memo_generated_report_mode(state: Any) -> str:
+    language = str(getattr(state, "report_output_language", "") or "").strip()
+    mode = str(getattr(state, "report_output_mode", "") or "").strip()
+    if language and mode:
+        return mode
+    return "legacy_metadata_unknown" if getattr(state, "report", None) else "not_generated"
+
+
+def _decision_memo_generated_output_language(state: Any) -> str:
+    mode = str(getattr(state, "report_output_mode", "") or "").strip()
+    value = str(getattr(state, "report_output_language", "") or "").strip()
+    if mode and value in {"en", "es-MX"}:
+        return value
+    return "legacy_metadata_unknown" if getattr(state, "report", None) else "not_generated"
+
+
+def _decision_memo_expected_headings(output_language: str) -> tuple[str, ...]:
+    if output_language == "es-MX":
+        return (
+            "Decisión",
+            "Recomendación",
+            "Por qué se recomienda",
+            "Hechos proporcionados por el operador",
+            "Hipótesis y supuestos propuestos",
+            "Desconocidos / no proporcionados",
+            "Madurez de la evidencia",
+            "Siguientes acciones",
+            "Señales de monitoreo",
+            "Umbrales para cambiar de curso",
+            "Apéndice: Análisis técnico",
+        )
+    return (
+        "Decision",
+        "Recommendation",
+        "Why this is recommended",
+        "Operator-supplied facts",
+        "Hypotheses and proposed assumptions",
+        "Unknowns / not supplied",
+        "Evidence maturity",
+        "Next actions",
+        "Monitoring signals",
+        "Change-course thresholds",
+        "Appendix: Technical Analysis",
+    )
+
+
+def _decision_memo_other_language_headings(output_language: str) -> tuple[str, ...]:
+    return _decision_memo_expected_headings("en" if output_language == "es-MX" else "es-MX")
+
+
+def _decision_memo_claim_labels(output_language: str) -> tuple[str, ...]:
+    common = (
+        "Operator-supplied fact",
+        "Source-supported claim",
+        "Inference",
+        "Proposed operator assumption",
+        "Unknown / not supplied",
+        "Not applicable",
+        "Hecho proporcionado por el operador",
+        "Afirmación respaldada por fuente",
+        "Inferencia",
+        "Supuesto propuesto para el operador",
+        "Desconocido / no proporcionado",
+        "No aplica",
+    )
+    return common
+
+
+def _decision_memo_operator_fact_labels(output_language: str) -> tuple[str, ...]:
+    return ("Operator-supplied fact", "Hecho proporcionado por el operador")
+
+
+def _decision_memo_source_supported_labels(output_language: str) -> tuple[str, ...]:
+    return ("Source-supported claim", "Afirmación respaldada por fuente")
+
+
+def _decision_memo_proposed_threshold_labels(output_language: str) -> tuple[str, ...]:
+    return ("Proposed operator threshold", "Umbral propuesto por el operador")
+
+
+def _decision_memo_heading_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", ascii_text.lower()).strip()
+
+
+def _decision_memo_heading_entries(report: str) -> list[dict[str, Any]]:
+    lines = str(report or "").splitlines()
+    entries: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s{0,3}(#{1,6})\s*(.*?)\s*#*\s*$", line)
+        if not match:
+            continue
+        title = match.group(2).strip()
+        entries.append(
+            {
+                "title": title,
+                "key": _decision_memo_heading_key(title),
+                "line_number": index + 1,
+                "level": len(match.group(1)),
+                "body": "",
+            }
+        )
+    for pos, entry in enumerate(entries):
+        start = entry["line_number"]
+        end = entries[pos + 1]["line_number"] - 1 if pos + 1 < len(entries) else len(lines)
+        entry["body"] = "\n".join(lines[start:end]).strip()
+    return entries
+
+
+def _decision_memo_sections(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    sections: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        key = entry.get("key", "")
+        if key and key not in sections:
+            sections[key] = entry
+    return sections
+
+
+def _decision_memo_main_text(report: str, entries: list[dict[str, Any]], appendix_key: str) -> str:
+    appendix_line = 0
+    for entry in entries:
+        if entry.get("key") == appendix_key:
+            appendix_line = int(entry.get("line_number") or 0)
+            break
+    if not appendix_line:
+        return str(report or "")
+    lines = str(report or "").splitlines()
+    return "\n".join(lines[: max(0, appendix_line - 1)])
+
+
+def _decision_memo_exact_citation_markers(state: Any) -> set[str]:
+    try:
+        from cdp.citation_resolvability import build_defense_pass_result
+
+        result = build_defense_pass_result(state)
+    except Exception:
+        return set()
+    return {
+        str(getattr(resolution, "marker", "") or "")
+        for resolution in getattr(result, "resolutions", []) or []
+        if getattr(resolution, "status", "") == "resolved_exact"
+    }
+
+
+def _decision_memo_add_finding(
+    findings: list[DecisionMemoQualityFinding],
+    rule_name: str,
+    message: str,
+    *,
+    location: str = "",
+    excerpt: str = "",
+) -> None:
+    findings.append(
+        DecisionMemoQualityFinding(
+            rule_name=rule_name,
+            message=message,
+            location=location,
+            excerpt=_decision_memo_excerpt(excerpt),
+        )
+    )
+
+
+def _decision_memo_excerpt(value: str, limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _decision_memo_check_required_sections(
+    findings: list[DecisionMemoQualityFinding],
+    headings: tuple[str, ...],
+    sections: dict[str, dict[str, Any]],
+) -> None:
+    for heading in headings:
+        if _decision_memo_heading_key(heading) not in sections:
+            _decision_memo_add_finding(
+                findings,
+                "required_memo_section_missing",
+                f"Required decision memo section is missing: {heading}.",
+                location=heading,
+            )
+
+
+def _decision_memo_check_appendix(
+    findings: list[DecisionMemoQualityFinding],
+    report: str,
+    entries: list[dict[str, Any]],
+    appendix_key: str,
+) -> None:
+    appendix_entries = [entry for entry in entries if entry.get("key") == appendix_key]
+    if not appendix_entries:
+        _decision_memo_add_finding(
+            findings,
+            "appendix_missing_or_unseparated",
+            "Appendix: Technical Analysis is missing as a Markdown heading.",
+        )
+        return
+    appendix = appendix_entries[0]
+    if int(appendix.get("line_number") or 0) <= 2:
+        _decision_memo_add_finding(
+            findings,
+            "appendix_missing_or_unseparated",
+            "Technical appendix appears before a substantive main memo.",
+            location=f"line {appendix.get('line_number')}",
+            excerpt=appendix.get("title", ""),
+        )
+    if not str(appendix.get("body") or "").strip():
+        _decision_memo_add_finding(
+            findings,
+            "empty_heading",
+            "Technical appendix heading has no visible content.",
+            location=f"line {appendix.get('line_number')}",
+            excerpt=appendix.get("title", ""),
+        )
+    main_text = _decision_memo_main_text(report, entries, appendix_key)
+    if len(re.sub(r"\s+", "", main_text)) < 80:
+        _decision_memo_add_finding(
+            findings,
+            "appendix_missing_or_unseparated",
+            "Main memo before the appendix is too short to be clearly separated.",
+        )
+
+
+def _decision_memo_check_duplicate_headings(
+    findings: list[DecisionMemoQualityFinding],
+    entries: list[dict[str, Any]],
+) -> None:
+    counts: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        key = entry.get("key", "")
+        if key:
+            counts.setdefault(key, []).append(entry)
+    for key, duplicate_entries in counts.items():
+        if len(duplicate_entries) > 1:
+            _decision_memo_add_finding(
+                findings,
+                "duplicate_heading",
+                f"Heading appears {len(duplicate_entries)} times: {duplicate_entries[0].get('title')}.",
+                location=", ".join(f"line {entry.get('line_number')}" for entry in duplicate_entries),
+                excerpt=duplicate_entries[0].get("title", ""),
+            )
+
+
+def _decision_memo_check_empty_headings(
+    findings: list[DecisionMemoQualityFinding],
+    entries: list[dict[str, Any]],
+) -> None:
+    for entry in entries:
+        if not str(entry.get("title") or "").strip():
+            _decision_memo_add_finding(
+                findings,
+                "empty_heading",
+                "Markdown heading has no title.",
+                location=f"line {entry.get('line_number')}",
+            )
+            continue
+        body = str(entry.get("body") or "").strip()
+        if not body:
+            _decision_memo_add_finding(
+                findings,
+                "empty_heading",
+                "Markdown heading has no visible content before the next heading.",
+                location=f"line {entry.get('line_number')}",
+                excerpt=entry.get("title", ""),
+            )
+
+
+def _decision_memo_check_markdown_tables(findings: list[DecisionMemoQualityFinding], report: str) -> None:
+    lines = str(report or "").splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not _decision_memo_table_line(line):
+            index += 1
+            continue
+        start = index
+        block: list[str] = []
+        while index < len(lines) and _decision_memo_table_line(lines[index]):
+            block.append(lines[index])
+            index += 1
+        if len(block) < 2 or not _decision_memo_separator_row(block[1]):
+            _decision_memo_add_finding(
+                findings,
+                "malformed_markdown_table",
+                "Markdown table block is missing a separator row immediately after the header.",
+                location=f"line {start + 1}",
+                excerpt="\n".join(block[:3]),
+            )
+            continue
+        widths = [_decision_memo_table_width(row) for row in block if not _decision_memo_separator_row(row)]
+        if widths and len(set(widths)) > 1:
+            _decision_memo_add_finding(
+                findings,
+                "malformed_markdown_table",
+                "Markdown table rows have inconsistent cell counts.",
+                location=f"line {start + 1}",
+                excerpt="\n".join(block[:4]),
+            )
+
+
+def _decision_memo_table_line(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _decision_memo_separator_row(line: str) -> bool:
+    cells = [cell.strip() for cell in str(line or "").strip().strip("|").split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+
+def _decision_memo_table_width(line: str) -> int:
+    return len(str(line or "").strip().strip("|").split("|"))
+
+
+def _decision_memo_check_truncation(findings: list[DecisionMemoQualityFinding], report: str) -> None:
+    lines = [line.strip() for line in str(report or "").splitlines() if line.strip()]
+    if not lines:
+        return
+    last = lines[-1]
+    if last.startswith(("#", "-", "*", "|")) or re.match(r"^\d+[.)]\s+", last):
+        return
+    word_count = len(re.findall(r"\b\w+\b", last))
+    abrupt_tail = re.search(r"[,;:]$|\b(?:and|or|but|because|with|para|con|y|o|porque|que)$", last, re.I)
+    complete_punctuation = re.search(r"[.!?)]$", last)
+    if abrupt_tail or (word_count >= 8 and not complete_punctuation):
+        _decision_memo_add_finding(
+            findings,
+            "likely_incomplete_final_sentence",
+            "Final sentence may be incomplete or abruptly truncated.",
+            location="final line",
+            excerpt=last,
+        )
+
+
+def _decision_memo_check_contradictory_counts(
+    findings: list[DecisionMemoQualityFinding],
+    main_text: str,
+) -> None:
+    lines = str(main_text or "").splitlines()
+    count_pattern = re.compile(
+        r"\b(?P<count>\d+|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+"
+        r"(?P<noun>options?|alternatives?|actions?|experiments?|signals?|thresholds?|"
+        r"opciones|alternativas|acciones|experimentos|señales|umbrales)\b",
+        re.I,
+    )
+    for index, line in enumerate(lines):
+        match = count_pattern.search(line)
+        if not match:
+            continue
+        stated = _decision_memo_count_value(match.group("count"))
+        if stated is None:
+            continue
+        actual = _decision_memo_following_enumeration_count(lines, index + 1)
+        if actual > 0 and actual != stated:
+            _decision_memo_add_finding(
+                findings,
+                "contradictory_option_count",
+                f"Text states {stated} {match.group('noun')} but the immediately following enumeration has {actual}.",
+                location=f"line {index + 1}",
+                excerpt=line,
+            )
+
+
+def _decision_memo_count_value(value: str) -> int | None:
+    text = str(value or "").lower()
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "uno": 1,
+        "dos": 2,
+        "tres": 3,
+        "cuatro": 4,
+        "cinco": 5,
+        "seis": 6,
+        "siete": 7,
+        "ocho": 8,
+        "nueve": 9,
+        "diez": 10,
+    }
+    if text.isdigit():
+        return int(text)
+    return words.get(text)
+
+
+def _decision_memo_following_enumeration_count(lines: list[str], start_index: int) -> int:
+    nonempty: list[str] = []
+    for line in lines[start_index: start_index + 12]:
+        if line.strip():
+            nonempty.append(line)
+        elif nonempty:
+            break
+    if not nonempty:
+        return 0
+    if _decision_memo_table_line(nonempty[0]):
+        return sum(
+            1
+            for row in nonempty[2:]
+            if _decision_memo_table_line(row) and not _decision_memo_separator_row(row)
+        )
+    count = 0
+    for line in nonempty:
+        if re.match(r"^\s*(?:[-*]|\d+[.)])\s+", line):
+            count += 1
+        elif count:
+            break
+    return count
+
+
+def _decision_memo_check_unsupported_numeric_claims(
+    findings: list[DecisionMemoQualityFinding],
+    main_text: str,
+    exact_markers: set[str],
+    output_language: str,
+) -> None:
+    for line_number, line in _decision_memo_review_lines(main_text):
+        if not _decision_memo_numeric_claim_pattern(line):
+            continue
+        if _decision_memo_line_has_any_label(line, _decision_memo_operator_fact_labels(output_language)):
+            continue
+        if _decision_memo_line_has_any_label(line, _decision_memo_proposed_threshold_labels(output_language)):
+            continue
+        if _decision_memo_line_has_exact_marker(line, exact_markers):
+            continue
+        _decision_memo_add_finding(
+            findings,
+            "unsupported_numeric_claim",
+            "Main memo contains numeric precision or diagnostic scoring without an operator fact, proposed threshold, or concrete source locator label.",
+            location=f"line {line_number}",
+            excerpt=line,
+        )
+
+
+def _decision_memo_numeric_claim_pattern(line: str) -> bool:
+    text = str(line or "")
+    if re.search(r"\b(?:BF|DQ|RPN|rho|H_norm|FMEA|SQI|p\s*=|confidence interval|correlation|probability|probabilidad)\b|ρ", text, re.I):
+        return True
+    if re.search(r"\$\s*\d|\b\d+(?:\.\d+)?\s*(?:%|pp|x)\b", text, re.I):
+        return True
+    if _decision_memo_has_unsupported_numeric_range(text):
+        return True
+    if re.search(r"\b(?:forecast|projection|expected|predicted|precise|pronóstico|proyección|esperado)\b.{0,50}\b\d", text, re.I):
+        return True
+    return False
+
+
+def _decision_memo_has_unsupported_numeric_range(text: str) -> bool:
+    iso_spans = [
+        match.span()
+        for match in re.finditer(r"\b\d{4}-\d{2}-\d{2}(?:T\d{6}Z)?\b", text, re.I)
+    ]
+    range_pattern = re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:to|-|–)\s*\d+(?:\.\d+)?\s*"
+        r"(?P<unit>%|pp|usd|mxn|dollars?|pesos?)?\b",
+        re.I,
+    )
+    for match in range_pattern.finditer(text):
+        if any(_decision_memo_spans_overlap(match.span(), span) for span in iso_spans):
+            continue
+        if _decision_memo_numeric_range_is_roadmap_timing(text, match):
+            continue
+        if match.group("unit"):
+            return True
+        if _decision_memo_numeric_range_has_sensitive_context(text, match):
+            return True
+    return False
+
+
+def _decision_memo_spans_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _decision_memo_numeric_range_is_roadmap_timing(text: str, match: re.Match[str]) -> bool:
+    prefix = text[max(0, match.start() - 24):match.start()]
+    suffix = text[match.end():match.end() + 24]
+    return bool(
+        re.search(r"\b(?:day|days|día|días)\s*$", prefix, re.I)
+        or re.match(r"\s*(?:day|days|día|días)\b", suffix, re.I)
+    )
+
+
+def _decision_memo_numeric_range_has_sensitive_context(text: str, match: re.Match[str]) -> bool:
+    context = text[max(0, match.start() - 60):match.end() + 60]
+    return bool(
+        re.search(
+            r"\b(?:price|pricing|cost|budget|spend|forecast|projection|predicted|probability|"
+            r"probabilidad|precio|costo|presupuesto|gasto|pronóstico|proyección|esperado|"
+            r"usd|mxn|dollars?|pesos?)\b|\$",
+            context,
+            re.I,
+        )
+    )
+
+
+def _decision_memo_check_source_supported_locators(
+    findings: list[DecisionMemoQualityFinding],
+    main_text: str,
+    exact_markers: set[str],
+    output_language: str,
+) -> None:
+    labels = _decision_memo_source_supported_labels(output_language)
+    for line_number, line in _decision_memo_review_lines(main_text):
+        if not _decision_memo_line_has_any_label(line, labels):
+            continue
+        if _decision_memo_line_has_exact_marker(line, exact_markers):
+            continue
+        _decision_memo_add_finding(
+            findings,
+            "source_supported_without_concrete_locator",
+            "Claim is labeled source-supported but does not include a concrete locator resolved against the existing locator register.",
+            location=f"line {line_number}",
+            excerpt=line,
+        )
+
+
+def _decision_memo_check_evidence_certainty_mismatch(
+    findings: list[DecisionMemoQualityFinding],
+    main_text: str,
+    sections: dict[str, dict[str, Any]],
+    output_language: str,
+) -> None:
+    maturity_key = _decision_memo_heading_key("Madurez de la evidencia" if output_language == "es-MX" else "Evidence maturity")
+    maturity_text = str((sections.get(maturity_key) or {}).get("body") or "")
+    low_maturity = bool(
+        re.search(
+            r"\b(hypothesis-only|partial|weak|unavailable|sparse|limited|not supplied|"
+            r"hip[oó]tesis|parcial|d[eé]bil|no disponible|limitada|no proporcionad[ao])\b",
+            maturity_text,
+            re.I,
+        )
+    )
+    if not low_maturity:
+        return
+    for line_number, line in _decision_memo_review_lines(main_text):
+        if _decision_memo_certainty_wording(line) and not _decision_memo_certainty_negated(line):
+            _decision_memo_add_finding(
+                findings,
+                "evidence_maturity_certainty_mismatch",
+                "Evidence maturity is weak or partial, but the main memo uses certainty wording.",
+                location=f"line {line_number}",
+                excerpt=line,
+            )
+
+
+def _decision_memo_certainty_wording(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(confirmed|proven|guaranteed|certain|validated|established|definitive|"
+            r"confirmado|comprobado|garantizado|cierto|validado|establecido|definitivo)\b",
+            str(line or ""),
+            re.I,
+        )
+    )
+
+
+def _decision_memo_certainty_negated(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(not|no|sin|un|not yet|no est[aá]|a[uú]n no|pending|pendiente)\b.{0,30}"
+            r"\b(confirmed|proven|guaranteed|certain|validated|established|"
+            r"confirmado|comprobado|garantizado|cierto|validado|establecido)\b",
+            str(line or ""),
+            re.I,
+        )
+    )
+
+
+def _decision_memo_check_heading_language(
+    findings: list[DecisionMemoQualityFinding],
+    entries: list[dict[str, Any]],
+    output_language: str,
+) -> None:
+    present_keys = {_decision_memo_language_heading_key(str(entry.get("title", ""))) for entry in entries}
+    wrong_language = [
+        heading for heading in _decision_memo_other_language_headings(output_language)
+        if _decision_memo_language_heading_key(heading) in present_keys
+    ]
+    if wrong_language:
+        _decision_memo_add_finding(
+            findings,
+            "heading_language_mismatch",
+            f"Report output language is {output_language}, but headings from another required heading set are present.",
+            excerpt=", ".join(wrong_language[:4]),
+        )
+
+
+def _decision_memo_language_heading_key(value: str) -> str:
+    return re.sub(r"[^\w/]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
+
+
+def _decision_memo_check_monitoring_rows(
+    findings: list[DecisionMemoQualityFinding],
+    state: Any,
+    sections: dict[str, dict[str, Any]],
+    output_language: str,
+) -> None:
+    try:
+        from monitoring_templates import build_monitoring_template_rows
+    except Exception:
+        return
+    try:
+        rows = build_monitoring_template_rows(state)
+    except Exception:
+        return
+    metrics = [
+        _decision_memo_text(row.metric_signal)
+        for row in rows
+        if _decision_memo_monitoring_metric_is_visible(_decision_memo_text(row.metric_signal))
+    ]
+    if not metrics:
+        return
+    section_heading = "Señales de monitoreo" if output_language == "es-MX" else "Monitoring signals"
+    section = sections.get(_decision_memo_heading_key(section_heading))
+    section_text = _decision_memo_text((section or {}).get("body", ""))
+    if not section_text:
+        return
+    normalized_section = _decision_memo_normalized_text(section_text)
+    if any(_decision_memo_normalized_text(metric) in normalized_section for metric in metrics):
+        return
+    _decision_memo_add_finding(
+        findings,
+        "monitoring_signals_template_mismatch",
+        "Monitoring signals section does not appear to reference any visible rows from the generated monitoring template.",
+        location=section_heading,
+        excerpt=", ".join(metrics[:4]),
+    )
+
+
+def _decision_memo_monitoring_metric_is_visible(value: str) -> bool:
+    normalized = _decision_memo_normalized_text(value)
+    return normalized not in {
+        "",
+        "operator to define",
+        "to be confirmed",
+        "not supplied",
+        "monitoring template placeholder",
+    }
+
+
+def _decision_memo_review_lines(text: str) -> list[tuple[int, str]]:
+    rows: list[tuple[int, str]] = []
+    in_code = False
+    for line_number, raw_line in enumerate(str(text or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code or not line:
+            continue
+        if line.startswith("#") or _decision_memo_separator_row(line):
+            continue
+        rows.append((line_number, line))
+    return rows
+
+
+def _decision_memo_line_has_any_label(line: str, labels: tuple[str, ...]) -> bool:
+    normalized = _decision_memo_normalized_text(line)
+    return any(_decision_memo_normalized_text(label) in normalized for label in labels)
+
+
+def _decision_memo_line_has_exact_marker(line: str, exact_markers: set[str]) -> bool:
+    if not exact_markers:
+        return False
+    return any(marker and marker in line for marker in exact_markers)
+
+
+def _decision_memo_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _decision_memo_normalized_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", ascii_text.lower()).strip()
 
 
 def threshold_consistency_warnings(state: Any, context: ReportQualityContext | None = None) -> list[str]:

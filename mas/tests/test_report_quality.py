@@ -1,4 +1,5 @@
 """Regression tests for deterministic report quality helpers."""
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ from report_quality import (  # noqa: E402
     SPARSE_CONFIDENCE_RULE,
     THRESHOLD_CONFLICT_UNKNOWN_WARNING,
     UNSUPPORTED_EVIDENCE_FILES_WARNING,
+    assess_decision_memo_pilot_plan_quality,
     assess_risk_classification_gate,
     assess_report_quality_context,
     client_simplify_text,
@@ -48,13 +50,19 @@ from state import (  # noqa: E402
     GauntletResult,
     KnowledgeItem,
     KnowledgeLayerState,
+    MonitorCanary,
+    MonitorOutput,
     ProjectState,
+    REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
     Risk,
     STPAItem,
     StrategyAction,
     StrategyOutput,
     UploadedFileManifest,
 )
+
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _question(question_id: str, priority=ClarificationPriority.CRITICAL, status=ClarificationStatus.OPEN):
@@ -97,7 +105,184 @@ def _constrained_strategy_state(project_id: str, generated_text: str) -> Project
     return state
 
 
+def _cacofonico_fixture_state() -> ProjectState:
+    fixture = json.loads((FIXTURE_DIR / "cacofonico_decision_memo_redacted.json").read_text(encoding="utf-8"))
+    source = fixture["sources"][0]
+    state = ProjectState(
+        project_id=fixture["project_id"],
+        project_name=fixture["project_name"],
+        brief=fixture["brief"],
+        output_language=fixture["output_language"],
+        report_mode=fixture["report_mode"],
+        report_output_language=fixture["output_language"],
+        report_output_mode=fixture["report_mode"],
+        report=fixture["report"],
+    )
+    state.knowledge_layer = KnowledgeLayerState(
+        items=[
+            KnowledgeItem(
+                item_id=source["evidence_id"],
+                evidence_id=source["evidence_id"],
+                title=source["title"],
+                source_ref=source["filename"],
+                locator=source["locator"],
+            )
+        ]
+    )
+    state.monitor = MonitorOutput(
+        canaries=[
+            MonitorCanary(
+                signal=fixture["visible_monitoring_rows"][0]["metric_signal"],
+                direction="up",
+                window=fixture["visible_monitoring_rows"][0]["cadence"],
+                meaning=fixture["visible_monitoring_rows"][0]["decision_or_hypothesis"],
+            )
+        ]
+    )
+    return state
+
+
+def _english_decision_memo_report(*, facts: str = "", why: str = "", thresholds: str = "") -> str:
+    return f"""# Decision
+Inference: Decide whether to run a bounded pilot before scale-up.
+
+# Recommendation
+Inference: Run a monitored pilot before making a broader commitment.
+
+# Why this is recommended
+{why or "Inference: The sequence keeps the decision reversible while evidence matures."}
+
+# Operator-supplied facts
+{facts or "Unknown / not supplied: Operator numeric facts were not supplied."}
+
+# Hypotheses and proposed assumptions
+Proposed operator assumption: The pilot can validate the main operating constraint.
+
+# Unknowns / not supplied
+Unknown / not supplied: Final budget approval is not supplied.
+
+# Evidence maturity
+Inference: Evidence maturity is partial and requires operator review.
+
+# Next actions
+Inference: Assign an owner and run the pilot review.
+
+# Monitoring signals
+Inference: Monitor pilot completion and review quality.
+
+# Change-course thresholds
+{thresholds or "Proposed operator threshold: Change course if the owner cannot review pilot evidence."}
+
+# Appendix: Technical Analysis
+Technical mechanics stay separated from the main memo.
+"""
+
+
+def _english_decision_memo_state(report: str) -> ProjectState:
+    return ProjectState(
+        project_id="decision-memo-qa",
+        project_name="Decision memo QA",
+        brief="Decide whether to run a pilot.",
+        output_language="en",
+        report_mode=REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+        report_output_language="en",
+        report_output_mode=REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+        report=report,
+    )
+
+
 class TestReportQualityHelpers(unittest.TestCase):
+    def test_decision_memo_quality_accepts_redacted_es_mx_fixture(self):
+        state = _cacofonico_fixture_state()
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+
+        self.assertTrue(result.checked)
+        self.assertEqual(result.output_language, "es-MX")
+        self.assertEqual(result.report_mode, "decision_memo_pilot_plan")
+        self.assertEqual(result.findings, ())
+
+    def test_decision_memo_quality_reports_required_advisory_findings(self):
+        state = _cacofonico_fixture_state()
+        state.report = state.report.replace("# Apéndice: Análisis técnico", "# Apéndice técnico")
+        state.report += "\n# Recomendación\n"
+        state.report = state.report.replace(
+            "Afirmación respaldada por fuente: el resumen operativo redactado identifica restricciones de capacidad",
+            "Afirmación respaldada por fuente: el resumen operativo redactado confirma 73% de probabilidad",
+        )
+        state.report = state.report.replace(" Resumen operativo redactado [Evidence: ev-pilot-summary | chunk=2]", "")
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertIn("required_memo_section_missing", rule_names)
+        self.assertIn("appendix_missing_or_unseparated", rule_names)
+        self.assertIn("duplicate_heading", rule_names)
+        self.assertIn("empty_heading", rule_names)
+        self.assertIn("unsupported_numeric_claim", rule_names)
+        self.assertIn("source_supported_without_concrete_locator", rule_names)
+
+    def test_decision_memo_numeric_qa_allows_ordinary_roadmap_dates(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why=(
+                    "Inference: Roadmap checkpoints are 2026-07-07 and 2026-07-07T075847Z.\n"
+                    "Inference: Days 1 to 7 are setup, Days 31 to 60 are review, then a 90-day pilot.\n"
+                    "Inference: Review 7, 30, 60, and 90 days as ordinary roadmap timing."
+                )
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertTrue(result.checked)
+        self.assertNotIn("unsupported_numeric_claim", rule_names)
+
+    def test_decision_memo_numeric_qa_still_flags_unsupported_precision(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why=(
+                    "Inference: P=60% confirms the option.\n"
+                    "Inference: rho = 0.72 and RPN 168 are acceptable.\n"
+                    "Inference: BF > 10 and H_norm < 0.15 prove readiness.\n"
+                    "Inference: MXN $15K is the expected price."
+                )
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertIn("unsupported_numeric_claim", rule_names)
+
+    def test_decision_memo_numeric_qa_allows_operator_supplied_numbers_only_when_labeled(self):
+        operator_state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                facts=(
+                    "Operator-supplied fact: The pilot window is 90 days.\n"
+                    "Operator-supplied fact: The operator listed 25 contacts."
+                )
+            )
+        )
+        unsupported_state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why="Inference: P=25% supports scaling."
+            )
+        )
+
+        operator_result = assess_decision_memo_pilot_plan_quality(operator_state)
+        unsupported_result = assess_decision_memo_pilot_plan_quality(unsupported_state)
+
+        self.assertNotIn(
+            "unsupported_numeric_claim",
+            {finding.rule_name for finding in operator_result.findings},
+        )
+        self.assertIn(
+            "unsupported_numeric_claim",
+            {finding.rule_name for finding in unsupported_result.findings},
+        )
+
     def test_generic_growth_ignores_generated_seo_terms_for_domain(self):
         state = ProjectState(
             project_id="growth-generated-seo",

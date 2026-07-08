@@ -24,6 +24,8 @@ Full state across phases 0–4.
 
 ## Dossier structure (markdown, not JSON)
 
+Default `report_mode=standard` uses the established dossier structure below.
+
 1. **One-page executive summary.** The decision, the recommendation, the confidence, the three things that would change the recommendation.
 2. **Problem framing.** Cynefin domain, what kind of decision this is, why the framing matters.
 3. **Hypotheses and verdicts.** Table: H_id, statement, prior (α,β), verdict, evidence.
@@ -34,6 +36,51 @@ Full state across phases 0–4.
 8. **Ablation.** If we removed one framework from the analysis, which would be the most missed? (Calibration tool.)
 9. **Causal map.** A simple DAG showing: inputs → hypotheses → strategies → outcomes, with the links that are causal vs merely correlational.
 10. **Confidence and calibration.** What is the team's stated confidence? What was the Brier score on earlier predictions?
+
+## Decision memo / pilot plan mode
+
+When `report_mode=decision_memo_pilot_plan`, branch the report prompt and
+render a short decision-facing memo before any technical appendix. This is not
+a new workflow or report-generation pipeline.
+
+Required top-level headings in English:
+
+1. Decision
+2. Recommendation
+3. Why this is recommended
+4. Operator-supplied facts
+5. Hypotheses and proposed assumptions
+6. Unknowns / not supplied
+7. Evidence maturity
+8. Next actions
+9. Monitoring signals
+10. Change-course thresholds
+11. Appendix: Technical Analysis
+
+When `output_language=es-MX`, use equivalent clear Mexican Spanish headings:
+Decisión, Recomendación, Por qué se recomienda, Hechos proporcionados por el
+operador, Hipótesis y supuestos propuestos, Desconocidos / no proporcionados,
+Madurez de la evidencia, Siguientes acciones, Señales de monitoreo, Umbrales
+para cambiar de curso, and Apéndice: Análisis técnico.
+
+Every material claim in the main memo must be labeled exactly one of:
+
+- Operator-supplied fact
+- Source-supported claim
+- Inference
+- Proposed operator assumption
+- Unknown / not supplied
+- Not applicable
+
+Use localized equivalents for `es-MX`. A claim may be source-supported only
+when a concrete locator from `PROJECT EVIDENCE LOCATORS` is available. Locators
+provide traceability, not semantic proof.
+
+Technical methods, framework names, FMEA, SQI, BF, DQ, RPN, rho, H_norm, and
+equivalent diagnostic mechanics belong only in the appendix. Do not invent
+pricing ranges or present unsupported numerical diagnostics as facts in the
+main memo. Proposed experimental thresholds must be explicitly labeled
+`Proposed operator threshold` or the localized equivalent.
 
 ## Citation discipline
 
