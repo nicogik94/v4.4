@@ -11,7 +11,8 @@ Human review is required before any output is shared or acted on.
 
 A Strategic Decision Audit helps an operator structure an important business,
 product, or operating decision. The operator supplies a brief, optional source
-files, and a risk classification. The existing workflow then runs:
+files, output settings, and a risk classification. The existing workflow then
+runs:
 
 `classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report`
 
@@ -94,6 +95,10 @@ that the operator is not allowed to process in the local runtime.
 
 - Dashboard framing: `Strategic Decision Audit framing`.
 - API/project type value: `strategic_audit`.
+- Default output language: `en`.
+- Default report mode: `standard`.
+- CACOFÓNICO pilot report mode: `decision_memo_pilot_plan` with
+  `output_language=es-MX` when Mexican Spanish output is required.
 - Workflow order: `classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report`.
 - Default posture: local operator workflow with human review required.
 
@@ -104,6 +109,8 @@ This framing label does not create vertical-specific logic.
 Before delivery, generate or review these artifacts:
 
 - `report` DOCX or PDF: client-safe after review.
+- `decision_memo_pilot_plan` DOCX or PDF: visible only when the stored report
+  was generated with `report_output_mode=decision_memo_pilot_plan`.
 - `client_dossier` DOCX or PDF: client-safe after review.
 - `client_monitoring_template` XLSX: client-safe after review.
 - `operator_dossier` DOCX or PDF: operator-only.
@@ -136,7 +143,18 @@ Avoid language that says or implies:
 
 This is a local operator workflow. It does not add authentication, tenancy,
 public deployment hardening, provider routing changes, queue/runtime changes,
-report generation changes, export schema changes, or regulated vertical logic.
+new workflow phases, provider-side research automation, CRM, outreach,
+persistent review logging, or regulated vertical logic.
+
+Compatibility boundary: no auth, tenancy, public deployment hardening,
+provider routing changes, queue/runtime changes, report generation changes,
+export schema changes, or regulated vertical logic beyond the bounded
+`decision_memo_pilot_plan` report-mode branch and profile described above.
+
+Changing `output_language` or `report_mode` after report generation does not
+rewrite report history. The generated report keeps `report_output_language` and
+`report_output_mode`; rerun the report phase for new settings to affect the
+report and decision memo export availability.
 
 Client-safe means the export path applies deterministic cleanup for the intended
 audience. It does not mean the output is correct, complete, legally approved,

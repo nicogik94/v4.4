@@ -18,6 +18,30 @@ from workflow_templates import (
 )
 
 
+DEFAULT_OUTPUT_LANGUAGE = "en"
+OUTPUT_LANGUAGE_ES_MX = "es-MX"
+ALLOWED_OUTPUT_LANGUAGES: tuple[str, ...] = (DEFAULT_OUTPUT_LANGUAGE, OUTPUT_LANGUAGE_ES_MX)
+DEFAULT_REPORT_MODE = "standard"
+REPORT_MODE_DECISION_MEMO_PILOT_PLAN = "decision_memo_pilot_plan"
+ALLOWED_REPORT_MODES: tuple[str, ...] = (DEFAULT_REPORT_MODE, REPORT_MODE_DECISION_MEMO_PILOT_PLAN)
+
+
+def normalize_output_language(value: Any) -> str:
+    normalized = str(value).strip() if isinstance(value, str) else ""
+    if normalized not in ALLOWED_OUTPUT_LANGUAGES:
+        allowed = ", ".join(ALLOWED_OUTPUT_LANGUAGES)
+        raise ValueError(f"output_language must be one of: {allowed}")
+    return normalized
+
+
+def normalize_report_mode(value: Any) -> str:
+    normalized = str(value).strip() if isinstance(value, str) else ""
+    if normalized not in ALLOWED_REPORT_MODES:
+        allowed = ", ".join(ALLOWED_REPORT_MODES)
+        raise ValueError(f"report_mode must be one of: {allowed}")
+    return normalized
+
+
 class PhaseStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -926,6 +950,8 @@ class ProjectState(BaseModel):
     ingestion_source: str = DEFAULT_INGESTION_SOURCE
     ingestion_external_case_id: str = ""
     ingestion_metadata: dict[str, Any] = Field(default_factory=dict)
+    output_language: str = DEFAULT_OUTPUT_LANGUAGE
+    report_mode: str = DEFAULT_REPORT_MODE
     imported_evidence: list[Evidence] = Field(default_factory=list)
     imported_signals: list[Signal] = Field(default_factory=list)
     knowledge_layer: Optional[KnowledgeLayerState] = None
@@ -974,6 +1000,8 @@ class ProjectState(BaseModel):
 
     # Phase 5: Report
     report: Optional[str] = None
+    report_output_language: Optional[str] = None
+    report_output_mode: Optional[str] = None
     dq: DQScores = Field(default_factory=DQScores)
 
     # Meta-learning
@@ -1045,6 +1073,30 @@ class ProjectState(BaseModel):
     @classmethod
     def _coerce_project_type(cls, value):
         return normalize_project_type(value)
+
+    @field_validator("output_language", mode="before")
+    @classmethod
+    def _coerce_output_language(cls, value):
+        return normalize_output_language(DEFAULT_OUTPUT_LANGUAGE if value is None else value)
+
+    @field_validator("report_mode", mode="before")
+    @classmethod
+    def _coerce_report_mode(cls, value):
+        return normalize_report_mode(DEFAULT_REPORT_MODE if value is None else value)
+
+    @field_validator("report_output_language", mode="before")
+    @classmethod
+    def _coerce_report_output_language(cls, value):
+        if value in (None, ""):
+            return None
+        return normalize_output_language(value)
+
+    @field_validator("report_output_mode", mode="before")
+    @classmethod
+    def _coerce_report_output_mode(cls, value):
+        if value in (None, ""):
+            return None
+        return normalize_report_mode(value)
 
     def model_post_init(self, __context) -> None:
         sequence = get_workflow_phase_sequence(self.project_type)

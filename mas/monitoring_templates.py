@@ -58,6 +58,22 @@ OPERATOR_MONITORING_TEMPLATE_HEADERS: tuple[str, ...] = (
     *OPERATOR_TRACE_HEADERS,
 )
 
+REVIEW_LOG_HEADERS: tuple[str, ...] = (
+    "Review date",
+    "Reviewer",
+    "Review decision / status",
+    "Hypothesis / experiment",
+    "Signal / metric",
+    "Last observed value",
+    "Observation date",
+    "Evidence / note",
+    "Change made",
+    "Follow-up owner",
+    "Next review date",
+    "Follow-up due date",
+    "Notes",
+)
+
 
 @dataclass(frozen=True)
 class MonitoringTemplateRow:
@@ -181,8 +197,22 @@ def _write_tabular_sheet(worksheet: Any, headers: tuple[str, ...], rows: list[li
 def _write_review_log_sheet(worksheet: Any) -> None:
     _write_tabular_sheet(
         worksheet,
-        ("Review date", "Reviewer", "Status", "Notes"),
-        [["To be confirmed", "To be confirmed", "To be confirmed", "Record review decisions, threshold changes, and owner follow-up here."]],
+        REVIEW_LOG_HEADERS,
+        [[
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "To be confirmed",
+            "Record review decisions, threshold changes, and owner follow-up here.",
+        ]],
     )
 
 

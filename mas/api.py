@@ -87,6 +87,7 @@ from state import (
     ProjectState, PhaseStatus,
     ClassifyOutput, Hypothesis, GauntletOutput,
     AuditOutput, StrategyOutput, MonitorOutput, SQIOutput,
+    normalize_output_language, normalize_report_mode,
     validate_technology_readiness_output,
     KnowledgeLayerState, SourceRegistryEntry,
 )
@@ -106,6 +107,7 @@ from tools.scoring import (
 )
 from workspace import QueueItem, WorkspaceSummary, build_queue_item, build_workspace_summary
 from exporters import (
+    ExportProfileConflict,
     build_export_filename,
     export_project_docx_bytes,
     export_project_pdf_bytes,
@@ -192,11 +194,39 @@ async def require_operator_auth(
 app.include_router(automation_roi_router, dependencies=[Depends(require_operator_auth)])
 
 
+def _output_config_from_project_payload(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    candidates: list[dict[str, Any]] = []
+    case_payload = payload.get("case")
+    if isinstance(case_payload, dict):
+        candidates.append(case_payload)
+    candidates.append(payload)
+
+    output: dict[str, str] = {}
+    for field, normalizer in (
+        ("output_language", normalize_output_language),
+        ("report_mode", normalize_report_mode),
+    ):
+        supplied = [candidate[field] for candidate in candidates if field in candidate]
+        if not supplied:
+            continue
+        first = supplied[0]
+        if any(value != first for value in supplied[1:]):
+            raise ValueError(f"{field} was supplied with conflicting values")
+        if first is None:
+            raise ValueError(f"{field} must be a string")
+        output[field] = normalizer(first)
+    return output
+
+
 class CreateProjectRequest(BaseModel):
     name: str = "New Project"
     brief: str
     data: str = ""
     project_type: str = "strategic_audit"
+    output_language: str | None = None
+    report_mode: str | None = None
     # v4.4 — optional combined classification at create time. Backward-compatible:
     # if omitted, project defaults to minimal_risk and operator can set later via
     # POST /projects/{id}/risk-classification.
@@ -211,6 +241,8 @@ class PatchProjectInputRequest(BaseModel):
     project_name: str | None = None
     brief: str | None = None
     data: str | None = None
+    output_language: str | None = None
+    report_mode: str | None = None
     observations: dict[str, str] | None = None
     timer_logs: list[dict] | None = None
 
@@ -464,6 +496,10 @@ async def create_project(payload: dict[str, Any] = Body(...)):
         req = normalize_project_ingestion(payload)
     except IngestionContractError as exc:
         raise HTTPException(400, str(exc)) from exc
+    try:
+        output_config = _output_config_from_project_payload(payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     state = ProjectState(
         project_id=str(uuid.uuid4()),
@@ -475,6 +511,7 @@ async def create_project(payload: dict[str, Any] = Body(...)):
         ingestion_source=req.source,
         ingestion_external_case_id=req.external_case_id,
         ingestion_metadata=req.metadata,
+        **output_config,
         created_at=datetime.now(),
     )
     # v4.4 — apply optional classification at create time
@@ -1041,6 +1078,16 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
     changed_keys: list[str] = []
     changed_field_paths: list[str] = []
     for field, value in updates.items():
+        if field == "output_language":
+            try:
+                value = normalize_output_language(value)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        elif field == "report_mode":
+            try:
+                value = normalize_report_mode(value)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         if getattr(state, field) != value:
             setattr(state, field, value)
             changed_keys.append(field)
@@ -1066,6 +1113,10 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
         restart_phase = "monitor" if "monitor" in sequence else sequence[0]
         invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
         state.current_phase = invalidated[0] if invalidated else restart_phase
+    elif any(key in ("output_language", "report_mode") for key in changed_keys):
+        if _mark_report_configuration_stale(state):
+            invalidated = ["report"]
+            state.current_phase = "report"
 
     _log_operator_edit(state, "input", changed_field_paths, invalidated)
     ensure_decision_objects(state, trigger="api.patch_input")
@@ -1226,6 +1277,8 @@ async def export_project_profile(project_id: str, profile: str = "report", forma
 
     try:
         payload, media_type, filename = export_project_profile_bytes(state, profile, format)
+    except ExportProfileConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -1687,6 +1740,18 @@ def _mark_phase_stale(state: ProjectState, phase: str) -> bool:
         state.phase_summaries.pop(phase, None)
         return True
     return False
+
+
+def _mark_report_configuration_stale(state: ProjectState) -> bool:
+    if not state.report:
+        return False
+    report_status = state.phase_status.get("report", PhaseStatus.PENDING)
+    if report_status == PhaseStatus.STALE:
+        return False
+    state.phase_status["report"] = PhaseStatus.STALE
+    state.phase_confidence.pop("report", None)
+    state.phase_summaries.pop("report", None)
+    return True
 
 
 def _invalidate_from_phase(

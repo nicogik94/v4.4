@@ -3744,7 +3744,8 @@ a:hover { text-decoration: underline; }
   color: var(--mute);
 }
 .ev-brief-field input,
-.ev-brief-field textarea {
+.ev-brief-field textarea,
+.ev-brief-field select {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--line);
@@ -3756,7 +3757,8 @@ a:hover { text-decoration: underline; }
   resize: vertical;
 }
 .ev-brief-field input:focus,
-.ev-brief-field textarea:focus {
+.ev-brief-field textarea:focus,
+.ev-brief-field select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-bg);
@@ -3999,6 +4001,20 @@ a:hover { text-decoration: underline; }
       <div class="form-row">
         <label>Supporting data (optional)</label>
         <textarea id="np-data" placeholder="Metrics, notes, structured context that should travel with the project."></textarea>
+      </div>
+      <div class="form-row">
+        <label>Output language</label>
+        <select id="np-output-language">
+          <option value="en">English</option>
+          <option value="es-MX">Español (México)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Report mode</label>
+        <select id="np-report-mode">
+          <option value="standard">Standard</option>
+          <option value="decision_memo_pilot_plan">Decision memo / pilot plan</option>
+        </select>
       </div>
       <div class="form-row">
         <label>Risk classification (EU AI Act) <span class="required-star">*</span></label>
@@ -4433,6 +4449,11 @@ const EXPORT_PROFILES = {
     formats: ['pdf', 'docx'],
     help: 'Client-safe after review.',
   },
+  decision_memo_pilot_plan: {
+    label: 'Decision memo / pilot plan',
+    formats: ['pdf', 'docx'],
+    help: 'Decision memo with separated technical appendix.',
+  },
   client_dossier: {
     label: 'Client-safe after review',
     formats: ['pdf', 'docx'],
@@ -4481,6 +4502,23 @@ function isTechnologyReadinessProject(project) {
 function isAutomationRoiProject(project = state.project?.fullState) {
   return classToken(project?.project_type) === 'automation_roi';
 }
+function generatedReportMetadataStatus(project = state.project?.fullState) {
+  const reportOutput = state.project?.workspace?.report_output || {};
+  if (reportOutput.metadata_status) return reportOutput.metadata_status;
+  if (!project?.report) return 'not_generated';
+  if (project?.report_output_language && project?.report_output_mode) return 'generated';
+  return 'legacy_metadata_unknown';
+}
+function generatedReportMode(project = state.project?.fullState) {
+  if (generatedReportMetadataStatus(project) !== 'generated') return '';
+  return state.project?.workspace?.report_output?.generated_report_mode
+    || project?.report_output_mode
+    || '';
+}
+function decisionMemoExportSupported(project = state.project?.fullState) {
+  return generatedReportMetadataStatus(project) === 'generated'
+    && generatedReportMode(project) === 'decision_memo_pilot_plan';
+}
 function workspaceTabsForProject(project = state.project?.fullState) {
   const tabs = WORKSPACE_TABS.slice();
   if (isAutomationRoiProject(project)) tabs.push(AUTOMATION_ROI_TAB);
@@ -4488,6 +4526,9 @@ function workspaceTabsForProject(project = state.project?.fullState) {
 }
 function exportProfileKeysForProject(project = state.project?.fullState) {
   const keys = STANDARD_EXPORT_PROFILE_KEYS.filter(exportProfileSupported);
+  if (decisionMemoExportSupported(project) && exportProfileSupported('decision_memo_pilot_plan')) {
+    keys.splice(1, 0, 'decision_memo_pilot_plan');
+  }
   if (isTechnologyReadinessProject(project) && technologyReadinessWorkbookExportSupported()) {
     keys.push(TECHNOLOGY_READINESS_EXPORT_PROFILE_KEY);
   }
@@ -6244,6 +6285,8 @@ function renderEvBrief(fs) {
   const name = (fs.project_name || '').trim();
   const brief = (fs.brief || '').trim();
   const data = (fs.data || '').trim();
+  const outputLanguage = fs.output_language || 'en';
+  const reportMode = fs.report_mode || 'standard';
   return `
     <div class="ev-brief-edit">
       <div class="ev-brief-field">
@@ -6258,10 +6301,24 @@ function renderEvBrief(fs) {
         <label for="ev-edit-data">Supporting data</label>
         <textarea id="ev-edit-data" rows="3" placeholder="Metrics, notes, structured context that travels with the project.">${escapeHtml(data)}</textarea>
       </div>
+      <div class="ev-brief-field">
+        <label for="ev-edit-output-language">Output language</label>
+        <select id="ev-edit-output-language">
+          <option value="en" ${outputLanguage === 'en' ? 'selected' : ''}>English</option>
+          <option value="es-MX" ${outputLanguage === 'es-MX' ? 'selected' : ''}>Español (México)</option>
+        </select>
+      </div>
+      <div class="ev-brief-field">
+        <label for="ev-edit-report-mode">Report mode</label>
+        <select id="ev-edit-report-mode">
+          <option value="standard" ${reportMode === 'standard' ? 'selected' : ''}>Standard</option>
+          <option value="decision_memo_pilot_plan" ${reportMode === 'decision_memo_pilot_plan' ? 'selected' : ''}>Decision memo / pilot plan</option>
+        </select>
+      </div>
       <div class="ev-brief-status" id="ev-brief-status"></div>
       <div class="ev-brief-actions">
         <button class="btn btn-accent btn-sm" id="ev-brief-save" type="button">Save changes</button>
-        <span class="ev-brief-hint">Saving brief or data resets downstream phases (classify onward) so the engine re-analyzes with updated context.</span>
+        <span class="ev-brief-hint">Saving brief or data resets downstream phases; saving language or mode requires a report rerun.</span>
       </div>
     </div>
   `;
@@ -7389,6 +7446,30 @@ function renderInspectorCalibration() {
 /* ═══════════════════════════════════════════════════════════════════════
    Report tab — rendered markdown-ish report
    ═══════════════════════════════════════════════════════════════════════ */
+function renderReportRerunNotice() {
+  const reportOutput = state.project?.workspace?.report_output || {};
+  if (!reportOutput.rerun_required) return '';
+  const notice = reportOutput.rerun_notice || 'Rerun the report phase for the current output settings to affect this report.';
+  return `<div class="export-profile-note" style="margin-bottom: var(--sp-3);">${escapeHtml(notice)}</div>`;
+}
+
+function renderReportQualityNotice() {
+  const quality = state.project?.workspace?.report_quality || {};
+  if (!quality.checked) return '';
+  if (!Number(quality.finding_count || 0)) {
+    return `<div class="export-profile-help" style="margin-bottom: var(--sp-3);">Decision memo QA: no advisory findings.</div>`;
+  }
+  const findings = Array.isArray(quality.findings) ? quality.findings.slice(0, 5) : [];
+  return `
+    <div class="export-profile-warning visible" style="margin-bottom: var(--sp-3);">
+      <strong>Decision memo QA: ${escapeHtml(String(quality.finding_count))} advisory finding${Number(quality.finding_count) === 1 ? '' : 's'}.</strong>
+      <ul style="margin: 6px 0 0 16px; padding: 0;">
+        ${findings.map(f => `<li>${escapeHtml(f.rule_name || 'quality_rule')}: ${escapeHtml(f.message || '')}</li>`).join('')}
+      </ul>
+    </div>
+  `;
+}
+
 function renderReportStub() {
   const fs = state.project?.fullState;
   const md = state.project?.report;
@@ -7413,6 +7494,8 @@ function renderReportStub() {
 
   return `
     <div class="rpt">
+      ${renderReportRerunNotice()}
+      ${renderReportQualityNotice()}
       <div class="rpt-head">
         <div>
           <h2 style="font-size: var(--fs-lg); font-weight: 700; color: var(--ink-1); margin: 0;">Final report</h2>
@@ -7897,16 +7980,24 @@ function renderInspectorReport() {
   const reportExists = typeof state.project.report === 'string' && state.project.report.length > 0;
   const sqi = fs?.sqi?.sqi_overall != null ? Number(fs.sqi.sqi_overall).toFixed(1) : '—';
   const det = fs?.det_scores?.overall != null ? Number(fs.det_scores.overall).toFixed(1) : '—';
+  const reportOutput = state.project?.workspace?.report_output || {};
+  const quality = state.project?.workspace?.report_quality || {};
 
   return `
     <div class="ins-section">
       <div class="ins-section-head"><h5>Report status</h5><span class="meta">${reportExists ? 'ready' : 'pending'}</span></div>
       <div class="ins-section-body">
+        ${renderReportRerunNotice()}
+        ${renderReportQualityNotice()}
         <div class="ins-kv">
           <div class="k">length</div><div class="v">${reportExists ? fmtInt(state.project.report.length) + ' chars' : '—'}</div>
           <div class="k">sqi</div><div class="v">${escapeHtml(sqi)}</div>
           <div class="k">det score</div><div class="v">${escapeHtml(det)}</div>
           <div class="k">report phase</div><div class="v plain">${escapeHtml(fs?.phase_status?.report || 'pending')}</div>
+          <div class="k">metadata status</div><div class="v plain">${escapeHtml(generatedReportMetadataStatus(fs))}</div>
+          <div class="k">generated mode</div><div class="v plain">${escapeHtml(generatedReportMode(fs) || '—')}</div>
+          <div class="k">generated language</div><div class="v plain">${escapeHtml((generatedReportMetadataStatus(fs) === 'generated' && (reportOutput.generated_output_language || fs?.report_output_language)) || '—')}</div>
+          <div class="k">memo QA</div><div class="v plain">${quality.checked ? escapeHtml(`${quality.status || 'checked'} (${quality.finding_count || 0})`) : '—'}</div>
         </div>
       </div>
     </div>
@@ -7928,6 +8019,8 @@ function renderInspectorReport() {
       <div class="ins-cta">
         <button class="btn btn-secondary btn-sm" data-export="docx" ${reportExists ? '' : 'disabled'}>Download DOCX</button>
         <button class="btn btn-secondary btn-sm" data-export="pdf" ${reportExists ? '' : 'disabled'}>Download PDF</button>
+        <button class="btn btn-secondary btn-sm" data-profile-export="client_monitoring_template" data-profile-format="xlsx">Download monitoring XLSX — Client</button>
+        <button class="btn btn-secondary btn-sm" data-profile-export="operator_monitoring_template" data-profile-format="xlsx">Download monitoring XLSX — Operator</button>
         <button class="btn btn-ghost btn-sm" data-reload-report>Refresh report</button>
         ${renderExportProfileControl(reportExists)}
       </div>
@@ -8009,6 +8102,13 @@ function wireInspector() {
   // Report: inspector export buttons
   document.querySelectorAll('#inspector button[data-export]').forEach(b => {
     b.addEventListener('click', () => downloadExport(state.selectedProjectId, b.dataset.export));
+  });
+  document.querySelectorAll('#inspector button[data-profile-export]').forEach(b => {
+    b.addEventListener('click', () => exportProjectProfile(
+      state.selectedProjectId,
+      b.dataset.profileExport,
+      b.dataset.profileFormat
+    ));
   });
   const profileSelect = $('export-profile-select');
   if (profileSelect) {
@@ -8134,12 +8234,16 @@ async function onBriefSave() {
   const newName = ($('ev-edit-name')?.value || '').trim();
   const newBrief = ($('ev-edit-brief')?.value || '').trim();
   const newData = ($('ev-edit-data')?.value || '').trim();
+  const newOutputLanguage = $('ev-edit-output-language')?.value || 'en';
+  const newReportMode = $('ev-edit-report-mode')?.value || 'standard';
 
   // Build patch with only changed fields
   const patch = {};
   if (newName !== (fs.project_name || '').trim()) patch.project_name = newName;
   if (newBrief !== (fs.brief || '').trim()) patch.brief = newBrief;
   if (newData !== (fs.data || '').trim()) patch.data = newData;
+  if (newOutputLanguage !== (fs.output_language || 'en')) patch.output_language = newOutputLanguage;
+  if (newReportMode !== (fs.report_mode || 'standard')) patch.report_mode = newReportMode;
 
   if (Object.keys(patch).length === 0) {
     if (status) { status.textContent = 'No changes detected.'; status.className = 'ev-brief-status info'; }
@@ -8489,6 +8593,8 @@ function closeNewProjectModal() {
   $('new-project-modal').hidden = true;
   ['np-name', 'np-brief', 'np-data', 'np-rationale'].forEach(id => { $(id).value = ''; });
   $('np-template').value = 'strategic_audit';
+  $('np-output-language').value = 'en';
+  $('np-report-mode').value = 'standard';
   $('np-risk').value = 'minimal_risk';
 }
 
@@ -8499,6 +8605,8 @@ async function createProjectFromModal() {
   const risk = $('np-risk').value;
   const rationale = $('np-rationale').value.trim();
   const projectType = $('np-template').value || 'strategic_audit';
+  const outputLanguage = $('np-output-language').value || 'en';
+  const reportMode = $('np-report-mode').value || 'standard';
 
   if (!name) { toast('Project name is required.', 'err'); return; }
   if (!brief) { toast('Brief is required — describe the decision.', 'err'); return; }
@@ -8517,6 +8625,8 @@ async function createProjectFromModal() {
     const proj = await apiPost('/projects', {
       name, brief, data,
       project_type: projectType,
+      output_language: outputLanguage,
+      report_mode: reportMode,
       risk_classification: risk,
       risk_rationale: rationale || `set at create time via v5 console (${risk})`,
       risk_set_by: 'operator-console-v5',

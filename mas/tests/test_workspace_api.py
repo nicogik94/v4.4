@@ -22,7 +22,7 @@ from clarifications import (  # noqa: E402
 )
 from decision_objects import ensure_decision_objects  # noqa: E402
 from overview import build_operator_overview  # noqa: E402
-from state import PhaseStatus, ProjectState  # noqa: E402
+from state import REPORT_MODE_DECISION_MEMO_PILOT_PLAN, PhaseStatus, ProjectState  # noqa: E402
 from workspace import build_workspace_summary  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
 
@@ -259,6 +259,61 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary.imported_evidence_pending_analysis)
         self.assertIsNotNone(summary.clarification_summary)
 
+    async def test_workspace_report_output_metadata_and_rerun_notice(self):
+        state = make_state("workspace-report-output")
+        state.report = "old English report"
+        state.output_language = "es-MX"
+        state.report_mode = REPORT_MODE_DECISION_MEMO_PILOT_PLAN
+        state.report_output_language = "en"
+        state.report_output_mode = "standard"
+        state.phase_status["report"] = PhaseStatus.COMPLETED
+
+        workspace = build_workspace_summary(state)
+
+        self.assertTrue(workspace.report_output.rerun_required)
+        self.assertEqual(workspace.report_output.current_output_language, "es-MX")
+        self.assertEqual(workspace.report_output.metadata_status, "generated")
+        self.assertEqual(workspace.report_output.generated_output_language, "en")
+        self.assertIn("Rerun the report phase", workspace.report_output.rerun_notice)
+
+    async def test_patch_project_input_updates_output_config_without_relabeling_report(self):
+        state = make_state("patch-output-config")
+        state.report = "old English report"
+        state.report_output_language = "en"
+        state.report_output_mode = "standard"
+        state.phase_status["report"] = PhaseStatus.COMPLETED
+        save = AsyncMock()
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)), patch("api.store.save", new=save):
+            response = await api.patch_project_input(
+                state.project_id,
+                api.PatchProjectInputRequest(
+                    output_language="es-MX",
+                    report_mode=REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+                ),
+            )
+
+        saved_state = save.await_args.args[0]
+        self.assertEqual(response["invalidated_phases"], ["report"])
+        self.assertEqual(saved_state.report, "old English report")
+        self.assertEqual(saved_state.output_language, "es-MX")
+        self.assertEqual(saved_state.report_mode, REPORT_MODE_DECISION_MEMO_PILOT_PLAN)
+        self.assertEqual(saved_state.report_output_language, "en")
+        self.assertEqual(saved_state.report_output_mode, "standard")
+        self.assertEqual(saved_state.phase_status["report"], PhaseStatus.STALE)
+
+    async def test_patch_project_input_rejects_invalid_output_config(self):
+        state = make_state("patch-output-config-invalid")
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with self.assertRaises(api.HTTPException) as ctx:
+                await api.patch_project_input(
+                    state.project_id,
+                    api.PatchProjectInputRequest(output_language="pt-BR"),
+                )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("output_language must be one of", ctx.exception.detail)
+
     async def test_create_project_accepts_legacy_ingestion_payload(self):
         save = AsyncMock()
         with patch("api.store.save", new=save), patch("decision_events.append", new=AsyncMock()):
@@ -305,6 +360,41 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved_state.ingestion_external_case_id, "case-123")
         self.assertEqual(saved_state.ingestion_metadata, {"segment": "midmarket", "priority": "high"})
 
+    async def test_create_project_accepts_output_language_and_report_mode(self):
+        save = AsyncMock()
+        with patch("api.store.save", new=save), patch("decision_events.append", new=AsyncMock()):
+            await api.create_project(
+                {
+                    "name": "Decision memo intake",
+                    "brief": "Decide whether to run a pilot.",
+                    "output_language": "es-MX",
+                    "report_mode": REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+                }
+            )
+
+        saved_state = save.await_args.args[0]
+        self.assertEqual(saved_state.output_language, "es-MX")
+        self.assertEqual(saved_state.report_mode, REPORT_MODE_DECISION_MEMO_PILOT_PLAN)
+        self.assertIsNone(saved_state.report_output_language)
+        self.assertIsNone(saved_state.report_output_mode)
+
+    async def test_create_project_rejects_invalid_output_config(self):
+        for field, value, expected in (
+            ("output_language", "fr", "output_language must be one of"),
+            ("report_mode", "memo", "report_mode must be one of"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(api.HTTPException) as ctx:
+                    await api.create_project(
+                        {
+                            "name": "Bad output config",
+                            "brief": "Decide whether to run a pilot.",
+                            field: value,
+                        }
+                    )
+                self.assertEqual(ctx.exception.status_code, 400)
+                self.assertIn(expected, ctx.exception.detail)
+
     async def test_create_project_rejects_mixed_legacy_and_case_payload(self):
         with self.assertRaises(api.HTTPException) as ctx:
             await api.create_project(
@@ -328,6 +418,10 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.ingestion_source, "operator")
         self.assertEqual(state.ingestion_external_case_id, "")
         self.assertEqual(state.ingestion_metadata, {})
+        self.assertEqual(state.output_language, "en")
+        self.assertEqual(state.report_mode, "standard")
+        self.assertIsNone(state.report_output_language)
+        self.assertIsNone(state.report_output_mode)
 
     async def test_old_project_state_payload_loads_with_ingestion_defaults(self):
         state = ProjectState.model_validate(
@@ -345,10 +439,35 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.ingestion_source, "operator")
         self.assertEqual(state.ingestion_external_case_id, "")
         self.assertEqual(state.ingestion_metadata, {})
+        self.assertEqual(state.output_language, "en")
+        self.assertEqual(state.report_mode, "standard")
+        self.assertIsNone(state.report_output_language)
+        self.assertIsNone(state.report_output_mode)
         self.assertEqual(workspace.input_contract.contract_version, "legacy.v1")
         self.assertEqual(workspace.input_contract.source, "operator")
         self.assertEqual(workspace.input_contract.external_case_id, "")
         self.assertEqual(workspace.input_contract.metadata_keys, [])
+        self.assertEqual(workspace.report_output.metadata_status, "not_generated")
+
+    async def test_legacy_report_missing_generated_metadata_is_unknown(self):
+        state = ProjectState.model_validate(
+            {
+                "project_id": "legacy-report-metadata",
+                "project_name": "Legacy report metadata",
+                "brief": "Stored before generated metadata existed.",
+                "report": "Legacy report body.",
+            }
+        )
+
+        workspace = build_workspace_summary(state)
+
+        self.assertIsNone(state.report_output_language)
+        self.assertIsNone(state.report_output_mode)
+        self.assertEqual(workspace.report_output.metadata_status, "legacy_metadata_unknown")
+        self.assertIsNone(workspace.report_output.generated_output_language)
+        self.assertIsNone(workspace.report_output.generated_report_mode)
+        self.assertTrue(workspace.report_output.rerun_required)
+        self.assertIn("before output metadata was recorded", workspace.report_output.rerun_notice)
 
 
 class TestRequestIdMiddleware(unittest.TestCase):

@@ -13,7 +13,17 @@ from typing import Awaitable, Callable, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from state import ProjectState, PhaseStatus, PhaseFailureDiagnostic
+from state import (
+    DEFAULT_OUTPUT_LANGUAGE,
+    DEFAULT_REPORT_MODE,
+    OUTPUT_LANGUAGE_ES_MX,
+    REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+    ProjectState,
+    PhaseFailureDiagnostic,
+    PhaseStatus,
+    normalize_output_language,
+    normalize_report_mode,
+)
 from config import PHASE_ORDER, GATE_CONFIGS, FRAMEWORKS_BY_PHASE
 from llm_client import call_llm, parse_json, LLMResponse
 from cdp.citation_format import (
@@ -31,6 +41,7 @@ from report_quality import (
     SPARSE_PRECISION_RULE,
     TELEMETRY_PRIVACY_CAVEAT,
     WAVE2_GRADUATION_MATRIX,
+    assess_decision_memo_pilot_plan_quality,
     assess_report_quality_context,
 )
 from tools.scoring import (
@@ -605,7 +616,33 @@ def build_report_prompt(state: ProjectState) -> str:
     hard_constraints = _operator_hard_constraints_prompt_block(state)
     obs_text = _sanitize_report_context("\n".join(f"{k}: {v}" for k, v in state.observations.items()) or "No observations")
     timer_text = "; ".join(f"{l.get('time','')}-{l.get('label','')}" for l in state.timer_logs[:20]) or "None"
+    output_language = _report_output_language_for_state(state)
+    report_mode = _report_mode_for_state(state)
+    language_rules = _report_output_language_prompt_block(output_language)
+    if report_mode == REPORT_MODE_DECISION_MEMO_PILOT_PLAN:
+        return _build_decision_memo_pilot_plan_report_prompt(
+            state=state,
+            output_language=output_language,
+            language_rules=language_rules,
+            evidence_locator_register=evidence_locator_register,
+            report_quality_rules=report_quality_rules,
+            factual_safety_rules=factual_safety_rules,
+            research_depth_rules=research_depth_rules,
+            evidence_maturity_rule=evidence_maturity_rule,
+            sprint0_rule=sprint0_rule,
+            hard_constraints=hard_constraints,
+            ctx_classify=ctx_classify,
+            ctx_hyps=ctx_hyps,
+            ctx_gauntlet=ctx_gauntlet,
+            ctx_audit=ctx_audit,
+            ctx_strategy=ctx_strategy,
+            ctx_monitor=ctx_monitor,
+            obs_text=obs_text,
+            timer_text=timer_text,
+        )
     return f"""PHASE 5: Final report. Write a client-facing decision memo for non-technical business decision-makers.
+
+{language_rules}
 
 {evidence_locator_register}
 
@@ -698,6 +735,208 @@ Monitoring and Kill Criteria:
 
 Appendix: Technical Analysis:
 - Move framework-heavy content here: FMEA, HAZOP, SQI, Causal Inference, HRO, Red Team, Ablation, framework references, and technical scoring notes.
+
+{ctx_classify}
+{ctx_hyps}
+{ctx_gauntlet}
+{ctx_audit}
+{ctx_strategy}
+{ctx_monitor}
+MONITORING: {obs_text}
+TIMER: {timer_text}
+PROJECT: {state.brief[:400]}"""
+
+
+def _report_output_language_for_state(state: ProjectState) -> str:
+    try:
+        return normalize_output_language(getattr(state, "output_language", DEFAULT_OUTPUT_LANGUAGE))
+    except ValueError:
+        return DEFAULT_OUTPUT_LANGUAGE
+
+
+def _report_mode_for_state(state: ProjectState) -> str:
+    try:
+        return normalize_report_mode(getattr(state, "report_mode", DEFAULT_REPORT_MODE))
+    except ValueError:
+        return DEFAULT_REPORT_MODE
+
+
+def _report_output_language_prompt_block(output_language: str) -> str:
+    if output_language == OUTPUT_LANGUAGE_ES_MX:
+        return """PROJECT OUTPUT LANGUAGE: es-MX.
+- Write generated headings and narrative in clear Mexican Spanish.
+- Keep source titles, filenames, quoted evidence, source text, URLs, evidence IDs, and citation markers in their original language.
+- Do not imitate the client's brand voice; use neutral operator-facing business language."""
+    return """PROJECT OUTPUT LANGUAGE: en.
+- Write generated headings and narrative in clear, neutral English.
+- Keep source titles, filenames, quoted evidence, source text, URLs, evidence IDs, and citation markers in their original language.
+- Do not imitate the client's brand voice; use neutral operator-facing business language."""
+
+
+def _decision_memo_headings(output_language: str) -> tuple[str, ...]:
+    if output_language == OUTPUT_LANGUAGE_ES_MX:
+        return (
+            "Decisión",
+            "Recomendación",
+            "Por qué se recomienda",
+            "Hechos proporcionados por el operador",
+            "Hipótesis y supuestos propuestos",
+            "Desconocidos / no proporcionados",
+            "Madurez de la evidencia",
+            "Siguientes acciones",
+            "Señales de monitoreo",
+            "Umbrales para cambiar de curso",
+            "Apéndice: Análisis técnico",
+        )
+    return (
+        "Decision",
+        "Recommendation",
+        "Why this is recommended",
+        "Operator-supplied facts",
+        "Hypotheses and proposed assumptions",
+        "Unknowns / not supplied",
+        "Evidence maturity",
+        "Next actions",
+        "Monitoring signals",
+        "Change-course thresholds",
+        "Appendix: Technical Analysis",
+    )
+
+
+def _claim_labels_for_language(output_language: str) -> tuple[str, ...]:
+    if output_language == OUTPUT_LANGUAGE_ES_MX:
+        return (
+            "Hecho proporcionado por el operador",
+            "Afirmación respaldada por fuente",
+            "Inferencia",
+            "Supuesto propuesto para el operador",
+            "Desconocido / no proporcionado",
+            "No aplica",
+        )
+    return (
+        "Operator-supplied fact",
+        "Source-supported claim",
+        "Inference",
+        "Proposed operator assumption",
+        "Unknown / not supplied",
+        "Not applicable",
+    )
+
+
+def _proposed_threshold_label(output_language: str) -> str:
+    return "Umbral propuesto por el operador" if output_language == OUTPUT_LANGUAGE_ES_MX else "Proposed operator threshold"
+
+
+def _build_decision_memo_pilot_plan_report_prompt(
+    *,
+    state: ProjectState,
+    output_language: str,
+    language_rules: str,
+    evidence_locator_register: str,
+    report_quality_rules: str,
+    factual_safety_rules: str,
+    research_depth_rules: str,
+    evidence_maturity_rule: str,
+    sprint0_rule: str,
+    hard_constraints: str,
+    ctx_classify: str,
+    ctx_hyps: str,
+    ctx_gauntlet: str,
+    ctx_audit: str,
+    ctx_strategy: str,
+    ctx_monitor: str,
+    obs_text: str,
+    timer_text: str,
+) -> str:
+    headings = _decision_memo_headings(output_language)
+    labels = _claim_labels_for_language(output_language)
+    threshold_label = _proposed_threshold_label(output_language)
+    heading_lines = "\n".join(f"# {heading}" for heading in headings)
+    label_lines = "\n".join(f"- {label}" for label in labels)
+    return f"""PHASE 5: Final report. REPORT MODE: decision_memo_pilot_plan.
+Write a short decision-facing memo first, followed by a separated technical appendix.
+
+{language_rules}
+
+{evidence_locator_register}
+
+{REPORT_CITATION_DISCIPLINE}
+
+Decision memo / pilot plan rules:
+- The first dashboard screen must be decision-ready for a non-technical operator.
+- Use clear, neutral, operator-facing business language. Do not imitate a client's brand voice.
+- Keep the main memo short. Use compact bullets or tables. Put methods and diagnostics only in the appendix.
+- Technical methods, framework names, FMEA, SQI, BF, DQ, RPN, rho, H_norm, priors, and equivalent diagnostic mechanics must not appear in the main memo.
+- Appendix content may explain diagnostic methods, but it must not present unsupported numerical outputs as validated facts.
+- Every material claim in the main memo must be identified as exactly one claim label from this list:
+{label_lines}
+- A claim may be labeled Source-supported claim only when it includes a concrete locator copied from PROJECT EVIDENCE LOCATORS.
+- A concrete locator must include the source title or filename plus an available locator such as page=N, chunk=N, row=N-M, sheet=S; row=N-M, or an explicit uploaded-source locator.
+- Locator resolvability provides traceability only. It does not prove semantic support, establish truth, or validate every claim.
+- Without a concrete locator, label the claim as Inference, Proposed operator assumption, Unknown / not supplied, Not applicable, or the localized equivalent.
+- Do not automatically translate source titles, filenames, quoted evidence, source text, URLs, evidence IDs, or citation markers.
+- Do not invent pricing ranges, owners, dates, metrics, thresholds, budgets, customer facts, evidence, or commitments.
+- Do not present unsupported probabilities, price ranges, statistical measures, FMEA scores, BF/DQ/RPN/rho/H_norm values, or precise forecasts as facts in the main memo.
+- Numbers supplied by the operator may appear only as Operator-supplied fact or the localized equivalent.
+- Proposed experimental thresholds may appear only when explicitly labeled {threshold_label}.
+- Use coarse language when evidence does not support precision.
+- Preserve constrained strategy shape. If the operator limited the work to one focused initiative plus one small experiment, do not expand it into several parallel tracks.
+- Defer major engineering work or broad growth spend when the operator prohibits it or limits this period to a small experiment.
+
+REPORT QUALITY CONTEXT:
+{report_quality_rules}
+
+{hard_constraints}
+
+Factual-safety rules:
+{factual_safety_rules}
+
+Research-depth and claim-labeling rules:
+{research_depth_rules}
+
+Required report structure:
+Use these exact Markdown headings in this exact order:
+{heading_lines}
+
+Decision:
+- State the decision under review and the bounded choice now.
+- Do not include technical method names.
+
+Recommendation:
+- State the recommended path, the decision status, and whether it is proceed, defer, run a pilot, or collect evidence first.
+- Separate recommendation strength from evidence maturity.
+
+Why this is recommended:
+- Give 3-5 plain-language reasons.
+- Each material claim must carry exactly one claim label.
+
+Operator-supplied facts:
+- List only facts directly supplied by the operator. If a number came from the operator, label it as an operator-supplied fact.
+
+Hypotheses and proposed assumptions:
+- Separate hypotheses from proposed operator assumptions.
+- Do not treat assumptions as facts.
+
+Unknowns / not supplied:
+- List missing decision-critical inputs plainly.
+
+Evidence maturity:
+- {evidence_maturity_rule}
+- {sprint0_rule}
+
+Next actions:
+- Include the smallest usable pilot/follow-through plan. If constraints require fewer actions than a generic 5-7 item list, include fewer.
+
+Monitoring signals:
+- Use monitoring rows already generated by the monitor/strategy outputs where available.
+- Do not create a second source of truth for monitoring data.
+
+Change-course thresholds:
+- Use proposed operator thresholds only when explicitly labeled {threshold_label}.
+- If thresholds are not supplied, state that they are unknown / not supplied.
+
+Appendix: Technical Analysis:
+- Put framework-heavy content here: FMEA, HAZOP, SQI, Causal Inference, HRO, Red Team, Ablation, BF, DQ, RPN, rho, H_norm, calibration notes, and other technical scoring.
 
 {ctx_classify}
 {ctx_hyps}
@@ -1896,10 +2135,26 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 )
     else:
         state.report = response.text
+        state.report_output_language = _report_output_language_for_state(state)
+        state.report_output_mode = _report_mode_for_state(state)
+        generation_metadata = report_freshness.build_report_generation_metadata(state.report)
+        generation_metadata.update(
+            {
+                "report_output_language": state.report_output_language,
+                "report_output_mode": state.report_output_mode,
+            }
+        )
+        if state.report_output_mode == REPORT_MODE_DECISION_MEMO_PILOT_PLAN:
+            qa_result = assess_decision_memo_pilot_plan_quality(state)
+            generation_metadata["decision_memo_quality"] = {
+                "checked": qa_result.checked,
+                "finding_count": len(qa_result.findings),
+                "rule_names": [finding.rule_name for finding in qa_result.findings],
+            }
         log_policy_event(
             state,
             "report_generated",
-            report_freshness.build_report_generation_metadata(state.report),
+            generation_metadata,
         )
         state.phase_status[phase] = PhaseStatus.COMPLETED
         state.phase_confidence[phase] = 1.0

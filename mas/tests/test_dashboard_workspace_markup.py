@@ -322,6 +322,7 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
 
         for profile in (
             "report",
+            "decision_memo_pilot_plan",
             "client_dossier",
             "operator_dossier",
             "machine_archive",
@@ -342,6 +343,17 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("/projects/{id}/export?profile=report&format=pdf", html)
         self.assertIn("Download DOCX", html)
         self.assertIn("Download PDF", html)
+        self.assertIn("Download monitoring XLSX — Client", html)
+        self.assertIn("Download monitoring XLSX — Operator", html)
+        self.assertIn("data-profile-export=\"client_monitoring_template\"", html)
+        self.assertIn("data-profile-export=\"operator_monitoring_template\"", html)
+        self.assertIn("generatedReportMode", html)
+        self.assertIn("generatedReportMetadataStatus", html)
+        self.assertIn("decisionMemoExportSupported", html)
+        self.assertIn("metadata_status", html)
+        self.assertIn("report_output?.generated_report_mode", html)
+        self.assertIn("renderReportRerunNotice", html)
+        self.assertIn("renderReportQualityNotice", html)
 
         for old_label in (
             "Client dossier",
@@ -381,6 +393,7 @@ class TestDashboardWorkspaceMarkup(unittest.TestCase):
         self.assertIn("function technologyReadinessWorkbookExportSupported()", html)
         self.assertIn("isTechnologyReadinessProject(project) && technologyReadinessWorkbookExportSupported()", html)
         self.assertIn("keys.push(TECHNOLOGY_READINESS_EXPORT_PROFILE_KEY)", html)
+        self.assertIn("keys.splice(1, 0, 'decision_memo_pilot_plan')", html)
 
     def test_dashboard_surfaces_supported_input_contract_labels_only(self):
         if not HTML_PATH.exists():

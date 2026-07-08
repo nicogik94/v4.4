@@ -37,6 +37,7 @@ from clarifications import (  # noqa: E402
 )
 from exporters import (  # noqa: E402
     CLIENT_DELIVERY_VALIDATION_BANNER,
+    ExportProfileConflict,
     MONITORING_TEMPLATE_OPERATOR_NOTE,
     _safe_report_markdown,
     build_client_dossier_markdown,
@@ -56,6 +57,7 @@ from monitoring_templates import (  # noqa: E402
     CLIENT_MONITORING_TEMPLATE_HEADERS,
     OPERATOR_MONITORING_TEMPLATE_HEADERS,
     OPERATOR_TRACE_HEADERS,
+    REVIEW_LOG_HEADERS,
     SHEET_NAME,
     monitoring_template_cell_rows,
 )
@@ -77,6 +79,7 @@ from state import (  # noqa: E402
     PhaseStatus,
     PreliminaryVerdict,
     ProjectState,
+    REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
     StrategyAction,
     StrategyOutput,
     UploadedFileManifest,
@@ -1153,6 +1156,8 @@ Stop if baseline data access is unavailable.
         expected = {
             ("report", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ("report", "pdf"): "application/pdf",
+            (REPORT_MODE_DECISION_MEMO_PILOT_PLAN, "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            (REPORT_MODE_DECISION_MEMO_PILOT_PLAN, "pdf"): "application/pdf",
             ("client_dossier", "docx"): "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ("client_dossier", "pdf"): "application/pdf",
             ("client_monitoring_template", "xlsx"): "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1170,6 +1175,9 @@ Stop if baseline data access is unavailable.
                     if profile == TECHNOLOGY_READINESS_WORKBOOK_PROFILE
                     else state
                 )
+                if profile == REPORT_MODE_DECISION_MEMO_PILOT_PLAN:
+                    export_state.report_output_language = "en"
+                    export_state.report_output_mode = REPORT_MODE_DECISION_MEMO_PILOT_PLAN
                 payload, actual_media_type, filename = export_project_profile_bytes(export_state, profile, fmt)
                 self.assertGreater(len(payload), 100)
                 self.assertEqual(actual_media_type, media_type)
@@ -1188,6 +1196,42 @@ Stop if baseline data access is unavailable.
                         if profile.startswith("operator")
                         else tuple(CLIENT_MONITORING_TEMPLATE_HEADERS)
                     ))
+
+    def test_decision_memo_profile_uses_generated_report_mode_metadata(self):
+        state = make_export_state("decision-memo-profile")
+        state.report = """# Decision
+Operator-supplied fact: decide whether to run the bounded pilot.
+
+# Recommendation
+Inference: run the pilot before scaling.
+
+# Appendix: Technical Analysis
+Technical details stay separated.
+        """
+        state.report_mode = "standard"
+        state.report_output_language = "en"
+        state.report_output_mode = REPORT_MODE_DECISION_MEMO_PILOT_PLAN
+
+        payload, media_type, filename = export_project_profile_bytes(
+            state,
+            REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+            "docx",
+        )
+        text = _docx_text(payload)
+
+        self.assertEqual(media_type, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertIn("decision_memo_pilot_plan-", filename)
+        self.assertIn("Decision", text)
+        self.assertIn("Appendix: Technical Analysis", text)
+
+    def test_decision_memo_profile_rejects_current_mode_without_generated_metadata(self):
+        state = make_export_state("decision-memo-profile-gated")
+        state.report_mode = REPORT_MODE_DECISION_MEMO_PILOT_PLAN
+        state.report_output_language = None
+        state.report_output_mode = None
+
+        with self.assertRaises(ExportProfileConflict):
+            export_project_profile_bytes(state, REPORT_MODE_DECISION_MEMO_PILOT_PLAN, "pdf")
 
     def test_technology_readiness_workbook_profile_exports_expected_sheets_and_safety_language(self):
         state = make_technology_readiness_export_state("tech-workbook-profile")
@@ -1378,6 +1422,7 @@ This section is narrative only and should not replace Decision Gates.
         for sheet_name in expected_sheets:
             self.assertGreaterEqual(len(_xlsx_sheet_rows(workbook, sheet_name)), 1, sheet_name)
         self.assertEqual(_xlsx_sheet_rows(workbook, SHEET_NAME)[0], tuple(CLIENT_MONITORING_TEMPLATE_HEADERS))
+        self.assertEqual(_xlsx_sheet_rows(workbook, "Review Log")[0], tuple(REVIEW_LOG_HEADERS))
         self.assertIn("Metric / signal", _xlsx_sheet_rows(workbook, "Stop - Change Criteria")[0])
         self.assertIn("Output trust metric", workbook_text)
         self.assertIn("more than 20% over approved budget", workbook_text)
@@ -1416,6 +1461,7 @@ This section is narrative only and should not replace Decision Gates.
         self.assertTrue(expected_sheets.issubset(set(workbook.sheetnames)))
         for sheet_name in expected_sheets:
             self.assertGreaterEqual(len(_xlsx_sheet_rows(workbook, sheet_name)), 1, sheet_name)
+        self.assertEqual(_xlsx_sheet_rows(workbook, "Review Log")[0], tuple(REVIEW_LOG_HEADERS))
         self.assertEqual(_xlsx_sheet_rows(workbook, SHEET_NAME)[0], tuple(OPERATOR_MONITORING_TEMPLATE_HEADERS))
         for header in OPERATOR_TRACE_HEADERS:
             self.assertIn(header, _xlsx_sheet_rows(workbook, SHEET_NAME)[0])
@@ -3747,6 +3793,82 @@ class TestProfileExportApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(missing.exception.status_code, 400)
         self.assertEqual(unknown.exception.status_code, 400)
         self.assertEqual(invalid_combo.exception.status_code, 400)
+
+    async def test_decision_memo_export_route_rejects_no_report_with_409(self):
+        state = make_export_state("direct-decision-no-report")
+        state.report = None
+        state.report_output_language = None
+        state.report_output_mode = None
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with self.assertRaises(HTTPException) as ctx:
+                await api.export_project_profile(
+                    state.project_id,
+                    profile=REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+                    format="docx",
+                )
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("profile=decision_memo_pilot_plan", ctx.exception.detail)
+
+    async def test_decision_memo_export_route_rejects_legacy_report_metadata_with_409(self):
+        state = make_export_state("direct-decision-legacy")
+        state.report_output_language = None
+        state.report_output_mode = None
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with self.assertRaises(HTTPException) as ctx:
+                await api.export_project_profile(
+                    state.project_id,
+                    profile=REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+                    format="docx",
+                )
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("report_output_mode=decision_memo_pilot_plan", ctx.exception.detail)
+
+    async def test_decision_memo_export_route_rejects_generated_standard_report_with_409(self):
+        state = make_export_state("direct-decision-standard")
+        state.report_output_language = "en"
+        state.report_output_mode = "standard"
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            with self.assertRaises(HTTPException) as ctx:
+                await api.export_project_profile(
+                    state.project_id,
+                    profile=REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+                    format="docx",
+                )
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("report_output_mode=decision_memo_pilot_plan", ctx.exception.detail)
+
+    async def test_decision_memo_export_route_returns_generated_decision_report(self):
+        state = make_export_state("direct-decision-success")
+        state.report = """# Decision
+Operator-supplied fact: decide whether to run the bounded pilot.
+
+# Recommendation
+Inference: run the pilot before scaling.
+
+# Appendix: Technical Analysis
+Technical details stay separated.
+"""
+        state.report_output_language = "en"
+        state.report_output_mode = REPORT_MODE_DECISION_MEMO_PILOT_PLAN
+
+        with patch("api.store.load", new=AsyncMock(return_value=state)):
+            response = await api.export_project_profile(
+                state.project_id,
+                profile=REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+                format="docx",
+            )
+
+        self.assertEqual(response.media_type, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertIn("decision_memo_pilot_plan-", response.headers["content-disposition"])
+        text = _docx_text(response.body)
+        self.assertIn("Decision", text)
+        self.assertIn("Appendix: Technical Analysis", text)
 
 
 if __name__ == "__main__":

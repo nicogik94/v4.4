@@ -25,7 +25,9 @@ Use the existing profile export route:
 - `profile=client_monitoring_template&format=xlsx`
 - `profile=operator_monitoring_template&format=xlsx`
 
-The workbook contains one sheet named `Monitoring Template`.
+The workbook contains a primary sheet named `Monitoring Template` and
+supporting sheets for stop/change criteria, canaries, operator trace views,
+metadata, and a downloaded `Review Log` worksheet.
 
 ## Column Definitions
 
@@ -56,6 +58,22 @@ Operator-only columns:
 - `Internal source refs`: source refs useful for trace/debug review.
 - `Diagnostic notes`: source-path notes such as monitor row origin.
 
+Review Log columns:
+
+- `Review date`
+- `Reviewer`
+- `Review decision / status`
+- `Hypothesis / experiment`
+- `Signal / metric`
+- `Last observed value`
+- `Observation date`
+- `Evidence / note`
+- `Change made`
+- `Follow-up owner`
+- `Next review date`
+- `Follow-up due date`
+- `Notes`
+
 ## Decision Gates Relationship
 
 Decision Gates remain the source of truth for proceed, extend, stop, and
@@ -83,11 +101,13 @@ local paths.
 2. Export the operator template when traceability is needed.
 3. Assign missing owners, cadences, and evidence sources.
 4. Confirm thresholds before treating them as approved gates.
-5. Review the template during the planned OODA cadence.
+5. Use the Review Log worksheet as an operator-controlled tracking artifact.
+6. Review the template during the planned OODA cadence.
 
 ## Limitations
 
 - no automatic business-truth validation,
+- no persisted dashboard review log,
 - no semantic proof for every claim,
 - no guarantee of causal truth,
 - no guarantee that generated thresholds are validated,

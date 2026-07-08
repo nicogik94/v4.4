@@ -56,13 +56,17 @@ from report_quality import (
 import report_freshness
 from hypothesis_coverage import assess_hypothesis_variable_coverage
 from monitoring_templates import monitoring_template_xlsx_bytes
-from state import ProjectState
+from state import REPORT_MODE_DECISION_MEMO_PILOT_PLAN, ProjectState
 from technology_readiness_workbook import (
     TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
     technology_readiness_workbook_xlsx_bytes,
 )
 from workflow_templates import TECHNOLOGY_READINESS_PHASE_LABELS, TECHNOLOGY_READINESS_PHASE_SEQUENCE
 from version import get_git_sha
+
+
+class ExportProfileConflict(ValueError):
+    """Raised when a requested export profile conflicts with generated report metadata."""
 
 
 def build_export_filename(state: ProjectState, ext: str) -> str:
@@ -362,6 +366,7 @@ MONITORING_TEMPLATE_OPERATOR_NOTE = (
 
 EXPORT_PROFILE_FORMATS = {
     "report": {"pdf", "docx"},
+    REPORT_MODE_DECISION_MEMO_PILOT_PLAN: {"pdf", "docx"},
     "client_dossier": {"pdf", "docx"},
     "client_monitoring_template": {"xlsx"},
     "operator_dossier": {"pdf", "docx"},
@@ -448,14 +453,34 @@ def export_project_profile_bytes(state: ProjectState, profile: str, format: str)
             state,
             audience="client",
         )
+    elif profile_name == REPORT_MODE_DECISION_MEMO_PILOT_PLAN:
+        generated_language, generated_mode = _generated_report_metadata(state)
+        if not getattr(state, "report", None):
+            raise ExportProfileConflict(
+                "profile=decision_memo_pilot_plan requires a generated report"
+            )
+        if not generated_language or not generated_mode:
+            raise ExportProfileConflict(
+                "profile=decision_memo_pilot_plan requires generated "
+                "report_output_mode=decision_memo_pilot_plan"
+            )
+        if generated_mode != REPORT_MODE_DECISION_MEMO_PILOT_PLAN:
+            raise ExportProfileConflict(
+                "profile=decision_memo_pilot_plan requires generated "
+                "report_output_mode=decision_memo_pilot_plan"
+            )
+        markdown = _decision_memo_pilot_plan_export_markdown(state)
     elif profile_name == "client_dossier":
         markdown = build_client_dossier_markdown(state, current_code_version=current_version)
     else:
         markdown = build_operator_dossier_markdown(state, current_code_version=current_version)
 
-    client_visible_profile = profile_name in {"report", "client_dossier"}
+    client_visible_profile = profile_name in {"report", "client_dossier", REPORT_MODE_DECISION_MEMO_PILOT_PLAN}
     if client_visible_profile:
-        markdown = _finalize_client_runtime_render_markdown(markdown, state)
+        if profile_name == REPORT_MODE_DECISION_MEMO_PILOT_PLAN:
+            markdown = _finalize_export_markdown(markdown, state, audience="client")
+        else:
+            markdown = _finalize_client_runtime_render_markdown(markdown, state)
 
     if fmt == "docx":
         return _export_markdown_docx_bytes(markdown, title=filename), PROFILE_MEDIA_TYPES[fmt], filename
@@ -3290,6 +3315,26 @@ def _safe_report_markdown(state: ProjectState) -> str:
         markdown = _dedupe_client_sparse_growth_sprint0(markdown)
         markdown = guard_client_bf_confidence(markdown, state)
     return _finalize_export_markdown(markdown, state, audience="client", quality=quality)
+
+
+def _generated_report_metadata(state: ProjectState) -> tuple[str, str]:
+    language = str(getattr(state, "report_output_language", "") or "").strip()
+    mode = str(getattr(state, "report_output_mode", "") or "").strip()
+    return language, mode
+
+
+def _decision_memo_pilot_plan_export_markdown(state: ProjectState) -> str:
+    markdown = _redact_unsafe_string(state.report or "No report available.")
+    markdown = _ensure_decision_memo_appendix_spacing(markdown)
+    return normalize_export_text(markdown, audience="client")
+
+
+def _ensure_decision_memo_appendix_spacing(markdown: str) -> str:
+    return re.sub(
+        r"(?m)([^\n])\n(#{1,6}\s+(?:Appendix: Technical Analysis|Apéndice: Análisis técnico)\s*)$",
+        r"\1\n\n\2",
+        str(markdown or ""),
+    )
 
 
 def _prepend_report_freshness_warning(

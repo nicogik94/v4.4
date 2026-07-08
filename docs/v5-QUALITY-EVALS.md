@@ -14,6 +14,8 @@ claim that outputs are automatically true or production-safe.
 - machine archive report content is not changed by client/operator exports,
 - workflow order remains
   `classify -> hypotheses -> gauntlet -> audit -> strategy -> sqi -> monitor -> report`.
+- decision memo / pilot plan reports receive deterministic, advisory,
+  non-blocking quality findings when generated in that mode.
 
 ## Client / Operator Separation Rules
 
@@ -59,10 +61,31 @@ provider payloads, chain-of-thought, local paths, and unsafe storage refs.
 - Evidence markers identify source material; they do not prove semantic support
   by themselves.
 
+## Decision Memo / Pilot Plan QA
+
+The deterministic helper for `decision_memo_pilot_plan` checks:
+
+- required memo sections and separated technical appendix,
+- duplicate or empty headings,
+- malformed markdown table boundaries,
+- likely incomplete final sentence,
+- contradictory explicit counts versus immediately following enumerations,
+- unsupported numeric-claim patterns in the main memo,
+- source-supported labels without concrete locators from the existing register,
+- evidence-maturity versus certainty-wording mismatch,
+- generated report language versus required heading language mismatch,
+- monitoring-signal text versus generated monitoring-template rows.
+
+These findings are advisory and surfaced through workspace/dashboard state. They
+do not block report completion and do not claim to prove semantic truth.
+
 ## Limitations
 
 - no guarantee of causal truth,
 - no semantic evidence proof for every claim,
+- evidence marker resolvability is checked, but title/filename presence depends on
+  available locator metadata; missing source metadata remains operator-review
+  required,
 - no automatic business-truth validation,
 - no replacement for expert/domain review,
 - no public SaaS readiness,
