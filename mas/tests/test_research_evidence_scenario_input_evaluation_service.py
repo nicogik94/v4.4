@@ -103,10 +103,7 @@ def test_feature_gate_defaults_off_before_connection_access(
 
 def test_invalid_payload_and_autocommit_fail_before_repository(monkeypatch):
     monkeypatch.setenv("MAS_RESEARCH_EVIDENCE_ENABLED", "true")
-    invalid = ScenarioInputEvaluationRequest.model_construct(
-        **_request().model_dump(exclude={"request_id"}),
-        request_id=" ",
-    )
+    invalid = _request().model_copy(update={"request_id": " "})
     with pytest.raises(ValidationError):
         service.create_scenario_input_evaluation(TripwireConn(), invalid)
     conn = FakeConn(autocommit=True)
