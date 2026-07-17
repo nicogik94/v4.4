@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
+import subprocess
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Iterator, Optional
@@ -54,6 +58,9 @@ V59_RESEARCH_AUTOMATION_ROI_USE_SQL = (
 V60_RESEARCH_AUTOMATION_ROI_EXECUTION_SQL = (
     SQL_DIR / "v60_research_evidence_automation_roi_execution.sql"
 )
+V61_RESEARCH_EVIDENCE_PACK_SQL = (
+    SQL_DIR / "v61_research_evidence_pack_foundation.sql"
+)
 
 # Slice B (Automation ROI) objects — used by the v48 schema tests.
 SLICE_B_TABLES = (
@@ -69,6 +76,377 @@ MIGRATION_DSN_ENV = "TEST_EVIDENCE_MIGRATION_PG_DSN"
 MIGRATION_OWNER = "workflow_migration_owner"
 RUNTIME_DSN_ENV = "TEST_EVIDENCE_RUNTIME_PG_DSN"
 RUNTIME_ROLE = "workflow_automation_roi_runtime"
+
+EXTERNAL_ROLE_MANIFEST = {
+    "workflow_migration_owner": {
+        "login": True, "inherit": False, "superuser": False,
+        "createdb": False, "createrole": False, "replication": False,
+        "bypassrls": False,
+    },
+    "workflow_research_evidence_owner": {
+        "login": False, "inherit": False, "superuser": False,
+        "createdb": False, "createrole": False, "replication": False,
+        "bypassrls": False,
+    },
+    "workflow_automation_roi_runtime": {
+        "login": True, "inherit": False, "superuser": False,
+        "createdb": False, "createrole": False, "replication": False,
+        "bypassrls": False,
+    },
+}
+EXTERNAL_MEMBERSHIP_MANIFEST = (
+    (
+        "workflow_research_evidence_owner",
+        "workflow_migration_owner",
+        False,
+        False,
+        True,
+    ),
+)
+_EXTERNAL_ROLE_NAMES = tuple(EXTERNAL_ROLE_MANIFEST)
+
+
+class ExternalRoleInfrastructureError(RuntimeError):
+    """Disposable-cluster role prerequisites are absent or divergent."""
+
+
+def _role_rows(conn):
+    return conn.execute(
+        """SELECT rolname,rolcanlogin,rolinherit,rolsuper,rolcreatedb,
+                  rolcreaterole,rolreplication,rolbypassrls,rolconnlimit,
+                  rolvaliduntil
+           FROM pg_catalog.pg_roles
+           WHERE rolname=ANY(%s::text[]) ORDER BY rolname""",
+        (list(_EXTERNAL_ROLE_NAMES),),
+    ).fetchall()
+
+
+def external_role_attributes(conn):
+    attributes = {}
+    for row in _role_rows(conn):
+        attributes[row[0]] = {
+            "login": row[1], "inherit": row[2], "superuser": row[3],
+            "createdb": row[4], "createrole": row[5],
+            "replication": row[6], "bypassrls": row[7],
+        }
+    return attributes
+
+
+def external_role_memberships(conn):
+    return tuple(conn.execute(
+        """SELECT granted.rolname,member.rolname,membership.admin_option,
+                  membership.inherit_option,membership.set_option
+           FROM pg_catalog.pg_auth_members membership
+           JOIN pg_catalog.pg_roles granted ON granted.oid=membership.roleid
+           JOIN pg_catalog.pg_roles member ON member.oid=membership.member
+           WHERE granted.rolname=ANY(%s::text[])
+              OR member.rolname=ANY(%s::text[])
+           ORDER BY granted.rolname,member.rolname""",
+        (list(_EXTERNAL_ROLE_NAMES), list(_EXTERNAL_ROLE_NAMES)),
+    ).fetchall())
+
+
+def external_role_snapshot(conn):
+    roles = tuple(conn.execute(
+        """SELECT oid,rolname,rolcanlogin,rolinherit,rolsuper,rolcreatedb,
+                  rolcreaterole,rolreplication,rolbypassrls,rolconnlimit,
+                  rolvaliduntil
+           FROM pg_catalog.pg_roles
+           WHERE rolname=ANY(%s::text[]) ORDER BY rolname""",
+        (list(_EXTERNAL_ROLE_NAMES),),
+    ).fetchall())
+    memberships = tuple(conn.execute(
+        """SELECT membership.roleid,membership.member,membership.grantor,
+                  membership.admin_option,membership.inherit_option,
+                  membership.set_option
+           FROM pg_catalog.pg_auth_members membership
+           JOIN pg_catalog.pg_roles granted ON granted.oid=membership.roleid
+           JOIN pg_catalog.pg_roles member ON member.oid=membership.member
+           WHERE granted.rolname=ANY(%s::text[])
+              OR member.rolname=ANY(%s::text[])
+           ORDER BY membership.roleid,membership.member""",
+        (list(_EXTERNAL_ROLE_NAMES), list(_EXTERNAL_ROLE_NAMES)),
+    ).fetchall())
+    return roles, memberships
+
+
+def cluster_role_oids(conn):
+    return tuple(row[0] for row in conn.execute(
+        "SELECT oid FROM pg_catalog.pg_roles ORDER BY oid"
+    ).fetchall())
+
+
+class ExternalRoleHarness:
+    def __init__(self, cluster_identity, connection_parameters, *, credentials=True):
+        self.cluster_identity = cluster_identity
+        self._connection_parameters = dict(connection_parameters)
+        self._credentials = {}
+        self._created_roles = set()
+        self._schemas = set()
+        self.credential_generation_counts = {}
+        if credentials:
+            for role in (MIGRATION_OWNER, RUNTIME_ROLE):
+                self._credentials[role] = secrets.token_urlsafe(32)
+                self.credential_generation_counts[role] = 1
+
+    @classmethod
+    def for_unknown_provenance_test(cls, conn):
+        return cls(
+            ("unknown-provenance", uuid.uuid4().hex),
+            _connection_parameters(conn), credentials=False,
+        )
+
+    def bind_schema(self, schema):
+        self._schemas.add(schema)
+
+    def provision(self, conn):
+        psycopg = psycopg_module()
+        prior = _begin_autocommit(conn)
+        try:
+            actual = external_role_attributes(conn)
+            for role, expected in EXTERNAL_ROLE_MANIFEST.items():
+                if role in actual:
+                    if actual[role] != expected:
+                        raise ExternalRoleInfrastructureError(
+                            f"external role attribute divergence: {role}"
+                        )
+                    if expected["login"] and (
+                        role not in self._created_roles
+                        or role not in self._credentials
+                    ):
+                        raise ExternalRoleInfrastructureError(
+                            f"external login role credential provenance is unknown: {role}"
+                        )
+                    continue
+                role_sql = psycopg.sql.SQL(
+                    "CREATE ROLE {} {} NOINHERIT NOSUPERUSER NOCREATEDB "
+                    "NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+                ).format(
+                    psycopg.sql.Identifier(role),
+                    psycopg.sql.SQL("LOGIN" if expected["login"] else "NOLOGIN"),
+                )
+                if expected["login"]:
+                    role_sql += psycopg.sql.SQL(" PASSWORD {}").format(
+                        psycopg.sql.Literal(self._credentials[role])
+                    )
+                conn.execute(role_sql)
+                self._created_roles.add(role)
+
+            memberships = external_role_memberships(conn)
+            if not memberships:
+                conn.execute(
+                    psycopg.sql.SQL(
+                        "GRANT {} TO {} "
+                        "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
+                    ).format(
+                        psycopg.sql.Identifier("workflow_research_evidence_owner"),
+                        psycopg.sql.Identifier(MIGRATION_OWNER),
+                    )
+                )
+            elif memberships != EXTERNAL_MEMBERSHIP_MANIFEST:
+                raise ExternalRoleInfrastructureError(
+                    "external role membership divergence"
+                )
+
+            database = conn.execute(
+                "SELECT pg_catalog.current_database()"
+            ).fetchone()[0]
+            if conn.execute(
+                "SELECT has_database_privilege(%s,%s,'CREATE')",
+                (MIGRATION_OWNER, database),
+            ).fetchone()[0]:
+                raise ExternalRoleInfrastructureError(
+                    "workflow_migration_owner unexpectedly has database CREATE"
+                )
+            if external_role_attributes(conn) != EXTERNAL_ROLE_MANIFEST:
+                raise ExternalRoleInfrastructureError(
+                    "external role provisioning verification failed"
+                )
+            if external_role_memberships(conn) != EXTERNAL_MEMBERSHIP_MANIFEST:
+                raise ExternalRoleInfrastructureError(
+                    "external membership provisioning verification failed"
+                )
+        finally:
+            _restore_autocommit(conn, prior)
+        return self
+
+    @contextlib.contextmanager
+    def _role_connection(self, role, schema, *, autocommit):
+        psycopg = psycopg_module()
+        connection = self.authenticated_connection(role)
+        try:
+            connection.autocommit = autocommit
+            connection.execute(
+                psycopg.sql.SQL("SET search_path TO {}").format(
+                    psycopg.sql.Identifier(schema)
+                )
+            )
+            identity = connection.execute(
+                "SELECT session_user,current_user"
+            ).fetchone()
+            if identity != (role, role):
+                raise ExternalRoleInfrastructureError(
+                    f"genuine external role authentication failed: {role}"
+                )
+            if not autocommit:
+                connection.commit()
+            yield connection
+        finally:
+            with contextlib.suppress(Exception):
+                connection.rollback()
+            connection.close()
+
+    def migration_connection(self, schema):
+        return self._role_connection(MIGRATION_OWNER, schema, autocommit=True)
+
+    def runtime_connection(self, schema):
+        return self._role_connection(RUNTIME_ROLE, schema, autocommit=False)
+
+    def authenticated_connection(self, role):
+        if role not in self._credentials or role not in self._created_roles:
+            raise ExternalRoleInfrastructureError(
+                f"external login role credential provenance is unknown: {role}"
+            )
+        parameters = dict(self._connection_parameters)
+        parameters.update(user=role, password=self._credentials[role])
+        return _actual_psycopg_module().connect(**parameters)
+
+
+_external_role_lock = threading.Lock()
+_external_role_harnesses = {}
+_external_schema_harnesses = {}
+_active_external_role_harness = None
+_MIGRATION_CONNECTION_TOKEN = "in-memory-role:workflow-migration-owner"
+_RUNTIME_CONNECTION_TOKEN = "in-memory-role:workflow-automation-roi-runtime"
+
+
+def _connection_parameters(conn):
+    return {
+        "host": conn.info.host,
+        "port": conn.info.port,
+        "dbname": conn.info.dbname,
+    }
+
+
+def _cluster_identity(conn):
+    system_identifier = conn.execute(
+        "SELECT system_identifier::text FROM pg_catalog.pg_control_system()"
+    ).fetchone()[0]
+    return system_identifier, conn.info.host, conn.info.port
+
+
+def ensure_external_role_prerequisites(conn):
+    global _active_external_role_harness
+    identity = _cluster_identity(conn)
+    with _external_role_lock:
+        harness = _external_role_harnesses.get(identity)
+        if harness is None:
+            harness = ExternalRoleHarness(identity, _connection_parameters(conn))
+            harness.provision(conn)
+            _external_role_harnesses[identity] = harness
+        else:
+            harness.provision(conn)
+        _active_external_role_harness = harness
+        os.environ[MIGRATION_DSN_ENV] = _MIGRATION_CONNECTION_TOKEN
+        os.environ[RUNTIME_DSN_ENV] = _RUNTIME_CONNECTION_TOKEN
+        return harness
+
+
+class _PsycopgProxy:
+    def __init__(self, module):
+        self._module = module
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+    def connect(self, conninfo="", **kwargs):
+        if conninfo in (_MIGRATION_CONNECTION_TOKEN, _RUNTIME_CONNECTION_TOKEN):
+            harness = _active_external_role_harness
+            if harness is None:
+                raise ExternalRoleInfrastructureError(
+                    "in-memory external-role credential owner is unavailable"
+                )
+            role = (
+                MIGRATION_OWNER
+                if conninfo == _MIGRATION_CONNECTION_TOKEN
+                else RUNTIME_ROLE
+            )
+            return harness.authenticated_connection(role)
+        return self._module.connect(conninfo, **kwargs)
+
+
+_psycopg_proxy = None
+
+
+def _actual_psycopg_module():
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - environment guard
+        pytest.skip("psycopg is not installed; Slice A PostgreSQL tests require it")
+    return psycopg
+
+
+@contextlib.contextmanager
+def dedicated_negative_role_cluster():
+    psycopg = psycopg_module()
+    container = f"mas-r2a1-negative-role-{uuid.uuid4().hex[:12]}"
+    database = f"mas_research_evidence_test_negative_{uuid.uuid4().hex[:10]}"
+    bootstrap_password = secrets.token_urlsafe(32)
+    environment = os.environ.copy()
+    environment["POSTGRES_PASSWORD"] = bootstrap_password
+    command = [
+        "docker", "run", "-d", "--pull=never", "--name", container,
+        "-e", "POSTGRES_PASSWORD", "-e", f"POSTGRES_DB={database}",
+        "-p", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql/data",
+        "postgres:16-alpine",
+    ]
+    subprocess.run(
+        command, env=environment, check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(100):
+            ready = subprocess.run(
+                ["docker", "exec", container, "pg_isready", "-U", "postgres",
+                 "-d", database],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if ready.returncode == 0:
+                break
+            time.sleep(0.05)
+        else:
+            raise ExternalRoleInfrastructureError(
+                "dedicated negative-role PostgreSQL cluster did not become ready"
+            )
+        port_output = subprocess.run(
+            ["docker", "port", container, "5432/tcp"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        port = int(port_output.rsplit(":", 1)[1])
+        connection = None
+        for _ in range(100):
+            try:
+                connection = psycopg.connect(
+                    host="127.0.0.1", port=port, dbname=database,
+                    user="postgres", password=bootstrap_password,
+                )
+                break
+            except psycopg.OperationalError:
+                time.sleep(0.05)
+        if connection is None:
+            raise ExternalRoleInfrastructureError(
+                "dedicated negative-role PostgreSQL connection was unavailable"
+            ) from None
+        connection.autocommit = True
+        try:
+            yield connection
+        finally:
+            connection.close()
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", container],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
 SLICE_A_TABLES = (
     "source_blob",
@@ -105,11 +483,10 @@ def require_dsn() -> str:
 
 
 def psycopg_module():
-    try:
-        import psycopg
-    except ImportError:  # pragma: no cover - environment guard
-        pytest.skip("psycopg is not installed; Slice A PostgreSQL tests require it")
-    return psycopg
+    global _psycopg_proxy
+    if _psycopg_proxy is None:
+        _psycopg_proxy = _PsycopgProxy(_actual_psycopg_module())
+    return _psycopg_proxy
 
 
 def connect(*, schema: Optional[str] = None, autocommit: bool = False):
@@ -117,6 +494,7 @@ def connect(*, schema: Optional[str] = None, autocommit: bool = False):
     psycopg = psycopg_module()
     conn = psycopg.connect(require_dsn())
     conn.autocommit = autocommit
+    ensure_external_role_prerequisites(conn)
     if schema is not None:
         conn.execute(f'SET search_path TO "{schema}"')
         if not autocommit:
@@ -245,6 +623,9 @@ def apply_v58_research_scenario_input_evaluation(conn) -> None:
 def assign_v59_upstream_migration_ownership(conn, schema: str) -> None:
     """Model production ownership after bootstrap creates disposable topology."""
     psycopg = psycopg_module()
+    harness = ensure_external_role_prerequisites(conn)
+    harness.bind_schema(schema)
+    _external_schema_harnesses[schema] = harness
     prior = _begin_autocommit(conn)
     try:
         conn.execute(
@@ -366,6 +747,11 @@ def assert_single_v59_upstream_schema(conn) -> str:
 @contextlib.contextmanager
 def v59_migration_connection(upstream_schema: str):
     """Open the genuine migration-owner login required by the v59 contract."""
+    harness = _external_schema_harnesses.get(upstream_schema)
+    if harness is not None:
+        with harness.migration_connection(upstream_schema) as connection:
+            yield connection
+        return
     migration_dsn = os.getenv(MIGRATION_DSN_ENV)
     if not migration_dsn:
         raise RuntimeError(f"{MIGRATION_DSN_ENV} is required for v59")
@@ -399,6 +785,11 @@ def v59_migration_connection(upstream_schema: str):
 @contextlib.contextmanager
 def runtime_connection(upstream_schema: str):
     """Open the genuine runtime login used by R1.6A functional tests."""
+    harness = _external_schema_harnesses.get(upstream_schema)
+    if harness is not None:
+        with harness.runtime_connection(upstream_schema) as connection:
+            yield connection
+        return
     runtime_dsn = os.getenv(RUNTIME_DSN_ENV)
     if not runtime_dsn:
         raise RuntimeError(f"{RUNTIME_DSN_ENV} is required for R1.6A runtime tests")
@@ -459,6 +850,38 @@ def apply_v60_research_automation_roi_execution(conn) -> None:
         _restore_autocommit(conn, prior)
     with v59_migration_connection(upstream_schema) as migration:
         _run_script(migration, V60_RESEARCH_AUTOMATION_ROI_EXECUTION_SQL)
+
+
+def apply_v51_through_v60_research_topology(conn, schema: str) -> None:
+    """Apply the complete approved predecessor topology required by v61.
+
+    ``apply_full_schema`` supplies init.sql -> outcomes.sql -> v47.  The v48
+    and v49 foundations are part of the approved disposable baseline because
+    v57 has a foreign-key dependency on ``approved_calculation_input``.
+    """
+    apply_v48(conn)
+    apply_v49(conn)
+    apply_v51_research(conn)
+    apply_v52_research(conn)
+    apply_v53_research_intake(conn)
+    apply_v54_research_review(conn)
+    apply_v55_research_freshness(conn)
+    apply_v56_research_claim_support(conn)
+    apply_v57_research_binding(conn)
+    apply_v58_research_scenario_input_evaluation(conn)
+    assign_v59_upstream_migration_ownership(conn, schema)
+    provision_v59_dedicated_schema(conn)
+    apply_v59_research_automation_roi_use(conn)
+    apply_v60_research_automation_roi_execution(conn)
+
+
+def apply_v61_research_evidence_pack(conn) -> None:
+    """(Re)apply only the R2.0A-1 canonical evidence-pack foundation."""
+    prior = _begin_autocommit(conn)
+    try:
+        _run_script(conn, V61_RESEARCH_EVIDENCE_PACK_SQL)
+    finally:
+        _restore_autocommit(conn, prior)
 
 
 def slice_b_tables_present(conn, schema: str) -> int:

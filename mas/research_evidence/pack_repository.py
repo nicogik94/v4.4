@@ -1,0 +1,490 @@
+"""Caller-transaction-owned persistence for the canonical evidence pack."""
+from __future__ import annotations
+
+import json
+from typing import Optional
+
+from . import claim_support_repository, review_repository
+from .pack_models import (
+    ResearchEvidenceClaimAnnotationRevisionCreate,
+    ResearchEvidenceClaimAnnotationRevisionRecord,
+    ResearchEvidenceExplicitProbability,
+    ResearchEvidenceProjectContextRevisionCreate,
+    ResearchEvidenceProjectContextRevisionRecord,
+    ResearchEvidenceUsageAuthorizationDecisionCreate,
+    ResearchEvidenceUsageAuthorizationDecisionRecord,
+    UsageScope,
+)
+
+
+class ResearchEvidencePackRepositoryError(ValueError):
+    pass
+
+
+class ResearchEvidencePackParentNotFound(ResearchEvidencePackRepositoryError):
+    pass
+
+
+class ResearchEvidencePackIntegrityError(ResearchEvidencePackRepositoryError):
+    pass
+
+
+class ResearchEvidencePackRequestConflict(ResearchEvidencePackIntegrityError):
+    pass
+
+
+class ResearchEvidencePackTransactionError(ResearchEvidencePackRepositoryError):
+    pass
+
+
+def require_read_committed_transaction(conn) -> None:
+    """Require the sole supported caller-owned write transaction mode."""
+    if conn.autocommit:
+        raise ResearchEvidencePackTransactionError(
+            "research-evidence pack writes require a non-autocommit connection"
+        )
+    row = conn.execute("SHOW transaction_isolation").fetchone()
+    isolation = "" if row is None else str(row[0])
+    isolation = " ".join(isolation.replace("_", " ").lower().split())
+    if isolation != "read committed":
+        raise ResearchEvidencePackTransactionError(
+            "research-evidence pack writes require PostgreSQL READ COMMITTED isolation"
+        )
+
+
+def _sqlstate(exc: Exception) -> str:
+    return str(getattr(exc, "sqlstate", None) or getattr(getattr(exc, "diag", None), "sqlstate", "") or "")
+
+
+def _constraint(exc: Exception) -> str:
+    return str(getattr(getattr(exc, "diag", None), "constraint_name", "") or "")
+
+
+def _message_primary(exc: Exception) -> str:
+    return str(getattr(getattr(exc, "diag", None), "message_primary", "") or "")
+
+
+def _schema_name(exc: Exception) -> str:
+    return str(getattr(getattr(exc, "diag", None), "schema_name", "") or "")
+
+
+def _table_name(exc: Exception) -> str:
+    return str(getattr(getattr(exc, "diag", None), "table_name", "") or "")
+
+
+_TRANSITION_RECOVERY_MESSAGE = (
+    "usage decisions must alternate authorization and revocation"
+)
+
+
+def _is_unique_request_recovery(exc: Exception) -> bool:
+    return (
+        _sqlstate(exc) == "23505"
+        and _constraint(exc) == "uq_reuad_scope_request"
+    )
+
+
+def _is_transition_recovery(exc: Exception) -> bool:
+    return (
+        _sqlstate(exc) == "23514"
+        and not _constraint(exc)
+        and not _schema_name(exc)
+        and not _table_name(exc)
+        and _message_primary(exc) == _TRANSITION_RECOVERY_MESSAGE
+    )
+
+
+def lock_project(conn, *, project_id: str) -> None:
+    row = conn.execute("SELECT id::text FROM projects WHERE id = %s FOR UPDATE", (project_id,)).fetchone()
+    if row is None:
+        raise ResearchEvidencePackParentNotFound("project not found")
+
+
+_CONTEXT_SELECT = """
+SELECT id::text, project_id::text, request_id, research_question,
+       project_limitations_json, unresolved_gaps_json, actor, context_sequence,
+       supersedes_context_revision_id::text, recorded_at
+FROM research_evidence_project_context_revision
+"""
+
+
+def _context(row) -> ResearchEvidenceProjectContextRevisionRecord:
+    return ResearchEvidenceProjectContextRevisionRecord(
+        id=row[0], project_id=row[1], request_id=row[2], research_question=row[3],
+        project_limitations=tuple(row[4]), unresolved_gaps=tuple(row[5]), actor=row[6],
+        context_sequence=row[7], supersedes_context_revision_id=row[8], recorded_at=row[9],
+    )
+
+
+def get_project_context_revision_by_request_id(conn, *, project_id: str, request_id: str):
+    row = conn.execute(_CONTEXT_SELECT + " WHERE project_id = %s AND request_id = %s", (project_id, request_id)).fetchone()
+    return None if row is None else _context(row)
+
+
+def get_effective_project_context_revision(conn, *, project_id: str):
+    row = conn.execute(_CONTEXT_SELECT + " WHERE project_id = %s ORDER BY context_sequence DESC LIMIT 1", (project_id,)).fetchone()
+    return None if row is None else _context(row)
+
+
+def ensure_project_context_retry_matches(existing, value):
+    if (
+        existing.project_id, existing.request_id, existing.research_question,
+        existing.project_limitations, existing.unresolved_gaps, existing.actor,
+    ) != (
+        value.project_id, value.request_id, value.research_question,
+        value.project_limitations, value.unresolved_gaps, value.actor,
+    ):
+        raise ResearchEvidencePackRequestConflict("request_id identifies a different project-context revision")
+    return existing
+
+
+def insert_project_context_revision(conn, value):
+    existing = get_project_context_revision_by_request_id(
+        conn, project_id=value.project_id, request_id=value.request_id
+    )
+    if existing is not None:
+        return ensure_project_context_retry_matches(existing, value)
+    savepoint = "research_evidence_pack_context_insert"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        row = conn.execute(
+            """INSERT INTO research_evidence_project_context_revision
+               (project_id, request_id, research_question, project_limitations_json,
+                unresolved_gaps_json, actor)
+               VALUES (%s,%s,%s,%s::jsonb,%s::jsonb,%s)
+               RETURNING id::text, project_id::text, request_id, research_question,
+                 project_limitations_json, unresolved_gaps_json, actor, context_sequence,
+                 supersedes_context_revision_id::text, recorded_at""",
+            (value.project_id, value.request_id, value.research_question,
+             json.dumps(value.project_limitations), json.dumps(value.unresolved_gaps), value.actor),
+        ).fetchone()
+    except Exception as exc:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        if _constraint(exc) == "uq_repcr_project_request":
+            existing = get_project_context_revision_by_request_id(conn, project_id=value.project_id, request_id=value.request_id)
+            if existing is not None:
+                return ensure_project_context_retry_matches(existing, value)
+        if _sqlstate(exc).startswith("23"):
+            raise ResearchEvidencePackIntegrityError("project-context revision violates the immutable contract") from exc
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    return _context(row)
+
+
+_ANNOTATION_SELECT = """
+SELECT id::text, project_id::text, claim_draft_id::text, request_id,
+ epistemic_status, confidence_label, decision_relevance, supports_statement,
+ does_not_prove, limitations_json, related_claim_draft_ids_json, operator_notes,
+ explicit_probability_value, explicit_probability_provided_by,
+ explicit_probability_provenance_reference, explicit_probability_provenance_note,
+ actor, annotation_sequence, supersedes_annotation_revision_id::text, recorded_at
+FROM research_evidence_claim_annotation_revision
+"""
+
+
+def _annotation(row) -> ResearchEvidenceClaimAnnotationRevisionRecord:
+    probability = None
+    if row[12] is not None:
+        probability = ResearchEvidenceExplicitProbability(value=row[12], provided_by=row[13], provenance_reference=row[14], provenance_note=row[15])
+    return ResearchEvidenceClaimAnnotationRevisionRecord(
+        id=row[0], project_id=row[1], claim_draft_id=row[2], request_id=row[3],
+        epistemic_status=row[4], confidence_label=row[5], decision_relevance=row[6],
+        supports_statement=row[7], does_not_prove=row[8], limitations=tuple(row[9]),
+        related_claim_draft_ids=tuple(row[10]), operator_notes=row[11],
+        explicit_probability=probability, actor=row[16], annotation_sequence=row[17],
+        supersedes_annotation_revision_id=row[18], recorded_at=row[19],
+    )
+
+
+def get_claim_annotation_revision_by_request_id(conn, *, project_id: str, claim_draft_id: str, request_id: str):
+    row = conn.execute(_ANNOTATION_SELECT + " WHERE project_id=%s AND claim_draft_id=%s AND request_id=%s", (project_id, claim_draft_id, request_id)).fetchone()
+    return None if row is None else _annotation(row)
+
+
+def get_effective_claim_annotation_revision(conn, *, project_id: str, claim_draft_id: str):
+    row = conn.execute(_ANNOTATION_SELECT + " WHERE project_id=%s AND claim_draft_id=%s ORDER BY annotation_sequence DESC LIMIT 1", (project_id, claim_draft_id)).fetchone()
+    return None if row is None else _annotation(row)
+
+
+def list_effective_project_annotations(conn, *, project_id: str):
+    rows = conn.execute(_ANNOTATION_SELECT + " WHERE project_id=%s AND (project_id,claim_draft_id,annotation_sequence) IN (SELECT project_id,claim_draft_id,max(annotation_sequence) FROM research_evidence_claim_annotation_revision WHERE project_id=%s GROUP BY project_id,claim_draft_id) ORDER BY claim_draft_id", (project_id, project_id)).fetchall()
+    return [_annotation(row) for row in rows]
+
+
+def ensure_claim_annotation_retry_matches(existing, value):
+    fields = ("project_id","claim_draft_id","request_id","epistemic_status","confidence_label","decision_relevance","supports_statement","does_not_prove","limitations","related_claim_draft_ids","operator_notes","explicit_probability","actor")
+    if tuple(getattr(existing, f) for f in fields) != tuple(getattr(value, f) for f in fields):
+        raise ResearchEvidencePackRequestConflict("request_id identifies a different claim-annotation revision")
+    return existing
+
+
+def require_claim_and_related_claims(conn, *, project_id: str, claim_draft_id: str, related_claim_draft_ids: tuple[str, ...]) -> None:
+    ids = (claim_draft_id,) + related_claim_draft_ids
+    count = conn.execute("SELECT count(*) FROM research_claim_draft WHERE project_id=%s AND id = ANY(%s::uuid[])", (project_id, list(ids))).fetchone()[0]
+    if count != len(ids):
+        raise ResearchEvidencePackParentNotFound("canonical claim or related claim not found for project")
+
+
+def insert_claim_annotation_revision(conn, value):
+    existing = get_claim_annotation_revision_by_request_id(
+        conn, project_id=value.project_id, claim_draft_id=value.claim_draft_id,
+        request_id=value.request_id,
+    )
+    if existing is not None:
+        return ensure_claim_annotation_retry_matches(existing, value)
+    p = value.explicit_probability
+    params = (value.project_id,value.claim_draft_id,value.request_id,value.epistemic_status.value,value.confidence_label.value,value.decision_relevance,value.supports_statement,value.does_not_prove,json.dumps(value.limitations),json.dumps(value.related_claim_draft_ids),value.operator_notes,None if p is None else p.value,None if p is None else p.provided_by.value,None if p is None else p.provenance_reference,None if p is None else p.provenance_note,value.actor)
+    savepoint="research_evidence_pack_annotation_insert"; conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        row=conn.execute("""INSERT INTO research_evidence_claim_annotation_revision
+        (project_id,claim_draft_id,request_id,epistemic_status,confidence_label,decision_relevance,supports_statement,does_not_prove,limitations_json,related_claim_draft_ids_json,operator_notes,explicit_probability_value,explicit_probability_provided_by,explicit_probability_provenance_reference,explicit_probability_provenance_note,actor)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s)
+        RETURNING id::text,project_id::text,claim_draft_id::text,request_id,epistemic_status,confidence_label,decision_relevance,supports_statement,does_not_prove,limitations_json,related_claim_draft_ids_json,operator_notes,explicit_probability_value,explicit_probability_provided_by,explicit_probability_provenance_reference,explicit_probability_provenance_note,actor,annotation_sequence,supersedes_annotation_revision_id::text,recorded_at""",params).fetchone()
+    except Exception as exc:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}"); conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        if _constraint(exc)=="uq_recar_claim_request":
+            existing=get_claim_annotation_revision_by_request_id(conn,project_id=value.project_id,claim_draft_id=value.claim_draft_id,request_id=value.request_id)
+            if existing is not None: return ensure_claim_annotation_retry_matches(existing,value)
+        if _sqlstate(exc).startswith("23"): raise ResearchEvidencePackIntegrityError("claim annotation violates the immutable contract") from exc
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}"); return _annotation(row)
+
+
+_AUTH_SELECT="""SELECT id::text,project_id::text,claim_intake_item_id::text,evidence_intake_item_id::text,claim_support_assessment_id::text,usage_scope,decision,reason,actor,request_id,claim_draft_id::text,claim_annotation_revision_id::text,claim_review_decision_id::text,evidence_review_decision_id::text,decision_sequence,supersedes_decision_id::text,recorded_at FROM research_evidence_usage_authorization_decision"""
+
+
+def _authorization(row):
+    return ResearchEvidenceUsageAuthorizationDecisionRecord(id=row[0],project_id=row[1],claim_intake_item_id=row[2],evidence_intake_item_id=row[3],claim_support_assessment_id=row[4],usage_scope=row[5],decision=row[6],reason=row[7],actor=row[8],request_id=row[9],claim_draft_id=row[10],claim_annotation_revision_id=row[11],claim_review_decision_id=row[12],evidence_review_decision_id=row[13],decision_sequence=row[14],supersedes_decision_id=row[15],recorded_at=row[16])
+
+
+def get_usage_authorization_decision_by_request_id(conn, *, project_id, claim_intake_item_id, evidence_intake_item_id, usage_scope, request_id):
+    row=conn.execute(_AUTH_SELECT+" WHERE project_id=%s AND claim_intake_item_id=%s AND evidence_intake_item_id=%s AND usage_scope=%s AND request_id=%s",(project_id,claim_intake_item_id,evidence_intake_item_id,UsageScope(usage_scope).value,request_id)).fetchone(); return None if row is None else _authorization(row)
+
+
+def get_effective_usage_authorization_decision(conn, *, project_id, claim_intake_item_id, evidence_intake_item_id, usage_scope):
+    row=conn.execute(_AUTH_SELECT+" WHERE project_id=%s AND claim_intake_item_id=%s AND evidence_intake_item_id=%s AND usage_scope=%s ORDER BY decision_sequence DESC LIMIT 1",(project_id,claim_intake_item_id,evidence_intake_item_id,UsageScope(usage_scope).value)).fetchone(); return None if row is None else _authorization(row)
+
+
+def list_effective_project_authorizations(conn, *, project_id):
+    return [
+        decision
+        for decision, _ in _effective_usage_authorization_rows(
+            conn, project_id=project_id,
+        )
+    ]
+
+
+def ensure_usage_authorization_retry_matches(existing,value):
+    fields=("project_id","claim_intake_item_id","evidence_intake_item_id","usage_scope","decision","reason","actor","request_id")
+    if tuple(getattr(existing,f) for f in fields)!=tuple(getattr(value,f) for f in fields): raise ResearchEvidencePackRequestConflict("request_id identifies a different usage-authorization decision")
+    return existing
+
+
+def insert_usage_authorization_decision(conn,value):
+    # Direct repository callers receive the same bounded transaction-scoped
+    # serializer as service callers.  Re-locking a row already locked by this
+    # transaction is harmless.
+    require_read_committed_transaction(conn)
+    lock_project(conn, project_id=value.project_id)
+    existing = get_usage_authorization_decision_by_request_id(
+        conn, project_id=value.project_id,
+        claim_intake_item_id=value.claim_intake_item_id,
+        evidence_intake_item_id=value.evidence_intake_item_id,
+        usage_scope=value.usage_scope, request_id=value.request_id,
+    )
+    if existing is not None:
+        return ensure_usage_authorization_retry_matches(existing, value)
+    savepoint="research_evidence_pack_authorization_insert"; conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        row=conn.execute("""INSERT INTO research_evidence_usage_authorization_decision(project_id,claim_intake_item_id,evidence_intake_item_id,usage_scope,decision,reason,actor,request_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id::text,project_id::text,claim_intake_item_id::text,evidence_intake_item_id::text,claim_support_assessment_id::text,usage_scope,decision,reason,actor,request_id,claim_draft_id::text,claim_annotation_revision_id::text,claim_review_decision_id::text,evidence_review_decision_id::text,decision_sequence,supersedes_decision_id::text,recorded_at""",(value.project_id,value.claim_intake_item_id,value.evidence_intake_item_id,value.usage_scope.value,value.decision.value,value.reason,value.actor,value.request_id)).fetchone()
+    except Exception as exc:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        request_race = (
+            _is_unique_request_recovery(exc)
+            or _is_transition_recovery(exc)
+        )
+        try:
+            if request_race:
+                existing=get_usage_authorization_decision_by_request_id(conn,project_id=value.project_id,claim_intake_item_id=value.claim_intake_item_id,evidence_intake_item_id=value.evidence_intake_item_id,usage_scope=value.usage_scope,request_id=value.request_id)
+                if existing is not None:
+                    return ensure_usage_authorization_retry_matches(existing,value)
+            if request_race:
+                raise ResearchEvidencePackIntegrityError("usage authorization violates the immutable contract") from exc
+            raise
+        finally:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}"); return _authorization(row)
+
+
+_EFFECTIVE_AUTHORIZATION_SELECT = """
+WITH latest_decisions AS (
+  SELECT DISTINCT ON (
+    claim_intake_item_id,evidence_intake_item_id,usage_scope
+  ) d.*
+  FROM research_evidence_usage_authorization_decision d
+  WHERE d.project_id=%s
+  ORDER BY claim_intake_item_id,evidence_intake_item_id,usage_scope,
+           decision_sequence DESC
+)
+SELECT d.id::text,d.project_id::text,d.claim_intake_item_id::text,
+       d.evidence_intake_item_id::text,d.claim_support_assessment_id::text,
+       d.usage_scope,d.decision,d.reason,d.actor,d.request_id,
+       d.claim_draft_id::text,d.claim_annotation_revision_id::text,
+       d.claim_review_decision_id::text,d.evidence_review_decision_id::text,
+       d.decision_sequence,d.supersedes_decision_id::text,d.recorded_at,
+       evidence_item.source_snapshot_id::text
+FROM latest_decisions d
+JOIN research_evidence_intake_item claim_item
+  ON claim_item.id=d.claim_intake_item_id
+ AND claim_item.project_id=d.project_id
+ AND claim_item.item_kind='claim_draft'
+ AND claim_item.claim_draft_id=d.claim_draft_id
+JOIN research_evidence_intake_item evidence_item
+  ON evidence_item.id=d.evidence_intake_item_id
+ AND evidence_item.project_id=d.project_id
+ AND evidence_item.item_kind='candidate_fact'
+JOIN research_evidence_claim_annotation_revision annotation
+  ON annotation.id=d.claim_annotation_revision_id
+ AND annotation.project_id=d.project_id
+ AND annotation.claim_draft_id=d.claim_draft_id
+JOIN research_evidence_claim_support_assessment support
+  ON support.id=d.claim_support_assessment_id
+ AND support.project_id=d.project_id
+ AND support.claim_intake_item_id=d.claim_intake_item_id
+ AND support.evidence_intake_item_id=d.evidence_intake_item_id
+JOIN research_evidence_intake_item_review_decision claim_review
+  ON claim_review.id=d.claim_review_decision_id
+ AND claim_review.project_id=d.project_id
+ AND claim_review.research_evidence_intake_item_id=d.claim_intake_item_id
+JOIN research_evidence_intake_item_review_decision evidence_review
+  ON evidence_review.id=d.evidence_review_decision_id
+ AND evidence_review.project_id=d.project_id
+ AND evidence_review.research_evidence_intake_item_id=d.evidence_intake_item_id
+WHERE d.decision='authorized'
+  AND annotation.annotation_sequence=(
+    SELECT max(current_annotation.annotation_sequence)
+    FROM research_evidence_claim_annotation_revision current_annotation
+    WHERE current_annotation.project_id=d.project_id
+      AND current_annotation.claim_draft_id=d.claim_draft_id
+  )
+  AND support.assessment_sequence=(
+    SELECT max(current_support.assessment_sequence)
+    FROM research_evidence_claim_support_assessment current_support
+    WHERE current_support.project_id=d.project_id
+      AND current_support.claim_intake_item_id=d.claim_intake_item_id
+      AND current_support.evidence_intake_item_id=d.evidence_intake_item_id
+  )
+  AND support.locator_resolution='resolvable'
+  AND support.evidence_linkage='linked'
+  AND support.semantic_relationship IN ('support','qualification')
+  AND claim_review.decision_sequence=(
+    SELECT max(current_claim_review.decision_sequence)
+    FROM research_evidence_intake_item_review_decision current_claim_review
+    WHERE current_claim_review.project_id=d.project_id
+      AND current_claim_review.research_evidence_intake_item_id=d.claim_intake_item_id
+  )
+  AND claim_review.decision_type='approved'
+  AND evidence_review.decision_sequence=(
+    SELECT max(current_evidence_review.decision_sequence)
+    FROM research_evidence_intake_item_review_decision current_evidence_review
+    WHERE current_evidence_review.project_id=d.project_id
+      AND current_evidence_review.research_evidence_intake_item_id=d.evidence_intake_item_id
+  )
+  AND evidence_review.decision_type='approved'
+ORDER BY d.usage_scope, d.claim_draft_id, evidence_item.source_snapshot_id,
+         d.decision_sequence, d.id
+"""
+
+
+def _effective_usage_authorization_rows(conn, *, project_id: str):
+    rows = conn.execute(_EFFECTIVE_AUTHORIZATION_SELECT, (project_id,)).fetchall()
+    effective = []
+    claim_endpoint_effectiveness = {}
+    evidence_endpoint_effectiveness = {}
+    for row in rows:
+        decision = _authorization(row[:17])
+        try:
+            if decision.claim_intake_item_id not in claim_endpoint_effectiveness:
+                claim_endpoint_effectiveness[decision.claim_intake_item_id] = (
+                    claim_support_repository.claim_endpoint_is_available(
+                        conn, project_id=project_id,
+                        claim_intake_item_id=decision.claim_intake_item_id,
+                    )
+                    and claim_support_repository.claim_endpoint_lineage_is_current(
+                        conn, project_id=project_id,
+                        claim_intake_item_id=decision.claim_intake_item_id,
+                    )
+                )
+            if decision.evidence_intake_item_id not in evidence_endpoint_effectiveness:
+                evidence_endpoint_effectiveness[decision.evidence_intake_item_id] = (
+                    claim_support_repository.evidence_endpoint_is_available(
+                        conn, project_id=project_id,
+                        evidence_intake_item_id=decision.evidence_intake_item_id,
+                    )
+                    and claim_support_repository.evidence_endpoint_lineage_is_current(
+                        conn, project_id=project_id,
+                        evidence_intake_item_id=decision.evidence_intake_item_id,
+                    )
+                )
+            endpoints_effective = (
+                claim_endpoint_effectiveness[decision.claim_intake_item_id]
+                and evidence_endpoint_effectiveness[decision.evidence_intake_item_id]
+            )
+        except (ResearchEvidencePackRepositoryError, ValueError):
+            endpoints_effective = False
+        if endpoints_effective:
+            effective.append((decision, row[17]))
+    return effective
+
+
+def effective_project_pack_member_counts(conn, *, project_id: str) -> tuple[int,int]:
+    rows = _effective_usage_authorization_rows(conn, project_id=project_id)
+    return len({source_snapshot_id for _, source_snapshot_id in rows}), len({decision.claim_draft_id for decision, _ in rows})
+
+
+def effective_project_pack_capacity(
+    conn, *, project_id: str, claim_draft_id: str,
+    evidence_intake_item_id: str,
+) -> tuple[int, int, bool, bool]:
+    target = conn.execute(
+        """SELECT source_snapshot_id::text
+           FROM research_evidence_intake_item
+           WHERE project_id=%s AND id=%s AND item_kind='candidate_fact'""",
+        (project_id, evidence_intake_item_id),
+    ).fetchone()
+    rows = _effective_usage_authorization_rows(conn, project_id=project_id)
+    sources = {source_snapshot_id for _, source_snapshot_id in rows}
+    claims = {decision.claim_draft_id for decision, _ in rows}
+    return (
+        len(sources), len(claims),
+        target is not None and target[0] in sources,
+        claim_draft_id in claims,
+    )
+
+
+def project_pack_member_presence(conn, *, project_id: str, claim_draft_id: str, evidence_intake_item_id: str) -> tuple[bool, bool]:
+    target = conn.execute(
+        """SELECT source_snapshot_id::text
+           FROM research_evidence_intake_item
+           WHERE project_id=%s AND id=%s AND item_kind='candidate_fact'""",
+        (project_id, evidence_intake_item_id),
+    ).fetchone()
+    if target is None:
+        return False, False
+    rows = _effective_usage_authorization_rows(conn, project_id=project_id)
+    return (
+        any(source_snapshot_id == target[0] for _, source_snapshot_id in rows),
+        any(decision.claim_draft_id == claim_draft_id for decision, _ in rows),
+    )
+
+
+def usage_authorization_is_effective(conn, decision) -> bool:
+    if decision is None:
+        return False
+    return any(
+        current.id == decision.id
+        for current, _ in _effective_usage_authorization_rows(
+            conn, project_id=decision.project_id,
+        )
+    )
