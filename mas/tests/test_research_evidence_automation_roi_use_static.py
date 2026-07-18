@@ -1366,27 +1366,36 @@ def test_v59_harness_requires_one_oid_validated_upstream_before_apply():
     )
 
 
-def test_ci_preprovisions_dedicated_schema_and_ephemeral_logins():
-    assert "Provision R1.6A authenticated test roles" in CI_WORKFLOW
-    assert "workflow_research_evidence_owner" in CI_WORKFLOW
-    assert "CREATE SCHEMA IF NOT EXISTS" in CI_WORKFLOW
-    assert "AUTHORIZATION" in CI_WORKFLOW
-    assert "TEST_EVIDENCE_MIGRATION_PG_DSN" in CI_WORKFLOW
-    assert "TEST_EVIDENCE_RUNTIME_PG_DSN" in CI_WORKFLOW
-    assert "secrets.token_urlsafe" in CI_WORKFLOW
-    assert "sql.Literal(password)" in CI_WORKFLOW
-    assert "::add-mask::" in CI_WORKFLOW
-    assert "REVOKE CREATE ON DATABASE" in CI_WORKFLOW
-    assert "FROM PUBLIC, {}, {}" in CI_WORKFLOW
-    assert "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE" in CI_WORKFLOW
-    assert "GRANT CREATE ON DATABASE" not in CI_WORKFLOW
-    assert "ALTER DATABASE" not in CI_WORKFLOW
-    assert re.search(r"(?<!NO)\bCREATEDB\b", CI_WORKFLOW) is None
-    assert re.search(r"(?<!NO)\bSUPERUSER\b", CI_WORKFLOW) is None
-    assert "SET ROLE workflow_migration_owner" not in CI_WORKFLOW
-    assert "SET ROLE workflow_automation_roi_runtime" not in CI_WORKFLOW
-    assert "print(environment)" not in CI_WORKFLOW
-    assert "print(os.environ)" not in CI_WORKFLOW
+def test_ci_delegates_external_role_credentials_to_test_harness():
+    assert "Provision R1.6A authenticated test roles" not in CI_WORKFLOW
+    assert "TEST_EVIDENCE_MIGRATION_PG_DSN" not in CI_WORKFLOW
+    assert "TEST_EVIDENCE_RUNTIME_PG_DSN" not in CI_WORKFLOW
+    assert re.search(r"\bCREATE\s+ROLE\b", CI_WORKFLOW, re.IGNORECASE) is None
+    assert "secrets.token_urlsafe" not in CI_WORKFLOW
+    assert "::add-mask::" not in CI_WORKFLOW
+    assert "TEST_EVIDENCE_PG_DSN" in CI_WORKFLOW
+    assert "image: postgres:16-alpine" in CI_WORKFLOW
+    pytest_step = (
+        "      - name: Run pytest\n"
+        "        working-directory: mas\n"
+        "        run: python -m pytest tests -q\n"
+    )
+    assert CI_WORKFLOW.count("      - name: Run pytest\n") == 1
+    assert CI_WORKFLOW.endswith(pytest_step)
+
+    assert "class ExternalRoleHarness:" in PG_HELPER
+    assert "_MIGRATION_CONNECTION_TOKEN = \"in-memory-role:" in PG_HELPER
+    assert "_RUNTIME_CONNECTION_TOKEN = \"in-memory-role:" in PG_HELPER
+    assert "self._credentials[role] = secrets.token_urlsafe(32)" in PG_HELPER
+    assert "def authenticated_connection(self, role):" in PG_HELPER
+    assert "return _actual_psycopg_module().connect(**parameters)" in PG_HELPER
+    assert '"SELECT session_user,current_user"' in PG_HELPER
+    assert "identity != (role, role)" in PG_HELPER
+    assert "for_unknown_provenance_test" in PG_HELPER
+    assert "credentials=False" in PG_HELPER
+    assert (
+        "external login role credential provenance is unknown" in PG_HELPER
+    )
 
 
 def test_r1_6a_functional_harness_uses_genuine_runtime_login():

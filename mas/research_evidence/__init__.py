@@ -135,6 +135,36 @@ from .intake_service import (
     create_intake,
     create_intake_item,
 )
+from .pack_models import (
+    ConfidenceLabel,
+    EpistemicStatus,
+    ProbabilityProvidedBy,
+    ResearchEvidenceClaimAnnotationRevisionCreate,
+    ResearchEvidenceClaimAnnotationRevisionRecord,
+    ResearchEvidenceExplicitProbability,
+    ResearchEvidenceProjectContextRevisionCreate,
+    ResearchEvidenceProjectContextRevisionRecord,
+    ResearchEvidenceUsageAuthorizationDecisionCreate,
+    ResearchEvidenceUsageAuthorizationDecisionRecord,
+    UsageAuthorizationDecisionType,
+    UsageScope,
+)
+from .pack_service import (
+    ResearchEvidencePackDisabled,
+    ResearchEvidencePackEligibilityError,
+    ResearchEvidencePackLimitError,
+    ResearchEvidencePackServiceError,
+    ResearchEvidencePackTransactionError,
+    claim_evidence_usage_is_authorized,
+    get_effective_claim_annotation_revision,
+    get_effective_project_context_revision,
+    get_effective_usage_authorization_decision,
+    list_effective_project_annotations,
+    list_effective_project_authorizations,
+    record_claim_annotation_revision,
+    record_project_context_revision,
+    record_usage_authorization_decision,
+)
 from .review_models import (
     ResearchEvidenceIntakeItemReviewDecisionCreate,
     ResearchEvidenceIntakeItemReviewDecisionRecord,
@@ -189,6 +219,7 @@ SCENARIO_INPUT_EVALUATION_SCHEMA_MIGRATION = (
 AUTOMATION_ROI_USE_SCHEMA_MIGRATION = (
     "v59_research_evidence_automation_roi_input_snapshot.sql"
 )
+PACK_SCHEMA_MIGRATION = "v61_research_evidence_pack_foundation.sql"
 
 
 def is_enabled() -> bool:
@@ -313,4 +344,31 @@ __all__ = [
     "register_scenario_input_manifest",
     "canonical_manifest_descriptor",
     "manifest_fingerprint",
+    "PACK_SCHEMA_MIGRATION",
+    "ConfidenceLabel",
+    "EpistemicStatus",
+    "ProbabilityProvidedBy",
+    "ResearchEvidenceClaimAnnotationRevisionCreate",
+    "ResearchEvidenceClaimAnnotationRevisionRecord",
+    "ResearchEvidenceExplicitProbability",
+    "ResearchEvidencePackDisabled",
+    "ResearchEvidencePackEligibilityError",
+    "ResearchEvidencePackLimitError",
+    "ResearchEvidencePackServiceError",
+    "ResearchEvidencePackTransactionError",
+    "ResearchEvidenceProjectContextRevisionCreate",
+    "ResearchEvidenceProjectContextRevisionRecord",
+    "ResearchEvidenceUsageAuthorizationDecisionCreate",
+    "ResearchEvidenceUsageAuthorizationDecisionRecord",
+    "UsageAuthorizationDecisionType",
+    "UsageScope",
+    "claim_evidence_usage_is_authorized",
+    "get_effective_claim_annotation_revision",
+    "get_effective_project_context_revision",
+    "get_effective_usage_authorization_decision",
+    "list_effective_project_annotations",
+    "list_effective_project_authorizations",
+    "record_claim_annotation_revision",
+    "record_project_context_revision",
+    "record_usage_authorization_decision",
 ]

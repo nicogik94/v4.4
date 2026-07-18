@@ -9,11 +9,11 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -45,152 +45,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Provision R1.6A authenticated test roles
-        working-directory: mas
-        run: |
-          python - <<'PY'
-          import os
-          import secrets
-
-          import psycopg
-          from psycopg import sql
-          from psycopg.conninfo import conninfo_to_dict, make_conninfo
-
-          bootstrap_dsn = os.environ["TEST_EVIDENCE_PG_DSN"]
-          credentials = {
-              "workflow_migration_owner": secrets.token_urlsafe(48),
-              "workflow_automation_roi_runtime": secrets.token_urlsafe(48),
-          }
-          owner = "workflow_research_evidence_owner"
-          migration = "workflow_migration_owner"
-          runtime = "workflow_automation_roi_runtime"
-          dedicated_schema = "research_evidence_automation_roi"
-
-          with psycopg.connect(bootstrap_dsn, autocommit=True) as connection:
-              owner_exists = connection.execute(
-                  "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s",
-                  (owner,),
-              ).fetchone()
-              if owner_exists is None:
-                  connection.execute(
-                      sql.SQL(
-                          "CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER "
-                          "NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS"
-                      ).format(sql.Identifier(owner))
-                  )
-              connection.execute(
-                  sql.SQL(
-                      "ALTER ROLE {} NOLOGIN NOINHERIT NOSUPERUSER "
-                      "NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS"
-                  ).format(sql.Identifier(owner))
-              )
-              for role, password in credentials.items():
-                  exists = connection.execute(
-                      "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s",
-                      (role,),
-                  ).fetchone()
-                  if exists is None:
-                      connection.execute(
-                          sql.SQL(
-                              "CREATE ROLE {} LOGIN NOINHERIT NOSUPERUSER "
-                              "NOCREATEROLE NOCREATEDB NOREPLICATION "
-                              "NOBYPASSRLS"
-                          ).format(sql.Identifier(role))
-                      )
-                  connection.execute(
-                      sql.SQL(
-                          "ALTER ROLE {} LOGIN NOINHERIT NOSUPERUSER "
-                          "NOCREATEROLE NOCREATEDB NOREPLICATION "
-                          "NOBYPASSRLS PASSWORD {}"
-                      ).format(
-                          sql.Identifier(role),
-                          sql.Literal(password),
-                      )
-                  )
-              database = connection.execute(
-                  "SELECT pg_catalog.current_database()"
-              ).fetchone()[0]
-              connection.execute(
-                  sql.SQL(
-                      "REVOKE CREATE ON DATABASE {} FROM PUBLIC, {}, {}"
-                  ).format(
-                      sql.Identifier(database),
-                      sql.Identifier(migration),
-                      sql.Identifier(runtime),
-                  )
-              )
-              connection.execute(
-                  sql.SQL(
-                      "GRANT {} TO {} "
-                      "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
-                  ).format(
-                      sql.Identifier(owner),
-                      sql.Identifier(migration),
-                  )
-              )
-              connection.execute(
-                  sql.SQL(
-                      "CREATE SCHEMA IF NOT EXISTS {} AUTHORIZATION {}"
-                  ).format(
-                      sql.Identifier(dedicated_schema),
-                      sql.Identifier(owner),
-                  )
-              )
-              connection.execute(
-                  sql.SQL("ALTER SCHEMA {} OWNER TO {}").format(
-                      sql.Identifier(dedicated_schema),
-                      sql.Identifier(owner),
-                  )
-              )
-              connection.execute(
-                  sql.SQL("SET ROLE {}").format(sql.Identifier(owner))
-              )
-              try:
-                  connection.execute(
-                      sql.SQL(
-                          "REVOKE ALL ON SCHEMA {} FROM PUBLIC"
-                      ).format(sql.Identifier(dedicated_schema))
-                  )
-                  connection.execute(
-                      sql.SQL(
-                          "GRANT USAGE ON SCHEMA {} TO {}"
-                      ).format(
-                          sql.Identifier(dedicated_schema),
-                          sql.Identifier(runtime),
-                      )
-                  )
-                  connection.execute(
-                      "ALTER DEFAULT PRIVILEGES "
-                      "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
-                  )
-              finally:
-                  connection.execute("RESET ROLE")
-
-          base_conninfo = conninfo_to_dict(bootstrap_dsn)
-          environment = {}
-          for role, variable in (
-              (
-                  "workflow_migration_owner",
-                  "TEST_EVIDENCE_MIGRATION_PG_DSN",
-              ),
-              (
-                  "workflow_automation_roi_runtime",
-                  "TEST_EVIDENCE_RUNTIME_PG_DSN",
-              ),
-          ):
-              restricted_conninfo = dict(base_conninfo)
-              restricted_conninfo["user"] = role
-              restricted_conninfo["password"] = credentials[role]
-              environment[variable] = make_conninfo(**restricted_conninfo)
-
-          for secret in (*credentials.values(), *environment.values()):
-              print(f"::add-mask::{secret}")
-
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
-              for variable, value in environment.items():
-                  env_file.write(f"{variable}={value}\n")
-          PY
 
       - name: Run pytest
         working-directory: mas
