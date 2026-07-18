@@ -6,6 +6,15 @@ import pytest
 from pydantic import ValidationError
 
 from research_evidence.pack_models import (
+    ResearchEvidencePackAggregate,
+    ResearchEvidencePackAuthorizedClaim,
+    ResearchEvidencePackAuthorizedEvidence,
+    ResearchEvidencePackAuthorizedRelationship,
+    ResearchEvidencePackAuthorizedSource,
+    ResearchEvidencePackClaimAnnotation,
+    ResearchEvidencePackContext,
+    ResearchEvidencePackCounts,
+    ResearchEvidencePackQuery,
     ResearchEvidenceClaimAnnotationRevisionCreate,
     ResearchEvidenceClaimAnnotationRevisionRecord,
     ResearchEvidenceExplicitProbability,
@@ -140,4 +149,113 @@ def test_usage_create_has_only_caller_fields_and_normalizes_uuids():
     with pytest.raises(ValidationError):
         ResearchEvidenceUsageAuthorizationDecisionCreate(
             **model.model_dump(), decision_sequence=1
+        )
+
+
+def aggregate_members(*, scope="client_report"):
+    claim_id = uid()
+    source_id = uid()
+    fact_id = uid()
+    annotation = ResearchEvidencePackClaimAnnotation(
+        annotation_revision_id=uid(), claim_draft_id=claim_id,
+        annotation_sequence=1, epistemic_status="reported_fact",
+        confidence_label="high", decision_relevance="decision relevant",
+        supports_statement="supports the claim", does_not_prove="causality",
+        limitations=(), related_claim_draft_ids=(), recorded_at=datetime.now(timezone.utc),
+    )
+    claim = ResearchEvidencePackAuthorizedClaim(
+        claim_draft_id=claim_id, claim_text="Authorized claim",
+        claim_category="fact", annotation=annotation,
+    )
+    source = ResearchEvidencePackAuthorizedSource(
+        source_snapshot_id=source_id, source_blob_id=uid(),
+        source_metadata_revision_id=uid(), captured_at=datetime.now(timezone.utc),
+    )
+    evidence = ResearchEvidencePackAuthorizedEvidence(
+        candidate_fact_revision_id=fact_id, source_snapshot_id=source_id,
+        fact_metadata_revision_id=uid(), fact_type="text", text_value="Evidence",
+    )
+    relationship = ResearchEvidencePackAuthorizedRelationship(
+        authorization_decision_id=uid(), claim_intake_item_id=uid(),
+        evidence_intake_item_id=uid(), claim_support_assessment_id=uid(),
+        claim_draft_id=claim_id, candidate_fact_revision_id=fact_id,
+        source_snapshot_id=source_id,
+        claim_annotation_revision_id=annotation.annotation_revision_id,
+        claim_review_decision_id=uid(), evidence_review_decision_id=uid(),
+        usage_scope=scope, authorization_sequence=1,
+        authorized_at=datetime.now(timezone.utc), locator_resolution="resolvable",
+        evidence_linkage="linked", semantic_relationship="support",
+    )
+    context_model = ResearchEvidencePackContext(
+        context_revision_id=uid(), context_sequence=1,
+        research_question="What should be decided?", project_limitations=(),
+        unresolved_gaps=(), recorded_at=datetime.now(timezone.utc),
+    )
+    return context_model, claim, source, evidence, relationship
+
+
+def test_aggregate_query_requires_uuid_and_explicit_valid_scope():
+    query = ResearchEvidencePackQuery(project_id=uid(), usage_scope="client_report")
+    assert query.usage_scope.value == "client_report"
+    with pytest.raises(ValidationError):
+        ResearchEvidencePackQuery(project_id=uid())
+    with pytest.raises(ValidationError):
+        ResearchEvidencePackQuery(project_id=uid(), usage_scope="all_scopes")
+    with pytest.raises(ValidationError):
+        ResearchEvidencePackQuery(project_id="not-a-uuid", usage_scope="client_report")
+
+
+def test_empty_pack_is_typed_immutable_and_uses_tuple_collections():
+    pack = ResearchEvidencePackAggregate(
+        project_id=uid(), usage_scope="internal_analysis",
+    )
+    assert pack.counts == ResearchEvidencePackCounts()
+    assert pack.context is None
+    assert pack.claims == pack.sources == pack.evidence == pack.relationships == ()
+    with pytest.raises(ValidationError):
+        pack.project_id = uid()
+
+
+def test_populated_aggregate_validates_scope_counts_and_canonical_members():
+    context_model, claim, source, evidence, relationship = aggregate_members()
+    pack = ResearchEvidencePackAggregate(
+        project_id=uid(), usage_scope="client_report", context=context_model,
+        claims=[claim], sources=[source], evidence=[evidence],
+        relationships=[relationship],
+        counts=ResearchEvidencePackCounts(
+            source_count=1, claim_count=1, evidence_count=1,
+            relationship_count=1,
+        ),
+    )
+    assert isinstance(pack.claims, tuple)
+    assert pack.relationships[0].usage_scope == pack.usage_scope
+    with pytest.raises(ValidationError, match="counts"):
+        ResearchEvidencePackAggregate(
+            **{**pack.model_dump(), "counts": ResearchEvidencePackCounts()}
+        )
+    wrong_scope = relationship.model_copy(update={"usage_scope": "operator_dossier"})
+    with pytest.raises(ValidationError, match="scope"):
+        ResearchEvidencePackAggregate(
+            **{**pack.model_dump(), "relationships": [wrong_scope]}
+        )
+    wrong_annotation = relationship.model_copy(
+        update={"claim_annotation_revision_id": uid()},
+    )
+    with pytest.raises(ValidationError, match="non-current pack annotation"):
+        ResearchEvidencePackAggregate(
+            **{**pack.model_dump(), "relationships": [wrong_annotation]}
+        )
+
+
+def test_aggregate_caps_and_empty_state_are_fail_closed():
+    with pytest.raises(ValidationError):
+        ResearchEvidencePackCounts(source_count=51)
+    with pytest.raises(ValidationError):
+        ResearchEvidencePackCounts(claim_count=201)
+    with pytest.raises(ValidationError):
+        ResearchEvidencePackCounts(relationship_count=10001)
+    context_model, _, _, _, _ = aggregate_members()
+    with pytest.raises(ValidationError, match="empty pack"):
+        ResearchEvidencePackAggregate(
+            project_id=uid(), usage_scope="client_report", context=context_model,
         )

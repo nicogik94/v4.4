@@ -1916,6 +1916,9 @@ def test_authorization_fails_closed_after_new_annotation(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=claim["project"],
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim["project"], usage_scope="client_report",
+    ).counts.relationship_count == 1
     conn.execute(annotation_sql, (claim["project"], claim["claim"], "annotation-2"))
     assert not pack_service.claim_evidence_usage_is_authorized(
         conn, project_id=claim["project"], claim_intake_item_id=claim["item"],
@@ -1924,6 +1927,9 @@ def test_authorization_fails_closed_after_new_annotation(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=claim["project"],
     ) == (0, 0)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim["project"], usage_scope="client_report",
+    ).counts.relationship_count == 0
 
 
 def _prepare_service_authorization(conn, tag, *, usage_scope="client_report"):
@@ -1955,6 +1961,64 @@ def _prepare_service_authorization(conn, tag, *, usage_scope="client_report"):
     )
     record = pack_service.record_usage_authorization_decision(conn, value)
     return claim, evidence, value, record
+
+
+def test_assembly_query_returns_current_bounded_pack_and_typed_empty_scope(
+    pack_schema,
+):
+    conn, _ = pack_schema
+    pg.apply_v61_research_evidence_pack(conn)
+    claim, evidence, value, authorization = _prepare_service_authorization(
+        conn, "assembly-current",
+    )
+    context = pack_service.record_project_context_revision(
+        conn,
+        ResearchEvidenceProjectContextRevisionCreate(
+            project_id=value.project_id,
+            request_id="assembly-current-context",
+            research_question="Which evidence is currently authorized?",
+            project_limitations=("Bounded test context",),
+            unresolved_gaps=("No external consumer",),
+            actor="operator",
+        ),
+    )
+
+    before = _pack_rows_snapshot(conn)
+    assembled = pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope=UsageScope.CLIENT_REPORT,
+    )
+    assert assembled == pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope="client_report",
+    )
+    assert _pack_rows_snapshot(conn) == before
+    assert assembled.project_id == value.project_id
+    assert assembled.usage_scope is UsageScope.CLIENT_REPORT
+    assert assembled.counts.model_dump() == {
+        "source_count": 1,
+        "claim_count": 1,
+        "evidence_count": 1,
+        "relationship_count": 1,
+    }
+    assert assembled.context.context_revision_id == context.id
+    assert assembled.claims[0].claim_draft_id == claim["claim"]
+    assert assembled.sources[0].source_snapshot_id == evidence["snapshot"]
+    assert assembled.evidence[0].candidate_fact_revision_id == evidence["fact"]
+    assert assembled.relationships[0].authorization_decision_id == authorization.id
+    assert assembled.relationships[0].usage_scope is UsageScope.CLIENT_REPORT
+
+    empty = pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope="internal_analysis",
+    )
+    assert empty.project_id == value.project_id
+    assert empty.usage_scope is UsageScope.INTERNAL_ANALYSIS
+    assert empty.context is None
+    assert empty.counts.model_dump() == {
+        "source_count": 0,
+        "claim_count": 0,
+        "evidence_count": 0,
+        "relationship_count": 0,
+    }
+    assert empty.claims == empty.sources == empty.evidence == empty.relationships == ()
 
 
 def test_genuine_transition_exception_enters_bounded_repository_recovery(
@@ -2045,6 +2109,9 @@ def test_effective_authorization_basis_matrix_and_reauthorization(
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=value.project_id,
     ) == (0, 0)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope=value.usage_scope,
+    ).counts.relationship_count == 0
 
     revoked = pack_service.record_usage_authorization_decision(
         conn,
@@ -2072,6 +2139,9 @@ def test_effective_authorization_basis_matrix_and_reauthorization(
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=value.project_id,
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope=value.usage_scope,
+    ).counts.relationship_count == 1
 
 
 def test_revocation_has_no_fallback_and_scopes_are_independent(pack_schema):
@@ -2091,6 +2161,12 @@ def test_revocation_has_no_fallback_and_scopes_are_independent(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=client.project_id,
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="client_report",
+    ).counts.relationship_count == 1
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="internal_analysis",
+    ).counts.relationship_count == 1
     for scope in ("client_report", "internal_analysis", "operator_dossier"):
         assert pack_service.claim_evidence_usage_is_authorized(
             conn, project_id=client.project_id,
@@ -2122,6 +2198,12 @@ def test_revocation_has_no_fallback_and_scopes_are_independent(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=client.project_id,
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="client_report",
+    ).counts.relationship_count == 0
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="internal_analysis",
+    ).counts.relationship_count == 1
     effective_ids = {
         record.id for record in pack_service.list_effective_project_authorizations(
             conn, project_id=client.project_id,
@@ -2296,6 +2378,16 @@ def test_cross_project_claim_and_evidence_are_rejected_without_sequence(pack_sch
            WHERE project_id=%s""",
         (claim_a["project"],),
     ).fetchone()[0] == 1
+    project_a_pack = pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim_a["project"], usage_scope="client_report",
+    )
+    project_b_pack = pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim_b["project"], usage_scope="client_report",
+    )
+    assert {item.claim_draft_id for item in project_a_pack.claims} == {
+        claim_a["claim"],
+    }
+    assert project_b_pack.counts.relationship_count == 0
 
 
 def _approve_item(conn, project_id, item_id, request_id):
@@ -2358,6 +2450,11 @@ def test_source_limit_is_effective_distinct_and_does_not_consume_rejection(pack_
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=claim["project"],
     ) == (50, 1)
+    bounded = pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim["project"], usage_scope="client_report",
+    )
+    assert bounded.counts.source_count == 50
+    assert bounded.counts.relationship_count == 50
     rejected_evidence = evidence_items[50]
     _approve_item(
         conn, claim["project"], rejected_evidence["item"],
@@ -2432,6 +2529,11 @@ def test_claim_limit_is_effective_distinct_and_does_not_consume_rejection(pack_s
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=first_claim["project"],
     ) == (1, 200)
+    bounded = pack_service.assemble_research_evidence_pack(
+        conn, project_id=first_claim["project"], usage_scope="client_report",
+    )
+    assert bounded.counts.claim_count == 200
+    assert bounded.counts.relationship_count == 200
     rejected_claim = claims[200]
     _approve_item(
         conn, first_claim["project"], rejected_claim["item"],

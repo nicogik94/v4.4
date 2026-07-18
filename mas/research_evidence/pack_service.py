@@ -10,8 +10,10 @@ from pydantic import BaseModel
 from . import claim_support_repository, review_repository
 from . import pack_repository as repo
 from .pack_models import (
+    ResearchEvidencePackAggregate,
     ResearchEvidenceClaimAnnotationRevisionCreate,
     ResearchEvidenceProjectContextRevisionCreate,
+    ResearchEvidencePackQuery,
     ResearchEvidenceUsageAuthorizationDecisionCreate,
     UsageAuthorizationDecisionType,
     UsageScope,
@@ -239,3 +241,19 @@ def claim_evidence_usage_is_authorized(conn, *, project_id: str, claim_intake_it
         evidence_intake_item_id=evidence_intake_item_id, usage_scope=usage_scope,
     )
     return repo.usage_authorization_is_effective(conn, decision)
+
+
+def assemble_research_evidence_pack(
+    conn, *, project_id: str, usage_scope: UsageScope,
+) -> ResearchEvidencePackAggregate:
+    """Return the immutable current pack for one explicit project/scope pair."""
+    query = ResearchEvidencePackQuery(
+        project_id=project_id, usage_scope=usage_scope,
+    )
+    _require_enabled()
+    try:
+        return repo.assemble_effective_project_pack(
+            conn, project_id=query.project_id, usage_scope=query.usage_scope,
+        )
+    except repo.ResearchEvidencePackCapacityError as exc:
+        raise ResearchEvidencePackLimitError(str(exc)) from exc

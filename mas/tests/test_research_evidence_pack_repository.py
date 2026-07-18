@@ -6,6 +6,7 @@ import pytest
 
 from research_evidence import pack_repository as repo
 from research_evidence.pack_models import (
+    MAX_PACK_RELATIONSHIPS,
     ResearchEvidenceProjectContextRevisionCreate,
     ResearchEvidenceProjectContextRevisionRecord,
     ResearchEvidenceUsageAuthorizationDecisionCreate,
@@ -63,6 +64,29 @@ def authorization_record(value):
         decision_sequence=1, supersedes_decision_id=None,
         recorded_at=datetime.now(timezone.utc),
     )
+
+
+def assembly_row(*, claim_id=None, source_id=None, fact_id=None, sequence=1):
+    now = datetime.now(timezone.utc)
+    row = [None] * 59
+    row[0:13] = [
+        uid(), uid(), uid(), uid(), claim_id or uid(), uid(), uid(), uid(),
+        sequence, now, source_id or uid(), uid(), uid(),
+    ]
+    row[13:24] = [
+        "document", "source-locator", now, "canonical-locator", "publisher",
+        "author", now, now, "citation", "high", "quality rationale",
+    ]
+    row[24:43] = [
+        fact_id or uid(), uid(), "text", None, "evidence text", "", None, None,
+        None, None, None, None, None, None, "stable-key", None,
+        "fact-citation", "claim text", "claim-category",
+    ]
+    row[43:59] = [
+        "reported_fact", "high", "relevant", "supports", "does not prove",
+        [], [], None, None, None, None, 1, now, "resolvable", "linked", "support",
+    ]
+    return tuple(row)
 
 
 def test_effective_context_is_project_scoped_and_sequence_ordered():
@@ -161,6 +185,170 @@ def test_effective_authorization_query_has_explicit_canonical_final_order():
         "ORDER BY d.usage_scope, d.claim_draft_id, "
         "evidence_item.source_snapshot_id, d.decision_sequence, d.id"
     )
+
+
+def test_assembly_query_freezes_current_scope_fail_closed_sql_contract():
+    normalized = " ".join(repo._PACK_ASSEMBLY_SELECT.split())
+    required = (
+        "d.project_id=%s AND d.usage_scope=%s",
+        "d.decision='authorized'",
+        "annotation.annotation_sequence=( SELECT max",
+        "support.assessment_sequence=( SELECT max",
+        "claim_review.decision_sequence=( SELECT max",
+        "evidence_review.decision_sequence=( SELECT max",
+        "support.locator_resolution='resolvable'",
+        "support.evidence_linkage='linked'",
+        "support.semantic_relationship IN ('support','qualification')",
+        "retention.event_type IN ('tombstone','redact')",
+        "successor.supersedes_claim_id=claim.id",
+        "replacement.supersedes_candidate_fact_revision_id=fact.id",
+        "SELECT DISTINCT ON (claim_draft_id,candidate_fact_revision_id)",
+        "ORDER BY claim_draft_id,source_snapshot_id,candidate_fact_revision_id",
+        "LIMIT %s",
+    )
+    assert not [fragment for fragment in required if fragment not in normalized]
+    forbidden = (" INSERT ", " UPDATE ", " DELETE ", " FOR UPDATE", "LOCK TABLE")
+    padded = f" {normalized} "
+    assert not [fragment for fragment in forbidden if fragment in padded]
+
+
+def test_assembly_returns_typed_empty_pack_without_reading_context():
+    project_id = uid()
+    conn = Conn([Result(row=(project_id,)), Result(rows=[])])
+    pack = repo.assemble_effective_project_pack(
+        conn, project_id=project_id, usage_scope="client_report",
+    )
+    assert pack.project_id == project_id
+    assert pack.usage_scope.value == "client_report"
+    assert pack.counts.relationship_count == 0
+    assert len(conn.calls) == 2
+    assert conn.calls[1][1] == (
+        project_id, "client_report", MAX_PACK_RELATIONSHIPS + 1,
+    )
+
+
+def test_assembly_rejects_missing_project_and_invalid_scope():
+    project_id = uid()
+    conn = Conn([Result(row=None)])
+    with pytest.raises(repo.ResearchEvidencePackParentNotFound, match="project"):
+        repo.assemble_effective_project_pack(
+            conn, project_id=project_id, usage_scope="client_report",
+        )
+    assert len(conn.calls) == 1
+    invalid = Conn([])
+    with pytest.raises(ValueError):
+        repo.assemble_effective_project_pack(
+            invalid, project_id=project_id, usage_scope="all_scopes",
+        )
+    assert invalid.calls == []
+
+
+def test_assembly_builds_current_context_and_deduplicates_identical_rows():
+    project_id = uid()
+    row = assembly_row()
+    context_value = ResearchEvidenceProjectContextRevisionCreate(
+        project_id=project_id, request_id="context", research_question="question",
+        project_limitations=[], unresolved_gaps=[], actor="operator",
+    )
+    conn = Conn([
+        Result(row=(project_id,)), Result(rows=[row, row]),
+        Result(row=row_for(context_value)),
+    ])
+    pack = repo.assemble_effective_project_pack(
+        conn, project_id=project_id, usage_scope="client_report",
+    )
+    assert pack.context.research_question == "question"
+    assert pack.counts.model_dump() == {
+        "source_count": 1, "claim_count": 1, "evidence_count": 1,
+        "relationship_count": 1,
+    }
+    assert pack.claims[0].annotation.annotation_revision_id == row[5]
+    assert pack.relationships[0].authorization_decision_id == row[0]
+    statements = [sql for sql, _ in conn.calls]
+    assert not any(
+        token in " ".join(statement.upper().split())
+        for statement in statements
+        for token in ("INSERT INTO", "UPDATE ", "DELETE FROM", "FOR UPDATE", "LOCK TABLE")
+    )
+
+
+def test_assembly_output_order_is_deterministic_independent_of_row_order():
+    project_id = uid()
+    low_claim, high_claim = sorted((uid(), uid()))
+    low_source, high_source = sorted((uid(), uid()))
+    low = assembly_row(claim_id=low_claim, source_id=high_source, sequence=2)
+    high = assembly_row(claim_id=high_claim, source_id=low_source, sequence=1)
+    context_value = ResearchEvidenceProjectContextRevisionCreate(
+        project_id=project_id, request_id="context", research_question="question",
+        project_limitations=[], unresolved_gaps=[], actor="operator",
+    )
+    conn = Conn([
+        Result(row=(project_id,)), Result(rows=[high, low]),
+        Result(row=row_for(context_value)),
+    ])
+    pack = repo.assemble_effective_project_pack(
+        conn, project_id=project_id, usage_scope="operator_dossier",
+    )
+    assert [item.claim_draft_id for item in pack.claims] == [low_claim, high_claim]
+    assert [item.source_snapshot_id for item in pack.sources] == [low_source, high_source]
+    assert [item.claim_draft_id for item in pack.relationships] == [low_claim, high_claim]
+    assert {item.usage_scope.value for item in pack.relationships} == {"operator_dossier"}
+
+
+def test_assembly_conflicting_duplicate_canonical_content_fails_closed():
+    project_id = uid()
+    fact_id = uid()
+    first = assembly_row(fact_id=fact_id)
+    conflicting = list(assembly_row(fact_id=fact_id))
+    conflicting[28] = "conflicting evidence text"
+    conn = Conn([
+        Result(row=(project_id,)), Result(rows=[first, tuple(conflicting)]),
+    ])
+    with pytest.raises(repo.ResearchEvidencePackIntegrityError, match="evidence"):
+        repo.assemble_effective_project_pack(
+            conn, project_id=project_id, usage_scope="internal_analysis",
+        )
+
+
+@pytest.mark.parametrize(
+    ("dimension", "count", "message"),
+    [("source", 51, "source"), ("claim", 201, "claim")],
+)
+def test_assembly_existing_capacity_limits_fail_closed(dimension, count, message):
+    project_id = uid()
+    template = list(assembly_row())
+    rows = []
+    for _ in range(count):
+        row = list(template)
+        row[0] = uid()
+        row[3] = uid()
+        if dimension == "source":
+            row[2] = uid()
+            row[7] = uid()
+            row[10], row[11], row[12] = uid(), uid(), uid()
+            row[24], row[25] = uid(), uid()
+        else:
+            row[1] = uid()
+            row[4], row[5], row[6] = uid(), uid(), uid()
+        rows.append(tuple(row))
+    conn = Conn([Result(row=(project_id,)), Result(rows=rows)])
+    with pytest.raises(repo.ResearchEvidencePackCapacityError, match=message):
+        repo.assemble_effective_project_pack(
+            conn, project_id=project_id, usage_scope="client_report",
+        )
+
+
+def test_assembly_relationship_cross_product_limit_fails_before_materialization():
+    project_id = uid()
+    conn = Conn([
+        Result(row=(project_id,)),
+        Result(rows=[()] * (MAX_PACK_RELATIONSHIPS + 1)),
+    ])
+    with pytest.raises(repo.ResearchEvidencePackCapacityError, match="relationships"):
+        repo.assemble_effective_project_pack(
+            conn, project_id=project_id, usage_scope="client_report",
+        )
+    assert len(conn.calls) == 2
 
 
 def test_authorization_insert_serializes_then_recovers_known_request_race(monkeypatch):

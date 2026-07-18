@@ -4,8 +4,23 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from pydantic import ValidationError
+
 from . import claim_support_repository, review_repository
 from .pack_models import (
+    MAX_PACK_CLAIMS,
+    MAX_PACK_RELATIONSHIPS,
+    MAX_PACK_SOURCES,
+    ResearchEvidencePackAggregate,
+    ResearchEvidencePackAuthorizedClaim,
+    ResearchEvidencePackAuthorizedEvidence,
+    ResearchEvidencePackAuthorizedRelationship,
+    ResearchEvidencePackAuthorizedSource,
+    ResearchEvidencePackClaimAnnotation,
+    ResearchEvidencePackContext,
+    ResearchEvidencePackCounts,
+    ResearchEvidencePackExplicitProbability,
+    ResearchEvidencePackQuery,
     ResearchEvidenceClaimAnnotationRevisionCreate,
     ResearchEvidenceClaimAnnotationRevisionRecord,
     ResearchEvidenceExplicitProbability,
@@ -34,6 +49,10 @@ class ResearchEvidencePackRequestConflict(ResearchEvidencePackIntegrityError):
 
 
 class ResearchEvidencePackTransactionError(ResearchEvidencePackRepositoryError):
+    pass
+
+
+class ResearchEvidencePackCapacityError(ResearchEvidencePackIntegrityError):
     pass
 
 
@@ -488,3 +507,423 @@ def usage_authorization_is_effective(conn, decision) -> bool:
             conn, project_id=decision.project_id,
         )
     )
+
+
+_PACK_ASSEMBLY_SELECT = """
+WITH latest_decisions AS MATERIALIZED (
+  SELECT DISTINCT ON (
+    d.claim_intake_item_id,d.evidence_intake_item_id,d.usage_scope
+  ) d.*
+  FROM research_evidence_usage_authorization_decision d
+  WHERE d.project_id=%s AND d.usage_scope=%s
+  ORDER BY d.claim_intake_item_id,d.evidence_intake_item_id,d.usage_scope,
+           d.decision_sequence DESC,d.id DESC
+), eligible AS MATERIALIZED (
+  SELECT
+    d.id::text AS authorization_decision_id,
+    d.claim_intake_item_id::text,
+    d.evidence_intake_item_id::text,
+    d.claim_support_assessment_id::text,
+    d.claim_draft_id::text,
+    d.claim_annotation_revision_id::text,
+    d.claim_review_decision_id::text,
+    d.evidence_review_decision_id::text,
+    d.decision_sequence AS authorization_sequence,
+    d.recorded_at AS authorized_at,
+    evidence_snapshot.id::text AS source_snapshot_id,
+    evidence_blob.id::text AS source_blob_id,
+    evidence_source_metadata.id::text AS source_metadata_revision_id,
+    evidence_snapshot.source_kind,
+    evidence_snapshot.source_locator,
+    evidence_snapshot.captured_at,
+    evidence_source_metadata.canonical_source_locator,
+    evidence_source_metadata.publisher,
+    evidence_source_metadata.author,
+    evidence_source_metadata.published_at,
+    evidence_source_metadata.retrieved_at,
+    evidence_source_metadata.citation_label,
+    evidence_source_metadata.declared_quality_tier,
+    evidence_source_metadata.declared_quality_rationale,
+    fact.id::text AS candidate_fact_revision_id,
+    fact_metadata.id::text AS fact_metadata_revision_id,
+    fact.fact_type,
+    fact.numeric_value,
+    fact.text_value,
+    fact.unit,
+    fact.currency_code,
+    fact.as_of_date,
+    fact.numerator_context,
+    fact.denominator_context,
+    fact.percentage_basis,
+    fact.percentage_subtype,
+    fact.time_unit,
+    fact.counted_entity,
+    fact_metadata.stable_fact_key,
+    fact_metadata.source_char_range,
+    fact_metadata.citation_locator,
+    claim.claim_text,
+    claim.claim_category,
+    annotation.epistemic_status,
+    annotation.confidence_label,
+    annotation.decision_relevance,
+    annotation.supports_statement,
+    annotation.does_not_prove,
+    annotation.limitations_json,
+    annotation.related_claim_draft_ids_json,
+    annotation.explicit_probability_value,
+    annotation.explicit_probability_provided_by,
+    annotation.explicit_probability_provenance_reference,
+    annotation.explicit_probability_provenance_note,
+    annotation.annotation_sequence,
+    annotation.recorded_at AS annotation_recorded_at,
+    support.locator_resolution,
+    support.evidence_linkage,
+    support.semantic_relationship
+  FROM latest_decisions d
+  JOIN research_evidence_intake_item claim_item
+    ON claim_item.id=d.claim_intake_item_id
+   AND claim_item.project_id=d.project_id
+   AND claim_item.item_kind='claim_draft'
+   AND claim_item.claim_draft_id=d.claim_draft_id
+  JOIN research_evidence_intake claim_intake
+    ON claim_intake.id=claim_item.research_evidence_intake_id
+   AND claim_intake.project_id=d.project_id
+   AND claim_intake.source_snapshot_id=claim_item.source_snapshot_id
+  JOIN source_snapshot claim_snapshot
+    ON claim_snapshot.id=claim_item.source_snapshot_id
+   AND claim_snapshot.project_id=d.project_id
+  JOIN source_blob claim_blob
+    ON claim_blob.id=claim_snapshot.source_blob_id
+   AND claim_blob.project_id=d.project_id
+  JOIN research_source_metadata_revision claim_source_metadata
+    ON claim_source_metadata.id=claim_intake.source_metadata_revision_id
+   AND claim_source_metadata.project_id=d.project_id
+   AND claim_source_metadata.source_snapshot_id=claim_snapshot.id
+  JOIN research_claim_draft claim
+    ON claim.id=d.claim_draft_id AND claim.project_id=d.project_id
+  JOIN research_evidence_intake_item evidence_item
+    ON evidence_item.id=d.evidence_intake_item_id
+   AND evidence_item.project_id=d.project_id
+   AND evidence_item.item_kind='candidate_fact'
+  JOIN research_evidence_intake evidence_intake
+    ON evidence_intake.id=evidence_item.research_evidence_intake_id
+   AND evidence_intake.project_id=d.project_id
+   AND evidence_intake.source_snapshot_id=evidence_item.source_snapshot_id
+  JOIN source_snapshot evidence_snapshot
+    ON evidence_snapshot.id=evidence_item.source_snapshot_id
+   AND evidence_snapshot.project_id=d.project_id
+  JOIN source_blob evidence_blob
+    ON evidence_blob.id=evidence_snapshot.source_blob_id
+   AND evidence_blob.project_id=d.project_id
+  JOIN research_source_metadata_revision evidence_source_metadata
+    ON evidence_source_metadata.id=evidence_intake.source_metadata_revision_id
+   AND evidence_source_metadata.project_id=d.project_id
+   AND evidence_source_metadata.source_snapshot_id=evidence_snapshot.id
+  JOIN candidate_fact_revision fact
+    ON fact.id=evidence_item.candidate_fact_revision_id
+   AND fact.project_id=d.project_id
+   AND fact.source_snapshot_id=evidence_snapshot.id
+  JOIN research_fact_metadata_revision fact_metadata
+    ON fact_metadata.id=evidence_item.fact_metadata_revision_id
+   AND fact_metadata.project_id=d.project_id
+   AND fact_metadata.candidate_fact_revision_id=fact.id
+  JOIN research_evidence_claim_annotation_revision annotation
+    ON annotation.id=d.claim_annotation_revision_id
+   AND annotation.project_id=d.project_id
+   AND annotation.claim_draft_id=d.claim_draft_id
+  JOIN research_evidence_claim_support_assessment support
+    ON support.id=d.claim_support_assessment_id
+   AND support.project_id=d.project_id
+   AND support.claim_intake_item_id=d.claim_intake_item_id
+   AND support.evidence_intake_item_id=d.evidence_intake_item_id
+   AND support.claim_draft_id=claim.id
+   AND support.claim_source_snapshot_id=claim_snapshot.id
+   AND support.claim_source_blob_id=claim_blob.id
+   AND support.claim_source_metadata_revision_id=claim_source_metadata.id
+   AND support.evidence_source_snapshot_id=evidence_snapshot.id
+   AND support.evidence_source_blob_id=evidence_blob.id
+   AND support.evidence_source_metadata_revision_id=evidence_source_metadata.id
+   AND support.candidate_fact_revision_id=fact.id
+   AND support.fact_metadata_revision_id=fact_metadata.id
+  JOIN research_evidence_intake_item_review_decision claim_review
+    ON claim_review.id=d.claim_review_decision_id
+   AND claim_review.project_id=d.project_id
+   AND claim_review.research_evidence_intake_item_id=d.claim_intake_item_id
+  JOIN research_evidence_intake_item_review_decision evidence_review
+    ON evidence_review.id=d.evidence_review_decision_id
+   AND evidence_review.project_id=d.project_id
+   AND evidence_review.research_evidence_intake_item_id=d.evidence_intake_item_id
+  WHERE d.decision='authorized'
+    AND annotation.annotation_sequence=(
+      SELECT max(current_annotation.annotation_sequence)
+      FROM research_evidence_claim_annotation_revision current_annotation
+      WHERE current_annotation.project_id=d.project_id
+        AND current_annotation.claim_draft_id=d.claim_draft_id
+    )
+    AND support.assessment_sequence=(
+      SELECT max(current_support.assessment_sequence)
+      FROM research_evidence_claim_support_assessment current_support
+      WHERE current_support.project_id=d.project_id
+        AND current_support.claim_intake_item_id=d.claim_intake_item_id
+        AND current_support.evidence_intake_item_id=d.evidence_intake_item_id
+    )
+    AND support.locator_resolution='resolvable'
+    AND support.evidence_linkage='linked'
+    AND support.semantic_relationship IN ('support','qualification')
+    AND claim_review.decision_sequence=(
+      SELECT max(current_claim_review.decision_sequence)
+      FROM research_evidence_intake_item_review_decision current_claim_review
+      WHERE current_claim_review.project_id=d.project_id
+        AND current_claim_review.research_evidence_intake_item_id=d.claim_intake_item_id
+    )
+    AND claim_review.decision_type='approved'
+    AND evidence_review.decision_sequence=(
+      SELECT max(current_evidence_review.decision_sequence)
+      FROM research_evidence_intake_item_review_decision current_evidence_review
+      WHERE current_evidence_review.project_id=d.project_id
+        AND current_evidence_review.research_evidence_intake_item_id=d.evidence_intake_item_id
+    )
+    AND evidence_review.decision_type='approved'
+    AND NOT EXISTS (
+      SELECT 1 FROM evidence_retention_event retention
+      WHERE retention.project_id=d.project_id
+        AND retention.event_type IN ('tombstone','redact')
+        AND (retention.source_snapshot_id=claim_snapshot.id
+             OR retention.source_blob_id=claim_blob.id)
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM evidence_retention_event retention
+      WHERE retention.project_id=d.project_id
+        AND retention.event_type IN ('tombstone','redact')
+        AND (retention.candidate_fact_revision_id=fact.id
+             OR retention.source_snapshot_id=evidence_snapshot.id
+             OR retention.source_blob_id=evidence_blob.id)
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_source_metadata_revision successor
+      WHERE successor.project_id=d.project_id
+        AND successor.source_snapshot_id=claim_source_metadata.source_snapshot_id
+        AND successor.supersedes_metadata_revision_id=claim_source_metadata.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_evidence_event event
+      WHERE event.project_id=d.project_id
+        AND event.entity_type='source_metadata_revision'
+        AND event.entity_id=claim_source_metadata.id
+        AND event.event_type IN ('superseded','withdrawn')
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_claim_draft successor
+      WHERE successor.project_id=d.project_id
+        AND successor.supersedes_claim_id=claim.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_evidence_event event
+      WHERE event.project_id=d.project_id
+        AND event.entity_type='claim_draft'
+        AND event.entity_id=claim.id
+        AND event.event_type IN ('superseded','withdrawn')
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_source_metadata_revision successor
+      WHERE successor.project_id=d.project_id
+        AND successor.source_snapshot_id=evidence_source_metadata.source_snapshot_id
+        AND successor.supersedes_metadata_revision_id=evidence_source_metadata.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_evidence_event event
+      WHERE event.project_id=d.project_id
+        AND event.entity_type='source_metadata_revision'
+        AND event.entity_id=evidence_source_metadata.id
+        AND event.event_type IN ('superseded','withdrawn')
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_fact_metadata_revision successor
+      WHERE successor.project_id=d.project_id
+        AND successor.candidate_fact_revision_id=fact_metadata.candidate_fact_revision_id
+        AND successor.supersedes_metadata_revision_id=fact_metadata.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_fact_metadata_revision replacement
+      WHERE replacement.project_id=d.project_id
+        AND replacement.supersedes_candidate_fact_revision_id=fact.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM research_evidence_event event
+      WHERE event.project_id=d.project_id
+        AND event.entity_type='fact_metadata_revision'
+        AND event.entity_id=fact_metadata.id
+        AND event.event_type IN ('superseded','withdrawn')
+    )
+), canonical_relationships AS (
+  SELECT DISTINCT ON (claim_draft_id,candidate_fact_revision_id) *
+  FROM eligible
+  ORDER BY claim_draft_id,candidate_fact_revision_id,
+           claim_intake_item_id,evidence_intake_item_id,
+           authorization_sequence DESC,authorization_decision_id
+)
+SELECT * FROM canonical_relationships
+ORDER BY claim_draft_id,source_snapshot_id,candidate_fact_revision_id,
+         authorization_sequence,authorization_decision_id
+LIMIT %s
+"""
+
+
+def _put_unique(target: dict, key: str, value, *, label: str) -> None:
+    existing = target.get(key)
+    if existing is not None and existing != value:
+        raise ResearchEvidencePackIntegrityError(
+            f"conflicting canonical {label} rows in evidence-pack assembly"
+        )
+    target[key] = value
+
+
+def _assembly_members(row, usage_scope: UsageScope):
+    probability = None
+    if row[50] is not None:
+        probability = ResearchEvidencePackExplicitProbability(
+            value=row[50], provided_by=row[51], provenance_reference=row[52],
+            provenance_note=row[53],
+        )
+    annotation = ResearchEvidencePackClaimAnnotation(
+        annotation_revision_id=row[5], claim_draft_id=row[4],
+        annotation_sequence=row[54], epistemic_status=row[43],
+        confidence_label=row[44], decision_relevance=row[45],
+        supports_statement=row[46], does_not_prove=row[47],
+        limitations=tuple(row[48]), related_claim_draft_ids=tuple(row[49]),
+        explicit_probability=probability, recorded_at=row[55],
+    )
+    claim = ResearchEvidencePackAuthorizedClaim(
+        claim_draft_id=row[4], claim_text=row[41], claim_category=row[42],
+        annotation=annotation,
+    )
+    source = ResearchEvidencePackAuthorizedSource(
+        source_snapshot_id=row[10], source_blob_id=row[11],
+        source_metadata_revision_id=row[12], source_kind=row[13],
+        source_locator=row[14], captured_at=row[15],
+        canonical_source_locator=row[16], publisher=row[17], author=row[18],
+        published_at=row[19], retrieved_at=row[20], citation_label=row[21],
+        declared_quality_tier=row[22], declared_quality_rationale=row[23],
+    )
+    evidence = ResearchEvidencePackAuthorizedEvidence(
+        candidate_fact_revision_id=row[24], source_snapshot_id=row[10],
+        fact_metadata_revision_id=row[25],
+        fact_type=row[26], numeric_value=row[27], text_value=row[28], unit=row[29],
+        currency_code=row[30], as_of_date=row[31], numerator_context=row[32],
+        denominator_context=row[33], percentage_basis=row[34],
+        percentage_subtype=row[35], time_unit=row[36], counted_entity=row[37],
+        stable_fact_key=row[38], source_char_range=row[39], citation_locator=row[40],
+    )
+    relationship = ResearchEvidencePackAuthorizedRelationship(
+        authorization_decision_id=row[0], claim_intake_item_id=row[1],
+        evidence_intake_item_id=row[2], claim_support_assessment_id=row[3],
+        claim_draft_id=row[4], candidate_fact_revision_id=row[24],
+        source_snapshot_id=row[10], claim_annotation_revision_id=row[5],
+        claim_review_decision_id=row[6], evidence_review_decision_id=row[7],
+        usage_scope=usage_scope, authorization_sequence=row[8], authorized_at=row[9],
+        locator_resolution=row[56], evidence_linkage=row[57],
+        semantic_relationship=row[58],
+    )
+    return claim, source, evidence, relationship
+
+
+def assemble_effective_project_pack(
+    conn, *, project_id: str, usage_scope: UsageScope,
+) -> ResearchEvidencePackAggregate:
+    """Assemble one bounded current pack without taking transaction ownership."""
+    query = ResearchEvidencePackQuery(
+        project_id=project_id, usage_scope=usage_scope,
+    )
+    project = conn.execute(
+        "SELECT id::text FROM projects WHERE id=%s", (query.project_id,),
+    ).fetchone()
+    if project is None:
+        raise ResearchEvidencePackParentNotFound("project not found")
+
+    rows = conn.execute(
+        _PACK_ASSEMBLY_SELECT,
+        (query.project_id, query.usage_scope.value, MAX_PACK_RELATIONSHIPS + 1),
+    ).fetchall()
+    if len(rows) > MAX_PACK_RELATIONSHIPS:
+        raise ResearchEvidencePackCapacityError(
+            f"current pack exceeds {MAX_PACK_RELATIONSHIPS} canonical relationships"
+        )
+    if not rows:
+        return ResearchEvidencePackAggregate(
+            project_id=query.project_id, usage_scope=query.usage_scope,
+        )
+
+    claims: dict[str, ResearchEvidencePackAuthorizedClaim] = {}
+    sources: dict[str, ResearchEvidencePackAuthorizedSource] = {}
+    evidence_items: dict[str, ResearchEvidencePackAuthorizedEvidence] = {}
+    relationships: dict[tuple[str, str], ResearchEvidencePackAuthorizedRelationship] = {}
+    try:
+        for row in rows:
+            claim, source, evidence, relationship = _assembly_members(
+                row, query.usage_scope,
+            )
+            _put_unique(claims, claim.claim_draft_id, claim, label="claim")
+            _put_unique(sources, source.source_snapshot_id, source, label="source")
+            _put_unique(
+                evidence_items, evidence.candidate_fact_revision_id, evidence,
+                label="evidence",
+            )
+            relationship_key = (
+                relationship.claim_draft_id,
+                relationship.candidate_fact_revision_id,
+            )
+            existing = relationships.get(relationship_key)
+            if existing is not None and existing != relationship:
+                raise ResearchEvidencePackIntegrityError(
+                    "conflicting duplicate canonical relationship in evidence-pack assembly"
+                )
+            relationships[relationship_key] = relationship
+
+        if len(sources) > MAX_PACK_SOURCES:
+            raise ResearchEvidencePackCapacityError(
+                f"current pack exceeds {MAX_PACK_SOURCES} distinct source snapshots"
+            )
+        if len(claims) > MAX_PACK_CLAIMS:
+            raise ResearchEvidencePackCapacityError(
+                f"current pack exceeds {MAX_PACK_CLAIMS} distinct canonical claims"
+            )
+
+        current_context = get_effective_project_context_revision(
+            conn, project_id=query.project_id,
+        )
+        context = None if current_context is None else ResearchEvidencePackContext(
+            context_revision_id=current_context.id,
+            context_sequence=current_context.context_sequence,
+            research_question=current_context.research_question,
+            project_limitations=current_context.project_limitations,
+            unresolved_gaps=current_context.unresolved_gaps,
+            recorded_at=current_context.recorded_at,
+        )
+        ordered_claims = tuple(sorted(claims.values(), key=lambda item: item.claim_draft_id))
+        ordered_sources = tuple(sorted(sources.values(), key=lambda item: item.source_snapshot_id))
+        ordered_evidence = tuple(sorted(
+            evidence_items.values(),
+            key=lambda item: (item.source_snapshot_id, item.candidate_fact_revision_id),
+        ))
+        ordered_relationships = tuple(sorted(
+            relationships.values(),
+            key=lambda item: (
+                item.claim_draft_id, item.source_snapshot_id,
+                item.candidate_fact_revision_id, item.authorization_sequence,
+                item.authorization_decision_id,
+            ),
+        ))
+        return ResearchEvidencePackAggregate(
+            project_id=query.project_id, usage_scope=query.usage_scope,
+            context=context, claims=ordered_claims, sources=ordered_sources,
+            evidence=ordered_evidence, relationships=ordered_relationships,
+            counts=ResearchEvidencePackCounts(
+                source_count=len(ordered_sources), claim_count=len(ordered_claims),
+                evidence_count=len(ordered_evidence),
+                relationship_count=len(ordered_relationships),
+            ),
+        )
+    except ValidationError as exc:
+        raise ResearchEvidencePackIntegrityError(
+            "structurally invalid persisted state in evidence-pack assembly"
+        ) from exc
