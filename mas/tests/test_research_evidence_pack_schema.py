@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 import tests.evidence_snapshot_pg as pg  # noqa: E402
 from research_evidence import pack_service  # noqa: E402
 from research_evidence.pack_models import (  # noqa: E402
+    MAX_PACK_CANDIDATE_REPRESENTATIONS,
     ResearchEvidenceClaimAnnotationRevisionCreate,
     ResearchEvidenceExplicitProbability,
     ResearchEvidenceProjectContextRevisionCreate,
@@ -1916,6 +1917,9 @@ def test_authorization_fails_closed_after_new_annotation(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=claim["project"],
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim["project"], usage_scope="client_report",
+    ).counts.relationship_count == 1
     conn.execute(annotation_sql, (claim["project"], claim["claim"], "annotation-2"))
     assert not pack_service.claim_evidence_usage_is_authorized(
         conn, project_id=claim["project"], claim_intake_item_id=claim["item"],
@@ -1924,6 +1928,9 @@ def test_authorization_fails_closed_after_new_annotation(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=claim["project"],
     ) == (0, 0)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim["project"], usage_scope="client_report",
+    ).counts.relationship_count == 0
 
 
 def _prepare_service_authorization(conn, tag, *, usage_scope="client_report"):
@@ -1955,6 +1962,625 @@ def _prepare_service_authorization(conn, tag, *, usage_scope="client_report"):
     )
     record = pack_service.record_usage_authorization_decision(conn, value)
     return claim, evidence, value, record
+
+
+def _wrap_existing_fact(conn, evidence, *, fact_metadata_id, tag):
+    intake_id = conn.execute(
+        """INSERT INTO research_evidence_intake
+           (project_id,source_snapshot_id,source_metadata_revision_id,
+            selection_reason,created_by)
+           VALUES(%s,%s,%s,%s,'operator') RETURNING id::text""",
+        (
+            evidence["project"], evidence["snapshot"],
+            evidence["source_metadata"], f"duplicate wrapper {tag}",
+        ),
+    ).fetchone()[0]
+    item_id = conn.execute(
+        """INSERT INTO research_evidence_intake_item
+           (project_id,research_evidence_intake_id,source_snapshot_id,item_kind,
+            candidate_fact_revision_id,fact_metadata_revision_id,created_by)
+           VALUES(%s,%s,%s,'candidate_fact',%s,%s,'operator')
+           RETURNING id::text""",
+        (
+            evidence["project"], intake_id, evidence["snapshot"],
+            evidence["fact"], fact_metadata_id,
+        ),
+    ).fetchone()[0]
+    wrapped = dict(evidence)
+    wrapped.update({
+        "intake": intake_id, "item": item_id,
+        "fact_metadata": fact_metadata_id,
+    })
+    return wrapped
+
+
+def _authorize_duplicate_wrapper(conn, claim, evidence, *, tag):
+    _approve_item(
+        conn, claim["project"], evidence["item"], f"{tag}-review",
+    )
+    insert_support(conn, claim, evidence, request_id=f"{tag}-support")
+    return pack_service.record_usage_authorization_decision(
+        conn,
+        ResearchEvidenceUsageAuthorizationDecisionCreate(
+            project_id=claim["project"],
+            claim_intake_item_id=claim["item"],
+            evidence_intake_item_id=evidence["item"],
+            usage_scope="client_report", decision="authorized",
+            reason="duplicate wrapper authorized", actor="operator",
+            request_id=f"{tag}-authorization",
+        ),
+    )
+
+
+def _revoke_wrapper(conn, claim, evidence, *, tag):
+    return pack_service.record_usage_authorization_decision(
+        conn,
+        ResearchEvidenceUsageAuthorizationDecisionCreate(
+            project_id=claim["project"],
+            claim_intake_item_id=claim["item"],
+            evidence_intake_item_id=evidence["item"],
+            usage_scope="client_report", decision="revoked",
+            reason="duplicate wrapper revoked", actor="operator",
+            request_id=f"{tag}-revocation",
+        ),
+    )
+
+
+def _bulk_authorize_duplicate_wrappers(
+    conn, claim, evidence, *, start_ordinal, count,
+):
+    """Create valid current wrapper heads set-wise in disposable PostgreSQL."""
+    stop_ordinal = start_ordinal + count - 1
+    conn.execute(
+        """CREATE TEMP TABLE IF NOT EXISTS r2a2_candidate_map (
+             ordinal integer PRIMARY KEY,
+             intake_id uuid NOT NULL,
+             item_id uuid NOT NULL,
+             review_id uuid NOT NULL,
+             support_id uuid NOT NULL,
+             authorization_id uuid NOT NULL
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO r2a2_candidate_map
+           SELECT ordinal,gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),
+                  gen_random_uuid(),gen_random_uuid()
+           FROM generate_series(%s::integer,%s::integer) ordinal""",
+        (start_ordinal, stop_ordinal),
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_intake
+           (id,project_id,source_snapshot_id,source_metadata_revision_id,
+            selection_reason,created_by)
+           SELECT intake_id,%s,%s,%s,
+                  'bounded duplicate wrapper '||ordinal,'operator'
+           FROM r2a2_candidate_map WHERE ordinal BETWEEN %s AND %s""",
+        (
+            claim["project"], evidence["snapshot"],
+            evidence["source_metadata"], start_ordinal, stop_ordinal,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_intake_item
+           (id,project_id,research_evidence_intake_id,source_snapshot_id,
+            item_kind,candidate_fact_revision_id,fact_metadata_revision_id,
+            created_by)
+           SELECT item_id,%s,intake_id,%s,'candidate_fact',%s,%s,'operator'
+           FROM r2a2_candidate_map WHERE ordinal BETWEEN %s AND %s""",
+        (
+            claim["project"], evidence["snapshot"], evidence["fact"],
+            evidence["fact_metadata"], start_ordinal, stop_ordinal,
+        ),
+    )
+
+    conn.execute(
+        "ALTER TABLE research_evidence_intake_item_review_decision "
+        "DISABLE TRIGGER trg_reird_prepare_insert"
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_intake_item_review_decision
+           (id,project_id,research_evidence_intake_item_id,decision_type,
+            decision_sequence,supersedes_decision_id,decision_reason,
+            decided_by,request_id,recorded_at)
+           SELECT review_id,%s,item_id,'approved',1,NULL,'Reviewed','operator',
+                  'bounded-review-'||ordinal,clock_timestamp()
+           FROM r2a2_candidate_map WHERE ordinal BETWEEN %s AND %s""",
+        (claim["project"], start_ordinal, stop_ordinal),
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_item_review_sequence_allocator
+           (project_id,research_evidence_intake_item_id,last_sequence)
+           SELECT %s,item_id,1 FROM r2a2_candidate_map
+           WHERE ordinal BETWEEN %s AND %s""",
+        (claim["project"], start_ordinal, stop_ordinal),
+    )
+    conn.execute(
+        "ALTER TABLE research_evidence_intake_item_review_decision "
+        "ENABLE ALWAYS TRIGGER trg_reird_prepare_insert"
+    )
+
+    conn.execute(
+        "ALTER TABLE research_evidence_claim_support_assessment "
+        "DISABLE TRIGGER trg_recsa_prepare_insert"
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_claim_support_assessment
+           (id,project_id,claim_intake_item_id,evidence_intake_item_id,
+            request_id,locator_resolution,locator_rationale,evidence_linkage,
+            evidence_linkage_rationale,semantic_relationship,
+            semantic_relationship_rationale,assessed_by,assessment_sequence,
+            supersedes_assessment_id,claim_draft_id,claim_source_snapshot_id,
+            claim_source_blob_id,claim_source_metadata_revision_id,
+            evidence_source_snapshot_id,evidence_source_blob_id,
+            evidence_source_metadata_revision_id,candidate_fact_revision_id,
+            fact_metadata_revision_id,assessed_at)
+           SELECT support_id,%s,%s,item_id,'bounded-support-'||ordinal,
+                  'resolvable','Stored locator was reviewed.','linked',
+                  'The evidence item is the intended link.','support',
+                  'Operator assessed supporting context.','operator',1,NULL,
+                  %s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()
+           FROM r2a2_candidate_map WHERE ordinal BETWEEN %s AND %s""",
+        (
+            claim["project"], claim["item"], claim["claim"],
+            claim["snapshot"], claim["blob"], claim["source_metadata"],
+            evidence["snapshot"], evidence["blob"],
+            evidence["source_metadata"], evidence["fact"],
+            evidence["fact_metadata"], start_ordinal, stop_ordinal,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_claim_support_sequence_allocator
+           (project_id,claim_intake_item_id,evidence_intake_item_id,last_sequence)
+           SELECT %s,%s,item_id,1 FROM r2a2_candidate_map
+           WHERE ordinal BETWEEN %s AND %s""",
+        (claim["project"], claim["item"], start_ordinal, stop_ordinal),
+    )
+    conn.execute(
+        "ALTER TABLE research_evidence_claim_support_assessment "
+        "ENABLE ALWAYS TRIGGER trg_recsa_prepare_insert"
+    )
+
+    claim_review_id = conn.execute(
+        """SELECT id::text FROM research_evidence_intake_item_review_decision
+           WHERE project_id=%s AND research_evidence_intake_item_id=%s
+           ORDER BY decision_sequence DESC LIMIT 1""",
+        (claim["project"], claim["item"]),
+    ).fetchone()[0]
+    annotation_id = conn.execute(
+        """SELECT id::text FROM research_evidence_claim_annotation_revision
+           WHERE project_id=%s AND claim_draft_id=%s
+           ORDER BY annotation_sequence DESC LIMIT 1""",
+        (claim["project"], claim["claim"]),
+    ).fetchone()[0]
+    conn.execute(
+        "ALTER TABLE research_evidence_usage_authorization_decision "
+        "DISABLE TRIGGER trg_reuad_prepare_insert"
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_usage_authorization_decision
+           (id,project_id,claim_intake_item_id,evidence_intake_item_id,
+            claim_support_assessment_id,usage_scope,decision,reason,actor,
+            request_id,claim_draft_id,claim_annotation_revision_id,
+            claim_review_decision_id,evidence_review_decision_id,
+            decision_sequence,supersedes_decision_id,recorded_at)
+           SELECT authorization_id,%s,%s,item_id,support_id,'client_report',
+                  'authorized','bounded duplicate authorized','operator',
+                  'bounded-authorization-'||ordinal,%s,%s,%s,review_id,
+                  1,NULL,clock_timestamp()
+           FROM r2a2_candidate_map WHERE ordinal BETWEEN %s AND %s""",
+        (
+            claim["project"], claim["item"], claim["claim"], annotation_id,
+            claim_review_id, start_ordinal, stop_ordinal,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO research_evidence_usage_authorization_sequence_allocator
+           (project_id,claim_intake_item_id,evidence_intake_item_id,usage_scope,
+            last_sequence)
+           SELECT %s,%s,item_id,'client_report',1 FROM r2a2_candidate_map
+           WHERE ordinal BETWEEN %s AND %s""",
+        (claim["project"], claim["item"], start_ordinal, stop_ordinal),
+    )
+    conn.execute(
+        "ALTER TABLE research_evidence_usage_authorization_decision "
+        "ENABLE ALWAYS TRIGGER trg_reuad_prepare_insert"
+    )
+
+
+def _assert_bulk_candidate_topology(conn, *, project_id, expected_count):
+    assert conn.execute(
+        """SELECT t.tgname,t.tgenabled
+           FROM pg_trigger t
+           WHERE t.tgname=ANY(ARRAY[
+             'trg_reird_prepare_insert','trg_recsa_prepare_insert',
+             'trg_reuad_prepare_insert'])
+           ORDER BY t.tgname"""
+    ).fetchall() == [
+        ("trg_recsa_prepare_insert", "A"),
+        ("trg_reird_prepare_insert", "A"),
+        ("trg_reuad_prepare_insert", "A"),
+    ]
+    assert conn.execute(
+        """SELECT count(*),count(DISTINCT evidence.candidate_fact_revision_id)
+           FROM research_evidence_usage_authorization_decision decision
+           JOIN research_evidence_usage_authorization_sequence_allocator auth_head
+             ON auth_head.project_id=decision.project_id
+            AND auth_head.claim_intake_item_id=decision.claim_intake_item_id
+            AND auth_head.evidence_intake_item_id=decision.evidence_intake_item_id
+            AND auth_head.usage_scope=decision.usage_scope
+            AND auth_head.last_sequence=decision.decision_sequence
+           JOIN research_evidence_claim_support_assessment support
+             ON support.id=decision.claim_support_assessment_id
+            AND support.project_id=decision.project_id
+            AND support.claim_intake_item_id=decision.claim_intake_item_id
+            AND support.evidence_intake_item_id=decision.evidence_intake_item_id
+           JOIN research_evidence_claim_support_sequence_allocator support_head
+             ON support_head.project_id=support.project_id
+            AND support_head.claim_intake_item_id=support.claim_intake_item_id
+            AND support_head.evidence_intake_item_id=support.evidence_intake_item_id
+            AND support_head.last_sequence=support.assessment_sequence
+           JOIN research_evidence_intake_item_review_decision claim_review
+             ON claim_review.id=decision.claim_review_decision_id
+            AND claim_review.project_id=decision.project_id
+            AND claim_review.research_evidence_intake_item_id=
+                decision.claim_intake_item_id
+           JOIN research_evidence_item_review_sequence_allocator claim_review_head
+             ON claim_review_head.project_id=claim_review.project_id
+            AND claim_review_head.research_evidence_intake_item_id=
+                claim_review.research_evidence_intake_item_id
+            AND claim_review_head.last_sequence=claim_review.decision_sequence
+           JOIN research_evidence_intake_item_review_decision evidence_review
+             ON evidence_review.id=decision.evidence_review_decision_id
+            AND evidence_review.project_id=decision.project_id
+            AND evidence_review.research_evidence_intake_item_id=
+                decision.evidence_intake_item_id
+           JOIN research_evidence_item_review_sequence_allocator evidence_review_head
+             ON evidence_review_head.project_id=evidence_review.project_id
+            AND evidence_review_head.research_evidence_intake_item_id=
+                evidence_review.research_evidence_intake_item_id
+            AND evidence_review_head.last_sequence=evidence_review.decision_sequence
+           JOIN research_evidence_intake_item evidence
+             ON evidence.id=decision.evidence_intake_item_id
+            AND evidence.project_id=decision.project_id
+            AND evidence.candidate_fact_revision_id=
+                support.candidate_fact_revision_id
+            AND evidence.fact_metadata_revision_id=
+                support.fact_metadata_revision_id
+           WHERE decision.project_id=%s
+             AND decision.usage_scope='client_report'
+             AND decision.decision='authorized'
+             AND support.locator_resolution='resolvable'
+             AND support.evidence_linkage='linked'
+             AND support.semantic_relationship IN ('support','qualification')
+             AND claim_review.decision_type='approved'
+             AND evidence_review.decision_type='approved'""",
+        (project_id,),
+    ).fetchone() == (expected_count, 1)
+
+
+def _plan_nodes(node):
+    yield node
+    for child in node.get("Plans", ()):
+        yield from _plan_nodes(child)
+
+
+def test_assembly_query_returns_current_bounded_pack_and_typed_empty_scope(
+    pack_schema,
+):
+    conn, _ = pack_schema
+    pg.apply_v61_research_evidence_pack(conn)
+    claim, evidence, value, authorization = _prepare_service_authorization(
+        conn, "assembly-current",
+    )
+    context = pack_service.record_project_context_revision(
+        conn,
+        ResearchEvidenceProjectContextRevisionCreate(
+            project_id=value.project_id,
+            request_id="assembly-current-context",
+            research_question="Which evidence is currently authorized?",
+            project_limitations=("Bounded test context",),
+            unresolved_gaps=("No external consumer",),
+            actor="operator",
+        ),
+    )
+
+    before = _pack_rows_snapshot(conn)
+    assembled = pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope=UsageScope.CLIENT_REPORT,
+    )
+    assert assembled == pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope="client_report",
+    )
+    assert _pack_rows_snapshot(conn) == before
+    assert assembled.project_id == value.project_id
+    assert assembled.usage_scope is UsageScope.CLIENT_REPORT
+    assert assembled.counts.model_dump() == {
+        "source_count": 1,
+        "claim_count": 1,
+        "evidence_count": 1,
+        "relationship_count": 1,
+    }
+    assert assembled.context.context_revision_id == context.id
+    assert assembled.claims[0].claim_draft_id == claim["claim"]
+    assert assembled.sources[0].source_snapshot_id == evidence["snapshot"]
+    assert assembled.evidence[0].candidate_fact_revision_id == evidence["fact"]
+    assert assembled.relationships[0].authorization_decision_id == authorization.id
+    assert assembled.relationships[0].usage_scope is UsageScope.CLIENT_REPORT
+
+    empty = pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope="internal_analysis",
+    )
+    assert empty.project_id == value.project_id
+    assert empty.usage_scope is UsageScope.INTERNAL_ANALYSIS
+    assert empty.context is None
+    assert empty.counts.model_dump() == {
+        "source_count": 0,
+        "claim_count": 0,
+        "evidence_count": 0,
+        "relationship_count": 0,
+    }
+    assert empty.claims == empty.sources == empty.evidence == empty.relationships == ()
+
+
+def test_assembly_conflicting_parallel_metadata_roots_fail_closed(pack_schema):
+    conn, _ = pack_schema
+    pg.apply_v61_research_evidence_pack(conn)
+    claim, evidence, value, _ = _prepare_service_authorization(
+        conn, "assembly-conflicting-root",
+    )
+    conflicting_metadata = conn.execute(
+        """INSERT INTO research_fact_metadata_revision
+           (project_id,candidate_fact_revision_id,stable_fact_key,
+            citation_locator,source_char_range,excerpt_hash,created_by)
+           VALUES(%s,%s,'conflicting-stable-key','conflicting-citation',
+                  '30-40','conflicting-excerpt','operator')
+           RETURNING id::text""",
+        (evidence["project"], evidence["fact"]),
+    ).fetchone()[0]
+    duplicate = _wrap_existing_fact(
+        conn, evidence, fact_metadata_id=conflicting_metadata,
+        tag="conflicting-root",
+    )
+    _authorize_duplicate_wrapper(
+        conn, claim, duplicate, tag="conflicting-root",
+    )
+    before = _pack_rows_snapshot(conn)
+    with pytest.raises(
+        pack_service.repo.ResearchEvidencePackIntegrityError,
+        match="conflicting canonical evidence",
+    ):
+        pack_service.assemble_research_evidence_pack(
+            conn, project_id=value.project_id, usage_scope="client_report",
+        )
+    assert _pack_rows_snapshot(conn) == before
+    assert conn.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_assembly_identical_wrappers_collapse_after_deterministic_comparison(
+    pack_schema,
+):
+    conn, _ = pack_schema
+    pg.apply_v61_research_evidence_pack(conn)
+    claim, evidence, value, first_authorization = _prepare_service_authorization(
+        conn, "assembly-identical-wrapper",
+    )
+    identical_metadata = conn.execute(
+        """INSERT INTO research_fact_metadata_revision
+           (project_id,candidate_fact_revision_id,stable_fact_key,
+            drift_group_key,supersedes_candidate_fact_revision_id,
+            source_char_range,excerpt_hash,citation_locator,metadata_json,
+            supersedes_metadata_revision_id,created_by)
+           SELECT project_id,candidate_fact_revision_id,stable_fact_key,
+                  drift_group_key,supersedes_candidate_fact_revision_id,
+                  source_char_range,excerpt_hash,citation_locator,metadata_json,
+                  NULL,created_by
+           FROM research_fact_metadata_revision WHERE id=%s
+           RETURNING id::text""",
+        (evidence["fact_metadata"],),
+    ).fetchone()[0]
+    assert identical_metadata != evidence["fact_metadata"]
+    duplicate = _wrap_existing_fact(
+        conn, evidence, fact_metadata_id=identical_metadata,
+        tag="identical-wrapper",
+    )
+    second_authorization = _authorize_duplicate_wrapper(
+        conn, claim, duplicate, tag="identical-wrapper",
+    )
+    packs = [
+        pack_service.assemble_research_evidence_pack(
+            conn, project_id=value.project_id, usage_scope="client_report",
+        )
+        for _ in range(3)
+    ]
+    assert packs[0] == packs[1] == packs[2]
+    assert packs[0].counts.relationship_count == 1
+    assert packs[0].counts.evidence_count == 1
+    expected = (
+        first_authorization.id
+        if evidence["item"] < duplicate["item"]
+        else second_authorization.id
+    )
+    assert packs[0].relationships[0].authorization_decision_id == expected
+    expected_metadata = (
+        evidence["fact_metadata"]
+        if evidence["item"] < duplicate["item"]
+        else identical_metadata
+    )
+    assert packs[0].evidence[0].fact_metadata_revision_id == expected_metadata
+
+
+def test_candidate_boundary_is_exact_and_gates_wide_postgresql_work(pack_schema):
+    conn, _ = pack_schema
+    pg.apply_v61_research_evidence_pack(conn)
+    claim, evidence, value, _ = _prepare_service_authorization(
+        conn, "assembly-candidate-boundary",
+    )
+    _bulk_authorize_duplicate_wrappers(
+        conn, claim, evidence, start_ordinal=1,
+        count=MAX_PACK_CANDIDATE_REPRESENTATIONS - 1,
+    )
+    conn.commit()
+    _assert_bulk_candidate_topology(
+        conn, project_id=value.project_id,
+        expected_count=MAX_PACK_CANDIDATE_REPRESENTATIONS,
+    )
+
+    exact = pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope="client_report",
+    )
+    assert exact.counts.relationship_count == 1
+    assert exact.counts.evidence_count == 1
+    assert conn.execute(
+        """SELECT count(*) FROM
+           research_evidence_usage_authorization_sequence_allocator
+           WHERE project_id=%s AND usage_scope='client_report'""",
+        (value.project_id,),
+    ).fetchone()[0] == MAX_PACK_CANDIDATE_REPRESENTATIONS
+
+    _bulk_authorize_duplicate_wrappers(
+        conn, claim, evidence,
+        start_ordinal=MAX_PACK_CANDIDATE_REPRESENTATIONS,
+        count=1,
+    )
+    conn.commit()
+    _assert_bulk_candidate_topology(
+        conn, project_id=value.project_id,
+        expected_count=MAX_PACK_CANDIDATE_REPRESENTATIONS + 1,
+    )
+
+    params = (
+        value.project_id, "client_report",
+        MAX_PACK_CANDIDATE_REPRESENTATIONS + 1,
+        MAX_PACK_CANDIDATE_REPRESENTATIONS,
+    )
+    document = conn.execute(
+        "EXPLAIN (ANALYZE,FORMAT JSON,COSTS OFF,TIMING OFF,SUMMARY OFF) "
+        + pack_service.repo._PACK_ASSEMBLY_SELECT,
+        params,
+    ).fetchone()[0]
+    nodes = list(_plan_nodes(document[0]["Plan"]))
+    head_plans = [
+        node for node in nodes
+        if node.get("Subplan Name") == "CTE bounded_authorization_heads"
+    ]
+    assert len(head_plans) == 1
+    head_plan = head_plans[0]
+    assert head_plan["Node Type"] == "Limit"
+    assert head_plan["Actual Rows"] == MAX_PACK_CANDIDATE_REPRESENTATIONS + 1
+    head_nodes = list(_plan_nodes(head_plan))
+    assert not {
+        node["Node Type"] for node in head_nodes
+    } & {
+        "Sort", "Incremental Sort", "Unique", "Aggregate", "Hash",
+        "Hash Join", "Materialize", "Memoize",
+    }
+    assert {
+        node["Relation Name"] for node in head_nodes
+        if "Relation Name" in node
+    } == {"research_evidence_usage_authorization_sequence_allocator"}
+    decision_nodes = [
+        node for node in nodes
+        if node.get("Relation Name") ==
+        "research_evidence_usage_authorization_decision"
+        and node not in head_nodes
+    ]
+    assert decision_nodes
+    assert all(node.get("Actual Loops") == 0 for node in decision_nodes)
+    wide_relations = {
+        "research_evidence_intake_item", "research_evidence_intake",
+        "source_snapshot", "source_blob", "research_source_metadata_revision",
+        "research_claim_draft", "candidate_fact_revision",
+        "research_fact_metadata_revision",
+        "research_evidence_claim_annotation_revision",
+        "research_evidence_claim_support_assessment",
+        "research_evidence_intake_item_review_decision",
+        "evidence_retention_event", "research_evidence_event",
+    }
+    wide_nodes = [
+        node for node in nodes if node.get("Relation Name") in wide_relations
+        and node not in head_nodes
+    ]
+    assert wide_nodes
+    assert all(node.get("Actual Loops") == 0 for node in wide_nodes)
+
+    with pytest.raises(
+        pack_service.repo.ResearchEvidencePackCapacityError,
+        match="authorization wrapper heads",
+    ):
+        pack_service.repo.assemble_effective_project_pack(
+            conn, project_id=value.project_id,
+            usage_scope=UsageScope.CLIENT_REPORT,
+        )
+    assert conn.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_revoked_wrapper_heads_consume_candidate_boundary(pack_schema, monkeypatch):
+    conn, _ = pack_schema
+    pg.apply_v61_research_evidence_pack(conn)
+    claim, evidence, value, _ = _prepare_service_authorization(
+        conn, "assembly-revoked-head-boundary",
+    )
+    _revoke_wrapper(conn, claim, evidence, tag="revoked-head-original")
+    duplicate = _wrap_existing_fact(
+        conn, evidence, fact_metadata_id=evidence["fact_metadata"],
+        tag="revoked-head-duplicate-1",
+    )
+    _authorize_duplicate_wrapper(
+        conn, claim, duplicate, tag="revoked-head-duplicate-1",
+    )
+    _revoke_wrapper(conn, claim, duplicate, tag="revoked-head-duplicate-1")
+    monkeypatch.setattr(
+        pack_service.repo, "MAX_PACK_CANDIDATE_REPRESENTATIONS", 2,
+    )
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope="client_report",
+    ).counts.relationship_count == 0
+
+    overflow = _wrap_existing_fact(
+        conn, evidence, fact_metadata_id=evidence["fact_metadata"],
+        tag="revoked-head-duplicate-2",
+    )
+    _authorize_duplicate_wrapper(
+        conn, claim, overflow, tag="revoked-head-duplicate-2",
+    )
+    _revoke_wrapper(conn, claim, overflow, tag="revoked-head-duplicate-2")
+    with pytest.raises(
+        pack_service.repo.ResearchEvidencePackCapacityError,
+        match="authorization wrapper heads",
+    ):
+        pack_service.repo.assemble_effective_project_pack(
+            conn, project_id=value.project_id,
+            usage_scope=UsageScope.CLIENT_REPORT,
+        )
+    assert conn.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_backward_allocator_head_cannot_resurrect_historical_authorization(
+    pack_schema,
+):
+    conn, _ = pack_schema
+    pg.apply_v61_research_evidence_pack(conn)
+    claim, evidence, value, _ = _prepare_service_authorization(
+        conn, "assembly-backward-authorization-head",
+    )
+    _revoke_wrapper(
+        conn, claim, evidence, tag="assembly-backward-authorization-head",
+    )
+    conn.execute(
+        """UPDATE research_evidence_usage_authorization_sequence_allocator
+           SET last_sequence=1
+           WHERE project_id=%s AND claim_intake_item_id=%s
+             AND evidence_intake_item_id=%s AND usage_scope='client_report'""",
+        (value.project_id, claim["item"], evidence["item"]),
+    )
+    before = _pack_rows_snapshot(conn)
+    assembled = pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope="client_report",
+    )
+    assert assembled.counts.relationship_count == 0
+    assert assembled.relationships == ()
+    assert _pack_rows_snapshot(conn) == before
+    assert conn.execute("SELECT 1").fetchone() == (1,)
 
 
 def test_genuine_transition_exception_enters_bounded_repository_recovery(
@@ -2045,6 +2671,9 @@ def test_effective_authorization_basis_matrix_and_reauthorization(
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=value.project_id,
     ) == (0, 0)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope=value.usage_scope,
+    ).counts.relationship_count == 0
 
     revoked = pack_service.record_usage_authorization_decision(
         conn,
@@ -2072,6 +2701,9 @@ def test_effective_authorization_basis_matrix_and_reauthorization(
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=value.project_id,
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=value.project_id, usage_scope=value.usage_scope,
+    ).counts.relationship_count == 1
 
 
 def test_revocation_has_no_fallback_and_scopes_are_independent(pack_schema):
@@ -2091,6 +2723,12 @@ def test_revocation_has_no_fallback_and_scopes_are_independent(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=client.project_id,
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="client_report",
+    ).counts.relationship_count == 1
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="internal_analysis",
+    ).counts.relationship_count == 1
     for scope in ("client_report", "internal_analysis", "operator_dossier"):
         assert pack_service.claim_evidence_usage_is_authorized(
             conn, project_id=client.project_id,
@@ -2122,6 +2760,12 @@ def test_revocation_has_no_fallback_and_scopes_are_independent(pack_schema):
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=client.project_id,
     ) == (1, 1)
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="client_report",
+    ).counts.relationship_count == 0
+    assert pack_service.assemble_research_evidence_pack(
+        conn, project_id=client.project_id, usage_scope="internal_analysis",
+    ).counts.relationship_count == 1
     effective_ids = {
         record.id for record in pack_service.list_effective_project_authorizations(
             conn, project_id=client.project_id,
@@ -2296,6 +2940,16 @@ def test_cross_project_claim_and_evidence_are_rejected_without_sequence(pack_sch
            WHERE project_id=%s""",
         (claim_a["project"],),
     ).fetchone()[0] == 1
+    project_a_pack = pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim_a["project"], usage_scope="client_report",
+    )
+    project_b_pack = pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim_b["project"], usage_scope="client_report",
+    )
+    assert {item.claim_draft_id for item in project_a_pack.claims} == {
+        claim_a["claim"],
+    }
+    assert project_b_pack.counts.relationship_count == 0
 
 
 def _approve_item(conn, project_id, item_id, request_id):
@@ -2358,6 +3012,11 @@ def test_source_limit_is_effective_distinct_and_does_not_consume_rejection(pack_
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=claim["project"],
     ) == (50, 1)
+    bounded = pack_service.assemble_research_evidence_pack(
+        conn, project_id=claim["project"], usage_scope="client_report",
+    )
+    assert bounded.counts.source_count == 50
+    assert bounded.counts.relationship_count == 50
     rejected_evidence = evidence_items[50]
     _approve_item(
         conn, claim["project"], rejected_evidence["item"],
@@ -2432,6 +3091,11 @@ def test_claim_limit_is_effective_distinct_and_does_not_consume_rejection(pack_s
     assert pack_service.repo.effective_project_pack_member_counts(
         conn, project_id=first_claim["project"],
     ) == (1, 200)
+    bounded = pack_service.assemble_research_evidence_pack(
+        conn, project_id=first_claim["project"], usage_scope="client_report",
+    )
+    assert bounded.counts.claim_count == 200
+    assert bounded.counts.relationship_count == 200
     rejected_claim = claims[200]
     _approve_item(
         conn, first_claim["project"], rejected_claim["item"],

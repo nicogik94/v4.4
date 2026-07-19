@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from research_evidence import pack_service as service
 from research_evidence.pack_models import (
+    ResearchEvidencePackAggregate,
     ResearchEvidenceClaimAnnotationRevisionCreate,
     ResearchEvidenceExplicitProbability,
     ResearchEvidenceProjectContextRevisionCreate,
@@ -240,3 +241,93 @@ def test_authorization_conflicting_retry_rechecks_after_lock_and_short_circuits(
     with pytest.raises(service.repo.ResearchEvidencePackRequestConflict):
         service.record_usage_authorization_decision(Conn(), value)
     assert events == ["lookup", "lock", "lookup", "conflict"]
+
+
+def test_assembly_service_disabled_fails_before_repository(monkeypatch):
+    monkeypatch.setattr(service.config, "research_evidence_enabled", lambda: False)
+    monkeypatch.setattr(
+        service.repo, "assemble_effective_project_pack",
+        lambda *args, **kwargs: pytest.fail("disabled service must not query"),
+    )
+    with pytest.raises(service.ResearchEvidencePackDisabled):
+        service.assemble_research_evidence_pack(
+            Conn(), project_id=uid(), usage_scope="client_report",
+        )
+
+
+def test_assembly_service_returns_typed_empty_pack_and_propagates_explicit_scope(
+    monkeypatch,
+):
+    monkeypatch.setattr(service.config, "research_evidence_enabled", lambda: True)
+    project_id = uid()
+    expected = ResearchEvidencePackAggregate(
+        project_id=project_id, usage_scope="operator_dossier",
+    )
+    calls = []
+
+    def assemble(conn, **kwargs):
+        calls.append((conn, kwargs))
+        return expected
+
+    monkeypatch.setattr(service.repo, "assemble_effective_project_pack", assemble)
+    conn = Conn()
+    first = service.assemble_research_evidence_pack(
+        conn, project_id=project_id, usage_scope="operator_dossier",
+    )
+    second = service.assemble_research_evidence_pack(
+        conn, project_id=project_id, usage_scope="operator_dossier",
+    )
+    assert first is second is expected
+    assert calls == [
+        (conn, {"project_id": project_id, "usage_scope": expected.usage_scope}),
+        (conn, {"project_id": project_id, "usage_scope": expected.usage_scope}),
+    ]
+    assert conn.calls == []
+
+
+def test_assembly_service_validates_identity_and_scope_before_feature_or_repository(
+    monkeypatch,
+):
+    feature_calls = []
+    monkeypatch.setattr(
+        service.config, "research_evidence_enabled",
+        lambda: feature_calls.append("feature") or True,
+    )
+    monkeypatch.setattr(
+        service.repo, "assemble_effective_project_pack",
+        lambda *args, **kwargs: pytest.fail("invalid input must not query"),
+    )
+    with pytest.raises(ValidationError):
+        service.assemble_research_evidence_pack(
+            Conn(), project_id="invalid", usage_scope="client_report",
+        )
+    with pytest.raises(ValidationError):
+        service.assemble_research_evidence_pack(
+            Conn(), project_id=uid(), usage_scope="all_scopes",
+        )
+    assert feature_calls == []
+
+
+def test_assembly_service_preserves_repository_failures_and_maps_capacity(monkeypatch):
+    monkeypatch.setattr(service.config, "research_evidence_enabled", lambda: True)
+    project_id = uid()
+    failure = service.repo.ResearchEvidencePackIntegrityError("corrupt state")
+    monkeypatch.setattr(
+        service.repo, "assemble_effective_project_pack",
+        lambda *args, **kwargs: (_ for _ in ()).throw(failure),
+    )
+    with pytest.raises(service.repo.ResearchEvidencePackIntegrityError) as raised:
+        service.assemble_research_evidence_pack(
+            Conn(), project_id=project_id, usage_scope="internal_analysis",
+        )
+    assert raised.value is failure
+
+    capacity = service.repo.ResearchEvidencePackCapacityError("over capacity")
+    monkeypatch.setattr(
+        service.repo, "assemble_effective_project_pack",
+        lambda *args, **kwargs: (_ for _ in ()).throw(capacity),
+    )
+    with pytest.raises(service.ResearchEvidencePackLimitError, match="over capacity"):
+        service.assemble_research_evidence_pack(
+            Conn(), project_id=project_id, usage_scope="internal_analysis",
+        )
