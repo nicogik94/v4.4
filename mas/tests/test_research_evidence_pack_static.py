@@ -87,7 +87,7 @@ def test_assembly_query_is_read_only_bounded_and_scope_explicit():
     service_assembly = service.split("def assemble_research_evidence_pack(", 1)[1]
     assert "usage_scope: UsageScope" in assembly
     assert "usage_scope: UsageScope" in service_assembly
-    assert "MAX_PACK_RELATIONSHIPS + 1" in assembly
+    assert "MAX_PACK_CANDIDATE_REPRESENTATIONS + 1" in assembly
     assert "ResearchEvidencePackQuery(" in assembly
     assert "ResearchEvidencePackQuery(" in service_assembly
     forbidden = (
@@ -96,6 +96,19 @@ def test_assembly_query_is_read_only_bounded_and_scope_explicit():
     )
     assert not [token for token in forbidden if token in assembly]
     assert "config.research_evidence_enabled()" in service
+
+    query = repository.split('_PACK_ASSEMBLY_SELECT = """', 1)[1].split('"""', 1)[0]
+    head_boundary, remainder = query.split("), candidate_status AS MATERIALIZED (", 1)
+    prewide, wide = remainder.split("), eligible AS MATERIALIZED (", 1)
+    assert "bounded_authorization_heads AS MATERIALIZED" in head_boundary
+    assert "LIMIT %s" in head_boundary
+    assert "DISTINCT" not in head_boundary and "ORDER BY" not in head_boundary
+    assert "research_evidence_usage_authorization_decision" not in head_boundary
+    assert "bounded_authorization_candidates AS MATERIALIZED" in prewide
+    assert "later_decision.decision_sequence>d.decision_sequence" in prewide
+    assert "research_source_metadata_revision" not in prewide
+    assert "research_fact_metadata_revision" not in prewide
+    assert "SELECT DISTINCT ON" not in wide
 
 
 def test_r2_0a_2_adds_no_migration_and_documents_exact_boundaries():

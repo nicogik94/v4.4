@@ -247,6 +247,54 @@ def test_populated_aggregate_validates_scope_counts_and_canonical_members():
         )
 
 
+@pytest.mark.parametrize(
+    ("orphan_kind", "message"),
+    [
+        ("claim", "relationship-reachable claims"),
+        ("source", "relationship-reachable sources"),
+        ("evidence", "relationship-reachable evidence"),
+    ],
+)
+def test_populated_aggregate_rejects_unreferenced_members(orphan_kind, message):
+    context_model, claim, source, evidence, relationship = aggregate_members()
+    claims = [claim]
+    sources = [source]
+    evidence_items = [evidence]
+    if orphan_kind == "claim":
+        orphan_id = uid()
+        claims.append(claim.model_copy(update={
+            "claim_draft_id": orphan_id,
+            "annotation": claim.annotation.model_copy(update={
+                "annotation_revision_id": uid(), "claim_draft_id": orphan_id,
+            }),
+        }))
+    elif orphan_kind == "source":
+        sources.append(source.model_copy(update={
+            "source_snapshot_id": uid(), "source_blob_id": uid(),
+            "source_metadata_revision_id": uid(),
+        }))
+    else:
+        evidence_items.append(evidence.model_copy(update={
+            "candidate_fact_revision_id": uid(),
+            "fact_metadata_revision_id": uid(),
+        }))
+    claims.sort(key=lambda item: item.claim_draft_id)
+    sources.sort(key=lambda item: item.source_snapshot_id)
+    evidence_items.sort(
+        key=lambda item: (item.source_snapshot_id, item.candidate_fact_revision_id)
+    )
+    with pytest.raises(ValidationError, match=message):
+        ResearchEvidencePackAggregate(
+            project_id=uid(), usage_scope="client_report", context=context_model,
+            claims=claims, sources=sources, evidence=evidence_items,
+            relationships=[relationship],
+            counts=ResearchEvidencePackCounts(
+                source_count=len(sources), claim_count=len(claims),
+                evidence_count=len(evidence_items), relationship_count=1,
+            ),
+        )
+
+
 def test_aggregate_caps_and_empty_state_are_fail_closed():
     with pytest.raises(ValidationError):
         ResearchEvidencePackCounts(source_count=51)

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from . import claim_support_repository, review_repository
 from .pack_models import (
+    MAX_PACK_CANDIDATE_REPRESENTATIONS,
     MAX_PACK_CLAIMS,
     MAX_PACK_RELATIONSHIPS,
     MAX_PACK_SOURCES,
@@ -510,16 +511,65 @@ def usage_authorization_is_effective(conn, decision) -> bool:
 
 
 _PACK_ASSEMBLY_SELECT = """
-WITH latest_decisions AS MATERIALIZED (
-  SELECT DISTINCT ON (
-    d.claim_intake_item_id,d.evidence_intake_item_id,d.usage_scope
-  ) d.*
-  FROM research_evidence_usage_authorization_decision d
-  WHERE d.project_id=%s AND d.usage_scope=%s
-  ORDER BY d.claim_intake_item_id,d.evidence_intake_item_id,d.usage_scope,
-           d.decision_sequence DESC,d.id DESC
-), eligible AS MATERIALIZED (
+WITH bounded_authorization_heads AS MATERIALIZED (
   SELECT
+    head.project_id,
+    head.claim_intake_item_id,
+    head.evidence_intake_item_id,
+    head.usage_scope,
+    head.last_sequence
+  FROM research_evidence_usage_authorization_sequence_allocator head
+  WHERE head.project_id=%s AND head.usage_scope=%s
+  LIMIT %s
+), candidate_status AS MATERIALIZED (
+  SELECT count(*)::integer AS candidate_count
+  FROM bounded_authorization_heads
+), bounded_authorization_candidates AS MATERIALIZED (
+  SELECT bounded_candidate.*
+  FROM candidate_status status
+  CROSS JOIN LATERAL (
+    SELECT current_decision.*
+    FROM bounded_authorization_heads head
+    CROSS JOIN LATERAL (
+      SELECT
+        d.id,
+        d.project_id,
+        d.claim_intake_item_id,
+        d.evidence_intake_item_id,
+        d.claim_support_assessment_id,
+        d.usage_scope,
+        d.claim_draft_id,
+        d.claim_annotation_revision_id,
+        d.claim_review_decision_id,
+        d.evidence_review_decision_id,
+        d.decision_sequence,
+        d.recorded_at
+      FROM research_evidence_usage_authorization_decision d
+      WHERE d.project_id=head.project_id
+        AND d.claim_intake_item_id=head.claim_intake_item_id
+        AND d.evidence_intake_item_id=head.evidence_intake_item_id
+        AND d.usage_scope=head.usage_scope
+        AND d.decision_sequence=head.last_sequence
+        AND d.decision='authorized'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM research_evidence_usage_authorization_decision later_decision
+          WHERE later_decision.project_id=d.project_id
+            AND later_decision.claim_intake_item_id=d.claim_intake_item_id
+            AND later_decision.evidence_intake_item_id=d.evidence_intake_item_id
+            AND later_decision.usage_scope=d.usage_scope
+            AND later_decision.decision_sequence>d.decision_sequence
+        )
+      LIMIT 1 OFFSET 0
+    ) current_decision
+    WHERE status.candidate_count <= %s
+    OFFSET 0
+  ) bounded_candidate
+), eligible AS MATERIALIZED (
+  SELECT candidate_representation.*
+  FROM bounded_authorization_candidates d
+  CROSS JOIN LATERAL (
+    SELECT
     d.id::text AS authorization_decision_id,
     d.claim_intake_item_id::text,
     d.evidence_intake_item_id::text,
@@ -579,12 +629,7 @@ WITH latest_decisions AS MATERIALIZED (
     support.locator_resolution,
     support.evidence_linkage,
     support.semantic_relationship
-  FROM latest_decisions d
-  JOIN research_evidence_intake_item claim_item
-    ON claim_item.id=d.claim_intake_item_id
-   AND claim_item.project_id=d.project_id
-   AND claim_item.item_kind='claim_draft'
-   AND claim_item.claim_draft_id=d.claim_draft_id
+  FROM research_evidence_intake_item claim_item
   JOIN research_evidence_intake claim_intake
     ON claim_intake.id=claim_item.research_evidence_intake_id
    AND claim_intake.project_id=d.project_id
@@ -653,7 +698,10 @@ WITH latest_decisions AS MATERIALIZED (
     ON evidence_review.id=d.evidence_review_decision_id
    AND evidence_review.project_id=d.project_id
    AND evidence_review.research_evidence_intake_item_id=d.evidence_intake_item_id
-  WHERE d.decision='authorized'
+  WHERE claim_item.id=d.claim_intake_item_id
+    AND claim_item.project_id=d.project_id
+    AND claim_item.item_kind='claim_draft'
+    AND claim_item.claim_draft_id=d.claim_draft_id
     AND annotation.annotation_sequence=(
       SELECT max(current_annotation.annotation_sequence)
       FROM research_evidence_claim_annotation_revision current_annotation
@@ -755,17 +803,17 @@ WITH latest_decisions AS MATERIALIZED (
         AND event.entity_id=fact_metadata.id
         AND event.event_type IN ('superseded','withdrawn')
     )
-), canonical_relationships AS (
-  SELECT DISTINCT ON (claim_draft_id,candidate_fact_revision_id) *
-  FROM eligible
-  ORDER BY claim_draft_id,candidate_fact_revision_id,
-           claim_intake_item_id,evidence_intake_item_id,
-           authorization_sequence DESC,authorization_decision_id
+    LIMIT 1 OFFSET 0
+  ) candidate_representation
 )
-SELECT * FROM canonical_relationships
-ORDER BY claim_draft_id,source_snapshot_id,candidate_fact_revision_id,
-         authorization_sequence,authorization_decision_id
-LIMIT %s
+SELECT eligible.*, status.candidate_count
+FROM candidate_status status
+LEFT JOIN eligible ON TRUE
+ORDER BY eligible.claim_draft_id NULLS FIRST,
+         eligible.source_snapshot_id NULLS FIRST,
+         eligible.candidate_fact_revision_id NULLS FIRST,
+         eligible.authorization_sequence NULLS FIRST,
+         eligible.authorization_decision_id NULLS FIRST
 """
 
 
@@ -776,6 +824,113 @@ def _put_unique(target: dict, key: str, value, *, label: str) -> None:
             f"conflicting canonical {label} rows in evidence-pack assembly"
         )
     target[key] = value
+
+
+def _put_semantically_unique(
+    target: dict, key: str, value, *, semantics, identity_field: str, label: str,
+) -> None:
+    """Retain one deterministic metadata root after payload equality succeeds."""
+    existing = target.get(key)
+    if existing is not None and semantics(existing) != semantics(value):
+        raise ResearchEvidencePackIntegrityError(
+            f"conflicting canonical {label} rows in evidence-pack assembly"
+        )
+    if existing is None or getattr(value, identity_field) < getattr(
+        existing, identity_field,
+    ):
+        target[key] = value
+
+
+def _relationship_semantics(
+    value: ResearchEvidencePackAuthorizedRelationship,
+) -> tuple:
+    """Return canonical content, excluding wrapper/ledger provenance."""
+    return (
+        value.claim_draft_id,
+        value.candidate_fact_revision_id,
+        value.source_snapshot_id,
+        value.claim_annotation_revision_id,
+        value.usage_scope,
+        value.locator_resolution,
+        value.evidence_linkage,
+        value.semantic_relationship,
+    )
+
+
+def _source_semantics(value: ResearchEvidencePackAuthorizedSource) -> tuple:
+    """Compare projected source content, not parallel metadata-root identity."""
+    return (
+        value.source_snapshot_id,
+        value.source_blob_id,
+        value.source_kind,
+        value.source_locator,
+        value.captured_at,
+        value.canonical_source_locator,
+        value.publisher,
+        value.author,
+        value.published_at,
+        value.retrieved_at,
+        value.citation_label,
+        value.declared_quality_tier,
+        value.declared_quality_rationale,
+    )
+
+
+def _evidence_semantics(value: ResearchEvidencePackAuthorizedEvidence) -> tuple:
+    """Compare projected fact content, not parallel metadata-root identity."""
+    return (
+        value.candidate_fact_revision_id,
+        value.source_snapshot_id,
+        value.fact_type,
+        value.numeric_value,
+        value.text_value,
+        value.unit,
+        value.currency_code,
+        value.as_of_date,
+        value.numerator_context,
+        value.denominator_context,
+        value.percentage_basis,
+        value.percentage_subtype,
+        value.time_unit,
+        value.counted_entity,
+        value.stable_fact_key,
+        value.source_char_range,
+        value.citation_locator,
+    )
+
+
+def _representation_key(
+    value: ResearchEvidencePackAuthorizedRelationship,
+) -> tuple:
+    """Choose a whole eligible wrapper only after semantic equality is proven."""
+    return (
+        value.claim_intake_item_id,
+        value.evidence_intake_item_id,
+        -value.authorization_sequence,
+        value.authorization_decision_id,
+        value.claim_support_assessment_id,
+        value.claim_review_decision_id,
+        value.evidence_review_decision_id,
+    )
+
+
+def _require_equivalent_representation(existing, candidate) -> None:
+    if existing[0] != candidate[0]:
+        raise ResearchEvidencePackIntegrityError(
+            "conflicting canonical claim rows in evidence-pack assembly"
+        )
+    if _source_semantics(existing[1]) != _source_semantics(candidate[1]):
+        raise ResearchEvidencePackIntegrityError(
+            "conflicting canonical source rows in evidence-pack assembly"
+        )
+    if _evidence_semantics(existing[2]) != _evidence_semantics(candidate[2]):
+        raise ResearchEvidencePackIntegrityError(
+            "conflicting canonical evidence rows in evidence-pack assembly"
+        )
+    if _relationship_semantics(existing[3]) != _relationship_semantics(candidate[3]):
+        raise ResearchEvidencePackIntegrityError(
+            "conflicting duplicate canonical relationship in evidence-pack assembly"
+        )
 
 
 def _assembly_members(row, usage_scope: UsageScope):
@@ -840,44 +995,81 @@ def assemble_effective_project_pack(
     if project is None:
         raise ResearchEvidencePackParentNotFound("project not found")
 
-    rows = conn.execute(
+    status_rows = conn.execute(
         _PACK_ASSEMBLY_SELECT,
-        (query.project_id, query.usage_scope.value, MAX_PACK_RELATIONSHIPS + 1),
+        (
+            query.project_id,
+            query.usage_scope.value,
+            MAX_PACK_CANDIDATE_REPRESENTATIONS + 1,
+            MAX_PACK_CANDIDATE_REPRESENTATIONS,
+        ),
     ).fetchall()
-    if len(rows) > MAX_PACK_RELATIONSHIPS:
-        raise ResearchEvidencePackCapacityError(
-            f"current pack exceeds {MAX_PACK_RELATIONSHIPS} canonical relationships"
+    if not status_rows:
+        raise ResearchEvidencePackIntegrityError(
+            "evidence-pack candidate boundary returned no status row"
         )
+    candidate_counts = {row[59] for row in status_rows}
+    if len(candidate_counts) != 1:
+        raise ResearchEvidencePackIntegrityError(
+            "inconsistent evidence-pack candidate boundary status"
+        )
+    candidate_count = candidate_counts.pop()
+    if candidate_count > MAX_PACK_CANDIDATE_REPRESENTATIONS:
+        raise ResearchEvidencePackCapacityError(
+            "current pack exceeds "
+            f"{MAX_PACK_CANDIDATE_REPRESENTATIONS} authorization wrapper heads"
+        )
+    rows = [row[:59] for row in status_rows if row[0] is not None]
     if not rows:
         return ResearchEvidencePackAggregate(
             project_id=query.project_id, usage_scope=query.usage_scope,
         )
 
+    representations = {}
     claims: dict[str, ResearchEvidencePackAuthorizedClaim] = {}
     sources: dict[str, ResearchEvidencePackAuthorizedSource] = {}
     evidence_items: dict[str, ResearchEvidencePackAuthorizedEvidence] = {}
     relationships: dict[tuple[str, str], ResearchEvidencePackAuthorizedRelationship] = {}
     try:
         for row in rows:
-            claim, source, evidence, relationship = _assembly_members(
+            candidate = _assembly_members(
                 row, query.usage_scope,
             )
-            _put_unique(claims, claim.claim_draft_id, claim, label="claim")
-            _put_unique(sources, source.source_snapshot_id, source, label="source")
-            _put_unique(
-                evidence_items, evidence.candidate_fact_revision_id, evidence,
-                label="evidence",
-            )
+            relationship = candidate[3]
             relationship_key = (
                 relationship.claim_draft_id,
                 relationship.candidate_fact_revision_id,
             )
-            existing = relationships.get(relationship_key)
-            if existing is not None and existing != relationship:
-                raise ResearchEvidencePackIntegrityError(
-                    "conflicting duplicate canonical relationship in evidence-pack assembly"
-                )
-            relationships[relationship_key] = relationship
+            existing = representations.get(relationship_key)
+            if existing is not None:
+                _require_equivalent_representation(existing, candidate)
+            if existing is None or _representation_key(
+                relationship
+            ) < _representation_key(existing[3]):
+                representations[relationship_key] = candidate
+
+        if len(representations) > MAX_PACK_RELATIONSHIPS:
+            raise ResearchEvidencePackCapacityError(
+                f"current pack exceeds {MAX_PACK_RELATIONSHIPS} canonical relationships"
+            )
+
+        for claim, source, evidence, relationship in representations.values():
+            _put_unique(claims, claim.claim_draft_id, claim, label="claim")
+            _put_semantically_unique(
+                sources, source.source_snapshot_id, source,
+                semantics=_source_semantics,
+                identity_field="source_metadata_revision_id",
+                label="source",
+            )
+            _put_semantically_unique(
+                evidence_items, evidence.candidate_fact_revision_id, evidence,
+                semantics=_evidence_semantics,
+                identity_field="fact_metadata_revision_id",
+                label="evidence",
+            )
+            relationships[
+                (relationship.claim_draft_id, relationship.candidate_fact_revision_id)
+            ] = relationship
 
         if len(sources) > MAX_PACK_SOURCES:
             raise ResearchEvidencePackCapacityError(

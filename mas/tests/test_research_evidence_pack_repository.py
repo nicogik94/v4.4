@@ -6,7 +6,7 @@ import pytest
 
 from research_evidence import pack_repository as repo
 from research_evidence.pack_models import (
-    MAX_PACK_RELATIONSHIPS,
+    MAX_PACK_CANDIDATE_REPRESENTATIONS,
     ResearchEvidenceProjectContextRevisionCreate,
     ResearchEvidenceProjectContextRevisionRecord,
     ResearchEvidenceUsageAuthorizationDecisionCreate,
@@ -66,7 +66,10 @@ def authorization_record(value):
     )
 
 
-def assembly_row(*, claim_id=None, source_id=None, fact_id=None, sequence=1):
+def assembly_row(
+    *, claim_id=None, source_id=None, fact_id=None, sequence=1,
+    candidate_count=1,
+):
     now = datetime.now(timezone.utc)
     row = [None] * 59
     row[0:13] = [
@@ -86,7 +89,11 @@ def assembly_row(*, claim_id=None, source_id=None, fact_id=None, sequence=1):
         "reported_fact", "high", "relevant", "supports", "does not prove",
         [], [], None, None, None, None, 1, now, "resolvable", "linked", "support",
     ]
-    return tuple(row)
+    return tuple(row) + (candidate_count,)
+
+
+def assembly_status(candidate_count):
+    return (None,) * 59 + (candidate_count,)
 
 
 def test_effective_context_is_project_scoped_and_sequence_ordered():
@@ -190,8 +197,16 @@ def test_effective_authorization_query_has_explicit_canonical_final_order():
 def test_assembly_query_freezes_current_scope_fail_closed_sql_contract():
     normalized = " ".join(repo._PACK_ASSEMBLY_SELECT.split())
     required = (
-        "d.project_id=%s AND d.usage_scope=%s",
+        "bounded_authorization_heads AS MATERIALIZED",
+        "FROM bounded_authorization_heads head",
+        "bounded_authorization_candidates AS MATERIALIZED",
+        "head.project_id=%s AND head.usage_scope=%s",
+        "d.decision_sequence=head.last_sequence",
         "d.decision='authorized'",
+        "later_decision.decision_sequence>d.decision_sequence",
+        "LIMIT 1 OFFSET 0",
+        "LIMIT %s",
+        "status.candidate_count <= %s",
         "annotation.annotation_sequence=( SELECT max",
         "support.assessment_sequence=( SELECT max",
         "claim_review.decision_sequence=( SELECT max",
@@ -202,11 +217,11 @@ def test_assembly_query_freezes_current_scope_fail_closed_sql_contract():
         "retention.event_type IN ('tombstone','redact')",
         "successor.supersedes_claim_id=claim.id",
         "replacement.supersedes_candidate_fact_revision_id=fact.id",
-        "SELECT DISTINCT ON (claim_draft_id,candidate_fact_revision_id)",
-        "ORDER BY claim_draft_id,source_snapshot_id,candidate_fact_revision_id",
-        "LIMIT %s",
+        "SELECT eligible.*, status.candidate_count",
+        "ORDER BY eligible.claim_draft_id NULLS FIRST",
     )
     assert not [fragment for fragment in required if fragment not in normalized]
+    assert "DISTINCT ON" not in normalized
     forbidden = (" INSERT ", " UPDATE ", " DELETE ", " FOR UPDATE", "LOCK TABLE")
     padded = f" {normalized} "
     assert not [fragment for fragment in forbidden if fragment in padded]
@@ -214,7 +229,9 @@ def test_assembly_query_freezes_current_scope_fail_closed_sql_contract():
 
 def test_assembly_returns_typed_empty_pack_without_reading_context():
     project_id = uid()
-    conn = Conn([Result(row=(project_id,)), Result(rows=[])])
+    conn = Conn([
+        Result(row=(project_id,)), Result(rows=[assembly_status(0)]),
+    ])
     pack = repo.assemble_effective_project_pack(
         conn, project_id=project_id, usage_scope="client_report",
     )
@@ -223,7 +240,9 @@ def test_assembly_returns_typed_empty_pack_without_reading_context():
     assert pack.counts.relationship_count == 0
     assert len(conn.calls) == 2
     assert conn.calls[1][1] == (
-        project_id, "client_report", MAX_PACK_RELATIONSHIPS + 1,
+        project_id, "client_report",
+        MAX_PACK_CANDIDATE_REPRESENTATIONS + 1,
+        MAX_PACK_CANDIDATE_REPRESENTATIONS,
     )
 
 
@@ -338,17 +357,30 @@ def test_assembly_existing_capacity_limits_fail_closed(dimension, count, message
         )
 
 
-def test_assembly_relationship_cross_product_limit_fails_before_materialization():
+def test_assembly_candidate_limit_accepts_exact_and_rejects_sentinel_before_rows():
     project_id = uid()
-    conn = Conn([
+    exact = Conn([
         Result(row=(project_id,)),
-        Result(rows=[()] * (MAX_PACK_RELATIONSHIPS + 1)),
+        Result(rows=[assembly_row(
+            candidate_count=MAX_PACK_CANDIDATE_REPRESENTATIONS,
+        )]),
+        Result(row=None),
     ])
-    with pytest.raises(repo.ResearchEvidencePackCapacityError, match="relationships"):
+    assert repo.assemble_effective_project_pack(
+        exact, project_id=project_id, usage_scope="client_report",
+    ).counts.relationship_count == 1
+
+    overflow = Conn([
+        Result(row=(project_id,)),
+        Result(rows=[assembly_status(MAX_PACK_CANDIDATE_REPRESENTATIONS + 1)]),
+    ])
+    with pytest.raises(
+        repo.ResearchEvidencePackCapacityError, match="authorization wrapper heads",
+    ):
         repo.assemble_effective_project_pack(
-            conn, project_id=project_id, usage_scope="client_report",
+            overflow, project_id=project_id, usage_scope="client_report",
         )
-    assert len(conn.calls) == 2
+    assert len(overflow.calls) == 2
 
 
 def test_authorization_insert_serializes_then_recovers_known_request_race(monkeypatch):

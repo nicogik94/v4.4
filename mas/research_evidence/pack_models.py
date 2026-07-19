@@ -15,6 +15,7 @@ from .claim_support_models import EvidenceLinkage, LocatorResolution, SemanticRe
 MAX_PACK_SOURCES = 50
 MAX_PACK_CLAIMS = 200
 MAX_PACK_RELATIONSHIPS = MAX_PACK_SOURCES * MAX_PACK_CLAIMS
+MAX_PACK_CANDIDATE_REPRESENTATIONS = MAX_PACK_RELATIONSHIPS
 
 
 class EpistemicStatus(str, Enum):
@@ -722,4 +723,20 @@ class ResearchEvidencePackAggregate(_ImmutableStrictModel):
                 != item.claim_annotation_revision_id
             ):
                 raise ValueError("relationship references a non-current pack annotation")
+
+        reachable_claim_ids = {
+            item.claim_draft_id for item in self.relationships
+        }
+        reachable_source_ids = {
+            item.source_snapshot_id for item in self.relationships
+        }
+        reachable_evidence_ids = {
+            item.candidate_fact_revision_id for item in self.relationships
+        }
+        if set(claim_ids) != reachable_claim_ids:
+            raise ValueError("pack claims must equal relationship-reachable claims")
+        if source_id_set != reachable_source_ids:
+            raise ValueError("pack sources must equal relationship-reachable sources")
+        if set(evidence_ids) != reachable_evidence_ids:
+            raise ValueError("pack evidence must equal relationship-reachable evidence")
         return self
