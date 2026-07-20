@@ -3,6 +3,7 @@ v4 Multi-Agent System — LangGraph Orchestrator
 Deterministic state machine managing 6 specialist agents.
 Handles phase transitions, convergence gates, re-entry routing, and downstream invalidation.
 """
+import asyncio
 import json
 import logging
 import re
@@ -33,6 +34,7 @@ from cdp.citation_format import (
 )
 from decision_objects import ensure_decision_objects
 from knowledge.retrieval import evaluate_phase_retrieval
+import research_evidence_context
 import report_freshness
 from report_quality import (
     PROVISIONAL_CLARIFICATION_CAVEAT,
@@ -440,7 +442,7 @@ HYPOTHESES:
 PROJECT: {state.brief[:500]}"""
 
 
-def build_audit_prompt(state: ProjectState) -> str:
+def build_audit_prompt(state: ProjectState, research_evidence_section: str = "") -> str:
     ctx_classify = summarize_phase_output("classify", state)
     ctx_hyps = summarize_phase_output("hypotheses", state)
     ctx_gauntlet = summarize_phase_output("gauntlet", state)
@@ -456,7 +458,7 @@ Return JSON:
 {ctx_classify}
 {ctx_hyps}
 {ctx_gauntlet}
-{retrieval_section}
+{retrieval_section}{research_evidence_section}
 {f"DATA: {state.data[:2000]}" if state.data else ""}"""
 
 
@@ -486,7 +488,7 @@ Constraint adherence rules:
 - Defer major engineering work or broad growth spend when the operator prohibits it or limits the budget to a small experiment."""
 
 
-def build_strategy_prompt(state: ProjectState) -> str:
+def build_strategy_prompt(state: ProjectState, research_evidence_section: str = "") -> str:
     ctx_classify = summarize_phase_output("classify", state)
     ctx_hyps = summarize_phase_output("hypotheses", state)
     ctx_audit = summarize_phase_output("audit", state)
@@ -520,7 +522,7 @@ Return JSON:
 {ctx_gauntlet}
 {ctx_audit}
 {hard_constraints}
-{retrieval_section}
+{retrieval_section}{research_evidence_section}
 {f"DATA: {state.data[:500]}" if state.data else ""}"""
 
 
@@ -1756,8 +1758,47 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         )
         return state
 
-    prompt = builder(state)
     is_json = phase != "report"
+
+    # ═══ R2.0A-4A: authorized Research Evidence consumer ═══
+    # Consumes the A-2 pack via the public A-3 internal_analysis projection for
+    # audit/strategy of a canonical strategic_audit project only. Read-only and
+    # fail-closed: on DB unavailability, integrity failure, capacity overflow,
+    # or consumer prompt overflow the phase is blocked before any LLM call and
+    # no partial Research Evidence reaches the model. When the feature is off or
+    # nothing is admitted the phase prompt stays byte-stable.
+    research_evidence_section = ""
+    if phase in {"audit", "strategy"}:
+        consumption = await research_evidence_context.load_research_evidence_consumption(
+            state, phase,
+        )
+        if consumption.records_event:
+            log_policy_event(
+                state,
+                research_evidence_context.RESEARCH_EVIDENCE_EVENT_TYPE,
+                consumption.event_details(),
+            )
+        if consumption.blocked:
+            logger.error(
+                f"Research Evidence fail-closed blocked phase {phase}: "
+                f"{consumption.blocked_reason}"
+            )
+            state.phase_status[phase] = PhaseStatus.FAILED
+            state.phase_confidence[phase] = 0.0
+            _record_phase_failure(
+                state,
+                phase,
+                consumption.blocked_reason,
+                consumption.operator_diagnostic,
+            )
+            return state
+        research_evidence_section = consumption.prompt_section()
+
+    prompt = (
+        builder(state, research_evidence_section=research_evidence_section)
+        if phase in {"audit", "strategy"}
+        else builder(state)
+    )
 
     if phase in {"audit", "strategy"}:
         _, used_items = _phase_retrieval_context(state, phase)
