@@ -16,6 +16,10 @@ from config import FRAMEWORKS_BY_PHASE, GATE_CONFIGS
 from decision_objects import ensure_decision_objects
 from knowledge.freshness import build_knowledge_health
 from knowledge.retrieval import RetrievalPhaseImpactSummary, build_phase_retrieval_impact
+from research_evidence_context import (
+    ResearchEvidenceImpactSummary,
+    build_phase_research_evidence_impact,
+)
 from state import ProjectState
 from tools.scoring import check_gate
 
@@ -149,6 +153,7 @@ class PhaseTraceSummary(BaseModel):
     gate_result: GateTraceSummary = Field(default_factory=GateTraceSummary)
     next_step: str = ""
     retrieval_impact: Optional[RetrievalPhaseImpactSummary] = None
+    research_evidence_impact: Optional[ResearchEvidenceImpactSummary] = None
     knowledge_usage: list[KnowledgeUsageSummary] = Field(default_factory=list)
     logic_separation: LogicSeparationSummary = Field(default_factory=LogicSeparationSummary)
     uncertainty: UncertaintySummary = Field(default_factory=UncertaintySummary)
@@ -250,6 +255,7 @@ def build_phase_trace(state: ProjectState, phase: str) -> PhaseTraceSummary:
         gate_result=gate_trace,
         next_step=_next_step(state, phase, status),
         retrieval_impact=_phase_retrieval_impact(state, phase),
+        research_evidence_impact=build_phase_research_evidence_impact(state, phase),
         knowledge_usage=_phase_knowledge_usage(state, phase),
         logic_separation=_logic_for_phase(state, phase, gate_trace),
         uncertainty=_phase_uncertainty(state, phase),
