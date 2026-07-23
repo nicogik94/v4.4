@@ -1,0 +1,205 @@
+"""Unit gating for the bounded candidate-fact production service (R2.0A-4B).
+
+No database: these prove the feature gate, the caller-transaction-ownership
+guard (autocommit + READ COMMITTED isolation), and canonical revalidation of a
+directly-constructed ``ValidatedFact`` — all before any SQL or SAVEPOINT runs.
+Repository binding, rollback, and append behavior live in the _pg suite.
+"""
+import sys
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
+
+import psycopg
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from knowledge.evidence_snapshot import fact_service  # noqa: E402
+from knowledge.evidence_snapshot.validation import (  # noqa: E402
+    FactValidationError,
+    ValidatedFact,
+    validate_fact,
+)
+
+
+class FakeConn:
+    """A connection whose every ``execute`` fails — proves no SQL runs.
+
+    The gating tests rely on this: any rejection that reaches ``execute`` (i.e.
+    a SAVEPOINT or SELECT) would raise AssertionError, so a passing test proves
+    the rejection happened before any SQL.
+    """
+
+    def __init__(self, *, autocommit=False, isolation_level=None):
+        self.autocommit = autocommit
+        self.isolation_level = isolation_level
+        self.executed = []
+
+    def execute(self, query, params=None):
+        self.executed.append(str(query))
+        raise AssertionError("no SQL should run in these gating tests")
+
+
+def _fact():
+    return validate_fact("count", value=3, counted_entity="records")
+
+
+# The service now requires an EXPLICITLY pinned READ COMMITTED level, so the
+# gating tests that must get past the isolation guard pin it here.
+RC = psycopg.IsolationLevel.READ_COMMITTED
+
+
+def _rc(**kwargs):
+    kwargs.setdefault("isolation_level", RC)
+    return FakeConn(**kwargs)
+
+
+def test_disabled_without_snapshot_flag(monkeypatch):
+    monkeypatch.delenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", raising=False)
+    with pytest.raises(fact_service.CandidateFactServiceDisabled):
+        fact_service.create_candidate_fact_revision(
+            FakeConn(), project_id="p", source_snapshot_id="s", fact=_fact()
+        )
+
+
+def test_autocommit_connection_rejected(monkeypatch):
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    with pytest.raises(fact_service.CandidateFactServiceTransactionError):
+        fact_service.create_candidate_fact_revision(
+            FakeConn(autocommit=True),
+            project_id="p",
+            source_snapshot_id="s",
+            fact=_fact(),
+        )
+
+
+def test_non_validated_fact_rejected(monkeypatch):
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    with pytest.raises(TypeError):
+        fact_service.create_candidate_fact_revision(
+            FakeConn(), project_id="p", source_snapshot_id="s",
+            fact={"fact_type": "count"},
+        )
+
+
+def test_missing_snapshot_id_rejected(monkeypatch):
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    with pytest.raises(fact_service.CandidateFactSourceSnapshotNotFound):
+        fact_service.create_candidate_fact_revision(
+            _rc(), project_id="p", source_snapshot_id="", fact=_fact()
+        )
+
+
+def test_none_isolation_rejected_before_any_sql(monkeypatch):
+    # isolation_level=None delegates to the server default and does NOT prove
+    # READ COMMITTED; it must be rejected before any SQL runs.
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = FakeConn(isolation_level=None)
+    with pytest.raises(fact_service.CandidateFactServiceTransactionError):
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s", fact=_fact()
+        )
+    assert conn.executed == []
+
+
+@pytest.mark.parametrize(
+    "isolation",
+    [psycopg.IsolationLevel.REPEATABLE_READ, psycopg.IsolationLevel.SERIALIZABLE],
+)
+def test_non_read_committed_isolation_rejected(monkeypatch, isolation):
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    with pytest.raises(fact_service.CandidateFactServiceTransactionError):
+        fact_service.create_candidate_fact_revision(
+            FakeConn(isolation_level=isolation),
+            project_id="p", source_snapshot_id="s", fact=_fact(),
+        )
+
+
+def test_read_committed_isolation_accepted_reaches_sql(monkeypatch):
+    # An explicitly pinned READ COMMITTED is accepted, so the guard passes and
+    # execution reaches the SAVEPOINT (proven by the FakeConn AssertionError).
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    with pytest.raises(AssertionError):
+        fact_service.create_candidate_fact_revision(
+            _rc(), project_id="p", source_snapshot_id="s", fact=_fact(),
+        )
+
+
+# ─────────────────────────── canonical revalidation (no SQL) ───────────────────────────
+#
+# A ``ValidatedFact`` is a plain dataclass and can be constructed directly,
+# bypassing ``validate_fact``. The service must reconstruct + revalidate every
+# field and reject a forged/inconsistent value BEFORE any SQL runs — proven by
+# the FakeConn, whose ``execute`` raises AssertionError (so a FactValidationError
+# means validation happened first).
+
+
+def _forged(**kwargs) -> ValidatedFact:
+    return ValidatedFact(**kwargs)
+
+
+FORGED_INVALID = [
+    # rate missing numerator and denominator contexts
+    _forged(fact_type="rate", numeric_value=Decimal("0.5")),
+    # rate missing only the denominator context
+    _forged(fact_type="rate", numeric_value=Decimal("0.5"), numerator_context="x"),
+    # percentage missing subtype
+    _forged(fact_type="percentage", numeric_value=Decimal("10"), percentage_basis="b"),
+    # percentage invalid subtype
+    _forged(
+        fact_type="percentage", numeric_value=Decimal("10"),
+        percentage_basis="b", percentage_subtype="not_a_subtype",
+    ),
+    # percentage out of bounds for its subtype (share_0_1 upper bound is 1)
+    _forged(
+        fact_type="percentage", numeric_value=Decimal("2"),
+        percentage_basis="b", percentage_subtype="share_0_1",
+    ),
+    # duration negative
+    _forged(fact_type="duration", numeric_value=Decimal("-1"), time_unit="days"),
+    # duration invalid unit
+    _forged(fact_type="duration", numeric_value=Decimal("1"), time_unit="fortnights"),
+    # count non-integral
+    _forged(fact_type="count", numeric_value=Decimal("3.5"), counted_entity="rows"),
+    # count missing counted_entity
+    _forged(fact_type="count", numeric_value=Decimal("3")),
+    # money unknown currency
+    _forged(
+        fact_type="money", numeric_value=Decimal("5"),
+        currency_code="XYZ", as_of_date=date(2026, 1, 1),
+    ),
+    # money missing as_of_date
+    _forged(fact_type="money", numeric_value=Decimal("5"), currency_code="USD"),
+    # blank textual fact
+    _forged(fact_type="text", text_value="   "),
+    # unknown fact_type entirely
+    _forged(fact_type="totally_bogus", text_value="x"),
+]
+
+
+@pytest.mark.parametrize("forged", FORGED_INVALID)
+def test_forged_validatedfact_rejected_before_any_sql(monkeypatch, forged):
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = _rc()
+    with pytest.raises(FactValidationError):
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s", fact=forged
+        )
+    assert conn.executed == []  # no SAVEPOINT / SELECT ran before rejection
+
+
+def test_valid_directly_constructed_fact_reaches_sql(monkeypatch):
+    # A well-formed ValidatedFact revalidates cleanly, so execution reaches the
+    # SAVEPOINT — proving canonicalization does not reject valid values.
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    good = ValidatedFact(
+        fact_type="rate", numeric_value=Decimal("0.5"),
+        numerator_context="defects", denominator_context="units",
+    )
+    with pytest.raises(AssertionError):
+        fact_service.create_candidate_fact_revision(
+            _rc(), project_id="p", source_snapshot_id="s", fact=good
+        )
