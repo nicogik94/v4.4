@@ -55,6 +55,17 @@ class CandidateFactSourceSnapshotNotFound(ValueError):
     """The bound source snapshot does not exist for the given project."""
 
 
+class CandidateFactSourceSnapshotUnavailable(ValueError):
+    """The bound snapshot exists but is canonically unavailable.
+
+    Canonical v47 availability (``repository.snapshot_available``) treats a
+    ``tombstone`` or ``redact`` retention event on the snapshot OR on its
+    underlying ``source_blob`` as blocking; ``legal_hold`` does not affect
+    availability. A new fact must never be created from a retained source, so
+    this is raised — after the same-project existence check — before the insert.
+    """
+
+
 def _require_enabled() -> None:
     if not config.evidence_snapshot_enabled():
         raise CandidateFactServiceDisabled(
@@ -175,12 +186,27 @@ def create_candidate_fact_revision(
     # A forged/invalid ValidatedFact raises here, before any SQL runs.
     canonical = _canonicalize(fact)
     with _fact_write(conn):
+        # (1) Same-project existence. This MUST stay separate from the
+        #     availability check below: ``repo.snapshot_available`` is a
+        #     NOT EXISTS resolver that returns True for a snapshot that does not
+        #     exist at all, so it can never stand in for existence. A missing or
+        #     foreign-project snapshot continues to raise NotFound.
         if not _source_snapshot_exists(
             conn, project_id=project_id, source_snapshot_id=source_snapshot_id
         ):
             raise CandidateFactSourceSnapshotNotFound(
                 "source snapshot does not exist for this project"
             )
+        # (2) Canonical v47 availability, reusing the exact resolver the Research
+        #     Evidence intake boundary uses (tombstone/redact on the snapshot or
+        #     its blob block; legal_hold does not). Run immediately before the
+        #     insert, inside the caller-owned transaction / savepoint. No new
+        #     locking protocol is introduced.
+        if not repo.snapshot_available(conn, source_snapshot_id):
+            raise CandidateFactSourceSnapshotUnavailable(
+                "source snapshot is tombstoned or redacted"
+            )
+        # (3) Insert the validated, canonical fact.
         return repo.insert_fact(
             conn,
             project_id=project_id,

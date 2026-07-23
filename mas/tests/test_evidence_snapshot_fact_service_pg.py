@@ -45,6 +45,23 @@ def _project_with_snapshot(conn, tag):
     return project_id, snapshot
 
 
+def _project_with_snapshot_and_blob(conn, tag):
+    project_id = pg.insert_project(conn, name=f"fact-{tag}")
+    blob = ev_blob(conn, project_id, tag)
+    snapshot = pg_snapshot(conn, project_id, blob, tag)
+    return project_id, snapshot, blob
+
+
+def _append_retention(conn, *, project_id, event_type, snapshot=None, blob=None):
+    from knowledge.evidence_snapshot import repository as ev_repo
+
+    return ev_repo.insert_retention_event(
+        conn, project_id=project_id, event_type=event_type,
+        source_snapshot_id=snapshot, source_blob_id=blob,
+        reason="", created_by="op",
+    )
+
+
 def ev_blob(conn, project_id, tag):
     from knowledge.evidence_snapshot import repository as ev_repo
 
@@ -123,3 +140,95 @@ def test_appends_multiple_facts_on_commit(schema):
         )
     conn.commit()
     assert _count_facts(conn, project_id) == 3
+
+
+def test_rejects_missing_snapshot_in_project(schema):
+    # Regression: an existence miss (not availability) still raises NotFound —
+    # snapshot_available's NOT EXISTS would spuriously say "available" here.
+    conn, _ = schema
+    project_id = pg.insert_project(conn, name="fact-missing")
+    conn.commit()
+    with pytest.raises(fact_service.CandidateFactSourceSnapshotNotFound):
+        fact_service.create_candidate_fact_revision(
+            conn, project_id=project_id, source_snapshot_id=str(uuid.uuid4()),
+            fact=validate_fact("count", value=1, counted_entity="x"),
+        )
+    conn.rollback()
+    assert _count_facts(conn, project_id) == 0
+
+
+# ─── REVIEW FINDING 4: reject facts from canonically UNAVAILABLE snapshots ───
+#
+# Canonical v47 (repository.snapshot_available) treats tombstone/redact on the
+# snapshot OR its blob as blocking; legal_hold does NOT. The wrapper must not
+# create a NEW candidate_fact_revision from a retained source. Existence is
+# checked FIRST (a missing/foreign snapshot stays NotFound), then availability.
+
+
+@pytest.mark.parametrize("event_type", ["tombstone", "redact"])
+def test_rejects_snapshot_target_retention(schema, event_type):
+    # A (tombstone) + B (redact): retention event targets the SNAPSHOT.
+    conn, _ = schema
+    project_id, snapshot = _project_with_snapshot(conn, f"snap-{event_type}")
+    _append_retention(
+        conn, project_id=project_id, event_type=event_type, snapshot=snapshot
+    )
+    conn.commit()
+    before = _count_facts(conn, project_id)
+    with pytest.raises(fact_service.CandidateFactSourceSnapshotUnavailable):
+        fact_service.create_candidate_fact_revision(
+            conn, project_id=project_id, source_snapshot_id=snapshot,
+            fact=validate_fact("count", value=7, counted_entity="rows"),
+        )
+    conn.commit()  # nothing to persist; prove no fact leaked through
+    assert _count_facts(conn, project_id) == before == 0
+
+
+@pytest.mark.parametrize("event_type", ["tombstone", "redact"])
+def test_rejects_blob_target_retention(schema, event_type):
+    # C (tombstone) + D (redact): retention event targets the underlying BLOB.
+    conn, _ = schema
+    project_id, snapshot, blob = _project_with_snapshot_and_blob(
+        conn, f"blob-{event_type}"
+    )
+    _append_retention(
+        conn, project_id=project_id, event_type=event_type, blob=blob
+    )
+    conn.commit()
+    before = _count_facts(conn, project_id)
+    with pytest.raises(fact_service.CandidateFactSourceSnapshotUnavailable):
+        fact_service.create_candidate_fact_revision(
+            conn, project_id=project_id, source_snapshot_id=snapshot,
+            fact=validate_fact("count", value=9, counted_entity="rows"),
+        )
+    conn.commit()
+    assert _count_facts(conn, project_id) == before == 0
+
+
+@pytest.mark.parametrize("target", ["snapshot", "blob"])
+def test_legal_hold_does_not_block_fact_creation(schema, target):
+    # E (mandatory control): legal_hold is NOT a blocking event — the snapshot
+    # stays canonically available and a valid fact still succeeds. Guards against
+    # treating every retention event as blocking.
+    conn, _ = schema
+    project_id, snapshot, blob = _project_with_snapshot_and_blob(
+        conn, f"hold-{target}"
+    )
+    _append_retention(
+        conn, project_id=project_id, event_type="legal_hold",
+        snapshot=snapshot if target == "snapshot" else None,
+        blob=blob if target == "blob" else None,
+    )
+    conn.commit()
+
+    from knowledge.evidence_snapshot import repository as ev_repo
+    assert ev_repo.snapshot_available(conn, snapshot) is True
+
+    fact_id = fact_service.create_candidate_fact_revision(
+        conn, project_id=project_id, source_snapshot_id=snapshot,
+        fact=validate_fact("count", value=13, counted_entity="rows"),
+        created_by="op",
+    )
+    conn.commit()
+    assert _count_facts(conn, project_id) == 1
+    assert fact_id

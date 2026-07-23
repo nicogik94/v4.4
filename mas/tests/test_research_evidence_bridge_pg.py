@@ -485,6 +485,116 @@ def test_full_chain_via_bridge_builds_equal_pack(pack_schema, monkeypatch):
     assert proj_payload["projection_fingerprint"] == direct_proj.projection_fingerprint
 
 
+# ─── REVIEW FINDING 4: fact-create rejects a canonically UNAVAILABLE snapshot ───
+#
+# Through the REAL operator path (not repo.snapshot_available directly): even
+# when topology preflight passes, fact-create must fail closed before creating a
+# fact when the source snapshot is tombstoned/redacted (on itself or its blob).
+# legal_hold must NOT be treated as blocking.
+
+
+def _count_where(conn, table, project_id):
+    return conn.execute(
+        f"SELECT count(*) FROM {table} WHERE project_id = %s", (project_id,)
+    ).fetchone()[0]
+
+
+def _fact_create_target(conn, tag):
+    """A committed project + blob + snapshot ready for a fact-create."""
+    project_id = pg.insert_project(conn, name=f"retain-{tag}")
+    blob = ev_repo.insert_or_get_blob(
+        conn, project_id=project_id,
+        content_hash=f"retain-{tag}-{uuid.uuid4().hex}", byte_size=21,
+    )
+    snapshot = ev_repo.insert_snapshot(
+        conn, source_blob_id=blob, project_id=project_id,
+        storage_ref=f"/r2a4b-retain/{uuid.uuid4().hex}",
+    )
+    conn.commit()
+    return project_id, snapshot, blob
+
+
+@pytest.mark.parametrize(
+    "event_type,target",
+    [("tombstone", "snapshot"), ("redact", "snapshot"),
+     ("tombstone", "blob"), ("redact", "blob")],
+)
+def test_bridge_fact_create_rejects_retained_snapshot(
+    pack_schema, monkeypatch, event_type, target
+):
+    conn, schema = pack_schema
+    project_id, snapshot, blob = _fact_create_target(conn, f"{event_type}-{target}")
+    retention_id = ev_repo.insert_retention_event(
+        conn, project_id=project_id, event_type=event_type,
+        source_snapshot_id=snapshot if target == "snapshot" else None,
+        source_blob_id=blob if target == "blob" else None,
+        reason="", created_by="op",
+    )
+    conn.commit()
+    facts_before = _count_where(conn, "candidate_fact_revision", project_id)
+    meta_before = _count_where(conn, "research_fact_metadata_revision", project_id)
+    retention_before = _count_where(conn, "evidence_retention_event", project_id)
+
+    recorder = {}
+    code, payload = _bridge(
+        monkeypatch, schema,
+        ["fact-create", "--project-id", project_id,
+         "--source-snapshot-id", snapshot, "--actor", "op",
+         "--fact-type", "count", "--value", "11", "--counted-entity", "records",
+         "--citation-locator", "section 2", "--commit"],
+        recorder=recorder,
+    )
+
+    # Fails closed: non-zero exit, the exact service error, nothing committed.
+    assert code == bridge.EXIT_FAILURE
+    assert payload["status"] == "error"
+    assert payload["committed"] is False
+    assert payload["error_type"] == "CandidateFactSourceSnapshotUnavailable"
+    assert recorder["commits"] == 0
+
+    # No partial fact / metadata survives; retention state is untouched.
+    conn.rollback()
+    assert _count_where(conn, "candidate_fact_revision", project_id) == facts_before == 0
+    assert _count_where(conn, "research_fact_metadata_revision", project_id) == meta_before == 0
+    assert _count_where(conn, "evidence_retention_event", project_id) == retention_before == 1
+    # The exact retention row is intact (unchanged event_type; not repaired).
+    row = conn.execute(
+        "SELECT event_type FROM evidence_retention_event WHERE id = %s::uuid",
+        (retention_id,),
+    ).fetchone()
+    assert row is not None and row[0] == event_type
+
+
+@pytest.mark.parametrize("target", ["snapshot", "blob"])
+def test_bridge_fact_create_legal_hold_control_still_succeeds(
+    pack_schema, monkeypatch, target
+):
+    # Control: legal_hold does not change availability, so the REAL fact-create
+    # command still creates the fact. Guards against blocking on any retention.
+    conn, schema = pack_schema
+    project_id, snapshot, blob = _fact_create_target(conn, f"hold-{target}")
+    ev_repo.insert_retention_event(
+        conn, project_id=project_id, event_type="legal_hold",
+        source_snapshot_id=snapshot if target == "snapshot" else None,
+        source_blob_id=blob if target == "blob" else None,
+        reason="", created_by="op",
+    )
+    conn.commit()
+
+    code, payload = _bridge(
+        monkeypatch, schema,
+        ["fact-create", "--project-id", project_id,
+         "--source-snapshot-id", snapshot, "--actor", "op",
+         "--fact-type", "count", "--value", "11", "--counted-entity", "records",
+         "--citation-locator", "section 2", "--commit"],
+    )
+    assert code == 0, payload
+    assert payload["committed"] is True
+    assert payload["candidate_fact_revision_id"]
+    conn.rollback()
+    assert _count_where(conn, "candidate_fact_revision", project_id) == 1
+
+
 # ═══════════════════════════ authorization confirmation ═══════════════════════════
 
 
