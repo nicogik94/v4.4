@@ -2427,6 +2427,13 @@ def cmd_trace_inspect(args, stream) -> int:
     as ``state_present=false`` / ``state_valid=null`` with both consumer phases
     ``not_recorded`` — it is detected by a read-only existence probe, never by
     reinterpreting a database error.
+
+    "Malformed persisted state" has two forms, both reported as
+    ``state_valid=false`` / ``invalid_state`` (never a generic error, never a
+    live-projection fallback): ``state_json`` that fails ``ProjectState``
+    validation, and ProjectState-valid JSON whose nested persisted Research
+    Evidence attestation cannot be reconstructed by the canonical impact builder
+    (ProjectState does not type its policy events).
     """
     import research_evidence_context as rc
     from state import ProjectState
@@ -2486,16 +2493,43 @@ def cmd_trace_inspect(args, stream) -> int:
                     f"({type(exc).__name__}); phases reported as invalid_state"
                 )
 
+        # Decoding the persisted Research Evidence attestation is itself a
+        # validation boundary, distinct from ProjectState model validation.
+        # ProjectState does NOT type its nested policy events
+        # (``policy_audit_log: list[dict]``), so a model-valid state can still
+        # carry a malformed ``research_evidence_consumption`` attestation the
+        # canonical builder cannot reconstruct (e.g. a non-numeric count that
+        # makes ``_impact_from_event_details`` raise). That is corrupt *persisted
+        # history*, exactly like a ``state_json`` that fails ProjectState
+        # validation, and is reported identically: ``state_valid=False`` with
+        # every consumer phase ``invalid_state``. Both phase impacts are built
+        # up-front, inside this boundary, so ONE malformed attestation
+        # invalidates the whole history rather than leaving a partially trusted
+        # trace. The boundary wraps ONLY the pure-Python impact projection over
+        # the already-read state — never the database read — so a database error
+        # can never be reinterpreted as malformed state.
+        phase_impacts: Optional[dict[str, Any]] = None
+        if state is not None:
+            try:
+                phase_impacts = {
+                    phase: rc.build_phase_research_evidence_impact(state, phase)
+                    for phase in ("audit", "strategy")
+                }
+            except Exception as exc:
+                phase_impacts = None
+                state_valid = False
+                warnings.append(
+                    "persisted Research Evidence attestation could not be "
+                    f"reconstructed ({type(exc).__name__}); phases reported as "
+                    "invalid_state"
+                )
+
         phases: dict[str, dict] = {}
         for phase in ("audit", "strategy"):
             if state_present and state_valid is False:
                 phases[phase] = _empty_phase_trace(_TRACE_INVALID_STATE)
                 continue
-            impact = (
-                rc.build_phase_research_evidence_impact(state, phase)
-                if state is not None
-                else None
-            )
+            impact = phase_impacts.get(phase) if phase_impacts is not None else None
             phases[phase] = (
                 _phase_trace_from_impact(impact)
                 if impact is not None

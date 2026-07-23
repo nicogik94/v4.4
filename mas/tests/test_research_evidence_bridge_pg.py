@@ -954,6 +954,134 @@ def test_trace_inspect_absent_table_keeps_readonly_connection_usable(
     )
 
 
+# ─── REVIEW FINDING 3: model-valid ProjectState, malformed RE attestation ───
+#
+# ProjectState does NOT type its nested policy events (policy_audit_log is a bare
+# list[dict]), so a model-valid state can still carry a
+# research_evidence_consumption attestation the canonical impact builder cannot
+# reconstruct (e.g. a non-numeric count → ValueError, or a malformed counts
+# shape → AttributeError). trace-inspect must treat that as corrupt persisted
+# history — state_valid=false / invalid_state — not let the exception escape as a
+# generic command error, and never fall back to the current projection.
+
+
+def _malformed_attestation_state_json(project_id, counts):
+    """A ProjectState-compatible state_json whose nested RE attestation is bad."""
+    return {
+        "project_id": project_id,
+        "project_type": "strategic_audit",
+        "policy_audit_log": [
+            {
+                "event_type": rc.RESEARCH_EVIDENCE_EVENT_TYPE,
+                "phase": "audit",
+                "details": {
+                    "phase": "audit",
+                    "status": "used",
+                    "usage_scope": "internal_analysis",
+                    "projection_fingerprint": "fp-should-not-be-trusted",
+                    "counts": counts,
+                    "sources": [],
+                    "blocked_reason": "",
+                },
+            }
+        ],
+    }
+
+
+def _assert_malformed_attestation_invalid_state(
+    conn, schema, monkeypatch, project_id, counts, malformed_marker
+):
+    # (1) The state itself is model-valid — the whole point of the finding.
+    raw = _malformed_attestation_state_json(project_id, counts)
+    assert ProjectState.model_validate(raw) is not None
+
+    # A populated CURRENT pack exists, so a bad implementation could be tempted
+    # to fall back to it; the historical fingerprint above must never surface.
+    current = project_research_evidence_presentation(
+        conn, project_id=project_id, usage_scope=UsageScope.INTERNAL_ANALYSIS
+    )
+    assert current.projection_fingerprint
+
+    _install_state_snapshots(conn)
+    conn.execute(
+        """
+        INSERT INTO state_snapshots (project_id, state_json)
+        VALUES (%s::uuid, %s::jsonb)
+        """,
+        (project_id, json.dumps(raw)),
+    )
+    conn.commit()
+
+    recorder = {}
+    code, payload = _bridge(
+        monkeypatch, schema, ["trace-inspect", "--project-id", project_id],
+        recorder=recorder,
+    )
+
+    # (2) The command SUCCEEDED at inspecting and reporting corrupt history.
+    assert code == 0
+    assert payload["state_present"] is True
+    assert payload["state_valid"] is False
+    for phase in ("audit", "strategy"):
+        assert payload["phases"][phase]["status"] == "invalid_state"
+        assert payload["phases"][phase]["consumed"] is False
+        # No trusted attestation content leaks from the corrupt event.
+        assert payload["phases"][phase]["projection_fingerprint"] == ""
+    assert payload["phases"]["report"]["status"] == "not_applicable"
+    assert payload["phases"]["report"]["consumed"] is False
+    assert payload["report_phase_consumes"] is False
+
+    # (3) No fall-back to the current projection.
+    serialized = json.dumps(payload)
+    assert current.projection_fingerprint not in serialized
+    assert "fp-should-not-be-trusted" not in serialized
+
+    # (4) A bounded, non-secret warning naming only the failure condition — never
+    #     the malformed value itself.
+    warnings = payload.get("warnings", [])
+    assert warnings
+    assert any("reconstructed" in w for w in warnings)
+    assert not any(malformed_marker in w for w in warnings)
+
+    # (5) Strictly read-only: no writes/DDL, no commits, connection read-only.
+    assert recorder["read_only"] is True
+    assert recorder["commits"] == 0
+    assert recorder["writes"] == []
+
+
+def test_trace_inspect_model_valid_state_non_numeric_count_is_invalid_state(
+    pack_schema, monkeypatch
+):
+    # A — non-numeric count: build raises ValueError inside the impact builder.
+    conn, schema = pack_schema
+    claim, evidence, _ = _seed_authorized_internal(conn, "trace-badcount")
+    _assert_malformed_attestation_invalid_state(
+        conn, schema, monkeypatch, claim["project"],
+        counts={
+            "source_count": "not-a-number",
+            "claim_count": 1,
+            "evidence_count": 1,
+            "relationship_count": 1,
+        },
+        malformed_marker="not-a-number",
+    )
+
+
+def test_trace_inspect_model_valid_state_malformed_counts_shape_is_invalid_state(
+    pack_schema, monkeypatch
+):
+    # B — malformed details shape: counts is a list, not a mapping, so the
+    # canonical reconstruction raises AttributeError. A DIFFERENT model-valid
+    # corruption than A, proving the boundary is not keyed to one exception.
+    conn, schema = pack_schema
+    claim, evidence, _ = _seed_authorized_internal(conn, "trace-badshape")
+    _assert_malformed_attestation_invalid_state(
+        conn, schema, monkeypatch, claim["project"],
+        counts=["source_count", "claim_count"],
+        malformed_marker="source_count",
+    )
+
+
 # ═══════════════════════════ drift invalidation via the bridge ═══════════════════════════
 
 

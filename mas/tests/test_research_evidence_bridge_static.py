@@ -574,6 +574,34 @@ def test_trace_inspect_reports_invalid_state():
     assert "_TRACE_INVALID_STATE" in text
 
 
+def test_trace_inspect_impact_builder_only_called_inside_error_boundary():
+    """REVIEW FINDING 3: decoding the persisted attestation is a validation
+    boundary. The canonical impact builder can raise on a model-valid state whose
+    nested RE attestation is malformed, so its ONLY call site must sit inside a
+    bounded try/except that marks the history invalid_state — never bare.
+    """
+    text = _text(BRIDGE)
+    body = text.split("def cmd_trace_inspect(")[1].split("\ndef ")[0]
+    # Invoked exactly once, and inside the bounded boundary.
+    assert body.count("build_phase_research_evidence_impact(") == 1
+    call_at = body.index("build_phase_research_evidence_impact(")
+    before, after = body[:call_at], body[call_at:]
+    # A try: opens the boundary immediately before the call, with no intervening
+    # except between that try and the call…
+    last_try = before.rfind("try:")
+    assert last_try != -1
+    assert "except" not in before[last_try:]
+    # …and its handler marks the persisted history invalid rather than letting
+    # the exception escape as a generic command error.
+    assert "except Exception as exc:" in after
+    handler = after.split("except Exception as exc:")[1]
+    assert "state_valid = False" in handler
+    assert "reconstructed" in handler
+    # The boundary never falls back to the live projection or consumer.
+    assert "project_research_evidence_presentation" not in body
+    assert "store.load" not in body
+
+
 def test_projection_preview_capacity_overflow_omits_rendered_bytes():
     # MINOR 1: no fabricated zero rendered-byte value anywhere; the capacity
     # overflow branch (no block rendered) omits the key entirely.
