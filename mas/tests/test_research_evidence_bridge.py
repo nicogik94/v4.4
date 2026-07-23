@@ -858,3 +858,86 @@ def test_constraint_manifest_entries_are_unique_and_bounded():
     # One request-id constraint per request-bearing ledger.
     assert len(relations) == 6
     assert relations <= set(bridge.CATALOG_MAIN_RELATIONS)
+
+
+# ─────────── direct script execution (repo-root entrypoint, no PYTHONPATH) ───────────
+#
+# REVIEW FINDING 1: the CLI imports `config` at module scope, but a direct
+# invocation puts `mas/tools` — not `mas` — at sys.path[0], so the tool died with
+# ModuleNotFoundError before argparse ever ran. Importing
+# `tools.research_evidence_bridge` in-process does NOT reproduce that: this
+# module already inserted the `mas` root into sys.path above. Only spawning the
+# real script entrypoint from the repository root, with PYTHONPATH removed from
+# the environment, is discriminating.
+
+REPO_ROOT = ROOT.parent
+SCRIPT_RELATIVE_PATH = "mas/tools/research_evidence_bridge.py"
+
+# An unreachable unix-socket directory, so `preflight` resolves its connection
+# attempt locally and immediately without touching any real database.
+_UNREACHABLE_DSN = (
+    "postgresql://bridge:bridge@/bridge"
+    "?host=/nonexistent-research-evidence-bridge-probe"
+)
+
+
+def _run_script_directly(*argv, extra_env=None):
+    """Invoke the actual script from the repo root with NO PYTHONPATH help."""
+    import os
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env.update(extra_env or {})
+    return subprocess.run(
+        [sys.executable, SCRIPT_RELATIVE_PATH, *argv],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_direct_script_help_succeeds_from_repo_root_without_pythonpath():
+    result = _run_script_directly("--help")
+    assert "ModuleNotFoundError" not in result.stderr, result.stderr
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    # argparse initialized and produced the real usage banner.
+    assert "usage: research_evidence_bridge" in result.stdout
+    assert "trace-inspect" in result.stdout
+    assert result.stderr == ""
+
+
+def test_direct_script_preflight_reaches_bridge_execution():
+    """A normal `preflight` must reach the command, not die during imports.
+
+    Runtime conditions may legitimately be unavailable/disabled — the assertion
+    is that Python imports and argparse completed and the bridge's own JSON
+    contract was produced.
+    """
+    result = _run_script_directly(
+        "preflight",
+        extra_env={
+            "DATABASE_URL": _UNREACHABLE_DSN,
+            "MAS_RESEARCH_EVIDENCE_ENABLED": "false",
+            "MAS_EVIDENCE_SNAPSHOT_ENABLED": "false",
+        },
+    )
+    assert "ModuleNotFoundError" not in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "preflight"
+    assert payload["committed"] is False
+    # Reached the command body: it evaluated the feature gates it was given.
+    assert payload["research_evidence_enabled"] is False
+    # Unreachable database is a normal degraded runtime condition, not a crash.
+    assert payload["writes_allowed"] is False
+
+
+def test_direct_script_unknown_command_is_an_argparse_usage_error():
+    """Discriminates argparse initialization from an import failure."""
+    result = _run_script_directly("definitely-not-a-command")
+    assert "ModuleNotFoundError" not in result.stderr, result.stderr
+    assert result.returncode == bridge.EXIT_USAGE
+    assert "usage: research_evidence_bridge" in result.stderr

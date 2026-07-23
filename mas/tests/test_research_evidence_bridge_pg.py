@@ -195,7 +195,11 @@ class _RecordingConn:
 
     def execute(self, query, params=None):
         text = str(query).strip().upper()
-        if text.startswith(("INSERT", "UPDATE", "DELETE")):
+        # DDL is recorded alongside DML: a read-only command must not create the
+        # storage it reads (e.g. trace-inspect must never create state_snapshots).
+        if text.startswith(
+            ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE")
+        ):
             self._log["writes"].append(str(query))
         return self._real.execute(query, params)
 
@@ -855,6 +859,99 @@ def test_trace_inspect_invalid_persisted_state(pack_schema, monkeypatch):
         assert payload["phases"][phase]["consumed"] is False
     assert payload["phases"]["report"]["status"] == "not_applicable"
     assert payload.get("warnings")  # bounded, non-secret warning present
+
+
+# ─────────── REVIEW FINDING 2: state_snapshots may not exist at all ───────────
+#
+# trace-inspect deliberately avoids store.load (which would create storage / use
+# a write-capable pool), so the persistence relation may never have been
+# initialized. Absence of the table is absence of a persisted attestation — a
+# normal, safe report, not an UndefinedTable command error. It is detected by a
+# read-only existence probe, so the read-only transaction is never aborted and
+# no database error is reinterpreted as absence.
+
+
+def _relation_exists(conn, name):
+    return conn.execute(
+        "SELECT to_regclass(%s) IS NOT NULL", (name,)
+    ).fetchone()[0]
+
+
+def test_trace_inspect_absent_state_snapshots_table_is_not_recorded(
+    pack_schema, monkeypatch
+):
+    conn, schema = pack_schema
+    claim, evidence, _ = _seed_authorized_internal(conn, "trace-notable")
+    project_id = claim["project"]
+    # State persistence has never initialized: the relation genuinely does not
+    # exist in this schema (and a populated current pack exists, so an unsafe
+    # implementation could be tempted to infer consumption from it).
+    conn.commit()
+    assert _relation_exists(conn, "state_snapshots") is False
+
+    recorder = {}
+    code, payload = _bridge(
+        monkeypatch, schema, ["trace-inspect", "--project-id", project_id],
+        recorder=recorder,
+    )
+
+    # Exits successfully with the safe absence report.
+    assert code == 0
+    assert payload["state_present"] is False
+    assert payload["state_valid"] is None
+    for phase in ("audit", "strategy"):
+        assert payload["phases"][phase]["status"] == "not_recorded"
+        assert payload["phases"][phase]["consumed"] is False
+        assert payload["phases"][phase]["projection_fingerprint"] == ""
+    assert payload["phases"]["report"]["status"] == "not_applicable"
+    assert payload["phases"]["report"]["consumed"] is False
+    assert payload["report_phase_consumes"] is False
+    # A bounded, non-secret warning names the uninitialized persistence.
+    assert any("state_snapshots" in w for w in payload.get("warnings", []))
+
+    # No table was created, and the connection stayed read-only with no
+    # writes/DDL and no commits.
+    assert _relation_exists(conn, "state_snapshots") is False
+    assert recorder["read_only"] is True
+    assert recorder["commits"] == 0
+    assert recorder["writes"] == []
+
+
+def test_trace_inspect_absent_table_keeps_readonly_connection_usable(
+    pack_schema, monkeypatch
+):
+    """The probe must not abort the transaction the way UndefinedTable would.
+
+    A caught UndefinedTable would leave the read-only transaction in a failed
+    state, so any subsequent statement on that connection raises. Proving the
+    command still runs to completion twice on the same schema — and that the
+    bridge connection is closed cleanly rather than aborted — discriminates the
+    existence probe from exception recovery.
+    """
+    conn, schema = pack_schema
+    claim, evidence, _ = _seed_authorized_internal(conn, "trace-notable-valid")
+    conn.commit()
+    assert _relation_exists(conn, "state_snapshots") is False
+
+    argv = ["trace-inspect", "--project-id", claim["project"]]
+    first_code, first_payload = _bridge(monkeypatch, schema, argv)
+    second_code, second_payload = _bridge(monkeypatch, schema, argv)
+    assert first_code == second_code == 0
+    assert first_payload == second_payload
+
+    # Now initialize persistence: the SAME command switches to the table-present
+    # behavior with no code path change, confirming the probe reads live state.
+    _install_state_snapshots(conn)
+    conn.commit()
+    third_code, third_payload = _bridge(monkeypatch, schema, argv)
+    assert third_code == 0
+    assert third_payload["state_present"] is False
+    assert third_payload["state_valid"] is None
+    assert third_payload["phases"]["audit"]["status"] == "not_recorded"
+    # …and the uninitialized-persistence warning is gone.
+    assert not any(
+        "state_snapshots" in w for w in third_payload.get("warnings", [])
+    )
 
 
 # ═══════════════════════════ drift invalidation via the bridge ═══════════════════════════

@@ -506,6 +506,66 @@ def test_trace_inspect_omits_unavailable_rendered_bytes():
     assert "rendered_utf8_bytes" in text.split("command: projection-preview")[1]
 
 
+# ─────────── REVIEW FINDING 1: direct execution bootstrap ───────────
+
+
+def test_bridge_bootstraps_repo_root_before_application_imports():
+    """`python mas/tools/research_evidence_bridge.py` must import cleanly.
+
+    Python puts `mas/tools` at sys.path[0] for a direct invocation, so the
+    application imports need the repository's `mas` root on sys.path FIRST.
+    """
+    text = _text(BRIDGE)
+    bootstrap = "sys.path.insert(0, str(ROOT))"
+    assert bootstrap in text
+    # The root is derived from this file — never an environment-specific
+    # absolute path and never a PYTHONPATH requirement pushed onto the operator.
+    assert "ROOT = Path(__file__).resolve().parents[1]" in text
+    assert "/home/" not in text and "C:\\" not in text
+    # The bootstrap precedes every application import.
+    bootstrap_at = text.index(bootstrap)
+    for application_import in ("import config", "import psycopg"):
+        assert text.index(application_import) > bootstrap_at, application_import
+
+
+def test_bridge_bootstrap_matches_the_repository_tool_pattern():
+    """The same bounded bootstrap the other repository tools already use."""
+    text = _text(BRIDGE)
+    reference = _text(ROOT / "mas/tools/cdp_review.py")
+    for line in (
+        "ROOT = Path(__file__).resolve().parents[1]",
+        "if str(ROOT) not in sys.path:",
+        "sys.path.insert(0, str(ROOT))",
+    ):
+        assert line in reference, line
+        assert line in text, line
+
+
+# ─────────── REVIEW FINDING 2: absent state_snapshots is probed ───────────
+
+
+def test_trace_inspect_probes_state_snapshots_existence():
+    """Absence is detected by a catalog probe, never by catching a DB error."""
+    text = _text(BRIDGE)
+    body = text.split("def cmd_trace_inspect(")[1].split("\ndef ")[0]
+    # A read-only existence probe runs BEFORE the SELECT…
+    assert "to_regclass('state_snapshots')" in body
+    assert body.index("to_regclass('state_snapshots')") < body.index(
+        "FROM state_snapshots"
+    )
+    assert "state_table_present" in body
+    # …so no exception recovery is needed and no arbitrary database error can be
+    # reinterpreted as absence. Checked against CODE only, ignoring comments.
+    code = "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "UndefinedTable" not in code
+    assert "psycopg.errors" not in code
+    assert "sqlstate" not in code
+    # The tool still never creates the relation it reads.
+    assert "CREATE TABLE" not in body
+
+
 def test_trace_inspect_reports_invalid_state():
     # A malformed persisted ProjectState is reported as invalid_state, not
     # not_recorded, and never falls back to the current projection.

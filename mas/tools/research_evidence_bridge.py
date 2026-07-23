@@ -43,9 +43,20 @@ import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Optional
 
-import config
+# Direct-execution bootstrap. Under `python mas/tools/research_evidence_bridge.py`
+# Python puts `mas/tools` — not `mas` — at sys.path[0], so the application
+# imports below would fail before argparse ever runs. Add the repository's `mas`
+# root the same bounded way the other repository tools do (``cdp_review``,
+# ``validate_t1a_gate2``): a path derived from this file, never an
+# environment-specific absolute path, and no weakening of the imports it enables.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import config  # noqa: E402
 
 # ─────────────────────────── exit codes ────────────────────────────
 
@@ -2410,6 +2421,12 @@ def cmd_trace_inspect(args, stream) -> int:
     live A-4A consumer entrypoint, never opens a write-capable pool or creates
     tables (so it avoids the async project-store loader entirely), and never
     infers historical consumption from the current A-3 projection.
+
+    Because the loader is avoided, ``state_snapshots`` may not exist at all. An
+    absent relation is a legitimate "nothing was ever persisted" and is reported
+    as ``state_present=false`` / ``state_valid=null`` with both consumer phases
+    ``not_recorded`` — it is detected by a read-only existence probe, never by
+    reinterpreting a database error.
     """
     import research_evidence_context as rc
     from state import ProjectState
@@ -2418,14 +2435,40 @@ def cmd_trace_inspect(args, stream) -> int:
     _require_research_evidence_enabled()
 
     def build(conn) -> dict:
-        row = conn.execute(
-            "SELECT state_json FROM state_snapshots WHERE project_id = %s::uuid",
-            (project_id,),
-        ).fetchone()
+        # ``state_snapshots`` belongs to the project store, not to this tool: it
+        # is created when state persistence first initializes. Until then the
+        # relation does not exist, and its absence means exactly one thing —
+        # there is no persisted consumption attestation to report. That is a
+        # normal absence, not an error, so it is resolved with a read-only
+        # catalog existence probe BEFORE the SELECT. Probing first (rather than
+        # recovering from a failed statement) keeps the read-only connection's
+        # transaction valid and requires no exception handling, so no arbitrary
+        # database error can ever be reinterpreted as absence. This tool still
+        # never creates the relation and never uses the project-store loader.
+        state_table_present = bool(
+            conn.execute(
+                "SELECT to_regclass('state_snapshots') IS NOT NULL"
+            ).fetchone()[0]
+        )
+        row = (
+            conn.execute(
+                "SELECT state_json FROM state_snapshots WHERE project_id = %s::uuid",
+                (project_id,),
+            ).fetchone()
+            if state_table_present
+            else None
+        )
         state_present = row is not None
         state = None
         state_valid: Optional[bool] = None
         warnings: list[str] = []
+        if not state_table_present:
+            # Bounded, non-secret: distinguishes "state persistence has never
+            # initialized" from "this project simply has no persisted state".
+            warnings.append(
+                "state persistence is not initialized (no state_snapshots "
+                "relation); no consumption attestation has been recorded"
+            )
         if state_present:
             raw = row[0]
             try:
