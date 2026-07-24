@@ -2970,6 +2970,12 @@ _NON_FINITE_BRIDGE_CASES = [
     # count currently admits an infinite value through validate_fact — another
     # numeric profile that would otherwise persist a non-finite NUMERIC.
     ("count", "Infinity", ["--counted-entity", "records"]),
+    # Bound-comparing profiles: without the CLI's pre-validate finite guard these
+    # would raise a non-canonical decimal.InvalidOperation at fact-create's own
+    # validate_fact call rather than the canonical FactValidationError.
+    ("duration", "NaN", ["--time-unit", "days"]),
+    ("percentage", "NaN",
+     ["--percentage-basis", "share", "--percentage-subtype", "share_0_100"]),
 ]
 
 

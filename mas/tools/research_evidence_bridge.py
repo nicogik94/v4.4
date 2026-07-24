@@ -1512,7 +1512,10 @@ def cmd_fact_create(args, stream) -> int:
     from knowledge.evidence_snapshot.fact_service import (
         create_candidate_fact_revision,
     )
-    from knowledge.evidence_snapshot.validation import validate_fact
+    from knowledge.evidence_snapshot.validation import (
+        FactValidationError,
+        validate_fact,
+    )
     from research_evidence.models import FactMetadataRevisionCreate
     from research_evidence.service import create_fact_metadata_revision
 
@@ -1538,6 +1541,14 @@ def cmd_fact_create(args, stream) -> int:
             if len(as_of) == 10 else _parse_aware_datetime(as_of, "--as-of-date").date()
 
     def build(conn) -> dict:
+        # Reject a non-finite numeric value with the canonical FactValidationError
+        # BEFORE this CLI's own validate_fact call: for a bound-comparing profile
+        # (duration, bounded percentage) validate_fact would compare a NaN against
+        # a bound and raise a non-canonical decimal.InvalidOperation instead. The
+        # bounded fact_service applies the same authoritative Decimal.is_finite()
+        # guard; this mirror keeps the CLI's own validation from tripping first.
+        if numeric_value is not None and not numeric_value.is_finite():
+            raise FactValidationError("numeric candidate facts must be finite")
         validated = validate_fact(
             fact_type,
             value=numeric_value,

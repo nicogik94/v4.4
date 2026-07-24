@@ -210,6 +210,20 @@ def test_fact_service_rejects_non_finite_numeric_before_any_sql():
     )
 
 
+def test_bridge_fact_create_rejects_non_finite_before_its_validate_fact():
+    # The CLI runs its own validate_fact; for a bound-comparing profile a NaN
+    # there raises a non-canonical decimal.InvalidOperation. cmd_fact_create must
+    # reject a non-finite numeric value with the canonical FactValidationError
+    # BEFORE that call.
+    text = _text(BRIDGE)
+    body = text.split("def cmd_fact_create(")[1].split("\ndef cmd_", 1)[0]
+    assert ".is_finite()" in body
+    assert '"numeric candidate facts must be finite"' in body
+    assert body.index("not numeric_value.is_finite()") < (
+        body.index("validated = validate_fact(")
+    )
+
+
 # ─────────────────── MAJOR 2: catalog-exact write preflight ──────────────────
 
 
