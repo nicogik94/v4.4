@@ -310,10 +310,23 @@ class BridgePreflightError(BridgeError):
 
 
 def _open_authoritative_connection():
-    """Open the authoritative MAS PostgreSQL connection (injectable seam)."""
+    """Open the authoritative MAS PostgreSQL connection (injectable seam).
+
+    Prefer the **current** ``DATABASE_URL`` environment variable over the
+    import-time ``config.DATABASE_URL`` snapshot, so the connection targets the
+    exact database the fail-closed write guard (``_require_configured_database_url``)
+    authorized. ``config.DATABASE_URL`` is frozen at config-import time (defaulting
+    to a localhost fallback); a wrapper or in-process caller that sets
+    ``os.environ['DATABASE_URL']`` before calling :func:`main` would otherwise pass
+    the env-based write guard yet silently connect to that stale fallback. The
+    config default still applies only when no ``DATABASE_URL`` is configured — a
+    read-only diagnostic case, since every write requires the env var. The DSN is
+    never logged or printed.
+    """
     import psycopg
 
-    return psycopg.connect(config.DATABASE_URL)
+    dsn = os.environ.get("DATABASE_URL", "").strip() or config.DATABASE_URL
+    return psycopg.connect(dsn)
 
 
 # Tests replace this with a callable returning a connection to a disposable

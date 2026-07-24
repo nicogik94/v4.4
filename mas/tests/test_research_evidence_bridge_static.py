@@ -236,6 +236,11 @@ def test_bridge_write_path_enforces_failclosed_preflight():
     # An explicitly configured DATABASE_URL env var is required for writes.
     assert "def _require_configured_database_url(" in text
     assert 'os.getenv("DATABASE_URL"' in text
+    # The connection seam uses the CURRENT DATABASE_URL env var (the one the guard
+    # checks), not only the import-time config.DATABASE_URL snapshot, so a write
+    # can never target the stale localhost fallback after passing the env guard.
+    seam = text.split("def _open_authoritative_connection(")[1].split("\ndef ", 1)[0]
+    assert 'os.environ.get("DATABASE_URL"' in seam
     # READ COMMITTED is verified, not silently assumed; the old silent catch is gone.
     assert "SHOW transaction_isolation" in text
     assert "server default is READ COMMITTED" not in text

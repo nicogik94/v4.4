@@ -1074,3 +1074,43 @@ def test_runtime_identity_fails_closed_when_control_function_raises():
 
     with pytest.raises(bridge.BridgePreflightError):
         bridge._runtime_identity(FakeConn(responder))
+
+
+# ═══════════ connection seam uses the checked DATABASE_URL, not import-time ═══════════
+#
+# `_require_configured_database_url` authorizes writes from the CURRENT
+# `os.environ['DATABASE_URL']`, but `config.DATABASE_URL` is frozen at
+# config-import time (localhost fallback). The connection seam must use the same
+# current env value the guard checked, or a wrapper that sets DATABASE_URL after
+# import could pass preflight yet connect to the stale fallback database.
+
+
+def test_authoritative_connection_uses_current_env_database_url(monkeypatch):
+    import psycopg
+
+    captured = {}
+    monkeypatch.setattr(
+        psycopg, "connect", lambda dsn: captured.setdefault("dsn", dsn)
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://explicit-host/live_db")
+    # Even if the import-time config snapshot points elsewhere...
+    monkeypatch.setattr(bridge.config, "DATABASE_URL", "postgresql://stale/fallback")
+    bridge._open_authoritative_connection()
+    assert captured["dsn"] == "postgresql://explicit-host/live_db"
+
+
+def test_authoritative_connection_falls_back_to_config_without_env(monkeypatch):
+    import psycopg
+
+    captured = {}
+    monkeypatch.setattr(
+        psycopg, "connect", lambda dsn: captured.setdefault("dsn", dsn)
+    )
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        bridge.config, "DATABASE_URL", "postgresql://config-fallback/db"
+    )
+    # No env configured is a read-only diagnostic case (writes require the env);
+    # the config default still applies.
+    bridge._open_authoritative_connection()
+    assert captured["dsn"] == "postgresql://config-fallback/db"
