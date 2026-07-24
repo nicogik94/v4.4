@@ -1088,6 +1088,16 @@ def test_fingerprint_changes_when_only_socket_endpoint_changes():
     assert bridge._runtime_fingerprint(a) != bridge._runtime_fingerprint(b)
 
 
+def test_fingerprint_encoding_is_injective_across_delimiter_containing_fields():
+    # Adjacent identity components that themselves contain the old '|' delimiter
+    # must not collide: (user="a|b", schema="c") and (user="a", schema="b|c")
+    # both flatten to "...|a|b|c|..." under a delimiter join, but the JSON-array
+    # encoding keeps their fingerprints distinct.
+    a = _identity_conn(current_user="a|b", current_schema="c")
+    b = _identity_conn(current_user="a", current_schema="b|c")
+    assert bridge._runtime_fingerprint(a) != bridge._runtime_fingerprint(b)
+
+
 def test_socket_endpoint_discriminator_is_not_emitted():
     # The clone discriminator is folded into the fingerprint but never emitted,
     # so no socket path leaks into the reported identity.

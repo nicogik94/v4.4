@@ -280,6 +280,10 @@ def test_runtime_identity_is_socket_safe_and_fails_closed():
     assert "_runtime_socket_endpoint(conn)" in fp
     # The socket endpoint is read (non-emitted) and never enters _runtime_identity.
     assert "_runtime_socket_endpoint(" not in ident
+    # The fingerprint encoding is injective (JSON array), not a delimiter join
+    # that a '|'-containing identifier or socket path could make ambiguous.
+    assert "json.dumps(" in fp
+    assert '"|".join' not in fp and "'|'.join" not in fp
 
 
 def test_bridge_has_a_catalog_exact_manifest():

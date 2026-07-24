@@ -835,8 +835,14 @@ def _runtime_fingerprint(conn) -> str:
     endpoint also fingerprints apart.
     """
     identity = _runtime_identity(conn)
-    canonical = "|".join(
-        (
+    # Serialize as a JSON array rather than a delimiter join so the encoding is
+    # injective: a component that itself contains the delimiter — quoted
+    # database/user/schema identifiers and a socket directory path may contain
+    # '|' — cannot make two distinct runtimes collide onto the same canonical
+    # string (and thus the same fingerprint). Fixed field order and compact
+    # separators keep it deterministic.
+    canonical = json.dumps(
+        [
             identity["current_database"],
             identity["inet_server_addr"],
             identity["inet_server_port"],
@@ -846,7 +852,9 @@ def _runtime_fingerprint(conn) -> str:
             identity["current_schema"],
             # Non-emitted clone discriminator (see _runtime_socket_endpoint).
             _runtime_socket_endpoint(conn),
-        )
+        ],
+        separators=(",", ":"),
+        ensure_ascii=True,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
