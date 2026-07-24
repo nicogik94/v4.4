@@ -273,6 +273,13 @@ def test_runtime_identity_is_socket_safe_and_fails_closed():
     # No DSN, credential, or data directory is ever part of the emitted identity.
     for secret in ("DATABASE_URL", "password", "data_directory", "conn.info"):
         assert secret not in ident
+    # Clone-safe: system_identifier is copied by a physical base backup, so the
+    # fingerprint also folds in a non-emitted per-running-cluster socket endpoint.
+    assert "def _runtime_socket_endpoint(" in text
+    fp = text.split("def _runtime_fingerprint(")[1].split("\ndef ", 1)[0]
+    assert "_runtime_socket_endpoint(conn)" in fp
+    # The socket endpoint is read (non-emitted) and never enters _runtime_identity.
+    assert "_runtime_socket_endpoint(" not in ident
 
 
 def test_bridge_has_a_catalog_exact_manifest():

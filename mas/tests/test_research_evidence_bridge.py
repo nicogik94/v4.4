@@ -994,11 +994,13 @@ _SOCKET_IDENTITY = {
 }
 
 
-def _identity_conn(**overrides):
+def _identity_conn(socket_endpoint=None, **overrides):
     """A FakeConn whose identity query returns a 7-column row (with overrides).
 
     ``system_identifier=None`` simulates a cluster/role that cannot supply the
     control-file identity (e.g. pg_control_system() is not executable).
+    ``socket_endpoint="host:port"`` attaches a driver ``info`` so the non-emitted
+    clone discriminator (the connection's socket endpoint) participates.
     """
     ident = dict(_SOCKET_IDENTITY)
     ident.update(overrides)
@@ -1009,7 +1011,11 @@ def _identity_conn(**overrides):
             return [row]
         raise AssertionError(f"unexpected query in identity unit test: {q!r}")
 
-    return FakeConn(responder)
+    conn = FakeConn(responder)
+    if socket_endpoint is not None:
+        host, _, port = socket_endpoint.partition(":")
+        conn.info = SimpleNamespace(host=host, port=port)
+    return conn
 
 
 def test_runtime_identity_exposes_socket_safe_cluster_discriminators():
@@ -1068,6 +1074,31 @@ def test_runtime_identity_emits_no_dsn_or_credentials():
     blob = json.dumps(ident)
     for secret in ("postgresql://", "password", "dbname=", "host=", "disposable@"):
         assert secret not in blob
+
+
+def test_fingerprint_changes_when_only_socket_endpoint_changes():
+    # A promoted physical base backup copies pg_control, so a clone shares
+    # system_identifier; with identical database/user/schema/port over a socket
+    # the emitted identity is byte-for-byte identical. Two such clusters must run
+    # at different socket endpoints, and the non-emitted socket discriminator
+    # keeps their fingerprints apart.
+    a = _identity_conn(socket_endpoint="/var/run/pg-a:5432")
+    b = _identity_conn(socket_endpoint="/var/run/pg-b:5432")
+    assert bridge._runtime_identity(a) == bridge._runtime_identity(b)
+    assert bridge._runtime_fingerprint(a) != bridge._runtime_fingerprint(b)
+
+
+def test_socket_endpoint_discriminator_is_not_emitted():
+    # The clone discriminator is folded into the fingerprint but never emitted,
+    # so no socket path leaks into the reported identity.
+    conn = _identity_conn(socket_endpoint="/var/run/postgresql:5432")
+    ident = bridge._runtime_identity(conn)
+    assert set(ident) == set(_IDENTITY_COLUMNS)  # still exactly 7 emitted fields
+    assert "/var/run/postgresql" not in json.dumps(ident)
+    # It does, however, participate in the fingerprint.
+    assert bridge._runtime_fingerprint(conn) != bridge._runtime_fingerprint(
+        _identity_conn()
+    )
 
 
 def test_runtime_identity_fails_closed_when_system_identifier_missing():

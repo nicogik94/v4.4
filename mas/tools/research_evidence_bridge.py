@@ -798,12 +798,41 @@ def _runtime_identity(conn) -> dict:
     }
 
 
+def _runtime_socket_endpoint(conn) -> str:
+    """A non-emitted, non-secret per-running-cluster discriminator.
+
+    ``system_identifier`` is copied verbatim by a physical base backup, so a
+    *promoted clone* shares it; if that clone also matches database/user/schema
+    and configured port over a Unix socket (where ``inet_server_*`` are empty),
+    the emitted identity is byte-for-byte identical and a fingerprint from one
+    runtime could satisfy another. Two clusters that could be confused must
+    nonetheless run at **different socket endpoints** — they cannot bind the same
+    socket directory and port simultaneously — so the live connection's socket
+    endpoint (host directory + port) distinguishes them.
+
+    It is folded into the fingerprint but **never emitted**, and it is not a
+    secret: a filesystem path and port, never a DSN, user, or password. Reading it
+    from the driver's connection info issues no SQL. Best-effort — an unavailable
+    endpoint contributes an empty discriminator and never fails closed, since
+    ``system_identifier`` remains the primary discriminator.
+    """
+    info = getattr(conn, "info", None)
+    if info is None:
+        return ""
+    host = str(getattr(info, "host", "") or "")
+    port = str(getattr(info, "port", "") or "")
+    return f"{host}:{port}" if (host or port) else ""
+
+
 def _runtime_fingerprint(conn) -> str:
     """A bounded fingerprint over the non-secret runtime identity (never a DSN).
 
     Hashes ALL identity dimensions deterministically, including the socket-safe
     cluster discriminators (``configured_port`` and ``system_identifier``) so two
-    socket-backed clusters sharing database/user/schema still fingerprint apart.
+    socket-backed clusters sharing database/user/schema still fingerprint apart,
+    plus a non-emitted per-running-cluster socket endpoint so a promoted physical
+    clone (which copies ``system_identifier``) running at a different socket
+    endpoint also fingerprints apart.
     """
     identity = _runtime_identity(conn)
     canonical = "|".join(
@@ -815,6 +844,8 @@ def _runtime_fingerprint(conn) -> str:
             identity["system_identifier"],
             identity["current_user"],
             identity["current_schema"],
+            # Non-emitted clone discriminator (see _runtime_socket_endpoint).
+            _runtime_socket_endpoint(conn),
         )
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
