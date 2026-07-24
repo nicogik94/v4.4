@@ -899,7 +899,14 @@ def _parse_string_array(value: Optional[str]) -> tuple[str, ...]:
             raise BridgeError(f"invalid JSON array: {exc}") from exc
         if not isinstance(data, list):
             raise BridgeError("expected a JSON array")
-        return tuple(str(item) for item in data)
+        # Reject non-string elements rather than coercing them: `str(item)` would
+        # turn `[null]` / `[{"x":1}]` / `[1]` into "None" / "{'x': 1}" / "1" and
+        # slip past the services' strict string-array validators, persisting
+        # malformed operator metadata into append-only evidence records.
+        for item in data:
+            if not isinstance(item, str):
+                raise BridgeError("JSON array items must be strings")
+        return tuple(data)
     return tuple(part.strip() for part in text.split("||") if part.strip())
 
 

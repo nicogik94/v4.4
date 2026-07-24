@@ -207,6 +207,19 @@ def test_parse_string_array_json_and_delimited_and_empty():
     assert bridge._parse_string_array("  ") == ()
     assert bridge._parse_string_array('["a", "b"]') == ("a", "b")
     assert bridge._parse_string_array("a || b || c") == ("a", "b", "c")
+    # An explicit empty string element in the JSON form is preserved as-is.
+    assert bridge._parse_string_array('["a", ""]') == ("a", "")
+
+
+@pytest.mark.parametrize(
+    "value", ["[null]", "[1]", '[{"x": 1}]', '["ok", 2]', "[true]", "[[1]]"]
+)
+def test_parse_string_array_rejects_non_string_json_items(value):
+    # Non-string JSON elements must be rejected, not coerced via str() into
+    # "None"/"1"/"{'x': 1}" that would slip past the services' string-array
+    # validators and persist malformed operator metadata.
+    with pytest.raises(bridge.BridgeError):
+        bridge._parse_string_array(value)
 
 
 def test_parse_aware_datetime_requires_timezone():
