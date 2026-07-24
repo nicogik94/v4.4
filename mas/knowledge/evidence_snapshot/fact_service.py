@@ -36,7 +36,7 @@ It:
 from __future__ import annotations
 
 from contextlib import contextmanager
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import config
 
@@ -144,7 +144,7 @@ def _canonicalize(fact: ValidatedFact) -> ValidatedFact:
 
 
 def _reject_non_finite_numeric(value) -> None:
-    """Reject a non-finite (NaN/±Inf) ``Decimal`` numeric candidate value.
+    """Reject a non-finite (NaN/±Inf) numeric candidate value.
 
     The canonical v47 :func:`validate_fact` normalizes numeric values to
     ``Decimal`` but does not universally reject the non-finite Decimals — several
@@ -152,12 +152,31 @@ def _reject_non_finite_numeric(value) -> None:
     ``count``/``duration`` for infinities) admit ``NaN``/``Infinity``/
     ``-Infinity``. PostgreSQL's own ``NUMERIC`` type stores those specials, so
     persistence cannot be relied on to reject them. This bounded A-4B guard makes
-    ``Decimal.is_finite()`` the authoritative check for every non-``None`` numeric
-    value, before any SQL or SAVEPOINT is issued. Non-Decimal and ``None`` values
-    (textual facts) are left for :func:`validate_fact` to handle. The message is
-    fixed and never echoes operator input.
+    ``Decimal.is_finite()`` the authoritative check, before any SQL or SAVEPOINT
+    is issued.
+
+    A directly-constructed ``ValidatedFact`` can carry a non-``Decimal``
+    ``numeric_value`` (e.g. the string ``"NaN"``) that :func:`validate_fact` would
+    coerce; for ``duration``/bounded ``percentage`` that coercion then compares
+    the ``NaN`` against a bound and raises a non-canonical
+    ``decimal.InvalidOperation`` instead of ``FactValidationError``. So a string
+    input is normalized here (mirroring ``validate_fact``'s ``str`` coercion)
+    purely to test finiteness: a non-finite string spelling is rejected uniformly,
+    while a genuinely non-numeric string is left for :func:`validate_fact` to
+    reject with its own canonical message. ``int`` is always finite; ``float`` /
+    ``bool`` / ``None`` are left to :func:`validate_fact`. The message is fixed and
+    never echoes operator input.
     """
-    if isinstance(value, Decimal) and not value.is_finite():
+    if isinstance(value, Decimal):
+        candidate = value
+    elif isinstance(value, str):
+        try:
+            candidate = Decimal(value.strip())
+        except InvalidOperation:
+            return  # not a number at all — validate_fact raises its own error
+    else:
+        return
+    if not candidate.is_finite():
         raise FactValidationError("numeric candidate facts must be finite")
 
 

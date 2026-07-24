@@ -273,8 +273,8 @@ def test_non_finite_numeric_fact_rejected_before_any_sql(monkeypatch, fact_type,
 
 def test_non_finite_from_string_input_rejected_before_any_sql(monkeypatch):
     # A forged ValidatedFact can carry a non-Decimal numeric_value (a string).
-    # validate_fact normalizes "Infinity" to Decimal("Infinity"); the post-
-    # validation finite re-check still rejects it before any SQL runs.
+    # validate_fact normalizes "Infinity" to Decimal("Infinity"); the finite
+    # re-check still rejects it before any SQL runs.
     monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
     conn = _rc()
     forged = ValidatedFact(
@@ -286,4 +286,50 @@ def test_non_finite_from_string_input_rejected_before_any_sql(monkeypatch):
             conn, project_id="p", source_snapshot_id="s", fact=forged
         )
     assert str(exc.value) == "numeric candidate facts must be finite"
+    assert conn.executed == []
+
+
+# A string spelling of a non-finite value for a bound-comparing profile
+# (duration / bounded percentage) would otherwise make validate_fact raise a
+# non-canonical decimal.InvalidOperation; the string is normalized and rejected
+# with the canonical FactValidationError instead, before any SQL runs.
+_STRING_NON_FINITE = [
+    ("duration", "NaN", {"time_unit": "days"}),
+    ("duration", "Infinity", {"time_unit": "days"}),
+    ("duration", "-inf", {"time_unit": "days"}),
+    ("percentage", "NaN",
+     {"percentage_basis": "b", "percentage_subtype": "share_0_100"}),
+    ("percentage", "Infinity",
+     {"percentage_basis": "b", "percentage_subtype": "share_0_1"}),
+]
+
+
+@pytest.mark.parametrize("fact_type,text_value,extra", _STRING_NON_FINITE)
+def test_string_non_finite_rejected_uniformly_before_any_sql(
+    monkeypatch, fact_type, text_value, extra
+):
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = _rc()
+    forged = ValidatedFact(fact_type=fact_type, numeric_value=text_value, **extra)
+    with pytest.raises(FactValidationError) as exc:
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s", fact=forged
+        )
+    assert str(exc.value) == "numeric candidate facts must be finite"
+    assert conn.executed == []
+
+
+def test_non_numeric_string_still_gets_canonical_validation_error(monkeypatch):
+    # A genuinely non-numeric string is NOT the finite error's concern: it is
+    # left for validate_fact to reject with its own canonical message.
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = _rc()
+    forged = ValidatedFact(
+        fact_type="count", numeric_value="not-a-number", counted_entity="rows"
+    )
+    with pytest.raises(FactValidationError) as exc:
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s", fact=forged
+        )
+    assert str(exc.value) != "numeric candidate facts must be finite"
     assert conn.executed == []
