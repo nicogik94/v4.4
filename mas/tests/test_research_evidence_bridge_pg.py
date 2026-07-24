@@ -3043,9 +3043,16 @@ def test_fact_create_rejects_non_finite_and_persists_nothing(
 # ═══════════════ P2-B: socket-backed runtime cluster fingerprint ═══════════════
 
 
-def test_runtime_identity_is_socket_backed_with_cluster_discriminator(pack_schema):
+def test_runtime_identity_carries_cluster_discriminator(pack_schema):
+    # Adaptive to how the ambient test cluster is reached: a Unix socket (the
+    # local disposable harness) reports NULL inet_server_*, while a TCP connection
+    # (some CI setups) reports the server address/port. In BOTH cases the cluster
+    # discriminators (system_identifier + configured port) must be present and the
+    # fingerprint deterministic; the socket-only NULL behaviour is asserted only
+    # when actually over a socket. (The socket-specific collision/clone properties
+    # are proven independently by the two-cluster socket probe below, which spins
+    # its own socket clusters regardless of how CI reaches Postgres.)
     conn, schema = pack_schema
-    # Raw truth first: over a Unix-domain socket the server addr/port ARE NULL.
     raw = conn.execute(
         """
         SELECT inet_server_addr(), inet_server_port(),
@@ -3054,15 +3061,18 @@ def test_runtime_identity_is_socket_backed_with_cluster_discriminator(pack_schem
         """
     ).fetchone()
     conn.rollback()
-    assert raw[0] is None, "expected NULL inet_server_addr over a unix socket"
-    assert raw[1] is None, "expected NULL inet_server_port over a unix socket"
+    over_socket = raw[0] is None  # inet_server_addr() is NULL only over a socket
     assert raw[2] and raw[2].strip(), "system_identifier must be present"
     assert raw[3] and raw[3].strip(), "configured port must be present"
 
     ident = bridge._runtime_identity(conn)
     conn.rollback()
-    assert ident["inet_server_addr"] == ""
-    assert ident["inet_server_port"] == ""
+    if over_socket:
+        assert raw[1] is None, "expected NULL inet_server_port over a unix socket"
+        assert ident["inet_server_addr"] == ""
+        assert ident["inet_server_port"] == ""
+    else:
+        assert ident["inet_server_addr"] != ""  # TCP: server address present
     assert ident["system_identifier"] == raw[2].strip()
     assert ident["configured_port"] == raw[3]
 
