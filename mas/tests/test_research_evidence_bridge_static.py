@@ -278,6 +278,9 @@ def test_runtime_identity_is_socket_safe_and_fails_closed():
     assert "def _runtime_socket_endpoint(" in text
     fp = text.split("def _runtime_fingerprint(")[1].split("\ndef ", 1)[0]
     assert "_runtime_socket_endpoint(conn)" in fp
+    # The clone discriminator is gated to Unix-socket connections (empty
+    # inet_server_addr); over TCP the server addr/port already identify it.
+    assert 'identity["inet_server_addr"] == ""' in fp
     # The socket endpoint is read (non-emitted) and never enters _runtime_identity.
     assert "_runtime_socket_endpoint(" not in ident
     # The fingerprint encoding is injective (JSON array), not a delimiter join

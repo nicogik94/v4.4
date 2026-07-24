@@ -835,6 +835,15 @@ def _runtime_fingerprint(conn) -> str:
     endpoint also fingerprints apart.
     """
     identity = _runtime_identity(conn)
+    # The clone discriminator applies ONLY to Unix-socket connections, where
+    # inet_server_addr()/inet_server_port() are empty. Over TCP the server address
+    # and port already identify the runtime, and ``conn.info.host`` is the
+    # client-supplied host string — reaching one server via a DNS name vs its IP
+    # would otherwise yield different fingerprints for the same runtime and
+    # spuriously refuse the write.
+    socket_endpoint = (
+        _runtime_socket_endpoint(conn) if identity["inet_server_addr"] == "" else ""
+    )
     # Serialize as a JSON array rather than a delimiter join so the encoding is
     # injective: a component that itself contains the delimiter — quoted
     # database/user/schema identifiers and a socket directory path may contain
@@ -850,8 +859,7 @@ def _runtime_fingerprint(conn) -> str:
             identity["system_identifier"],
             identity["current_user"],
             identity["current_schema"],
-            # Non-emitted clone discriminator (see _runtime_socket_endpoint).
-            _runtime_socket_endpoint(conn),
+            socket_endpoint,  # non-emitted clone discriminator, socket-only
         ],
         separators=(",", ":"),
         ensure_ascii=True,

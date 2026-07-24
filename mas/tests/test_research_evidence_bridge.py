@@ -1098,6 +1098,21 @@ def test_fingerprint_encoding_is_injective_across_delimiter_containing_fields():
     assert bridge._runtime_fingerprint(a) != bridge._runtime_fingerprint(b)
 
 
+def test_socket_endpoint_ignored_for_tcp_connections():
+    # Over TCP the server address/port already identify the runtime and
+    # conn.info.host is the client-supplied host string; reaching the same server
+    # via a DNS name vs its IP must NOT change the fingerprint. The clone
+    # discriminator applies only when inet_server_addr is empty (socket).
+    tcp = {"inet_server_addr": "10.0.0.5", "inet_server_port": "5432"}
+    a = _identity_conn(socket_endpoint="db.example.com:5432", **tcp)
+    b = _identity_conn(socket_endpoint="10.0.0.5:5432", **tcp)
+    assert bridge._runtime_fingerprint(a) == bridge._runtime_fingerprint(b)
+    # Sanity: the same divergence over a *socket* (empty inet addr) DOES matter.
+    sa = _identity_conn(socket_endpoint="/run/pg-a:5432")
+    sb = _identity_conn(socket_endpoint="/run/pg-b:5432")
+    assert bridge._runtime_fingerprint(sa) != bridge._runtime_fingerprint(sb)
+
+
 def test_socket_endpoint_discriminator_is_not_emitted():
     # The clone discriminator is folded into the fingerprint but never emitted,
     # so no socket path leaks into the reported identity.
