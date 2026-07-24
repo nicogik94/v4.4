@@ -7,6 +7,8 @@ and appends rather than mutates. Skips unless TEST_EVIDENCE_PG_DSN is set.
 """
 import sys
 import uuid
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,11 @@ if str(ROOT) not in sys.path:
 
 import tests.evidence_snapshot_pg as pg  # noqa: E402
 from knowledge.evidence_snapshot import fact_service  # noqa: E402
-from knowledge.evidence_snapshot.validation import validate_fact  # noqa: E402
+from knowledge.evidence_snapshot.validation import (  # noqa: E402
+    FactValidationError,
+    ValidatedFact,
+    validate_fact,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -232,3 +238,76 @@ def test_legal_hold_does_not_block_fact_creation(schema, target):
     conn.commit()
     assert _count_facts(conn, project_id) == 1
     assert fact_id
+
+
+# ─────────────── P2-A: non-finite numeric facts rejected (real PG) ───────────────
+#
+# PostgreSQL NUMERIC stores NaN/±Infinity, so the database cannot be relied on to
+# reject them. Prove the service rejects a directly-constructed non-finite fact
+# for every numeric profile, with FactValidationError and NO row inserted, even
+# on a real v47 schema and even when the caller then commits.
+
+
+def _non_finite_profile(fact_type, value):
+    if fact_type == "money":
+        return ValidatedFact(
+            fact_type="money", numeric_value=value,
+            currency_code="USD", as_of_date=date(2026, 1, 1),
+        )
+    if fact_type == "rate":
+        return ValidatedFact(
+            fact_type="rate", numeric_value=value,
+            numerator_context="defects", denominator_context="units",
+        )
+    if fact_type == "percentage":
+        return ValidatedFact(
+            fact_type="percentage", numeric_value=value,
+            percentage_basis="qoq", percentage_subtype="change",
+        )
+    if fact_type == "duration":
+        return ValidatedFact(
+            fact_type="duration", numeric_value=value, time_unit="days",
+        )
+    return ValidatedFact(
+        fact_type="count", numeric_value=value, counted_entity="records",
+    )
+
+
+@pytest.mark.parametrize("fact_type", ["money", "rate", "percentage", "duration", "count"])
+@pytest.mark.parametrize(
+    "value", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")]
+)
+def test_rejects_non_finite_numeric_fact_no_row_inserted(schema, fact_type, value):
+    conn, _ = schema
+    project_id, snapshot = _project_with_snapshot(conn, "nonfinite")
+    conn.commit()
+    assert _count_facts(conn, project_id) == 0
+    with pytest.raises(FactValidationError) as exc:
+        fact_service.create_candidate_fact_revision(
+            conn, project_id=project_id, source_snapshot_id=snapshot,
+            fact=_non_finite_profile(fact_type, value), created_by="op",
+        )
+    assert str(exc.value) == "numeric candidate facts must be finite"
+    # Even if the caller commits, no non-finite fact ever reached the table.
+    conn.commit()
+    assert _count_facts(conn, project_id) == 0
+
+    # A finite control on the same profile still persists.
+    good = validate_fact(
+        fact_type,
+        value=Decimal("1"),
+        currency_code="USD" if fact_type == "money" else None,
+        as_of_date=date(2026, 1, 1) if fact_type == "money" else None,
+        numerator_context="defects" if fact_type == "rate" else None,
+        denominator_context="units" if fact_type == "rate" else None,
+        percentage_basis="qoq" if fact_type == "percentage" else None,
+        percentage_subtype="change" if fact_type == "percentage" else None,
+        time_unit="days" if fact_type == "duration" else None,
+        counted_entity="records" if fact_type == "count" else None,
+    )
+    fact_service.create_candidate_fact_revision(
+        conn, project_id=project_id, source_snapshot_id=snapshot,
+        fact=good, created_by="op",
+    )
+    conn.commit()
+    assert _count_facts(conn, project_id) == 1

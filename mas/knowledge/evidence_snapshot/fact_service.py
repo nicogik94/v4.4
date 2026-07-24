@@ -36,11 +36,12 @@ It:
 from __future__ import annotations
 
 from contextlib import contextmanager
+from decimal import Decimal
 
 import config
 
 from . import repository as repo
-from .validation import ValidatedFact, validate_fact
+from .validation import FactValidationError, ValidatedFact, validate_fact
 
 
 class CandidateFactServiceDisabled(RuntimeError):
@@ -114,7 +115,14 @@ def _canonicalize(fact: ValidatedFact) -> ValidatedFact:
     text) and returns a clean value; a violation raises ``FactValidationError``
     before the caller reaches any SQL or SAVEPOINT.
     """
-    return validate_fact(
+    # Reject a non-finite Decimal BEFORE canonical validation. Some typed rules
+    # compare the value against bounds (``duration`` >= 0, ``percentage`` subtype
+    # bounds); a NaN/Inf makes those comparisons raise ``decimal.InvalidOperation``
+    # (NaN is unordered) rather than the canonical ``FactValidationError``. Running
+    # the finite check first keeps the rejection uniform and typed for every
+    # numeric profile.
+    _reject_non_finite_numeric(fact.numeric_value)
+    canonical = validate_fact(
         fact.fact_type,
         value=fact.numeric_value,
         text=fact.text_value,
@@ -128,6 +136,29 @@ def _canonicalize(fact: ValidatedFact) -> ValidatedFact:
         time_unit=fact.time_unit,
         counted_entity=fact.counted_entity,
     )
+    # Re-check the canonical result: a non-Decimal input (e.g. the string
+    # "Infinity") is normalized by ``validate_fact`` into a non-finite Decimal that
+    # the pre-check could not see.
+    _reject_non_finite_numeric(canonical.numeric_value)
+    return canonical
+
+
+def _reject_non_finite_numeric(value) -> None:
+    """Reject a non-finite (NaN/±Inf) ``Decimal`` numeric candidate value.
+
+    The canonical v47 :func:`validate_fact` normalizes numeric values to
+    ``Decimal`` but does not universally reject the non-finite Decimals — several
+    numeric profiles (``money``/``rate``, unbounded ``percentage`` subtypes, and
+    ``count``/``duration`` for infinities) admit ``NaN``/``Infinity``/
+    ``-Infinity``. PostgreSQL's own ``NUMERIC`` type stores those specials, so
+    persistence cannot be relied on to reject them. This bounded A-4B guard makes
+    ``Decimal.is_finite()`` the authoritative check for every non-``None`` numeric
+    value, before any SQL or SAVEPOINT is issued. Non-Decimal and ``None`` values
+    (textual facts) are left for :func:`validate_fact` to handle. The message is
+    fixed and never echoes operator input.
+    """
+    if isinstance(value, Decimal) and not value.is_finite():
+        raise FactValidationError("numeric candidate facts must be finite")
 
 
 @contextmanager

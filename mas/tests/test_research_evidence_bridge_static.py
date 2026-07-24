@@ -156,7 +156,9 @@ def test_fact_service_is_a_bounded_validated_wrapper():
     assert "conn.autocommit" in text
     assert ".commit(" not in text
     # Uses the canonical v47 validation + repository seam; adds no new storage.
-    assert "from .validation import ValidatedFact, validate_fact" in text
+    assert "from .validation import" in text
+    assert "ValidatedFact" in text
+    assert "validate_fact" in text
     assert "repo.insert_fact(" in text
     assert "CREATE TABLE" not in text
     # Binds the fact to an existing same-project snapshot; never infers from
@@ -188,6 +190,26 @@ def test_fact_service_revalidates_directly_constructed_facts():
     assert body.index("_canonicalize(fact)") < body.index("with _fact_write(conn)")
 
 
+# ─────────────────── P2-A: non-finite numeric facts rejected ─────────────────
+
+
+def test_fact_service_rejects_non_finite_numeric_before_any_sql():
+    text = _text(FACT_SERVICE)
+    # Decimal.is_finite() is the authoritative check, with a fixed, non-echoing
+    # message; it is enforced inside canonicalization (before any SAVEPOINT/SQL).
+    assert "def _reject_non_finite_numeric(" in text
+    assert ".is_finite()" in text
+    assert '"numeric candidate facts must be finite"' in text
+    # The guard runs both before AND after validate_fact within _canonicalize, so
+    # every numeric profile is rejected uniformly (a bounded comparison on a NaN
+    # would otherwise raise a non-canonical error), and always before the savepoint.
+    canon = text.split("def _canonicalize(")[1].split("\ndef ", 1)[0]
+    assert canon.count("_reject_non_finite_numeric(") == 2
+    assert canon.index("_reject_non_finite_numeric(fact.numeric_value)") < (
+        canon.index("canonical = validate_fact(")
+    )
+
+
 # ─────────────────── MAJOR 2: catalog-exact write preflight ──────────────────
 
 
@@ -209,6 +231,29 @@ def test_bridge_write_path_enforces_failclosed_preflight():
     assert "inet_server_addr" in text and "inet_server_port" in text
     assert "--expect-runtime-fingerprint" in text
     assert 'identity["current_schema"]' in text
+
+
+# ─────────────── P2-B: socket-safe runtime cluster fingerprint ───────────────
+
+
+def test_runtime_identity_is_socket_safe_and_fails_closed():
+    text = _text(BRIDGE)
+    # Over a Unix socket inet_server_addr()/port() are NULL, so the identity folds
+    # in a stable, non-secret cluster discriminator: the control-file
+    # system_identifier and the configured `port` GUC.
+    assert "pg_control_system()" in text
+    assert "system_identifier" in text
+    assert "current_setting('port'" in text
+    assert 'identity["system_identifier"]' in text
+    assert 'identity["configured_port"]' in text
+    # Fails closed when the cluster identity cannot be read; never a silent
+    # fallback to the collision-prone address/port-only fingerprint.
+    ident = text.split("def _runtime_identity(")[1].split("\ndef ", 1)[0]
+    assert "BridgePreflightError" in ident
+    assert "refusing to fingerprint an ambiguous runtime" in ident
+    # No DSN, credential, or data directory is ever part of the emitted identity.
+    for secret in ("DATABASE_URL", "password", "data_directory", "conn.info"):
+        assert secret not in ident
 
 
 def test_bridge_has_a_catalog_exact_manifest():

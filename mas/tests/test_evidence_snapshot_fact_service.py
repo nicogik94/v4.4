@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from knowledge.evidence_snapshot import fact_service  # noqa: E402
 from knowledge.evidence_snapshot.validation import (  # noqa: E402
+    NUMERIC_FACT_TYPES,
     FactValidationError,
     ValidatedFact,
     validate_fact,
@@ -203,3 +204,86 @@ def test_valid_directly_constructed_fact_reaches_sql(monkeypatch):
         fact_service.create_candidate_fact_revision(
             _rc(), project_id="p", source_snapshot_id="s", fact=good
         )
+
+
+# ─────────────────── P2-A: non-finite numeric facts rejected ───────────────────
+#
+# PostgreSQL NUMERIC itself stores NaN/±Infinity, and the canonical v47
+# `validate_fact` does NOT universally reject them (money/rate admit any
+# non-finite; the unbounded percentage `change` subtype admits them; count/
+# duration admit infinities). So the bounded A-4B service must reject every
+# non-finite numeric candidate — for EVERY numeric fact type — BEFORE any SQL or
+# SAVEPOINT runs. The FakeConn's `execute` raises AssertionError, so a passing
+# test also proves no SQL/SAVEPOINT/insert happened.
+
+NON_FINITE = [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")]
+
+
+def _numeric_profile(fact_type, value) -> ValidatedFact:
+    """An otherwise-valid, directly-constructed ValidatedFact of ``fact_type``.
+
+    Every non-numeric field required by that type is supplied, so the ONLY
+    remaining defect is the non-finite ``value``.
+    """
+    if fact_type == "money":
+        return ValidatedFact(
+            fact_type="money", numeric_value=value,
+            currency_code="USD", as_of_date=date(2026, 1, 1),
+        )
+    if fact_type == "rate":
+        return ValidatedFact(
+            fact_type="rate", numeric_value=value,
+            numerator_context="defects", denominator_context="units",
+        )
+    if fact_type == "percentage":
+        # The unbounded `change` subtype is the profile that currently admits a
+        # non-finite value through validate_fact (bounded subtypes reject some
+        # via their comparisons); it is the load-bearing case for this guard.
+        return ValidatedFact(
+            fact_type="percentage", numeric_value=value,
+            percentage_basis="quarter-over-quarter", percentage_subtype="change",
+        )
+    if fact_type == "duration":
+        return ValidatedFact(
+            fact_type="duration", numeric_value=value, time_unit="days",
+        )
+    if fact_type == "count":
+        return ValidatedFact(
+            fact_type="count", numeric_value=value, counted_entity="records",
+        )
+    raise AssertionError(f"unhandled numeric fact_type {fact_type!r}")
+
+
+@pytest.mark.parametrize("fact_type", sorted(NUMERIC_FACT_TYPES))
+@pytest.mark.parametrize("value", NON_FINITE)
+def test_non_finite_numeric_fact_rejected_before_any_sql(monkeypatch, fact_type, value):
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = _rc()
+    with pytest.raises(FactValidationError) as exc:
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s",
+            fact=_numeric_profile(fact_type, value),
+        )
+    # Uniform, bounded message that never echoes the operator's value.
+    assert str(exc.value) == "numeric candidate facts must be finite"
+    assert str(value) not in str(exc.value)
+    # No SAVEPOINT / SELECT / insert ran before the semantic rejection.
+    assert conn.executed == []
+
+
+def test_non_finite_from_string_input_rejected_before_any_sql(monkeypatch):
+    # A forged ValidatedFact can carry a non-Decimal numeric_value (a string).
+    # validate_fact normalizes "Infinity" to Decimal("Infinity"); the post-
+    # validation finite re-check still rejects it before any SQL runs.
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = _rc()
+    forged = ValidatedFact(
+        fact_type="money", numeric_value="Infinity",
+        currency_code="USD", as_of_date=date(2026, 1, 1),
+    )
+    with pytest.raises(FactValidationError) as exc:
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s", fact=forged
+        )
+    assert str(exc.value) == "numeric candidate facts must be finite"
+    assert conn.executed == []

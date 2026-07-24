@@ -75,8 +75,19 @@ class FakeConn:
 # lightweight responder only answers the non-catalog write-preflight probes:
 # READ COMMITTED, the runtime identity, and the parent project.
 
-# 5-column runtime identity: (db, addr, port, user, current_schema).
-READY_IDENTITY = ("disposable_db", "10.9.8.7", "5432", "operator", "public")
+# 7-column runtime identity, in the exact SELECT order of `_runtime_identity`:
+# (db, inet_addr, inet_port, configured_port, system_identifier, user,
+# current_schema). The cluster discriminators (configured_port,
+# system_identifier) are what keep two socket-backed clusters — where inet addr
+# and port are NULL/empty — from sharing a runtime fingerprint.
+READY_IDENTITY = (
+    "disposable_db", "10.9.8.7", "5432", "5432",
+    "7300000000000000001", "operator", "public",
+)
+# Positional indices into READY_IDENTITY, for the bare 1-column probes.
+_ID_DATABASE = 0
+_ID_SYSTEM_IDENTIFIER = 4
+_ID_SCHEMA = 6
 
 
 def _ready_catalog():
@@ -97,12 +108,12 @@ def ready_responder(query, params, *, isolation="read committed"):
     q = str(query)
     if "transaction_isolation" in q:
         return [(isolation,)]
-    if "inet_server" in q:  # _runtime_identity (5-column)
+    if "inet_server" in q:  # _runtime_identity (7-column)
         return [READY_IDENTITY]
     if "current_schema" in q:  # bare _current_schema
-        return [(READY_IDENTITY[4],)]
+        return [(READY_IDENTITY[_ID_SCHEMA],)]
     if "current_database" in q:  # bare _current_database (1-column)
-        return [(READY_IDENTITY[0],)]
+        return [(READY_IDENTITY[_ID_DATABASE],)]
     if "FROM projects" in q:  # parent project present
         return [("p", "Acme")]
     return []
@@ -462,9 +473,9 @@ def preflight_responder(query, params, *, project=True, snapshot=True):
     if "inet_server" in q:
         return [READY_IDENTITY]
     if "current_schema" in q:
-        return [(READY_IDENTITY[4],)]
+        return [(READY_IDENTITY[_ID_SCHEMA],)]
     if "current_database" in q:
-        return [(READY_IDENTITY[0],)]
+        return [(READY_IDENTITY[_ID_DATABASE],)]
     if "FROM projects" in q:
         return [(1,)] if project else []
     if "source_snapshot snapshot" in q:
@@ -941,3 +952,125 @@ def test_direct_script_unknown_command_is_an_argparse_usage_error():
     assert "ModuleNotFoundError" not in result.stderr, result.stderr
     assert result.returncode == bridge.EXIT_USAGE
     assert "usage: research_evidence_bridge" in result.stderr
+
+
+# ═══════════════ P2-B: socket-safe runtime cluster fingerprint ═══════════════
+#
+# Over a Unix-domain socket PostgreSQL returns NULL for inet_server_addr() and
+# inet_server_port(), which the identity COALESCEs to empty strings. On the
+# socket-backed topology this project runs on, database/user/schema alone then
+# fail to distinguish two local clusters. `_runtime_identity` therefore also
+# folds in a stable, non-secret cluster discriminator — the configured `port`
+# GUC and `pg_control_system().system_identifier` — so the fingerprint stays
+# distinct. These unit tests exercise the pure function against a fake connection
+# returning the exact 7-column identity row `_runtime_identity` selects.
+
+# The 7 columns of the identity SELECT, in order.
+_IDENTITY_COLUMNS = (
+    "current_database", "inet_server_addr", "inet_server_port",
+    "configured_port", "system_identifier", "current_user", "current_schema",
+)
+_SOCKET_IDENTITY = {
+    "current_database": "disposable",
+    "inet_server_addr": "",          # NULL over a Unix socket
+    "inet_server_port": "",          # NULL over a Unix socket
+    "configured_port": "5432",
+    "system_identifier": "7300000000000000001",
+    "current_user": "postgres",
+    "current_schema": "research_evidence_schema",
+}
+
+
+def _identity_conn(**overrides):
+    """A FakeConn whose identity query returns a 7-column row (with overrides).
+
+    ``system_identifier=None`` simulates a cluster/role that cannot supply the
+    control-file identity (e.g. pg_control_system() is not executable).
+    """
+    ident = dict(_SOCKET_IDENTITY)
+    ident.update(overrides)
+    row = tuple(ident[col] for col in _IDENTITY_COLUMNS)
+
+    def responder(q, p):
+        if "pg_control_system" in q and "inet_server" in q:
+            return [row]
+        raise AssertionError(f"unexpected query in identity unit test: {q!r}")
+
+    return FakeConn(responder)
+
+
+def test_runtime_identity_exposes_socket_safe_cluster_discriminators():
+    ident = bridge._runtime_identity(_identity_conn())
+    # Socket addr/port are empty, yet the cluster is still identified.
+    assert ident["inet_server_addr"] == ""
+    assert ident["inet_server_port"] == ""
+    assert ident["configured_port"] == "5432"
+    assert ident["system_identifier"] == "7300000000000000001"
+    assert set(ident) == set(_IDENTITY_COLUMNS)
+
+
+def test_fingerprint_changes_when_only_system_identifier_changes():
+    base = bridge._runtime_fingerprint(_identity_conn())
+    other = bridge._runtime_fingerprint(
+        _identity_conn(system_identifier="7300000000000000002")
+    )
+    assert base != other
+
+
+def test_configured_port_participates_in_the_canonical_identity():
+    base = bridge._runtime_fingerprint(_identity_conn())
+    other = bridge._runtime_fingerprint(_identity_conn(configured_port="5544"))
+    assert base != other
+
+
+def test_socket_empty_addr_port_does_not_erase_cluster_identity():
+    # Two socket clusters: identical db/user/schema and empty inet addr/port, but
+    # different system_identifier. The OLD identity dimensions collide; the fix
+    # keeps the fingerprints distinct.
+    a = _identity_conn(system_identifier="7300000000000000001")
+    b = _identity_conn(system_identifier="7300000000000000002")
+    ia, ib = bridge._runtime_identity(a), bridge._runtime_identity(b)
+    # Old collision surface is genuinely identical...
+    for col in ("current_database", "inet_server_addr", "inet_server_port",
+                "current_user", "current_schema"):
+        assert ia[col] == ib[col]
+    assert ia["inet_server_addr"] == "" and ia["inet_server_port"] == ""
+    # ...yet the corrected fingerprints differ.
+    assert bridge._runtime_fingerprint(a) != bridge._runtime_fingerprint(b)
+
+
+@pytest.mark.parametrize(
+    "field", ["current_database", "current_user", "current_schema"]
+)
+def test_existing_identity_dimensions_still_alter_the_fingerprint(field):
+    base = bridge._runtime_fingerprint(_identity_conn())
+    other = bridge._runtime_fingerprint(_identity_conn(**{field: "different"}))
+    assert base != other
+
+
+def test_runtime_identity_emits_no_dsn_or_credentials():
+    # The emitted identity is bounded and non-secret: no DSN, password, host, or
+    # connection option ever appears in it.
+    ident = bridge._runtime_identity(_identity_conn())
+    blob = json.dumps(ident)
+    for secret in ("postgresql://", "password", "dbname=", "host=", "disposable@"):
+        assert secret not in blob
+
+
+def test_runtime_identity_fails_closed_when_system_identifier_missing():
+    # If the cluster/role cannot supply system_identifier, the identity read
+    # fails closed rather than silently degrading to the collision-prone
+    # address/port-only fingerprint.
+    with pytest.raises(bridge.BridgePreflightError):
+        bridge._runtime_identity(_identity_conn(system_identifier=None))
+
+
+def test_runtime_identity_fails_closed_when_control_function_raises():
+    # A role that cannot execute pg_control_system() raises at the SELECT; the
+    # identity read converts that into a fail-closed BridgePreflightError, never a
+    # fallback fingerprint.
+    def responder(q, p):
+        raise RuntimeError("permission denied for function pg_control_system")
+
+    with pytest.raises(bridge.BridgePreflightError):
+        bridge._runtime_identity(FakeConn(responder))

@@ -733,33 +733,73 @@ def _runtime_identity(conn) -> dict:
     Includes ``current_schema`` so the fingerprint is bound to the schema writes
     actually resolve into — an operator who repoints search_path at a decoy gets
     a different fingerprint.
+
+    Also includes a stable *cluster* discriminator that survives a Unix-domain
+    socket connection. Over a socket ``inet_server_addr()`` and
+    ``inet_server_port()`` are both NULL (there is no TCP peer), so on the
+    socket-backed topology this project runs on, ``database``/``user``/``schema``
+    alone cannot tell two distinct local clusters apart — two clusters sharing
+    those three values would collide. ``pg_control_system().system_identifier``
+    (the control-file cluster identity fixed at initdb) plus the configured
+    ``port`` GUC restore that discrimination. None of these fields is a secret: no
+    DSN, credential, connection option, or data directory is ever read.
+
+    Fails closed: if the live role cannot supply the cluster's
+    ``system_identifier`` (e.g. it cannot execute ``pg_control_system()``), this
+    raises :class:`BridgePreflightError` rather than silently degrading to the
+    collision-prone address/port-only identity.
     """
-    row = conn.execute(
-        """
-        SELECT current_database(),
-               COALESCE(inet_server_addr()::text, ''),
-               COALESCE(inet_server_port()::text, ''),
-               current_user,
-               COALESCE(current_schema, '')
-        """
-    ).fetchone()
+    try:
+        row = conn.execute(
+            """
+            SELECT current_database(),
+                   COALESCE(inet_server_addr()::text, ''),
+                   COALESCE(inet_server_port()::text, ''),
+                   COALESCE(current_setting('port', true), ''),
+                   (SELECT system_identifier::text
+                      FROM pg_catalog.pg_control_system()),
+                   current_user,
+                   COALESCE(current_schema, '')
+            """
+        ).fetchone()
+    except Exception as exc:
+        raise BridgePreflightError(
+            "runtime cluster identity is unavailable "
+            f"({type(exc).__name__}); refusing to fingerprint an ambiguous "
+            "runtime"
+        ) from exc
+    system_identifier = (str(row[4]) if row and row[4] is not None else "").strip()
+    if not system_identifier:
+        raise BridgePreflightError(
+            "runtime cluster identity is unavailable (system_identifier missing); "
+            "refusing to fingerprint an ambiguous runtime"
+        )
     return {
         "current_database": row[0] or "",
         "inet_server_addr": row[1] or "",
         "inet_server_port": row[2] or "",
-        "current_user": row[3] or "",
-        "current_schema": row[4] or "",
+        "configured_port": row[3] or "",
+        "system_identifier": system_identifier,
+        "current_user": row[5] or "",
+        "current_schema": row[6] or "",
     }
 
 
 def _runtime_fingerprint(conn) -> str:
-    """A bounded fingerprint over the non-secret runtime identity (never a DSN)."""
+    """A bounded fingerprint over the non-secret runtime identity (never a DSN).
+
+    Hashes ALL identity dimensions deterministically, including the socket-safe
+    cluster discriminators (``configured_port`` and ``system_identifier``) so two
+    socket-backed clusters sharing database/user/schema still fingerprint apart.
+    """
     identity = _runtime_identity(conn)
     canonical = "|".join(
         (
             identity["current_database"],
             identity["inet_server_addr"],
             identity["inet_server_port"],
+            identity["configured_port"],
+            identity["system_identifier"],
             identity["current_user"],
             identity["current_schema"],
         )

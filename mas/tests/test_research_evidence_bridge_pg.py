@@ -14,10 +14,15 @@ Proves against a genuine database that the bridge:
 
 Skips unless TEST_EVIDENCE_PG_DSN is set.
 """
+import contextlib
 import io
 import json
 import os
+import secrets
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -2945,3 +2950,360 @@ def test_clean_topology_makes_the_same_race_idempotent(pack_schema, monkeypatch)
     assert _ledger_count(
         conn, "research_evidence_intake_item_review_decision", chain["project_id"]
     ) == 4  # 2 seeded reviews + 1 raced + 1 bridge retry (recorded once)
+
+
+# ═══════════════════ P2-A: non-finite numeric facts rejected (real bridge) ═════════════════
+#
+# PostgreSQL NUMERIC stores NaN/±Infinity, so persistence cannot be relied on to
+# reject a non-finite value. Prove the REAL `fact-create --commit` path rejects
+# non-finite numeric facts for every affected profile, persists nothing, and
+# never commits — while a finite control on the same profile still succeeds.
+
+# (fact_type, non_finite_value, extra-args) — each otherwise valid for its type.
+_NON_FINITE_BRIDGE_CASES = [
+    ("money", "NaN", ["--currency-code", "USD", "--as-of-date", "2026-01-01"]),
+    ("money", "Infinity", ["--currency-code", "USD", "--as-of-date", "2026-01-01"]),
+    ("rate", "NaN",
+     ["--numerator-context", "defects", "--denominator-context", "units"]),
+    ("rate", "-Infinity",
+     ["--numerator-context", "defects", "--denominator-context", "units"]),
+    # count currently admits an infinite value through validate_fact — another
+    # numeric profile that would otherwise persist a non-finite NUMERIC.
+    ("count", "Infinity", ["--counted-entity", "records"]),
+]
+
+
+def _seed_project_and_snapshot(conn, tag):
+    project_id = pg.insert_project(conn, name=tag)
+    blob = ev_repo.insert_or_get_blob(
+        conn, project_id=project_id,
+        content_hash=f"{tag}-{uuid.uuid4().hex}", byte_size=13,
+    )
+    snapshot = ev_repo.insert_snapshot(
+        conn, source_blob_id=blob, project_id=project_id,
+        storage_ref=f"/r2a4b-nf/{uuid.uuid4().hex}",
+    )
+    conn.commit()
+    return project_id, snapshot
+
+
+@pytest.mark.parametrize("fact_type,value,extra", _NON_FINITE_BRIDGE_CASES)
+def test_fact_create_rejects_non_finite_and_persists_nothing(
+    pack_schema, monkeypatch, fact_type, value, extra
+):
+    conn, schema = pack_schema
+    project_id, snapshot = _seed_project_and_snapshot(conn, "nonfinite")
+
+    def _count(relation):
+        conn.rollback()  # fresh READ COMMITTED snapshot of committed state
+        return conn.execute(
+            f"SELECT count(*) FROM {relation} WHERE project_id = %s", (project_id,)
+        ).fetchone()[0]
+
+    assert _count("candidate_fact_revision") == 0
+    assert _count("research_fact_metadata_revision") == 0
+
+    base = [
+        "fact-create", "--project-id", project_id,
+        "--source-snapshot-id", snapshot, "--actor", "op",
+        "--fact-type", fact_type,
+    ]
+    recorder = {}
+    code, payload = _bridge(
+        monkeypatch, schema,
+        # `--value=` form: a bare "-Infinity" would look like an option flag.
+        base + [f"--value={value}", "--commit"] + extra,
+        recorder=recorder,
+    )
+    # Fails closed with the canonical validation error; nothing committed.
+    assert code != 0
+    assert payload["error_type"] == "FactValidationError"
+    assert payload.get("committed") is False
+    assert recorder["commits"] == 0
+    # NOT relying on PostgreSQL to reject the value: no fact / metadata persisted.
+    assert _count("candidate_fact_revision") == 0
+    assert _count("research_fact_metadata_revision") == 0
+
+    # A FINITE control on the same profile still commits one fact + metadata.
+    code, payload = _bridge(
+        monkeypatch, schema, base + ["--value=1", "--commit"] + extra
+    )
+    assert code == 0, payload
+    assert payload["committed"] is True
+    assert _count("candidate_fact_revision") == 1
+    assert _count("research_fact_metadata_revision") == 1
+
+
+# ═══════════════ P2-B: socket-backed runtime cluster fingerprint ═══════════════
+
+
+def test_runtime_identity_is_socket_backed_with_cluster_discriminator(pack_schema):
+    conn, schema = pack_schema
+    # Raw truth first: over a Unix-domain socket the server addr/port ARE NULL.
+    raw = conn.execute(
+        """
+        SELECT inet_server_addr(), inet_server_port(),
+               (SELECT system_identifier::text FROM pg_control_system()),
+               current_setting('port')
+        """
+    ).fetchone()
+    conn.rollback()
+    assert raw[0] is None, "expected NULL inet_server_addr over a unix socket"
+    assert raw[1] is None, "expected NULL inet_server_port over a unix socket"
+    assert raw[2] and raw[2].strip(), "system_identifier must be present"
+    assert raw[3] and raw[3].strip(), "configured port must be present"
+
+    ident = bridge._runtime_identity(conn)
+    conn.rollback()
+    assert ident["inet_server_addr"] == ""
+    assert ident["inet_server_port"] == ""
+    assert ident["system_identifier"] == raw[2].strip()
+    assert ident["configured_port"] == raw[3]
+
+    # The fingerprint is non-empty and deterministic across repeated reads.
+    fp1 = bridge._runtime_fingerprint(conn)
+    conn.rollback()
+    fp2 = bridge._runtime_fingerprint(conn)
+    conn.rollback()
+    assert len(fp1) == 64 and fp1 == fp2
+    # No DSN / secret leaks into the emitted identity.
+    assert "postgresql://" not in json.dumps(ident)
+
+
+# ─────────── two-cluster socket fingerprint adversarial probe ───────────
+#
+# Two independent, disposable, socket-backed PostgreSQL clusters given
+# deliberately identical database / user / schema. Over their Unix sockets the
+# OLD identity dimensions (db, inet_addr='', inet_port='', user, schema) collide
+# exactly. Prove the corrected identity keeps them apart via system_identifier,
+# and that a real bridge write pinned to cluster A's fingerprint is refused
+# against cluster B. No persistent database is used — each cluster is a fresh
+# container removed on teardown.
+
+_IDENTICAL_DB = "disposable"
+_IDENTICAL_USER = "postgres"
+_IDENTICAL_SCHEMA = "research_evidence_probe"
+_CLUSTER_PASSWORD = "disposable"
+
+
+@contextlib.contextmanager
+def _socket_cluster(tag):
+    """A fresh socket-only postgres:16 cluster with an identical db/user/schema."""
+    if shutil.which("docker") is None:
+        pytest.skip("docker unavailable; two-cluster socket probe skipped")
+    sock_dir = tempfile.mkdtemp(prefix=f"pgs-probe-{tag}-")
+    os.chmod(sock_dir, 0o777)
+    name = f"r2a4b-probe-{tag}-{uuid.uuid4().hex[:10]}"
+    started = subprocess.run(
+        [
+            "docker", "run", "-d", "--rm", "--name", name,
+            "-e", f"POSTGRES_PASSWORD={_CLUSTER_PASSWORD}",
+            "-e", f"POSTGRES_DB={_IDENTICAL_DB}",
+            "-e", "PGDATA=/var/lib/postgresql/data",
+            "--tmpfs", "/var/lib/postgresql/data:rw,size=512m",
+            "-v", f"{sock_dir}:/var/run/postgresql",
+            "postgres:16-alpine",
+            "-c", "fsync=off", "-c", "synchronous_commit=off",
+            "-c", "full_page_writes=off", "-c", "listen_addresses=",
+            "-c", "unix_socket_permissions=0777",
+        ],
+        capture_output=True, text=True,
+    )
+    if started.returncode != 0:
+        shutil.rmtree(sock_dir, ignore_errors=True)
+        pytest.skip(f"could not start probe cluster: {started.stderr.strip()}")
+    try:
+        import psycopg
+
+        dsn = (
+            f"postgresql://{_IDENTICAL_USER}:{_CLUSTER_PASSWORD}@/"
+            f"{_IDENTICAL_DB}?host={sock_dir}"
+        )
+        # The postgres:16 entrypoint runs a temporary bootstrap server (for
+        # initdb) and then RESTARTS the real server, so `pg_isready` passing once
+        # is not a durable signal — a connect can hit "server closed the
+        # connection unexpectedly" during that restart. Make a working connection
+        # (that can run SELECT 1) the readiness gate, and retry through the
+        # bootstrap→final transition, mirroring the harness's own cluster helper.
+        conn = None
+        last_exc = None
+        for _ in range(120):
+            try:
+                candidate = psycopg.connect(dsn, autocommit=True, connect_timeout=3)
+                candidate.execute("SELECT 1")
+                conn = candidate
+                break
+            except psycopg.OperationalError as exc:
+                last_exc = exc
+                with contextlib.suppress(Exception):
+                    candidate.close()  # type: ignore[has-type]
+                time.sleep(1)
+        if conn is None:
+            pytest.skip(f"probe cluster did not become ready: {last_exc}")
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{_IDENTICAL_SCHEMA}"')
+        conn.execute(f'SET search_path TO "{_IDENTICAL_SCHEMA}"')
+        try:
+            yield conn
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    finally:
+        subprocess.run(["docker", "rm", "-vf", name], capture_output=True)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def _old_identity_dims(conn):
+    """The pre-fix identity surface: (db, inet_addr, inet_port, user, schema)."""
+    row = conn.execute(
+        """
+        SELECT current_database(),
+               COALESCE(inet_server_addr()::text, ''),
+               COALESCE(inet_server_port()::text, ''),
+               current_user,
+               COALESCE(current_schema, '')
+        """
+    ).fetchone()
+    return tuple(row)
+
+
+def test_two_socket_clusters_collide_on_old_identity_but_differ_on_fix():
+    with _socket_cluster("a") as conn_a, _socket_cluster("b") as conn_b:
+        # 1) The OLD identity dimensions are byte-for-byte identical (collision).
+        old_a = _old_identity_dims(conn_a)
+        old_b = _old_identity_dims(conn_b)
+        assert old_a == old_b, (old_a, old_b)
+        # ...and confirm the socket NULLs that cause the collision.
+        assert old_a[0] == _IDENTICAL_DB
+        assert old_a[1] == "" and old_a[2] == ""       # inet addr/port empty
+        assert old_a[3] == _IDENTICAL_USER
+        assert old_a[4] == _IDENTICAL_SCHEMA
+
+        # 2) The corrected identity distinguishes the clusters by system_identifier.
+        ident_a = bridge._runtime_identity(conn_a)
+        ident_b = bridge._runtime_identity(conn_b)
+        assert ident_a["system_identifier"] != ident_b["system_identifier"]
+        # Every OTHER emitted dimension is equal — only the cluster id differs.
+        for key in ("current_database", "inet_server_addr", "inet_server_port",
+                    "current_user", "current_schema"):
+            assert ident_a[key] == ident_b[key]
+
+        # 3) The corrected fingerprints therefore differ.
+        fp_a = bridge._runtime_fingerprint(conn_a)
+        fp_b = bridge._runtime_fingerprint(conn_b)
+        assert fp_a != fp_b
+
+
+def test_real_bridge_write_pinned_to_cluster_a_is_refused_against_cluster_b(
+    monkeypatch
+):
+    """A real bridge write carrying A's fingerprint is refused against B.
+
+    The runtime-identity gate is the last write-preflight step; the orthogonal
+    catalog / project / snapshot gates are stubbed ready so the REAL write runner
+    reaches the fingerprint comparison against genuine, distinct socket clusters.
+    The fingerprints are computed from each cluster's real
+    pg_control_system().system_identifier — nothing about the identity is faked.
+    """
+    monkeypatch.setenv("MAS_RESEARCH_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://socket-probe/db")
+    # Neutralize the orthogonal preflight gates; the fingerprint gate stays REAL.
+    monkeypatch.setattr(
+        bridge, "_collect_catalog",
+        lambda conn: {
+            "current_schema": _IDENTICAL_SCHEMA,
+            "relations_ready": True, "functions_ready": True,
+            "triggers_ready": True, "constraints_ready": True,
+            "roles_ready": True, "topology_security_ready": True,
+            "namespace_ready": True,
+        },
+    )
+    monkeypatch.setattr(bridge, "_project_exists", lambda conn, pid: True)
+    monkeypatch.setattr(
+        bridge, "_snapshot_summary",
+        lambda conn, **kw: {"source_snapshot_id": kw.get("source_snapshot_id", "s")},
+    )
+
+    with _socket_cluster("a") as conn_a, _socket_cluster("b") as conn_b:
+        for c in (conn_a, conn_b):
+            c.autocommit = False  # writer requires a non-autocommit txn
+        fingerprint_a = bridge._runtime_fingerprint(conn_a)
+        conn_a.rollback()
+        fingerprint_b = bridge._runtime_fingerprint(conn_b)
+        conn_b.rollback()
+        assert fingerprint_a != fingerprint_b
+
+        writes = {"b": 0}
+
+        class _CountingConn:
+            """Proxy that counts writes and keeps the shared cluster conn alive.
+
+            ``_run_write`` closes the connection it is handed; ``close`` here is a
+            no-op so ``conn_b`` survives for the second (accepted) write below.
+            """
+
+            def __init__(self, real):
+                object.__setattr__(self, "_real", real)
+
+            def __getattr__(self, n):
+                return getattr(self._real, n)
+
+            def execute(self, q, p=None):
+                if str(q).strip().upper().startswith(
+                    ("INSERT", "UPDATE", "DELETE")
+                ):
+                    writes["b"] += 1
+                return self._real.execute(q, p)
+
+            def rollback(self):
+                return self._real.rollback()
+
+            def close(self):
+                return None  # keep conn_b open for the accepted-write assertion
+
+            def commit(self):
+                raise AssertionError("no commit must occur on a refused write")
+
+        monkeypatch.setattr(
+            bridge, "open_bridge_connection", lambda: _CountingConn(conn_b)
+        )
+
+        argv = [
+            "fact-create", "--project-id", "p", "--source-snapshot-id", "s",
+            "--actor", "op", "--fact-type", "count", "--value", "3",
+            "--counted-entity", "records",
+            "--expect-runtime-fingerprint", fingerprint_a,  # cluster A's id
+            "--commit",
+        ]
+        out = io.StringIO()
+        code = bridge.main(argv, stream=out)
+        payload = json.loads(out.getvalue())
+        conn_b.rollback()
+
+        # The cross-cluster write is refused at the runtime-identity gate...
+        assert code == bridge.EXIT_FAILURE
+        assert payload["error_type"] == "BridgePreflightError"
+        # ...before ANY service write ran, and with no commit.
+        assert writes["b"] == 0
+
+        # The SAME write, pinned to cluster B's own fingerprint, now passes the
+        # runtime-identity gate (proven by a dry-run that reaches the service).
+        argv_ok = [
+            "fact-create", "--project-id", "p", "--source-snapshot-id", "s",
+            "--actor", "op", "--fact-type", "count", "--value", "3",
+            "--counted-entity", "records",
+            "--expect-runtime-fingerprint", fingerprint_b,  # cluster B's own id
+        ]  # no --commit → dry-run
+        monkeypatch.setattr(
+            bridge, "open_bridge_connection", lambda: conn_b
+        )
+        out2 = io.StringIO()
+        code2 = bridge.main(argv_ok, stream=out2)
+        payload2 = json.loads(out2.getvalue())
+        # (_run_write has already closed conn_b here; do not touch it again.)
+        # It got PAST the fingerprint gate (no runtime-identity mismatch). The
+        # service raises its own error only because the catalog is stubbed, so we
+        # assert specifically that the failure — if any — is NOT the identity gate.
+        assert payload2.get("error_type") != "BridgePreflightError"
+        assert "runtime identity fingerprint mismatch" not in json.dumps(payload2)
+        assert code2 in (bridge.EXIT_OK, bridge.EXIT_FAILURE)
