@@ -997,7 +997,13 @@ def _topology_security_findings(conn) -> list[str]:
     # Canonical membership: the owner role is granted to the migration owner with
     # the EXACT ratified PG16 options — admin=false, inherit=false, set=true.
     # Any material option drift is rejected (not just the presence of the row).
-    membership = conn.execute(
+    #
+    # PG16 stores one pg_auth_members row PER grantor, so the same role/member
+    # pair can carry multiple rows; a plain fetchone() could return the canonical
+    # row while ignoring a duplicate that enables ADMIN/INHERIT. Require EXACTLY
+    # ONE matching row so a second, option-drifted grant (by another grantor)
+    # cannot hide behind the canonical one.
+    memberships = conn.execute(
         """
         SELECT m.admin_option, m.inherit_option, m.set_option
         FROM pg_auth_members m
@@ -1006,12 +1012,14 @@ def _topology_security_findings(conn) -> list[str]:
         WHERE granted.rolname = 'workflow_research_evidence_owner'
           AND member.rolname = 'workflow_migration_owner'
         """
-    ).fetchone()
-    if membership is None:
+    ).fetchall()
+    if not memberships:
         findings.append("owner_membership_missing")
-    elif (bool(membership[0]), bool(membership[1]), bool(membership[2])) != (
-        False, False, True
-    ):
+    elif len(memberships) != 1:
+        findings.append("owner_membership_duplicate")
+    elif (
+        bool(memberships[0][0]), bool(memberships[0][1]), bool(memberships[0][2])
+    ) != (False, False, True):
         findings.append("owner_membership_options")
 
     # The runtime role must NOT reach the owner or migration-owner roles by any

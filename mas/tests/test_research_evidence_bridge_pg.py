@@ -1880,6 +1880,56 @@ def test_canonical_membership_option_drift_blocks_write(pack_schema, monkeypatch
         conn.commit()
 
 
+def test_duplicate_owner_membership_grant_blocks_write(pack_schema, monkeypatch):
+    conn, schema = pack_schema
+    # PG16 stores one pg_auth_members row per grantor, so a second grantor can add
+    # a DUPLICATE owner->migration row whose options drift (ADMIN enabled here). A
+    # single-row check could return the canonical row and miss it; the preflight
+    # must reject unless there is EXACTLY one matching row.
+    conn.execute("CREATE ROLE decoy_owner_grantor NOLOGIN")
+    conn.execute(
+        "GRANT workflow_research_evidence_owner TO decoy_owner_grantor "
+        "WITH ADMIN OPTION"
+    )
+    conn.execute(
+        "GRANT workflow_research_evidence_owner TO workflow_migration_owner "
+        "WITH ADMIN OPTION GRANTED BY decoy_owner_grantor"
+    )
+    conn.commit()
+    # Sanity: the drift really is a *second* row for the same pair.
+    dup_count = conn.execute(
+        """
+        SELECT count(*) FROM pg_auth_members m
+        JOIN pg_roles g ON g.oid = m.roleid
+        JOIN pg_roles mem ON mem.oid = m.member
+        WHERE g.rolname = 'workflow_research_evidence_owner'
+          AND mem.rolname = 'workflow_migration_owner'
+        """
+    ).fetchone()[0]
+    conn.commit()
+    assert dup_count == 2, dup_count
+    try:
+        payload = _preflight_payload(
+            monkeypatch, schema, factory=_raw_factory(schema)
+        )
+        assert payload["topology_security_ready"] is False
+        assert "owner_membership_duplicate" in payload["security_findings"]
+        _assert_claim_write_blocked(
+            monkeypatch, schema, conn, factory=_raw_factory(schema)
+        )
+    finally:
+        conn.rollback()
+        conn.execute(
+            "REVOKE workflow_research_evidence_owner FROM workflow_migration_owner "
+            "GRANTED BY decoy_owner_grantor"
+        )
+        conn.execute(
+            "REVOKE workflow_research_evidence_owner FROM decoy_owner_grantor"
+        )
+        conn.execute("DROP ROLE decoy_owner_grantor")
+        conn.commit()
+
+
 # ── MINOR 1: capacity-overflow byte omission (PG path) ──────────────────────
 
 

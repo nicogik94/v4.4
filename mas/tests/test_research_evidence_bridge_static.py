@@ -551,6 +551,12 @@ def test_role_escalation_is_recursive():
     # Canonical membership options (admin/inherit/set) are all validated.
     assert "set_option" in text and "inherit_option" in text and "admin_option" in text
     assert "owner_membership_options" in text
+    # PG16 stores one row per grantor; the membership check reads ALL matching
+    # rows and rejects a duplicate (a second grantor's drifted grant), rather than
+    # a single fetchone() that could miss it.
+    assert "owner_membership_duplicate" in text
+    sec = text.split("def _topology_security_findings(")[1].split("\ndef ", 1)[0]
+    assert "len(memberships) != 1" in sec
 
 
 def test_preflight_readiness_fidelity_flags_present():
