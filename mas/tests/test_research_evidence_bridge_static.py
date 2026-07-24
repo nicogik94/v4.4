@@ -188,6 +188,13 @@ def test_fact_service_revalidates_directly_constructed_facts():
     # Canonicalization is called before the savepoint context manager opens.
     body = text.split("def create_candidate_fact_revision(")[1]
     assert body.index("_canonicalize(fact)") < body.index("with _fact_write(conn)")
+    # The LIVE transaction isolation is verified (SHOW transaction_isolation), not
+    # only the driver attribute, immediately before the savepoint.
+    assert "def _verify_live_read_committed(" in text
+    assert "SHOW transaction_isolation" in text
+    assert body.index("_verify_live_read_committed(conn)") < (
+        body.index("with _fact_write(conn)")
+    )
 
 
 # ─────────────────── P2-A: non-finite numeric facts rejected ─────────────────

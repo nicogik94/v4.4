@@ -104,6 +104,27 @@ def _require_caller_owned_read_committed(conn) -> None:
         )
 
 
+def _verify_live_read_committed(conn) -> None:
+    """Verify the LIVE transaction isolation is READ COMMITTED (not just the attr).
+
+    ``_require_caller_owned_read_committed`` inspects only the driver's Python-side
+    ``isolation_level`` attribute so it can reject before any SQL, but that
+    attribute governs what the driver requests for a *new* transaction — a caller
+    can pin the active transaction differently with a raw ``SET TRANSACTION
+    ISOLATION LEVEL ...``. This confirms the actual server-side level with ``SHOW
+    transaction_isolation`` immediately before the insert (mirroring the bridge's
+    own preflight), so a fact is never persisted under an unexpected isolation. It
+    runs only after every pre-SQL rejection, so those still reject before any SQL.
+    """
+    row = conn.execute("SHOW transaction_isolation").fetchone()
+    level = (row[0] if row else "").strip().lower()
+    if level != "read committed":
+        raise CandidateFactServiceTransactionError(
+            "candidate-fact writes require a live READ COMMITTED transaction "
+            f"(got {level!r})"
+        )
+
+
 def _canonicalize(fact: ValidatedFact) -> ValidatedFact:
     """Revalidate a supplied ``ValidatedFact`` field-by-field via ``validate_fact``.
 
@@ -218,9 +239,11 @@ def create_candidate_fact_revision(
     connection lifecycle and the COMMIT/ROLLBACK decision; this service never
     commits.
 
-    Every rejection below (bad type, disabled feature, autocommit/isolation,
-    missing snapshot id, invalid fact value) happens *before* any SQL or
-    SAVEPOINT is issued; only a validated, canonical fact is ever persisted.
+    Every semantic rejection (bad type, disabled feature, autocommit/isolation
+    attribute, missing snapshot id, invalid or non-finite fact value) happens
+    *before* any SQL or SAVEPOINT is issued. The sole statement that precedes the
+    savepoint is the live-isolation verification below; only a validated,
+    canonical fact is ever persisted.
     """
     if not isinstance(fact, ValidatedFact):
         raise TypeError(
@@ -233,8 +256,12 @@ def create_candidate_fact_revision(
             "candidate fact requires an existing source_snapshot_id"
         )
     # Re-derive a canonical fact from the supplied value and persist ONLY that.
-    # A forged/invalid ValidatedFact raises here, before any SQL runs.
+    # A forged/invalid/non-finite ValidatedFact raises here, before any SQL runs.
     canonical = _canonicalize(fact)
+    # Verify the LIVE transaction isolation (not merely the driver attribute)
+    # before opening the savepoint. This is the first and only statement before
+    # the write, so every rejection above still precedes any SQL.
+    _verify_live_read_committed(conn)
     with _fact_write(conn):
         # (1) Same-project existence. This MUST stay separate from the
         #     availability check below: ``repo.snapshot_available`` is a

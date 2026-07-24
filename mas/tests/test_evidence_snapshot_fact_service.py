@@ -121,12 +121,66 @@ def test_non_read_committed_isolation_rejected(monkeypatch, isolation):
 
 def test_read_committed_isolation_accepted_reaches_sql(monkeypatch):
     # An explicitly pinned READ COMMITTED is accepted, so the guard passes and
-    # execution reaches the SAVEPOINT (proven by the FakeConn AssertionError).
+    # execution reaches SQL (proven by the FakeConn AssertionError).
     monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
     with pytest.raises(AssertionError):
         fact_service.create_candidate_fact_revision(
             _rc(), project_id="p", source_snapshot_id="s", fact=_fact(),
         )
+
+
+class _LiveIsolationConn:
+    """A conn whose driver attribute says READ COMMITTED but whose LIVE
+    ``SHOW transaction_isolation`` reports ``live_level`` — proving the service
+    verifies the live isolation, not only the attribute."""
+
+    def __init__(self, live_level):
+        self.autocommit = False
+        self.isolation_level = RC
+        self._live = live_level
+        self.executed = []
+
+    def execute(self, query, params=None):
+        q = str(query)
+        self.executed.append(q)
+        if "transaction_isolation" in q:
+            return _Row((self._live,))
+        raise AssertionError("only SHOW transaction_isolation expected pre-write")
+
+
+class _Row:
+    def __init__(self, value):
+        self._value = value
+
+    def fetchone(self):
+        return self._value
+
+
+def test_live_isolation_verified_rejects_non_read_committed(monkeypatch):
+    # Attribute says READ COMMITTED, but the live transaction was pinned to
+    # SERIALIZABLE (e.g. a raw SET after opening) — the service must reject it via
+    # SHOW transaction_isolation, before opening the savepoint / inserting.
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = _LiveIsolationConn("serializable")
+    with pytest.raises(fact_service.CandidateFactServiceTransactionError):
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s", fact=_fact()
+        )
+    assert any("transaction_isolation" in q for q in conn.executed)
+    assert not any("SAVEPOINT" in q for q in conn.executed)
+
+
+def test_live_read_committed_passes_isolation_and_reaches_write(monkeypatch):
+    # Live isolation is READ COMMITTED, so the check passes and execution reaches
+    # the savepoint (the next statement, which this conn rejects with an
+    # AssertionError), proving the verification does not block a valid caller.
+    monkeypatch.setenv("MAS_EVIDENCE_SNAPSHOT_ENABLED", "true")
+    conn = _LiveIsolationConn("read committed")
+    with pytest.raises(AssertionError):
+        fact_service.create_candidate_fact_revision(
+            conn, project_id="p", source_snapshot_id="s", fact=_fact()
+        )
+    assert any("transaction_isolation" in q for q in conn.executed)
 
 
 # ─────────────────────────── canonical revalidation (no SQL) ───────────────────────────
