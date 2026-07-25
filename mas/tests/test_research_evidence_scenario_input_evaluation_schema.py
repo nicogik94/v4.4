@@ -517,6 +517,330 @@ def feature_enabled(monkeypatch):
     monkeypatch.setenv("MAS_RESEARCH_EVIDENCE_ENABLED", "true")
 
 
+def _apply_v58_public_postgresql16_baseline(conn):
+    """Apply the real v58 predecessor chain in the default public namespace."""
+    assert 160000 <= int(conn.execute(
+        "SELECT current_setting('server_version_num')"
+    ).fetchone()[0]) < 170000
+    conn.execute("SET search_path TO public")
+    for path in (pg.INIT_SQL, pg.OUTCOMES_SQL, pg.V47_SQL):
+        pg._run_script(conn, path)
+    for apply in (
+        pg.apply_v48,
+        pg.apply_v49,
+        pg.apply_v51_research,
+        pg.apply_v52_research,
+        pg.apply_v53_research_intake,
+        pg.apply_v54_research_review,
+        pg.apply_v55_research_freshness,
+        pg.apply_v56_research_claim_support,
+        pg.apply_v57_research_binding,
+    ):
+        apply(conn)
+
+
+def _v58_owner_topology(conn):
+    table_rows = conn.execute(
+        """
+        SELECT c.relname, pg_get_userbyid(c.relowner),
+               pg_get_userbyid(database_info.datdba)
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_database database_info
+          ON database_info.datname = current_database()
+        WHERE n.nspname = current_schema()
+          AND c.relkind = 'r'
+          AND c.relname = ANY(%s)
+        ORDER BY c.relname
+        """,
+        (list(TABLES),),
+    ).fetchall()
+    function_rows = conn.execute(
+        """
+        SELECT p.proname, pg_get_userbyid(p.proowner),
+               pg_get_userbyid(database_info.datdba)
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        JOIN pg_database database_info
+          ON database_info.datname = current_database()
+        WHERE n.nspname = current_schema()
+          AND p.proname = ANY(%s)
+        ORDER BY p.proname
+        """,
+        (list(FUNCTION_INVENTORY),),
+    ).fetchall()
+    return table_rows, function_rows
+
+
+def _assert_v58_database_owned(conn):
+    table_rows, function_rows = _v58_owner_topology(conn)
+    assert len(table_rows) == 5
+    assert len(function_rows) == 11
+    assert all(owner == database_owner for _, owner, database_owner in table_rows)
+    assert all(
+        owner == database_owner
+        for _, owner, database_owner in function_rows
+    )
+
+
+def test_postgresql16_public_pg_database_owner_v58_first_apply_and_reapply():
+    """Certify the PostgreSQL 15/16 production ownership topology."""
+    with pg.dedicated_negative_role_cluster() as conn:
+        _apply_v58_public_postgresql16_baseline(conn)
+        identity = conn.execute(
+            """
+            SELECT pg_get_userbyid(database_info.datdba),
+                   pg_get_userbyid(namespace.nspowner),
+                   current_user
+            FROM pg_database database_info
+            JOIN pg_namespace namespace ON namespace.nspname = 'public'
+            WHERE database_info.datname = current_database()
+            """
+        ).fetchone()
+        assert identity == ("postgres", "pg_database_owner", "postgres")
+
+        pg.apply_v58_research_scenario_input_evaluation(conn)
+        _assert_v58_database_owned(conn)
+        assert conn.execute(
+            """
+            SELECT pg_get_userbyid(nspowner)
+            FROM pg_namespace WHERE nspname = 'public'
+            """
+        ).fetchone()[0] == "pg_database_owner"
+
+        pg.apply_v58_research_scenario_input_evaluation(conn)
+        _assert_v58_database_owned(conn)
+
+
+def test_postgresql16_v58_reapply_after_canonical_v59_schema_transfer():
+    """Keep v58 objects DB-owned after the ratified upstream schema transfer."""
+    with pg.dedicated_negative_role_cluster() as conn:
+        _apply_v58_public_postgresql16_baseline(conn)
+        pg.apply_v58_research_scenario_input_evaluation(conn)
+        pg.ensure_external_role_prerequisites(conn)
+        pg.assign_v59_upstream_migration_ownership(conn, "public")
+
+        assert conn.execute(
+            """
+            SELECT pg_get_userbyid(nspowner)
+            FROM pg_namespace WHERE nspname = 'public'
+            """
+        ).fetchone()[0] == pg.MIGRATION_OWNER
+        _assert_v58_database_owned(conn)
+
+        pg.apply_v58_research_scenario_input_evaluation(conn)
+        _assert_v58_database_owned(conn)
+
+
+def test_postgresql16_v58_reapply_rejects_owner_and_v59_security_drift():
+    """Exercise every load-bearing Model C owner/security rejection."""
+    with pg.dedicated_negative_role_cluster() as conn:
+        psycopg = pg.psycopg_module()
+        _apply_v58_public_postgresql16_baseline(conn)
+        pg.apply_v58_research_scenario_input_evaluation(conn)
+        pg.ensure_external_role_prerequisites(conn)
+        pg.assign_v59_upstream_migration_ownership(conn, "public")
+        database = conn.execute("SELECT current_database()").fetchone()[0]
+        database_owner = conn.execute(
+            """
+            SELECT pg_get_userbyid(datdba)
+            FROM pg_database WHERE datname = current_database()
+            """
+        ).fetchone()[0]
+        unrelated = f"v58_unrelated_{uuid.uuid4().hex[:12]}"
+        grantor = f"v58_grantor_{uuid.uuid4().hex[:12]}"
+        conn.execute(
+            psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                psycopg.sql.Identifier(unrelated)
+            )
+        )
+        conn.execute(
+            psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                psycopg.sql.Identifier(grantor)
+            )
+        )
+
+        # 1. A protected table cannot drift from the concrete database owner.
+        conn.execute(
+            psycopg.sql.SQL(
+                "ALTER TABLE research_evidence_scenario_input_manifest "
+                "OWNER TO {}"
+            ).format(psycopg.sql.Identifier(unrelated))
+        )
+        with pytest.raises(Exception, match="divergent table ownership"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            psycopg.sql.SQL(
+                "ALTER TABLE research_evidence_scenario_input_manifest "
+                "OWNER TO {}"
+            ).format(psycopg.sql.Identifier(database_owner))
+        )
+
+        # 2. A protected function has the same concrete-owner contract.
+        conn.execute(
+            psycopg.sql.SQL(
+                "ALTER FUNCTION "
+                "research_evidence_create_scenario_input_evaluation(jsonb) "
+                "OWNER TO {}"
+            ).format(psycopg.sql.Identifier(unrelated))
+        )
+        with pytest.raises(Exception, match="missing/divergent functions"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            psycopg.sql.SQL(
+                "ALTER FUNCTION "
+                "research_evidence_create_scenario_input_evaluation(jsonb) "
+                "OWNER TO {}"
+            ).format(psycopg.sql.Identifier(database_owner))
+        )
+
+        # 3. An arbitrary namespace owner is never trusted.
+        conn.execute(
+            psycopg.sql.SQL("ALTER SCHEMA public OWNER TO {}").format(
+                psycopg.sql.Identifier(unrelated)
+            )
+        )
+        with pytest.raises(Exception, match="untrusted schema owner"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            "ALTER SCHEMA public OWNER TO workflow_migration_owner"
+        )
+
+        # 4. Migration-owner schema trust requires exact role attributes.
+        conn.execute("ALTER ROLE workflow_migration_owner INHERIT")
+        with pytest.raises(Exception, match="non-canonical v59 role attributes"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute("ALTER ROLE workflow_migration_owner NOINHERIT")
+
+        # 5. The migration owner must not retain database CREATE.
+        conn.execute(
+            psycopg.sql.SQL(
+                "GRANT CREATE ON DATABASE {} TO workflow_migration_owner"
+            ).format(psycopg.sql.Identifier(database))
+        )
+        with pytest.raises(Exception, match="migration-owner database CREATE"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            psycopg.sql.SQL(
+                "REVOKE CREATE ON DATABASE {} FROM workflow_migration_owner"
+            ).format(psycopg.sql.Identifier(database))
+        )
+
+        # 6. The canonical owner-to-migration membership is mandatory.
+        conn.execute(
+            "REVOKE workflow_research_evidence_owner "
+            "FROM workflow_migration_owner"
+        )
+        with pytest.raises(Exception, match="exact canonical v59 owner membership"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            "GRANT workflow_research_evidence_owner "
+            "TO workflow_migration_owner "
+            "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
+        )
+
+        # 7. PostgreSQL-16 membership options are exact.
+        conn.execute(
+            "GRANT workflow_research_evidence_owner "
+            "TO workflow_migration_owner "
+            "WITH ADMIN FALSE, INHERIT TRUE, SET TRUE"
+        )
+        with pytest.raises(Exception, match="exact canonical v59 owner membership"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            "GRANT workflow_research_evidence_owner "
+            "TO workflow_migration_owner "
+            "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
+        )
+
+        # 8. A second grantor row for the canonical membership is rejected.
+        conn.execute(
+            psycopg.sql.SQL(
+                "GRANT workflow_research_evidence_owner TO {} "
+                "WITH ADMIN OPTION"
+            ).format(psycopg.sql.Identifier(grantor))
+        )
+        conn.execute(
+            psycopg.sql.SQL("SET ROLE {}").format(
+                psycopg.sql.Identifier(grantor)
+            )
+        )
+        conn.execute(
+            "GRANT workflow_research_evidence_owner "
+            "TO workflow_migration_owner "
+            "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
+        )
+        conn.execute("RESET ROLE")
+        assert conn.execute(
+            """
+            SELECT count(*)
+            FROM pg_auth_members membership
+            JOIN pg_roles granted ON granted.oid = membership.roleid
+            JOIN pg_roles member_role ON member_role.oid = membership.member
+            WHERE granted.rolname = 'workflow_research_evidence_owner'
+              AND member_role.rolname = 'workflow_migration_owner'
+            """
+        ).fetchone()[0] == 2
+        with pytest.raises(Exception, match="exact canonical v59 owner membership"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            psycopg.sql.SQL(
+                "REVOKE workflow_research_evidence_owner "
+                "FROM workflow_migration_owner GRANTED BY {}"
+            ).format(psycopg.sql.Identifier(grantor))
+        )
+        conn.execute(
+            psycopg.sql.SQL(
+                "REVOKE workflow_research_evidence_owner FROM {}"
+            ).format(psycopg.sql.Identifier(grantor))
+        )
+
+        # 9-10. Runtime can reach neither migration nor owner authority.
+        for granted_role in (
+            "workflow_migration_owner",
+            "workflow_research_evidence_owner",
+        ):
+            conn.execute(
+                psycopg.sql.SQL(
+                    "GRANT {} TO workflow_automation_roi_runtime "
+                    "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"
+                ).format(psycopg.sql.Identifier(granted_role))
+            )
+            with pytest.raises(
+                Exception, match="runtime role-membership escalation paths"
+            ):
+                pg.apply_v58_research_scenario_input_evaluation(conn)
+            conn.execute(
+                psycopg.sql.SQL(
+                    "REVOKE {} FROM workflow_automation_roi_runtime"
+                ).format(psycopg.sql.Identifier(granted_role))
+            )
+
+        # 11-12. ACL closure remains owner-only for tables and functions.
+        conn.execute(
+            psycopg.sql.SQL(
+                "GRANT SELECT ON "
+                "research_evidence_scenario_input_evaluation TO {}"
+            ).format(psycopg.sql.Identifier(unrelated))
+        )
+        with pytest.raises(Exception, match="tables have non-owner ACL"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+        conn.execute(
+            psycopg.sql.SQL(
+                "REVOKE SELECT ON "
+                "research_evidence_scenario_input_evaluation FROM {}"
+            ).format(psycopg.sql.Identifier(unrelated))
+        )
+        conn.execute(
+            psycopg.sql.SQL(
+                "GRANT EXECUTE ON FUNCTION "
+                "research_evidence_create_scenario_input_evaluation(jsonb) TO {}"
+            ).format(psycopg.sql.Identifier(unrelated))
+        )
+        with pytest.raises(Exception, match="functions have non-owner ACL"):
+            pg.apply_v58_research_scenario_input_evaluation(conn)
+
+
 def _binding(
     conn,
     evidence,
@@ -2918,9 +3242,11 @@ def test_exact_catalog_shape_actions_deferrability_defaults_and_acl(
 def test_closed_v58_object_inventory_and_clean_reapply(conn, schema_v58):
     table_rows = conn.execute(
         """
-        SELECT c.relname, c.relowner, n.nspowner
+        SELECT c.relname, c.relowner, database_info.datdba
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_database database_info
+          ON database_info.datname = current_database()
         WHERE n.nspname = current_schema()
           AND c.relkind = 'r' AND c.relname = ANY(%s)
         """,
@@ -2930,7 +3256,10 @@ def test_closed_v58_object_inventory_and_clean_reapply(conn, schema_v58):
         row[0]
         for row in table_rows
     }
-    assert all(owner == schema_owner for _, owner, schema_owner in table_rows)
+    assert all(
+        owner == database_owner
+        for _, owner, database_owner in table_rows
+    )
     index_rows = conn.execute(
         """
         SELECT index_class.oid, index_class.relname, table_class.relname,

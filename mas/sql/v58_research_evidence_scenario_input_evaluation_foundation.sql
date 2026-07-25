@@ -12,6 +12,13 @@
 -- application access.  No runtime role is granted here;
 -- a later authorized deployment/DBA wave must explicitly establish runtime-role
 -- access.
+--
+-- Protected v58 relations and functions are owned by the concrete owner of the
+-- current database (pg_database.datdba), not necessarily by their namespace
+-- owner.  PostgreSQL 15/16 normally owns public with the predefined
+-- pg_database_owner role, so database-object and namespace ownership can
+-- intentionally differ.  A later workflow_migration_owner namespace transfer
+-- is trusted only when the exact canonical v59 role topology is present.
 
 BEGIN;
 
@@ -21,6 +28,13 @@ DECLARE
     v_table_count integer;
     v_missing text;
     v_bad text;
+    v_database_oid oid;
+    v_database_owner_oid oid;
+    v_schema_owner_oid oid;
+    v_pg_database_owner_oid oid;
+    v_migration_owner_oid oid;
+    v_membership_options_supported boolean;
+    v_membership_options_valid boolean;
 BEGIN
     IF to_regclass('research_evidence_consumer_input_binding') IS NULL
        OR to_regclass(
@@ -32,6 +46,181 @@ BEGIN
     IF to_regprocedure('pg_catalog.sha256(bytea)') IS NULL THEN
         RAISE EXCEPTION 'v58 requires PostgreSQL SHA-256 support'
             USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    SELECT database_info.oid, database_info.datdba, namespace.nspowner
+    INTO v_database_oid, v_database_owner_oid, v_schema_owner_oid
+    FROM pg_catalog.pg_database database_info
+    JOIN pg_catalog.pg_namespace namespace
+      ON namespace.nspname = current_schema()
+    WHERE database_info.datname = pg_catalog.current_database();
+    SELECT role_info.oid INTO v_pg_database_owner_oid
+    FROM pg_catalog.pg_roles role_info
+    WHERE role_info.rolname = 'pg_database_owner';
+    SELECT role_info.oid INTO v_migration_owner_oid
+    FROM pg_catalog.pg_roles role_info
+    WHERE role_info.rolname = 'workflow_migration_owner';
+
+    IF v_database_oid IS NULL
+       OR v_database_owner_oid IS NULL
+       OR v_schema_owner_oid IS NULL
+       OR v_pg_database_owner_oid IS NULL THEN
+        RAISE EXCEPTION
+            'v58 contract violation: database/schema owner identity unavailable'
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    IF v_schema_owner_oid = v_database_owner_oid
+       OR v_schema_owner_oid = v_pg_database_owner_oid THEN
+        NULL;
+    ELSIF v_schema_owner_oid = v_migration_owner_oid THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_roles
+            WHERE rolname = 'workflow_migration_owner'
+              AND rolcanlogin AND NOT rolinherit
+              AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb
+              AND NOT rolreplication AND NOT rolbypassrls
+        ) OR NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_roles
+            WHERE rolname = 'workflow_research_evidence_owner'
+              AND NOT rolcanlogin AND NOT rolinherit
+              AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb
+              AND NOT rolreplication AND NOT rolbypassrls
+        ) OR NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_roles
+            WHERE rolname = 'workflow_automation_roi_runtime'
+              AND rolcanlogin AND NOT rolinherit
+              AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb
+              AND NOT rolreplication AND NOT rolbypassrls
+        ) THEN
+            RAISE EXCEPTION
+                'v58 rejects non-canonical v59 role attributes'
+                USING ERRCODE = '42501';
+        END IF;
+
+        IF pg_catalog.has_database_privilege(
+            v_migration_owner_oid, v_database_oid, 'CREATE'
+        ) THEN
+            RAISE EXCEPTION
+                'v58 rejects migration-owner database CREATE'
+                USING ERRCODE = '42501';
+        END IF;
+
+        SELECT count(*) = 2 INTO v_membership_options_supported
+        FROM pg_catalog.pg_attribute
+        WHERE attrelid = 'pg_catalog.pg_auth_members'::regclass
+          AND attname IN ('inherit_option', 'set_option')
+          AND NOT attisdropped;
+        IF NOT v_membership_options_supported THEN
+            RAISE EXCEPTION
+                'v58 cannot prove canonical v59 membership options'
+                USING ERRCODE = '42501';
+        END IF;
+        EXECUTE $membership_options$
+            SELECT count(*) = 1
+            FROM pg_catalog.pg_auth_members membership
+            JOIN pg_catalog.pg_roles granted_role
+              ON granted_role.oid = membership.roleid
+            JOIN pg_catalog.pg_roles member_role
+              ON member_role.oid = membership.member
+            WHERE granted_role.rolname =
+                      'workflow_research_evidence_owner'
+              AND member_role.rolname = 'workflow_migration_owner'
+              AND NOT membership.admin_option
+              AND NOT membership.inherit_option
+              AND membership.set_option
+        $membership_options$
+        INTO v_membership_options_valid;
+        IF NOT v_membership_options_valid THEN
+            RAISE EXCEPTION
+                'v58 requires exact canonical v59 owner membership'
+                USING ERRCODE = '42501';
+        END IF;
+
+        IF EXISTS (
+            WITH RECURSIVE reachable(role_oid) AS (
+                SELECT membership.roleid
+                FROM pg_catalog.pg_auth_members membership
+                JOIN pg_catalog.pg_roles runtime_role
+                  ON runtime_role.oid = membership.member
+                WHERE runtime_role.rolname =
+                          'workflow_automation_roi_runtime'
+                UNION
+                SELECT membership.roleid
+                FROM pg_catalog.pg_auth_members membership
+                JOIN reachable ON reachable.role_oid = membership.member
+            )
+            SELECT 1
+            FROM reachable
+            JOIN pg_catalog.pg_roles reached_role
+              ON reached_role.oid = reachable.role_oid
+            WHERE reached_role.rolname IN (
+                'workflow_migration_owner',
+                'workflow_research_evidence_owner'
+            )
+        ) THEN
+            RAISE EXCEPTION
+                'v58 rejects runtime role-membership escalation paths'
+                USING ERRCODE = '42501';
+        END IF;
+
+        IF (
+            SELECT count(*)
+            FROM pg_catalog.pg_auth_members membership
+            JOIN pg_catalog.pg_roles granted_role
+              ON granted_role.oid = membership.roleid
+            JOIN pg_catalog.pg_roles member_role
+              ON member_role.oid = membership.member
+            WHERE (
+                granted_role.rolname = ANY (ARRAY[
+                    'workflow_migration_owner',
+                    'workflow_research_evidence_owner',
+                    'workflow_automation_roi_runtime'
+                ])
+                OR member_role.rolname = ANY (ARRAY[
+                    'workflow_migration_owner',
+                    'workflow_research_evidence_owner',
+                    'workflow_automation_roi_runtime'
+                ])
+            )
+              AND granted_role.rolname =
+                    'workflow_research_evidence_owner'
+              AND member_role.rolname = 'workflow_migration_owner'
+              AND NOT membership.admin_option
+        ) <> 1 OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_auth_members membership
+            JOIN pg_catalog.pg_roles granted_role
+              ON granted_role.oid = membership.roleid
+            JOIN pg_catalog.pg_roles member_role
+              ON member_role.oid = membership.member
+            WHERE (
+                granted_role.rolname = ANY (ARRAY[
+                    'workflow_migration_owner',
+                    'workflow_research_evidence_owner',
+                    'workflow_automation_roi_runtime'
+                ])
+                OR member_role.rolname = ANY (ARRAY[
+                    'workflow_migration_owner',
+                    'workflow_research_evidence_owner',
+                    'workflow_automation_roi_runtime'
+                ])
+            )
+              AND NOT (
+                  granted_role.rolname =
+                      'workflow_research_evidence_owner'
+                  AND member_role.rolname = 'workflow_migration_owner'
+                  AND NOT membership.admin_option
+              )
+        ) THEN
+            RAISE EXCEPTION
+                'v58 requires the exact canonical v59 role-membership graph'
+                USING ERRCODE = '42501';
+        END IF;
+    ELSE
+        RAISE EXCEPTION
+            'v58 contract violation: untrusted schema owner'
+            USING ERRCODE = '42501';
     END IF;
 
     SELECT count(*) INTO v_table_count
@@ -67,6 +256,15 @@ BEGIN
            WHERE schemaname = current_schema()
              AND indexname LIKE 'idx_resi%'
        ) THEN
+        IF (
+            SELECT role_info.oid
+            FROM pg_catalog.pg_roles role_info
+            WHERE role_info.rolname = current_user
+        ) IS DISTINCT FROM v_database_owner_oid THEN
+            RAISE EXCEPTION
+                'v58 clean bootstrap requires the current database owner'
+                USING ERRCODE = '42501';
+        END IF;
         RETURN;
     END IF;
     IF v_table_count <> 5 THEN
@@ -85,7 +283,7 @@ BEGIN
               'research_evidence_scenario_input_evaluation_input',
               'research_evidence_scenario_input_evaluation_sequence_allocator'
           ])
-          AND c.relowner <> n.nspowner
+          AND c.relowner <> v_database_owner_oid
     ) THEN
         RAISE EXCEPTION 'v58 contract violation: divergent table ownership'
             USING ERRCODE = 'invalid_schema_definition';
@@ -624,7 +822,7 @@ BEGIN
         WHERE n.nspname = current_schema()
           AND p.proname = expected.name
           AND p.pronargs = expected.nargs
-          AND p.proowner = n.nspowner
+          AND p.proowner = v_database_owner_oid
           AND (
               (
                   expected.nargs = 0
