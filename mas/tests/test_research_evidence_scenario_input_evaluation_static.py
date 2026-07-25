@@ -233,6 +233,56 @@ def test_reapply_checks_same_name_definition_and_integrity_drift():
         assert sentinel in SQL_RAW
 
 
+def test_v58_uses_database_owner_not_namespace_owner_for_protected_objects():
+    sql = _without_comments(SQL_RAW)
+    for old_assumption in (
+        r"\bc\.relowner\s*(?:=|<>|!=|IS\s+(?:NOT\s+)?DISTINCT\s+FROM)"
+        r"\s*n\.nspowner\b",
+        r"\bp\.proowner\s*(?:=|<>|!=|IS\s+(?:NOT\s+)?DISTINCT\s+FROM)"
+        r"\s*n\.nspowner\b",
+    ):
+        assert not re.search(old_assumption, sql, re.IGNORECASE)
+
+    assert "pg_catalog.pg_database" in sql
+    assert "database_info.datdba" in sql
+    assert "c.relowner <> v_database_owner_oid" in sql
+    assert "p.proowner = v_database_owner_oid" in sql
+    assert "pg_database_owner" in sql
+    assert "untrusted schema owner" in sql
+
+
+def test_migration_owned_schema_requires_exact_canonical_v59_security():
+    sql = _without_comments(SQL_RAW)
+    for role in (
+        "workflow_migration_owner",
+        "workflow_research_evidence_owner",
+        "workflow_automation_roi_runtime",
+    ):
+        assert role in sql
+    for attribute in (
+        "rolcanlogin",
+        "rolinherit",
+        "rolsuper",
+        "rolcreaterole",
+        "rolcreatedb",
+        "rolreplication",
+        "rolbypassrls",
+    ):
+        assert attribute in sql
+    for contract in (
+        "has_database_privilege(",
+        "'CREATE'",
+        "pg_catalog.pg_auth_members",
+        "membership.admin_option",
+        "membership.inherit_option",
+        "membership.set_option",
+        "exact canonical v59 owner membership",
+        "exact canonical v59 role-membership graph",
+        "runtime role-membership escalation paths",
+    ):
+        assert contract in sql
+
+
 def test_trigger_inventory_closes_column_specific_update_scope_drift():
     assert SQL_RAW.count("''::int2vector") == 14
     assert re.search(
