@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
+import hashlib
+import json
 
 from pydantic import BaseModel, Field
 
@@ -260,7 +262,7 @@ def evaluate_phase_retrieval(
     now = now or datetime.now()
     refresh_knowledge_items(state, now=now)
 
-    eligible: list[RetrievalEligibleItem] = []
+    ranked_eligible: list[tuple[tuple[str, str], RetrievalEligibleItem]] = []
     blocked: list[RetrievalBlockedItem] = []
     for item in (state.knowledge_layer.items if state.knowledge_layer else []) or []:
         source = get_source_entry(state, item.source_id)
@@ -297,21 +299,25 @@ def evaluate_phase_retrieval(
             )
             continue
 
-        eligible.append(
-            RetrievalEligibleItem(
-                item_id=item.item_id,
-                source_id=item.source_id,
-                source_name=source.name if source else "",
-                title=item.title,
-                freshness_status=_status_value(item.freshness_status),
-                trust_tier=item.trust_tier,
-                sensitivity=item.sensitivity,
-                source_status=source_status,
-                projection=projection,
+        ranked_eligible.append(
+            (
+                _retrieval_ordering_key(item, projection),
+                RetrievalEligibleItem(
+                    item_id=item.item_id,
+                    source_id=item.source_id,
+                    source_name=source.name if source else "",
+                    title=item.title,
+                    freshness_status=_status_value(item.freshness_status),
+                    trust_tier=item.trust_tier,
+                    sensitivity=item.sensitivity,
+                    source_status=source_status,
+                    projection=projection,
+                ),
             )
         )
 
-    eligible.sort(key=lambda record: (record.projection.observed_at, record.item_id), reverse=True)
+    ranked_eligible.sort(key=lambda entry: entry[0], reverse=True)
+    eligible = [record for _, record in ranked_eligible]
     blocked.sort(key=lambda record: (record.source_id, record.item_id))
 
     limited_eligible = eligible[: policy.prompt_exposure.max_items]
@@ -402,6 +408,54 @@ def _blocked_reasons(
         reasons.append("manual_review_required")
 
     return reasons
+
+
+def _retrieval_ordering_key(item, projection: ProjectedKnowledgeItem) -> tuple[str, str]:
+    """Internal, project-independent ranking key for eligible retrieval items.
+
+    Recency stays the primary key. The tie-break is the item's own content
+    identity instead of ``item_id``: upload/file/source/item identifiers embed
+    the project UUID plus time and random material, so two projects holding the
+    same knowledge bytes ranked them differently and received different
+    prompt-facing subsets once ``max_items`` truncated the list.
+
+    This key is internal to ordering. It is not exposed in any schema.
+    """
+    return (projection.observed_at, _semantic_identity(item))
+
+
+def _semantic_identity(item) -> str:
+    """Return the stable content identity used to break recency ties.
+
+    ``checksum_sha256`` is the existing semantic identity on every ingest path:
+    document chunks hash ``upload_checksum:chunk_index:chunk_text``, table
+    chunks hash ``upload_checksum:row_offset:rows``, and offline-fixture items
+    hash their canonical payload. None of those derive from the project UUID,
+    file id, source id, item id, or random material.
+
+    Items stored without a checksum fall back to a digest of their own
+    prompt-safe content, never to a project-local opaque identifier.
+    """
+    checksum = str(getattr(item, "checksum_sha256", "") or "").strip().lower()
+    if checksum:
+        return checksum
+    return _semantic_content_digest(item)
+
+
+def _semantic_content_digest(item) -> str:
+    canonical = json.dumps(
+        {
+            "title": str(getattr(item, "title", "") or ""),
+            "summary": str(getattr(item, "summary", "") or ""),
+            "structured_payload": getattr(item, "structured_payload", None) or {},
+            "observed_at": str(getattr(item, "observed_at", "") or ""),
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _trust_rank(value: str) -> int:
