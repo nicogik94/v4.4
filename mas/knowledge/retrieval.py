@@ -433,8 +433,11 @@ def _semantic_identity(item) -> str:
     hash their canonical payload. None of those derive from the project UUID,
     file id, source id, item id, or random material.
 
-    Items stored without a checksum fall back to a digest of their own
-    prompt-safe content, never to a project-local opaque identifier.
+    ``checksum_sha256`` defaults to an empty string, so checksum-less items are
+    valid state. They fall back to a digest of their own prompt-safe content,
+    never to a project-local opaque identifier and never to a timestamp:
+    ``observed_at`` is already the primary ordering component, and hashing it
+    here would let equivalent content rank differently across instances.
     """
     checksum = str(getattr(item, "checksum_sha256", "") or "").strip().lower()
     if checksum:
@@ -448,7 +451,6 @@ def _semantic_content_digest(item) -> str:
             "title": str(getattr(item, "title", "") or ""),
             "summary": str(getattr(item, "summary", "") or ""),
             "structured_payload": getattr(item, "structured_payload", None) or {},
-            "observed_at": str(getattr(item, "observed_at", "") or ""),
         },
         sort_keys=True,
         ensure_ascii=True,

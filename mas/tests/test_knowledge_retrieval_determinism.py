@@ -376,22 +376,208 @@ class TestOpaqueIdIndependence(unittest.TestCase):
             for opaque in (item.item_id, item.source_id, file_id, state.project_id):
                 self.assertNotIn(opaque, key[1])
 
-    def test_missing_checksum_falls_back_to_content_not_to_item_id(self):
+class TestChecksumlessFallbackIdentity(unittest.TestCase):
+    """``checksum_sha256`` defaults to empty, so the fallback is real state.
+
+    The fallback digest must be derived from semantic content alone. It must not
+    hash ``observed_at``: recency is already the primary ordering component, and
+    hashing it would let semantically identical items rank differently across
+    equivalent states.
+    """
+
+    OBSERVED_BASE_A = EVALUATED_AT - timedelta(hours=20)
+    OBSERVED_BASE_B = EVALUATED_AT - timedelta(hours=8)
+
+    @staticmethod
+    def _checksumless_state(
+        project_id: str,
+        *,
+        uploaded_at: datetime,
+        random_material: str,
+        observed_base: datetime,
+        item_id_prefix: str,
+        invert_item_ids: bool,
+    ):
+        """Same semantic content, same relative recency structure, own identities.
+
+        Recency tiers are a function of the chunk's own content (its index), so
+        both projects carry the same relative recency structure over a
+        project-specific base timestamp.
+        """
+        state = _uploaded_state(project_id, uploaded_at=uploaded_at, random_material=random_material)
+        count = len(state.knowledge_layer.items)
+        for item in state.knowledge_layer.items:
+            chunk_index = int(item.structured_payload["chunk_index"])
+            item.checksum_sha256 = ""
+            item.observed_at = (observed_base + timedelta(hours=chunk_index % 3)).isoformat()
+            item.captured_at = item.observed_at
+            rank = count - chunk_index if invert_item_ids else chunk_index
+            item.item_id = f"{item_id_prefix}_{rank:04d}"
+        return state
+
+    @staticmethod
+    def _recency_tiers(chunk_indices: list) -> list:
+        return [int(index) % 3 for index in chunk_indices]
+
+    # ── A. single-item semantic identity ───────────────────────────────────
+
+    def test_identity_ignores_opaque_ids_and_timestamps(self):
+        state_a = _uploaded_state(
+            PROJECT_A, uploaded_at=UPLOADED_AT_A, random_material=UPLOAD_MATERIAL_A
+        )
+        state_b = _uploaded_state(
+            PROJECT_B, uploaded_at=UPLOADED_AT_B, random_material=UPLOAD_MATERIAL_B
+        )
+        self.assertNotEqual(state_a.project_id, state_b.project_id)
+
+        item = state_a.knowledge_layer.items[0].model_copy(deep=True)
+        item.checksum_sha256 = ""
+        twin = state_b.knowledge_layer.items[0].model_copy(deep=True)
+        twin.checksum_sha256 = ""
+        # Same semantic content, everything instance-specific different.
+        twin.title = item.title
+        twin.summary = item.summary
+        twin.structured_payload = dict(item.structured_payload)
+        twin.item_id = "knowledge_some_other_opaque_id"
+        twin.source_id = "knowledge_source_other"
+        twin.source_ref = "upload:file_other:other#chunk=1"
+        twin.observed_at = (EVALUATED_AT - timedelta(hours=37)).isoformat()
+        twin.captured_at = twin.observed_at
+
+        self.assertNotEqual(item.item_id, twin.item_id)
+        self.assertNotEqual(item.source_id, twin.source_id)
+        self.assertNotEqual(item.observed_at, twin.observed_at)
+        self.assertEqual(retrieval._semantic_identity(item), retrieval._semantic_identity(twin))
+
+        identity = retrieval._semantic_identity(item)
+        for opaque in (item.item_id, item.source_id, item.observed_at, state_a.project_id):
+            self.assertNotIn(opaque, identity)
+
+    def test_observed_at_alone_never_changes_identity(self):
         state = _uploaded_state(
             PROJECT_A, uploaded_at=UPLOADED_AT_A, random_material=UPLOAD_MATERIAL_A
         )
         item = state.knowledge_layer.items[0].model_copy(deep=True)
         item.checksum_sha256 = ""
-        twin = item.model_copy(deep=True)
-        twin.item_id = "knowledge_some_other_opaque_id"
-        twin.source_id = "knowledge_source_other"
+        baseline = retrieval._semantic_identity(item)
 
-        self.assertEqual(retrieval._semantic_identity(item), retrieval._semantic_identity(twin))
-        self.assertNotIn(item.item_id, retrieval._semantic_identity(item))
+        for hours in (1, 24, 10_000):
+            shifted = item.model_copy(deep=True)
+            shifted.observed_at = (EVALUATED_AT - timedelta(hours=hours)).isoformat()
+            shifted.captured_at = shifted.observed_at
+            shifted.effective_at = shifted.observed_at
+            with self.subTest(hours=hours):
+                self.assertNotEqual(shifted.observed_at, item.observed_at)
+                self.assertEqual(retrieval._semantic_identity(shifted), baseline)
 
-        divergent = item.model_copy(deep=True)
-        divergent.summary = item.summary + " (different content)"
-        self.assertNotEqual(retrieval._semantic_identity(item), retrieval._semantic_identity(divergent))
+    def test_semantic_content_changes_do_change_identity(self):
+        state = _uploaded_state(
+            PROJECT_A, uploaded_at=UPLOADED_AT_A, random_material=UPLOAD_MATERIAL_A
+        )
+        item = state.knowledge_layer.items[0].model_copy(deep=True)
+        item.checksum_sha256 = ""
+        baseline = retrieval._semantic_identity(item)
+
+        mutations = {
+            "title": lambda copy: setattr(copy, "title", copy.title + " (edited)"),
+            "summary": lambda copy: setattr(copy, "summary", copy.summary + " (edited)"),
+            "structured_payload": lambda copy: copy.structured_payload.update({"category": "changed"}),
+        }
+        for field, mutate in mutations.items():
+            with self.subTest(field=field):
+                mutated = item.model_copy(deep=True)
+                mutate(mutated)
+                self.assertNotEqual(retrieval._semantic_identity(mutated), baseline)
+
+    # ── B. truncated multi-item fallback equivalence ───────────────────────
+
+    def test_checksumless_projects_select_the_same_semantic_subset(self):
+        state_a = self._checksumless_state(
+            PROJECT_A,
+            uploaded_at=UPLOADED_AT_A,
+            random_material=UPLOAD_MATERIAL_A,
+            observed_base=self.OBSERVED_BASE_A,
+            item_id_prefix="knowledge_fallback_a",
+            invert_item_ids=False,
+        )
+        state_b = self._checksumless_state(
+            PROJECT_B,
+            uploaded_at=UPLOADED_AT_B,
+            random_material=UPLOAD_MATERIAL_B,
+            observed_base=self.OBSERVED_BASE_B,
+            item_id_prefix="knowledge_fallback_b",
+            invert_item_ids=True,
+        )
+
+        # Non-vacuous: fallback path really is exercised, truncation really bites,
+        # and every instance-specific identity genuinely differs.
+        for state in (state_a, state_b):
+            self.assertEqual(len(state.knowledge_layer.items), EXPECTED_ITEM_COUNT)
+            self.assertTrue(all(not item.checksum_sha256 for item in state.knowledge_layer.items))
+        self.assertGreater(EXPECTED_ITEM_COUNT, EXPECTED_MAX_ITEMS)
+        self.assertNotEqual(state_a.project_id, state_b.project_id)
+        self.assertEqual(
+            {item.item_id for item in state_a.knowledge_layer.items}
+            & {item.item_id for item in state_b.knowledge_layer.items},
+            set(),
+        )
+        self.assertNotEqual(
+            state_a.knowledge_layer.sources[0].source_id,
+            state_b.knowledge_layer.sources[0].source_id,
+        )
+        self.assertEqual(
+            {item.observed_at for item in state_a.knowledge_layer.items}
+            & {item.observed_at for item in state_b.knowledge_layer.items},
+            set(),
+        )
+        # The pre-fix key ordered these two states in opposite directions.
+        self.assertNotEqual(_legacy_chunk_sequence(state_a), _legacy_chunk_sequence(state_b))
+
+        for phase in ("audit", "strategy"):
+            with self.subTest(phase=phase):
+                selection_a = _semantic_selection(state_a, phase)
+                selection_b = _semantic_selection(state_b, phase)
+
+                self.assertEqual(selection_a["chunk_indices"], selection_b["chunk_indices"])
+                self.assertEqual(selection_a["projection_rows"], selection_b["projection_rows"])
+                self.assertEqual(selection_a["projection_digest"], selection_b["projection_digest"])
+                self.assertEqual(selection_a["max_items"], EXPECTED_MAX_ITEMS)
+                self.assertEqual(len(selection_a["chunk_indices"]), EXPECTED_MAX_ITEMS)
+                self.assertEqual(len(selection_a["view"].blocked_items), 0)
+                self.assertEqual(len(selection_b["view"].blocked_items), 0)
+                self.assertNotEqual(selection_a["item_ids"], selection_b["item_ids"])
+                self.assertNotEqual(selection_a["observed_at"], selection_b["observed_at"])
+
+                # The shared relative recency structure survives truncation:
+                # the two newest tiers are kept, the oldest tier is dropped.
+                self.assertEqual(
+                    self._recency_tiers(selection_a["chunk_indices"]),
+                    [2, 2, 2, 1, 1, 1],
+                )
+
+    # ── C. recency preserved ───────────────────────────────────────────────
+
+    def test_recency_remains_primary_for_checksumless_items(self):
+        state = _uploaded_state(
+            PROJECT_A, uploaded_at=UPLOADED_AT_A, random_material=UPLOAD_MATERIAL_A
+        )
+        for item in state.knowledge_layer.items:
+            item.checksum_sha256 = ""
+
+        # Give the newest timestamp to the item the tie-break ranks last, so
+        # recency order is the exact reverse of fallback-digest order.
+        by_identity = sorted(state.knowledge_layer.items, key=retrieval._semantic_identity)
+        for offset, item in enumerate(by_identity):
+            item.observed_at = (EVALUATED_AT - timedelta(hours=1 + offset)).isoformat()
+            item.captured_at = item.observed_at
+
+        view = evaluate_phase_retrieval(state, "audit", now=EVALUATED_AT)
+
+        expected = [item.item_id for item in by_identity][:EXPECTED_MAX_ITEMS]
+        self.assertEqual([record.item_id for record in view.eligible_items], expected)
+        observed = [record.projection.observed_at for record in view.eligible_items]
+        self.assertEqual(observed, sorted(observed, reverse=True))
+        self.assertEqual(len(set(observed)), EXPECTED_MAX_ITEMS)
 
 
 class TestRecencyOrdering(unittest.TestCase):
