@@ -22,6 +22,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -72,6 +73,25 @@ def _two_source_projection(first_kind, second_kind):
         remodel(projection.sources[1], source_kind=second_kind),
     )
     return rebuild(projection, sources=sources)
+
+
+def _unvalidated_kinds(pack, *kinds):
+    """Project ``pack``, then override each source's ``source_kind`` unvalidated.
+
+    ``model_construct`` deliberately bypasses A-3's require check so the renderer
+    can be exercised on a category it would normally never be handed. The point
+    is that the renderer must normalize on its own, not inherit safety from a
+    validator it does not run; everything else stays a real projection.
+    """
+    projection = project_research_evidence_pack(pack)
+    values = {
+        name: getattr(projection, name) for name in type(projection).model_fields
+    }
+    values["sources"] = tuple(
+        remodel(source, source_kind=kind)
+        for source, kind in zip(projection.sources, kinds, strict=True)
+    )
+    return type(projection).model_construct(**values)
 
 
 def _rendered_kind_values(block: str) -> list[str]:
@@ -172,6 +192,76 @@ def test_every_projected_source_carries_the_distinction_unconditionally():
     rendered = _rendered_kind_values(block)
     assert len(rendered) == len(projection.sources)
     assert rendered == [source.source_kind for source in projection.sources]
+
+
+def test_a3_still_refuses_an_absent_category_at_the_projection_boundary():
+    """The renderer's normalization below is defense in depth, not a policy change.
+
+    A-3 both allows AND requires ``source_kind`` for ``internal_analysis``, so a
+    projection whose source omits the category is refused before any renderer
+    sees it. This pins that upstream check as unchanged.
+    """
+    projection = project_research_evidence_pack(build_pack("internal_analysis"))
+    with pytest.raises(ValidationError):
+        rebuild(
+            projection,
+            sources=(remodel(projection.sources[0], source_kind=None),),
+        )
+
+
+def test_absent_source_kind_renders_the_attestation_blank_not_the_literal_none():
+    """An absent category must render as blank, exactly as the attestation does.
+
+    ``ResearchEvidencePresentationSource.source_kind`` is ``Optional[str]``, so a
+    directly constructed valid presentation source can carry ``None`` even though
+    the canonical database-backed chain always supplies a real string and A-3
+    refuses the omission one layer up (test above). Where the two boundaries can
+    still be reached independently they must agree, and neither may show the
+    model the literal text ``None`` as though it were a provenance category.
+    """
+    projection = _unvalidated_kinds(build_pack("internal_analysis"), None)
+    assert projection.sources[0].source_kind is None
+
+    block = rc.render_research_evidence_block(projection)
+
+    # The line stays present and unconditional: absence is disclosed, not hidden.
+    assert block.count(SOURCE_KIND_PREFIX) == 1
+    lines = block.splitlines()
+    header = next(i for i, line in enumerate(lines) if line.startswith("  S1 "))
+    assert lines[header + 1].startswith(SOURCE_KIND_PREFIX)
+
+    # ...and its rendered value is blank, never Python's ``None`` repr.
+    assert _rendered_kind_values(block) == [""]
+    assert "None" not in block
+
+    # The blank is exactly what the durable attestation already normalizes to,
+    # so the two boundaries can no longer disagree about the same source.
+    identity = rc._attestation_from_projection(projection)["sources"][0]
+    assert identity.source_kind == ""
+    assert _rendered_kind_values(block) == [identity.source_kind]
+
+
+def test_absent_and_concrete_source_kinds_stay_separate_in_one_block():
+    """Normalizing the absent case must not touch a category that is present."""
+    projection = _unvalidated_kinds(
+        build_two_member_pack("internal_analysis"), None, CURATED,
+    )
+    block = rc.render_research_evidence_block(projection)
+
+    assert _rendered_kind_values(block) == ["", CURATED]
+    assert block.count(SOURCE_KIND_PREFIX + CURATED) == 1
+    assert "None" not in block
+
+    # No private locator, blob id, storage reference or local path rides along.
+    assert "storage_ref" not in ResearchEvidencePresentationSource.model_fields
+    assert "storage_ref" not in block and "evidence_source_store" not in block
+    for source in projection.sources:
+        for private in (
+            source.source_locator, source.source_blob_id,
+            source.source_metadata_revision_id,
+        ):
+            assert private, "fixture must populate the private field"
+            assert private not in block
 
 
 # ═══════════════════ (3,4,5) durable consumption identity ═══════════════════

@@ -345,7 +345,11 @@ def _render_block_body(projection: ResearchEvidencePresentationProjection) -> li
             # projected value is passed through verbatim: how the system obtained
             # the bytes is not something this renderer may infer, normalize, or
             # rewrite. It is a closed category label, never a storage location.
-            lines.append(f"     source_kind: {_fmt(source.source_kind)}")
+            # ``or ""`` only bridges the projection's Optional field to the same
+            # blank the durable attestation records for an absent category (see
+            # ``_attestation_from_projection``), so the model never reads the
+            # literal "None" as if it were one; it substitutes nothing.
+            lines.append(f"     source_kind: {_fmt(source.source_kind or '')}")
             lines.append(f"     citation_label: {_fmt(source.citation_label)}")
             lines.append(
                 f"     canonical_source_locator: "
