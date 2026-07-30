@@ -33,6 +33,11 @@ tmp_*.json
 # Local databases / runtime artifacts
 *.sqlite3
 
+# Evidence-only source store (R2.0A-4C): immutable operator-supplied source
+# bytes a v47 source_snapshot references. Server-side runtime state, never
+# repository content.
+mas/evidence_source_store/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
