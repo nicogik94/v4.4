@@ -152,6 +152,11 @@ class ResearchEvidencePromptBudgetError(RuntimeError):
 class ResearchEvidenceSourceIdentity(BaseModel):
     source_snapshot_id: str = ""
     citation_label: str = ""
+    # Mechanical provenance category, carried verbatim from the A-3 projection
+    # (which requires it for this consumer's scope). Additive with a safe
+    # default so historical attestations/events recorded before this field
+    # existed still parse and simply report an empty category.
+    source_kind: str = ""
 
 
 class ResearchEvidenceImpactSummary(BaseModel):
@@ -250,6 +255,7 @@ class ResearchEvidenceConsumption:
                 {
                     "source_snapshot_id": source.source_snapshot_id,
                     "citation_label": source.citation_label,
+                    "source_kind": source.source_kind,
                 }
                 for source in self.sources
             ],
@@ -265,6 +271,10 @@ def _attestation_from_projection(
         ResearchEvidenceSourceIdentity(
             source_snapshot_id=source.source_snapshot_id,
             citation_label=source.citation_label,
+            # The projected value verbatim. ``or ""`` only bridges the
+            # projection's Optional field to this attestation's ``str`` default;
+            # it never substitutes, normalizes, or infers a category.
+            source_kind=source.source_kind or "",
         )
         for source in projection.sources[:_ATTESTATION_SOURCE_LIMIT]
     )
@@ -329,6 +339,13 @@ def _render_block_body(projection: ResearchEvidencePresentationProjection) -> li
             lines.append(
                 f"  S{index} source_snapshot_id={_fmt(source.source_snapshot_id)}"
             )
+            # Mechanical provenance category, emitted for EVERY projected source
+            # and unconditionally (A-3 requires it for this consumer's scope, so
+            # a conditional emission could only ever hide the distinction). The
+            # projected value is passed through verbatim: how the system obtained
+            # the bytes is not something this renderer may infer, normalize, or
+            # rewrite. It is a closed category label, never a storage location.
+            lines.append(f"     source_kind: {_fmt(source.source_kind)}")
             lines.append(f"     citation_label: {_fmt(source.citation_label)}")
             lines.append(
                 f"     canonical_source_locator: "
@@ -662,6 +679,9 @@ def _impact_from_event_details(phase: str, details: dict) -> ResearchEvidenceImp
         ResearchEvidenceSourceIdentity(
             source_snapshot_id=str(item.get("source_snapshot_id") or ""),
             citation_label=str(item.get("citation_label") or ""),
+            # Absent in events recorded before the field existed; those read
+            # back with an empty category rather than failing.
+            source_kind=str(item.get("source_kind") or ""),
         )
         for item in (details.get("sources") or [])
         if isinstance(item, dict)

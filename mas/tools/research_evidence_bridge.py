@@ -18,7 +18,18 @@ Safety posture:
 * every write requires ``MAS_RESEARCH_EVIDENCE_ENABLED=true`` (and
   ``MAS_EVIDENCE_SNAPSHOT_ENABLED=true`` when it touches v47 capture/facts);
 * every write runs on ONE caller-owned, non-autocommit, READ COMMITTED
-  transaction and defaults to rollback — it persists only with ``--commit``;
+  transaction and defaults to rollback — it persists only with ``--commit``.
+  ``source-capture`` is the one command with an unavoidable non-transactional
+  side effect: a POSIX filesystem cannot join a PostgreSQL transaction, so the
+  evidence bytes are made durable *before* the snapshot row is created. A dry-run
+  (or a failed commit) therefore commits no database state but may leave the
+  content-addressed blob on disk, unreferenced by any snapshot and reused rather
+  than duplicated by a later genuine capture. See
+  ``knowledge.evidence_snapshot.source_service``;
+* ``source-capture`` reads LOCAL operator-supplied bytes only — it accepts no URL
+  and performs no HTTP/network access — and creates no Knowledge source,
+  Knowledge item, uploaded-file manifest, ProjectState change, or imported
+  evidence/signals;
 * ``usage_scope`` is mechanically fixed to ``internal_analysis`` — there is no
   operator-selectable usage scope anywhere in this tool;
 * authorization/revocation additionally require a typed confirmation echoing the
@@ -267,6 +278,25 @@ CATALOG_CONSTRAINTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("research_evidence_usage_authorization_decision", "uq_reuad_scope_request",
      ("project_id", "claim_intake_item_id", "evidence_intake_item_id",
       "usage_scope", "request_id")),
+)
+
+# The v47 capture-operation uniqueness `source-capture` idempotency rests on.
+#
+# `source-capture` keys its retry contract on the project-scoped capture
+# operation id rather than a `request_id`, so it cannot live in
+# CATALOG_CONSTRAINTS above (whose every entry is a request-id key). The
+# mechanism is identical: the service probes for an existing committed operation
+# first, but at READ COMMITTED two concurrent captures can both observe "no such
+# operation". Only `uq_ingest_operation_project_op` makes the retry contract hold
+# — it is what forces the second writer to see the first operation instead of
+# appending a second capture event under one operation identity. Absent or
+# drifted, the guarantee silently disappears, so it is frozen as a catalog fact
+# and folded into the same `constraints_ready` verdict.
+#
+# (relation, constraint name, exact ordered conkey columns) — from ratified v47.
+CATALOG_CAPTURE_CONSTRAINTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("ingest_operation", "uq_ingest_operation_project_op",
+     ("project_id", "operation_id")),
 )
 
 # Topology roles the disposable/production cluster is expected to carry, with the
@@ -1144,7 +1174,9 @@ def _collect_catalog(conn) -> dict:
     # Load-bearing request-id uniqueness: without it the repositories' 23505
     # recovery arm is unreachable and concurrent retries append duplicates.
     bad_constraints: list[str] = []
-    for relation, conname, columns in CATALOG_CONSTRAINTS:
+    for relation, conname, columns in (
+        CATALOG_CONSTRAINTS + CATALOG_CAPTURE_CONSTRAINTS
+    ):
         problem = _constraint_problem(
             _constraint_state(conn, cur, relation, conname),
             expected_columns=columns,
@@ -1538,6 +1570,160 @@ def cmd_source_list(args, stream) -> int:
         }
 
     return _run_readonly("source-list", stream, build)
+
+
+# ═══════════════════════════ command: source-capture ═══════════════════════════
+# Evidence-only source ingress (R2.0A-4C). Creates a canonical v47 SourceBlob +
+# SourceSnapshot from operator-supplied immutable LOCAL bytes, through the bounded
+# `knowledge.evidence_snapshot.source_service`. It creates no Knowledge source, no
+# Knowledge item, no uploaded-file manifest, no ProjectState mutation, and no
+# imported evidence/signals — the Knowledge upload path is untouched.
+#
+# It never fetches: there is no URL input, no HTTP client, and no network access
+# anywhere in this command. A URL handed to `--file` is refused explicitly rather
+# than silently treated as a filename.
+
+# Schemes refused with a specific message so an operator who pastes a link is told
+# this command never downloads, instead of getting "file not found".
+_REFUSED_FILE_SCHEMES: tuple[str, ...] = (
+    "http://", "https://", "ftp://", "ftps://", "sftp://", "s3://", "gs://",
+    "data:", "file://",
+)
+
+
+def _evidence_source_kind_choices() -> tuple[str, ...]:
+    """The service's provenance vocabulary — one source of truth, never a copy.
+
+    Read from ``knowledge.evidence_snapshot.source_service`` so the CLI choices
+    can never drift from the kinds the service will actually accept (and so the
+    reserved kinds it refuses are never silently re-offered here).
+    """
+    from knowledge.evidence_snapshot.source_service import EVIDENCE_SOURCE_KINDS
+
+    return tuple(sorted(EVIDENCE_SOURCE_KINDS))
+
+
+def _refused_evidence_source_kinds() -> tuple[str, ...]:
+    """The kinds the service refuses — read from the service, never re-listed."""
+    from knowledge.evidence_snapshot.source_service import RESERVED_SOURCE_KINDS
+
+    return tuple(sorted(RESERVED_SOURCE_KINDS))
+
+
+def _read_local_source_bytes(raw_path: str) -> bytes:
+    """Read the operator's local artifact, or raise a bounded BridgeError.
+
+    Reads a regular local file and nothing else. The private absolute path is
+    never echoed back into the JSON payload by the caller.
+    """
+    candidate = raw_path.strip()
+    lowered = candidate.lower()
+    for scheme in _REFUSED_FILE_SCHEMES:
+        if lowered.startswith(scheme):
+            raise BridgeError(
+                "--file must be a local filesystem path; this command never "
+                "fetches a URL or performs network access"
+            )
+    path = Path(candidate).expanduser()
+    if not path.exists():
+        raise BridgeError("--file does not exist")
+    if not path.is_file():
+        raise BridgeError("--file must be a regular file")
+    try:
+        limit = config.evidence_source_max_bytes()
+    except config.EvidenceSourceConfigurationError as exc:
+        # Fail closed with the bounded, non-secret configuration message (it
+        # names the variable only) instead of an opaque error class.
+        raise BridgeError(str(exc)) from exc
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise BridgeError("--file could not be inspected") from exc
+    if size == 0:
+        raise BridgeError("--file is empty; capture requires genuine source bytes")
+    if size > limit:
+        raise BridgeError(f"--file exceeds the configured maximum of {limit} bytes")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise BridgeError("--file could not be read") from exc
+
+
+def cmd_source_capture(args, stream) -> int:
+    from knowledge.evidence_snapshot.source_service import (
+        capture_evidence_source_bytes,
+    )
+
+    project_id = _require_arg(getattr(args, "project_id", None), "--project-id")
+    source_kind = _require_arg(getattr(args, "source_kind", None), "--source-kind")
+    source_locator = _require_arg(
+        getattr(args, "source_locator", None), "--source-locator"
+    )
+    actor = _require_arg(getattr(args, "actor", None), "--actor")
+    operation_id = _require_arg(getattr(args, "operation_id", None), "--operation-id")
+    file_path = _require_arg(getattr(args, "file", None), "--file")
+
+    expected_sha256 = getattr(args, "expected_sha256", None)
+    if expected_sha256 is not None and str(expected_sha256).strip() == "":
+        expected_sha256 = None
+
+    # Read and bind the artifact BEFORE the write transaction is opened. A
+    # supplied --expected-sha256 that does not match the file's actual digest
+    # fails here — before any connection, any byte is stored, or any SQL runs.
+    content = _read_local_source_bytes(file_path)
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    if expected_sha256 is not None:
+        if str(expected_sha256).strip().lower() != actual_sha256:
+            raise BridgeError(
+                "--expected-sha256 does not match the digest of --file; refusing "
+                "to capture an artifact the operator did not intend"
+            )
+
+    def build(conn) -> dict:
+        result = capture_evidence_source_bytes(
+            conn,
+            project_id=project_id,
+            content=content,
+            source_kind=source_kind,
+            source_locator=source_locator,
+            operation_id=operation_id,
+            actor=actor,
+            # Re-bind inside the service too, so a direct service caller gets the
+            # same guarantee. The bridge already rejected a mismatch above,
+            # before any connection was opened.
+            expected_sha256=expected_sha256,
+        )
+        # Metadata-safe payload: identities, content identity, and the declared
+        # provenance CATEGORY only.
+        #
+        # `source_kind` is a safe category label (the same field `source-list` and
+        # the Automation-ROI workspace already expose). The raw capture
+        # `source_locator` is NOT emitted, consistent with the tool's existing
+        # posture that raw capture locators are private; `source_locator_recorded`
+        # confirms it was persisted without reprinting it. The private storage
+        # reference, the operator's local file path, and the source bytes
+        # themselves are never emitted.
+        return {
+            "project_id": project_id,
+            "source_snapshot_id": result["source_snapshot_id"],
+            "source_blob_id": result["source_blob_id"],
+            "capture_operation_id": result["operation_id"],
+            "content_sha256": result["content_sha256"],
+            "byte_size": result["byte_size"],
+            "source_kind": result["source_kind"],
+            "source_locator_recorded": bool(result["source_locator"]),
+            "capture_reused": result["reused"],
+            "source_bytes_persisted": result["bytes_persisted"],
+            # Unmistakable on BOTH paths: `--commit` governs database state only.
+            # These bytes are already verified and durable in the evidence source
+            # store and are not removed when the transaction rolls back (see the
+            # command description in `--help`).
+            "source_bytes_retained_on_rollback": True,
+        }
+
+    return _run_write(
+        "source-capture", args, stream, build, requires_snapshot_flag=True
+    )
 
 
 # ═══════════════════════════ command: source-metadata-create ═══════════════════════════
@@ -2733,6 +2919,63 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project-id", required=True)
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_source_list)
+
+    # source-capture (evidence-only v47 source ingress; no Knowledge objects)
+    p = sub.add_parser(
+        "source-capture",
+        help=(
+            "capture a v47 source snapshot from operator-supplied LOCAL bytes "
+            "without Knowledge ingestion (never fetches a URL)"
+        ),
+        description=(
+            "Capture a v47 source snapshot from operator-supplied LOCAL bytes "
+            "without Knowledge ingestion (this command never fetches a URL and "
+            "performs no network access). "
+            "DRY-RUN / ROLLBACK SCOPE: --commit governs DATABASE state only. A "
+            "POSIX filesystem cannot join a PostgreSQL transaction, so the "
+            "verified immutable source bytes are written to the evidence source "
+            "store BEFORE the snapshot row is created. A dry run (the default) "
+            "and a rolled-back or failed write therefore persist NO database "
+            "state, but the verified immutable source bytes MAY REMAIN in the "
+            "evidence source store; `source_bytes_persisted` and "
+            "`source_bytes_retained_on_rollback` report this in the output. "
+            "Such bytes are content-addressed and unreferenced: nothing can "
+            "reach them as evidence while no source snapshot points at them, and "
+            "a later genuine capture of the same bytes reuses them instead of "
+            "duplicating them. Identifying genuinely unreferenced artifacts is "
+            "an operator procedure documented in "
+            "docs/v4.4-R2.0A-4C-EVIDENCE-ONLY-SOURCE-SNAPSHOT-INGRESS.md; "
+            "referenced evidence bytes must never be removed."
+        ),
+    )
+    _add_write_common(p)
+    p.add_argument("--project-id", required=True)
+    p.add_argument(
+        "--file",
+        required=True,
+        help="local filesystem path to the immutable source artifact",
+    )
+    p.add_argument(
+        "--source-kind",
+        required=True,
+        choices=_evidence_source_kind_choices(),
+        help=(
+            "truthful provenance kind this ingress can attest to; refused: "
+            + ", ".join(_refused_evidence_source_kinds())
+        ),
+    )
+    p.add_argument("--source-locator", required=True)
+    p.add_argument("--actor", required=True)
+    p.add_argument(
+        "--operation-id",
+        required=True,
+        help="stable project-scoped capture operation id (idempotent retry key)",
+    )
+    p.add_argument(
+        "--expected-sha256",
+        help="bind the intended artifact: a mismatch fails before any write",
+    )
+    p.set_defaults(func=cmd_source_capture)
 
     # source-metadata-create
     p = sub.add_parser("source-metadata-create", help="attach source metadata")

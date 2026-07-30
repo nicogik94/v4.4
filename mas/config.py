@@ -384,6 +384,60 @@ def evidence_snapshot_enabled() -> bool:
     return _env_flag(EVIDENCE_SNAPSHOT_ENABLED_ENV, default=False)
 
 
+# ═══ Evidence-only source store (R2.0A-4C) ═══
+# A dedicated, immutable, content-addressed store for operator-supplied evidence
+# bytes captured WITHOUT Knowledge ingestion. It is deliberately a separate
+# namespace from UPLOAD_LAYER.storage_dir: the upload store holds Knowledge
+# uploads (registry entry + parsed items + manifest), while this root holds only
+# raw source bytes a v47 source_snapshot points at. Sharing one root would let an
+# evidence-only capture be mistaken for — or collide with — a Knowledge upload.
+# The root is explicitly configurable and must be a safe server-side location.
+EVIDENCE_SOURCE_STORAGE_DIR_ENV = "MAS_EVIDENCE_SOURCE_STORAGE_DIR"
+EVIDENCE_SOURCE_MAX_BYTES_ENV = "MAS_EVIDENCE_SOURCE_MAX_BYTES"
+EVIDENCE_SOURCE_DEFAULT_MAX_BYTES = 5_000_000
+# Smallest bound the store will honour. A configured value below it is clamped up
+# to 1 (never down to 0), so a size bound can never disable capture outright.
+EVIDENCE_SOURCE_MIN_MAX_BYTES = 1
+
+
+class EvidenceSourceConfigurationError(RuntimeError):
+    """The evidence-only source store is misconfigured.
+
+    Raised instead of silently substituting a default: a malformed size bound
+    that quietly became the 5 MB default would enlarge the limit the operator
+    actually wrote, so a capture they meant to bound tightly would be admitted.
+    Configuration is therefore fail-closed rather than best-effort.
+    """
+
+
+def evidence_source_storage_dir() -> str:
+    """Root of the evidence-only immutable source store (never a Knowledge path)."""
+    configured = os.getenv(EVIDENCE_SOURCE_STORAGE_DIR_ENV, "").strip()
+    if configured:
+        return configured
+    return os.path.join(os.path.dirname(__file__), "evidence_source_store")
+
+
+def evidence_source_max_bytes() -> int:
+    """Upper bound on a single operator-supplied evidence artifact, in bytes.
+
+    An unset (or empty) variable means "use the documented default". Anything
+    else must be a genuine integer byte count: a malformed value raises
+    :class:`EvidenceSourceConfigurationError` rather than falling back.
+    """
+    raw = os.getenv(EVIDENCE_SOURCE_MAX_BYTES_ENV, "").strip()
+    if not raw:
+        return EVIDENCE_SOURCE_DEFAULT_MAX_BYTES
+    try:
+        configured = int(raw)
+    except ValueError as exc:
+        raise EvidenceSourceConfigurationError(
+            f"{EVIDENCE_SOURCE_MAX_BYTES_ENV} must be an integer number of bytes; "
+            "refusing to fall back to the default size bound"
+        ) from exc
+    return max(EVIDENCE_SOURCE_MIN_MAX_BYTES, configured)
+
+
 # ═══ Research Evidence Metadata Sidecar (R1.1) ═══
 # Off by default. When enabled, operator-led service writes may attach
 # append-only, operator-declared metadata sidecars to existing Slice A
