@@ -1,9 +1,16 @@
 """Static guarantees and change scope for the provider-telemetry wave.
 
-Covers required regression 24 — *untracked candidate files are included in
+Covers required regression 24 — *newly added candidate files are included in
 change-scope tests* — which is the one the previous wave could not have passed:
-its whole implementation was untracked, so a scope check that read only
-``git diff`` would have reported an empty change set.
+its whole implementation was new, so a scope check that read only ``git diff``
+would have reported an empty change set.
+
+The scope guards derive the wave's footprint from the checkout itself rather
+than from any version-control delta. Every delta — ``git diff``, ``ls-files
+--others``, a merge-base range — is empty in at least one state this test must
+survive, and an empty delta makes a scope guard silently vacuous rather than
+loud. Reading untracked status was the earlier form, and it failed the instant
+the wave was committed without a single byte of the wave itself changing.
 
 The source-level assertions here use the AST with docstrings stripped rather than
 substring matching. A module that *documents* what it refuses to do would
@@ -24,8 +31,9 @@ if str(MAS) not in sys.path:
 
 PACKAGE = MAS / "provider_telemetry"
 
-# The complete, exact change scope of this wave — tracked modifications *and*
-# untracked additions. Anything outside it is out of scope by definition.
+# The complete, exact scope of this wave. Anything the discovered telemetry
+# surface or an active change set turns up outside it is out of scope by
+# definition — including a telemetry file someone adds later.
 ALLOWED = {
     # runtime integration
     "mas/api.py",
@@ -174,24 +182,88 @@ def _git(*args) -> list[str]:
     ).stdout.splitlines()
 
 
+def _untracked() -> set[str]:
+    return {path for path in _git("ls-files", "--others", "--exclude-standard") if path}
+
+
+def repository_files() -> set[str]:
+    """Every file present in this checkout — tracked plus not-yet-tracked.
+
+    Deliberately *not* a change set. ``git ls-files`` is non-empty in a dirty
+    development worktree, a clean committed feature branch, a detached exact-SHA
+    CI checkout and on merged main alike, whereas every change-set query
+    (``git diff``, ``ls-files --others``, a merge-base delta) legitimately
+    collapses to nothing in at least one of those four states.
+    """
+    return {path for path in set(_git("ls-files")) | _untracked() if path}
+
+
+# What makes a file this wave's: it is named for the telemetry, or its
+# executable source names it.
+TELEMETRY_MARKERS = ("provider_attempt_telemetry", "provider_telemetry")
+
+
+def _names_the_telemetry(path: Path) -> bool:
+    """True when a file's *code* — not its prose — refers to the telemetry."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not any(marker in raw for marker in TELEMETRY_MARKERS):
+        return False
+    if path.suffix == ".sql":
+        body = sql_without_comments(path)
+    elif path.suffix == ".py":
+        try:
+            body = code_of(path)
+        except SyntaxError:
+            body = raw
+    else:
+        body = raw
+    return any(marker in body for marker in TELEMETRY_MARKERS)
+
+
+def telemetry_surface() -> set[str]:
+    """The wave's footprint, discovered from the checkout rather than from Git.
+
+    This is the durable form of requirement 24. A brand-new package is invisible
+    to ``git diff``; once the same package is committed it is invisible to
+    ``git ls-files --others`` as well. Ownership is a property of the tree, so
+    discovering it here keeps the scope guards below load-bearing in every state
+    the test has to survive, including long after this branch is merged.
+    """
+    owned = set()
+    for rel in repository_files():
+        path = ROOT / rel
+        if not path.is_file():
+            continue
+        if any(marker in rel for marker in TELEMETRY_MARKERS) or _names_the_telemetry(path):
+            owned.add(rel)
+    return owned
+
+
 class ChangeScopeTests(unittest.TestCase):
     """Requirement 24."""
 
     def _inventory(self) -> set[str]:
-        tracked = _git("diff", "--name-only")
-        # Untracked files are the half the previous wave's scope check missed:
-        # a brand-new package is invisible to `git diff`.
-        untracked = _git("ls-files", "--others", "--exclude-standard")
-        return {path for path in tracked + untracked if path}
+        changed = _git("diff", "--name-only")
+        # An active change set still counts when there is one, so a dirty
+        # worktree cannot smuggle an out-of-scope edit past the guards below.
+        # It is unioned with — never substituted for — the discovered surface,
+        # which is what remains once the wave is committed.
+        return {path for path in changed if path} | _untracked() | telemetry_surface()
 
-    def test_the_change_inventory_includes_untracked_files(self):
+    def test_the_change_inventory_covers_the_whole_telemetry_surface(self):
         inventory = self._inventory()
-        untracked = set(_git("ls-files", "--others", "--exclude-standard"))
-        telemetry_untracked = {p for p in untracked if "provider_telemetry" in p}
-        # The wave adds a whole untracked package; if the inventory did not see
-        # untracked files this set would be empty and the test below vacuous.
-        self.assertTrue(telemetry_untracked)
-        self.assertTrue(telemetry_untracked <= inventory)
+        surface = telemetry_surface()
+        package = {p for p in surface if p.startswith("mas/provider_telemetry/")}
+        # Anti-vacuity: the wave adds a whole package, so if discovery were
+        # broken this would be empty and every scope assertion below trivial.
+        self.assertTrue(package)
+        self.assertTrue(surface <= inventory)
+        # And whatever is not yet tracked is covered too — the half a
+        # `git diff`-only check missed, still asserted where it exists.
+        self.assertTrue(_untracked() <= inventory)
 
     def test_the_change_inventory_is_within_the_declared_scope(self):
         unexpected = self._inventory() - ALLOWED
@@ -230,12 +302,16 @@ class MigrationScopeTests(unittest.TestCase):
         )
 
     def test_the_migration_is_the_only_one_this_wave_adds(self):
-        added = [
-            path
-            for path in _git("ls-files", "--others", "--exclude-standard")
-            if path.startswith("mas/sql/")
-        ]
-        self.assertEqual(added, ["mas/sql/v63_provider_attempt_telemetry_foundation.sql"])
+        # Which migration belongs to this wave is a property of what the SQL
+        # says, not of whether it happens to be staged yet: reading untracked
+        # status here made the test pass only while the wave sat in a dirty
+        # worktree, and fail the moment the very same files were committed.
+        owned = sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in (MAS / "sql").glob("*.sql")
+            if _names_the_telemetry(path)
+        )
+        self.assertEqual(owned, ["mas/sql/v63_provider_attempt_telemetry_foundation.sql"])
 
 
 class SecretSafetySourceTests(unittest.TestCase):
