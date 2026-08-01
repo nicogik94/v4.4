@@ -479,6 +479,59 @@ def agent_blueprint_studio_enabled() -> bool:
     return _env_flag(AGENT_BLUEPRINT_STUDIO_ENABLED_ENV, default=False)
 
 
+# ═══ Provider Attempt Telemetry (R2) ═══
+# Off by default. Two explicit postures, selected by
+# MAS_PROVIDER_TELEMETRY_POSTURE:
+#
+#   off (default)   No capture, no connection, no statement — nothing at all.
+#
+#   observational   Every provider attempt the runtime gateway makes, and every
+#                   candidate it skips, is appended to the durable append-only
+#                   telemetry relations in the authoritative MAS PostgreSQL
+#                   database. It never participates in model routing, retry
+#                   policy, fallback ordering, circuit-breaker state, cache keys,
+#                   prompts or phase ordering, and every telemetry failure fails
+#                   OPEN. Because failures fail open, an observational run does
+#                   NOT guarantee completeness and never claims to.
+#
+#   strict          The only posture suitable for a paired experiment. Every
+#                   actual provider HTTP attempt persists a durable start BEFORE
+#                   transport, and a start that cannot be persisted means the
+#                   request is NOT sent. This is intentionally fail-closed and is
+#                   not behavior-neutral. Runs are reconciled at a run-end
+#                   barrier and are certified only if every start has exactly one
+#                   truthful terminal state.
+#
+# See provider_telemetry/service.py for the exact, tested semantics of each.
+PROVIDER_TELEMETRY_POSTURE_ENV = "MAS_PROVIDER_TELEMETRY_POSTURE"
+PROVIDER_TELEMETRY_POSTURE_OFF = "off"
+PROVIDER_TELEMETRY_POSTURE_OBSERVATIONAL = "observational"
+PROVIDER_TELEMETRY_POSTURE_STRICT = "strict"
+PROVIDER_TELEMETRY_POSTURES = (
+    PROVIDER_TELEMETRY_POSTURE_OFF,
+    PROVIDER_TELEMETRY_POSTURE_OBSERVATIONAL,
+    PROVIDER_TELEMETRY_POSTURE_STRICT,
+)
+
+# The original boolean flag. Retained as a compatibility alias meaning
+# "observational"; the posture variable above wins when both are set.
+PROVIDER_ATTEMPT_TELEMETRY_ENABLED_ENV = "MAS_PROVIDER_ATTEMPT_TELEMETRY_ENABLED"
+
+
+def provider_attempt_telemetry_enabled() -> bool:
+    return _env_flag(PROVIDER_ATTEMPT_TELEMETRY_ENABLED_ENV, default=False)
+
+
+def provider_telemetry_posture() -> str:
+    """The configured posture. ``off`` unless explicitly set to a known value."""
+    raw = os.getenv(PROVIDER_TELEMETRY_POSTURE_ENV, "").strip().lower()
+    if raw in PROVIDER_TELEMETRY_POSTURES:
+        return raw
+    if not raw and provider_attempt_telemetry_enabled():
+        return PROVIDER_TELEMETRY_POSTURE_OBSERVATIONAL
+    return PROVIDER_TELEMETRY_POSTURE_OFF
+
+
 def _env_json_map(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:

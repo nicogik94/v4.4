@@ -115,6 +115,9 @@ def build_report_request(project_id: str, system: str, prompt: str) -> GatewayRe
         user_prompt=prompt,
         routing_context=RoutingContext(phase="report"),
         allow_cache=False,
+        # Telemetry attribution only: never part of the cache key, never read by
+        # routing. The CDP gateway call knows its project, so it records it.
+        project_id=project_id,
     )
 
 
@@ -122,14 +125,22 @@ async def generate_report(project_id: str, state: ProjectState):
     from config import MODEL_ROUTING
     from llm_client import _get_provider_gateway
     from orchestrator import build_report_prompt, build_system_prompt
+    from provider_telemetry import ENTRY_POINT_CDP_REPORT_GATEWAY, telemetry_scope
 
     prompt = build_report_prompt(state)
     system = build_system_prompt("report", json_mode=False)
     request = build_report_request(project_id, system, prompt)
-    return await _get_provider_gateway().call(
-        request,
-        config_override=MODEL_ROUTING["report"],
-    )
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_CDP_REPORT_GATEWAY,
+        project_id=project_id,
+        run_id=project_id,
+        phase="report",
+        expected_phases=("report",),
+    ):
+        return await _get_provider_gateway().call(
+            request,
+            config_override=MODEL_ROUTING["report"],
+        )
 
 
 async def load_project_state(project_id: str) -> ProjectState | None:

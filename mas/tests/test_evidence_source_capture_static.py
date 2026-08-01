@@ -38,9 +38,14 @@ def test_no_new_sql_migration_was_added():
     # Discovery concluded the existing v47 schema already represents evidence-only
     # capture, so this wave adds no migration at all (v62 stays unused).
     assert not list(sql_dir.glob("v62_*.sql"))
+    # The manifest below is the whole v6* series, not this wave's contribution.
+    # v63 belongs to the R2 provider-attempt telemetry wave and is unrelated to
+    # evidence-only source ingress; the assertion that matters for R2.0A-4C is
+    # the v62 one above, plus test_no_ddl_anywhere_in_the_new_modules below.
     assert sorted(p.name for p in sql_dir.glob("v6*.sql")) == [
         "v60_research_evidence_automation_roi_execution.sql",
         "v61_research_evidence_pack_foundation.sql",
+        "v63_provider_attempt_telemetry_foundation.sql",
     ]
 
 

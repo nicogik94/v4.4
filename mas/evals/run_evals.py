@@ -29,6 +29,11 @@ from cdp.review_caveats import CDP_REVIEW_CAVEATS
 from state import KnowledgeItem, KnowledgeLayerState, ProjectState
 from orchestrator import run_phase_node
 from llm_client import call_llm, LLMResponse, parse_json
+from provider_telemetry import (
+    ENTRY_POINT_EVALUATION_JUDGE,
+    ENTRY_POINT_EVALUATION_PHASE,
+    telemetry_scope,
+)
 from config import ModelConfig, Provider
 
 PASS_THRESHOLD = 0.75  # fail CI if <75% of cases pass
@@ -411,15 +416,24 @@ async def run_case_real(case: dict) -> ProjectState:
         data=_case_data_payload(case),
         created_at=datetime.now(),
     )
-    for phase in ["classify", "hypotheses", "gauntlet", "audit", "strategy"]:
-        try:
-            state = await run_phase_node(state, phase)
-            if phase == "classify" and _is_confused_classification(state):
-                _append_eval_error(state, "workflow halted after Confused classification")
-                break
-        except Exception as e:
-            # Log error but continue — judge can still evaluate partial output
-            _append_eval_error(state, f"{phase}: {e}")
+    phases = ["classify", "hypotheses", "gauntlet", "audit", "strategy"]
+    # `eval-<id>` is not a UUID, and is deliberately not treated as one: it is
+    # recorded as an external project identity, never cast into a UUID column.
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_EVALUATION_PHASE,
+        project_id=state.project_id,
+        run_id=state.project_id,
+        expected_phases=tuple(phases),
+    ):
+        for phase in phases:
+            try:
+                state = await run_phase_node(state, phase)
+                if phase == "classify" and _is_confused_classification(state):
+                    _append_eval_error(state, "workflow halted after Confused classification")
+                    break
+            except Exception as e:
+                # Log error but continue — judge can still evaluate partial output
+                _append_eval_error(state, f"{phase}: {e}")
     return state
 
 
@@ -705,18 +719,25 @@ async def judge_case(case: dict, output: dict) -> tuple[int, str]:
         data_based=case.get("data_based_expected", False),
         output=json.dumps(_compact_output_for_judge(output), default=str)[:16000],
     )
-    resp: LLMResponse = await call_llm(
-        "eval_judge",
-        JUDGE_SYSTEM_PROMPT,
-        prompt,
-        config_override=ModelConfig(
-            provider=Provider.ANTHROPIC,
-            model=JUDGE_MODEL,
-            max_tokens=1000,
-            temperature=0.0,
-        ),
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_EVALUATION_JUDGE,
         project_id=f"eval-{case['id']}",
-    )
+        run_id=f"eval-{case['id']}",
+        phase="eval_judge",
+        expected_phases=("eval_judge",),
+    ):
+        resp: LLMResponse = await call_llm(
+            "eval_judge",
+            JUDGE_SYSTEM_PROMPT,
+            prompt,
+            config_override=ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model=JUDGE_MODEL,
+                max_tokens=1000,
+                temperature=0.0,
+            ),
+            project_id=f"eval-{case['id']}",
+        )
     if not resp.ok:
         return 0, f"judge error: {resp.error}"
     try:

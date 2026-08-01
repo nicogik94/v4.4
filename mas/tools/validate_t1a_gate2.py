@@ -23,6 +23,10 @@ from extensions.runtime import GatewayRequest, RoutingContext  # noqa: E402
 from knowledge.registry import ensure_knowledge_layer, upsert_source_entry  # noqa: E402
 from knowledge.sync import sync_offline_source  # noqa: E402
 from llm_client import _get_provider_gateway  # noqa: E402
+from provider_telemetry import (  # noqa: E402
+    ENTRY_POINT_T1A_VALIDATION,
+    telemetry_scope,
+)
 from orchestrator import build_report_prompt, build_system_prompt  # noqa: E402
 from state import (  # noqa: E402
     KnowledgeItem,
@@ -356,17 +360,27 @@ def _validate_docx_preservation(state: ProjectState, markers: list[str]) -> dict
 async def _generate_report(case: ValidationCase) -> dict[str, Any]:
     prompt = build_report_prompt(case.state)
     system = build_system_prompt("report", json_mode=False)
+    # T1A validation cases carry their own identity; recording it truthfully is
+    # what makes a T1A run distinguishable from a workflow run in telemetry.
+    case_identity = str(getattr(case, "case_id", "") or getattr(case, "name", "") or "t1a")
     request = GatewayRequest(
         phase="report",
         system_prompt=system,
         user_prompt=prompt,
-        project_id="",
+        project_id=getattr(getattr(case, "state", None), "project_id", "") or "",
         agent_name="report",
         routing_context=RoutingContext(phase="report"),
         allow_cache=False,
     )
     gateway = _get_provider_gateway()
-    response = await gateway.call(request, config_override=MODEL_ROUTING["report"])
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_T1A_VALIDATION,
+        project_id=request.project_id or case_identity,
+        run_id=case_identity,
+        phase="report",
+        expected_phases=("report",),
+    ):
+        response = await gateway.call(request, config_override=MODEL_ROUTING["report"])
     return {
         "prompt": prompt,
         "response": response,
