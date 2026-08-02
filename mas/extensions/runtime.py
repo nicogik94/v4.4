@@ -30,6 +30,12 @@ class GatewayRequest:
     routing_context: RoutingContext = field(default_factory=lambda: RoutingContext(phase="audit"))
     cache_key: str = ""
     allow_cache: bool = False
+    # Telemetry attribution only: identifies the project a provider attempt
+    # belongs to. Never read by routing, caching or retry logic, and never part
+    # of the cache key (see runtime.provider_gateway.build_cache_key). A value
+    # that is not a UUID is preserved as an external project identity rather
+    # than cast — see provider_telemetry.identity.as_project_uuid.
+    project_id: str = ""
 
 
 @dataclass

@@ -22,6 +22,12 @@ from config import (
     RUNTIME_LAYER,
 )
 from extensions.runtime import GatewayRequest, RoutingContext
+from provider_telemetry import capture as attempt_capture
+from provider_telemetry.models import EVENT_OBSERVATION, SUBJECT_SDK_INVOCATION
+from provider_telemetry import identity as telemetry_identity
+from provider_telemetry import posture as telemetry_posture
+from provider_telemetry import service as telemetry_service
+from provider_telemetry import transport as telemetry_transport
 from runtime.cache import InMemorySemanticCache, NoOpSemanticCache
 from runtime.provider_gateway import (
     DefaultProviderGateway,
@@ -162,18 +168,81 @@ _breaker = CircuitBreaker()
 _semantic_cache = None
 
 
+def _instrument_provider_client(sdk_client, provider: str):
+    """Observe the HTTP boundary of an SDK client the SDK configured itself.
+
+    Telemetry never supplies ``http_client=``. It used to, and that was the
+    defect: the SDK's own default client is not a bare ``httpx.AsyncClient`` but
+    a ``DefaultAsyncHttpxClient`` carrying the SDK's connection limits (1000 /
+    100 rather than httpx's 100 / 20), ``follow_redirects=True`` rather than
+    httpx's ``False``, TCP keepalive socket options and — for Anthropic — an
+    explicitly constructed proxy mount table. Handing the SDK any client of our
+    own silently replaced all of it, so turning on a flag documented as
+    observational changed the runtime's effective network configuration.
+
+    The SDK is therefore constructed exactly as a telemetry-off build constructs
+    it, and only then are that client's transports wrapped in place. Same client,
+    same limits, same redirect policy, same proxies, same TLS, same pool, same
+    lifecycle — with instrumentation on the transports it already had.
+
+    The SDK's own ``max_retries`` is likewise left at its default. Setting it to
+    zero would make one telemetry row equal one HTTP request by making the
+    runtime less resilient; instead the transport observes each of the SDK's
+    internal retries and gives each its own attempt identity.
+    """
+    if telemetry_service.configured_posture() == telemetry_service.POSTURE_OFF:
+        return sdk_client
+    if telemetry_posture.strict_required():
+        # A strict-required worker cannot fall back to an uninstrumented client:
+        # that client would carry no transport guard, and the process-wide "no
+        # unscoped provider request" invariant would have a hole in it exactly
+        # where instrumentation failed. Raising here fails the process at client
+        # construction, which is before any request exists.
+        return telemetry_transport.instrument_sdk_client(sdk_client, provider=provider)
+    # Observational never changes what the runtime does. If this SDK build
+    # cannot be instrumented, the failure is recorded and the SDK keeps the
+    # client it built — which is the telemetry-off client, unmodified. The one
+    # thing that must not happen here is substituting a different client.
+    attempt_capture.guarded(
+        lambda: telemetry_transport.instrument_sdk_client(sdk_client, provider=provider),
+        None,
+        reason="http_client",
+    )
+    return sdk_client
+
+
 def _get_anthropic():
     global _anthropic
     if _anthropic is None:
-        _anthropic = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
+        _anthropic = _instrument_provider_client(
+            anthropic.AsyncAnthropic(
+                api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT
+            ),
+            Provider.ANTHROPIC.value,
+        )
     return _anthropic
 
 
 def _get_openai():
     global _openai
     if _openai is None:
-        _openai = openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=REQUEST_TIMEOUT)
+        _openai = _instrument_provider_client(
+            openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=REQUEST_TIMEOUT),
+            Provider.OPENAI.value,
+        )
     return _openai
+
+
+def reset_provider_clients() -> None:
+    """Drop the cached SDK clients so a posture change takes effect.
+
+    Test support and operational support: the instrumented transport is chosen
+    once per process at client construction, so a process that changes posture
+    has to rebuild its clients.
+    """
+    global _anthropic, _openai
+    _anthropic = None
+    _openai = None
 
 
 def _get_semantic_cache():
@@ -212,6 +281,78 @@ def _safe_provider_error(
     return message
 
 
+
+# ═══════════ adapter-level telemetry (isolated from the provider result) ═══════
+#
+# Every helper below is a no-op when nobody is capturing, and none of them can
+# raise into the adapter: the extraction, validation, redaction and fingerprint
+# work all runs inside provider_telemetry.capture's isolation boundary. A
+# response object whose `id` is a property that raises costs one field, not a
+# provider failure.
+
+
+def _record_observation(observe, response) -> None:
+    """Read the provider's own metadata FIRST, while the raw object still exists.
+
+    `response.id`, `response.model` and the stop reason live only on this object;
+    a few lines later the adapter has reduced it to text plus counters and they
+    are gone forever. Capturing here — before any transformation and before the
+    malformed-response guard — is what lets a response that is unusable to the
+    engine still yield a durable provider identity.
+    """
+    capture = attempt_capture.current_capture()
+    if capture is None:
+        return
+    observation = attempt_capture.guarded(
+        lambda: observe(response), None, reason="observe"
+    )
+    if observation is not None:
+        capture.record_observation(observation)
+
+
+def _record_malformed(category: str) -> None:
+    """Append a classification beside whatever was already observed.
+
+    Appended, never merged over: the id and usage captured a moment ago stay
+    exactly as they were.
+    """
+    capture = attempt_capture.current_capture()
+    if capture is None:
+        return
+    capture.append(
+        subject_kind=SUBJECT_SDK_INVOCATION,
+        subject_id=capture.invocation_id,
+        event_kind=EVENT_OBSERVATION,
+        error_category=category,
+    )
+
+
+def _record_adapter_exception(exc: BaseException, category: str) -> None:
+    """Record an exception raised anywhere inside the adapter.
+
+    If rich metadata was already captured, this is a *transformation* failure —
+    the provider answered and the adapter could not use the answer — and it is
+    appended beside that metadata rather than replacing it. If nothing was
+    captured, the call never got far enough to observe anything and this is a
+    plain provider-failure observation.
+    """
+    capture = attempt_capture.current_capture()
+    if capture is None:
+        return
+    if capture.events:
+        capture.record_transformation_failure(exc, error_category=category)
+        return
+    failure_class, identity = attempt_capture.observe_exception(exc)
+    capture.append(
+        subject_kind=SUBJECT_SDK_INVOCATION,
+        subject_id=capture.invocation_id,
+        event_kind=EVENT_OBSERVATION,
+        error_category=category,
+        error_identity=identity,
+        failure_class=failure_class,
+    )
+
+
 async def _call_anthropic(
     model: str, system: str, prompt: str, max_tokens: int,
     temperature: float, thinking_budget: int = 0
@@ -219,6 +360,12 @@ async def _call_anthropic(
     """Call Claude API with prompt caching on system prompt."""
     client = _get_anthropic()
     start = time.time()
+    # `start` is untouched: latency_ms keeps its exact previous derivation. The
+    # authoritative request/response instants now come from the instrumented
+    # transport, one pair per actual HTTP attempt, so they survive an SDK retry
+    # instead of being averaged into one bracket. When nobody is capturing,
+    # `capturing` is False and this function does no extra work at all.
+    capturing = attempt_capture.is_capturing()
     try:
         # Anthropic requires temperature=1 when extended thinking is enabled.
         effective_thinking_budget = 0
@@ -242,8 +389,13 @@ async def _call_anthropic(
 
         response = await client.messages.create(**kwargs)
 
+        if capturing:
+            _record_observation(attempt_capture.observe_anthropic_response, response)
+
         text_parts = []
         if not hasattr(response, "content") or response.content is None:
+            if capturing:
+                _record_malformed(TRANSPORT_MALFORMED_RESPONSE)
             return LLMResponse(
                 ok=False,
                 error=_safe_provider_error(TRANSPORT_MALFORMED_RESPONSE, Provider.ANTHROPIC.value, model),
@@ -270,6 +422,8 @@ async def _call_anthropic(
         )
     except Exception as exc:
         category = normalize_exception_category(exc)
+        if capturing:
+            _record_adapter_exception(exc, category)
         return LLMResponse(
             ok=False,
             error=_safe_provider_error(
@@ -290,6 +444,9 @@ async def _call_openai(
     """Call OpenAI API."""
     client = _get_openai()
     start = time.time()
+    # See _call_anthropic: `start` untouched; HTTP-attempt instants come from the
+    # instrumented transport.
+    capturing = attempt_capture.is_capturing()
     try:
         kwargs = {
             "model": model,
@@ -306,7 +463,13 @@ async def _call_openai(
             kwargs["temperature"] = temperature
 
         response = await client.chat.completions.create(**kwargs)
+
+        if capturing:
+            _record_observation(attempt_capture.observe_openai_response, response)
+
         if not getattr(response, "choices", None):
+            if capturing:
+                _record_malformed(TRANSPORT_MALFORMED_RESPONSE)
             return LLMResponse(
                 ok=False,
                 error=_safe_provider_error(TRANSPORT_MALFORMED_RESPONSE, Provider.OPENAI.value, model),
@@ -327,6 +490,8 @@ async def _call_openai(
         )
     except Exception as exc:
         category = normalize_exception_category(exc)
+        if capturing:
+            _record_adapter_exception(exc, category)
         return LLMResponse(
             ok=False,
             error=_safe_provider_error(category, Provider.OPENAI.value, model),
@@ -385,6 +550,10 @@ async def call_llm(
     the orchestrator the hooks it needs without requiring the multi-provider
     gateway to be deployed yet.
     """
+    # The worker invariant, at the other supported provider entry point. Checked
+    # before routing so a strict-required worker with no telemetry scope fails
+    # here rather than several layers into a request it is not allowed to make.
+    telemetry_posture.enforce_provider_call("llm_client.call_llm")
     routing_context = RoutingContext(phase=phase)
     selected_config, selection = select_model_config(
         phase,
@@ -397,13 +566,25 @@ async def call_llm(
         user_prompt=prompt,
         routing_context=routing_context,
         allow_cache=RUNTIME_LAYER.cache_enabled,
+        # Telemetry attribution only. Not part of the cache key and never read by
+        # routing (see build_cache_key / select_model_candidates).
+        project_id=project_id,
     )
     gateway = _get_provider_gateway()
-    resp = await gateway.call(
-        gateway_request,
-        config_override=config_override,
-        before_attempt=before_attempt,
-    )
+    # Bind the identity this call is made under. `bind_identity` only overlays
+    # the fields supplied here, so an outer scope's entry point, run and job
+    # identity — bound by the API workflow runner, the CLI, the evaluation
+    # harness or a tool — survives and is recorded alongside the phase. The
+    # signature is unchanged: callers and their test doubles pin it.
+    with telemetry_identity.bind_identity(
+        project_id=project_id or None,
+        phase=phase or None,
+    ):
+        resp = await gateway.call(
+            gateway_request,
+            config_override=config_override,
+            before_attempt=before_attempt,
+        )
     result = LLMResponse(
         text=resp.text,
         ok=not bool(resp.error),

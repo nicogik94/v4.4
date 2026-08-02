@@ -99,6 +99,7 @@ from extensions.connectors import (
 from ingestion_contract import IngestionContractError, normalize_project_ingestion
 from ingestion import merge_imported_records
 from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
+from provider_telemetry import ENTRY_POINT_API_MANUAL_PHASE, ENTRY_POINT_API_WORKFLOW_RUN, telemetry_scope
 from runtime import run_state as workflow_run_state
 from runtime import work_queue as workflow_queue
 from runtime.preflight import build_runtime_preflight
@@ -1054,8 +1055,16 @@ async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
         raise HTTPException(404, "Project not found")
     await _ensure_project_not_running(project_id)
 
-    with observability.trace_phase(project_id, req.phase, {"trigger": "manual"}):
-        updated = await run_phase_node(state, req.phase)
+    # The manual phase endpoint is a supported entry point and carries its own
+    # truthful identity: the project it acts on and the phase it runs.
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_API_MANUAL_PHASE,
+        project_id=project_id,
+        phase=req.phase,
+        expected_phases=(req.phase,),
+    ):
+        with observability.trace_phase(project_id, req.phase, {"trigger": "manual"}):
+            updated = await run_phase_node(state, req.phase)
     await store.save(updated)
     phase_status = updated.phase_status.get(req.phase)
     return {
@@ -1998,7 +2007,7 @@ async def _drain_workflow_queue(max_jobs: int = 1):
 async def _execute_workflow_job(job: workflow_queue.WorkflowJobRecord):
     running.add(job.project_id)
     try:
-        await _run_workflow(job.project_id, job.run_id)
+        await _run_workflow(job.project_id, job.run_id, job_id=job.job_id)
         record = await workflow_run_state.get_workflow_run(job.run_id)
         if record and record.status == "succeeded":
             await _safe_mark_workflow_job(workflow_queue.mark_job_succeeded, job.job_id)
@@ -2062,7 +2071,25 @@ def _phase_failure_detail_value(detail, key: str) -> str:
     return str(getattr(detail, key, "") or "")
 
 
-async def _run_workflow(project_id: str, run_id: str | None = None):
+async def _run_workflow(project_id: str, run_id: str | None = None, *, job_id: str = ""):
+    """Run a workflow inside a telemetry run scope.
+
+    The scope binds project/run/job identity and opens (then reconciles) one
+    telemetry run, without threading a parameter through the orchestrator's phase
+    functions. With telemetry off it costs one context-variable set and a no-op
+    session; `_run_workflow_sequence_for_run` below is the previous body,
+    unmodified.
+    """
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_API_WORKFLOW_RUN,
+        project_id=project_id,
+        run_id=run_id or "",
+        job_id=job_id,
+    ):
+        await _run_workflow_sequence_for_run(project_id, run_id)
+
+
+async def _run_workflow_sequence_for_run(project_id: str, run_id: str | None = None):
     current_phase = ""
     try:
         state = await store.load(project_id)

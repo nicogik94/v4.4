@@ -18,6 +18,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("v4-workflow")
 
+from provider_telemetry import (  # noqa: E402 - after logging configuration
+    ENTRY_POINT_CLI_SINGLE_PHASE,
+    ENTRY_POINT_CLI_WORKFLOW,
+    telemetry_scope,
+)
+
 
 async def run_project(brief: str, data: str = "", name: str = "New Project") -> ProjectState:
     """Execute the full v4 workflow on a project."""
@@ -35,8 +41,15 @@ async def run_project(brief: str, data: str = "", name: str = "New Project") -> 
     # Compile workflow (no checkpointer for local runs)
     workflow = compile_workflow()
 
-    # Run the full pipeline
-    final_state = await workflow.ainvoke(state)
+    # Run the full pipeline inside a telemetry run scope. The CLI is a supported
+    # entry point: it knows the project it created and names the run after it,
+    # so telemetry never has to record an absent identity for a CLI workflow.
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_CLI_WORKFLOW,
+        project_id=state.project_id,
+        run_id=state.project_id,
+    ):
+        final_state = await workflow.ainvoke(state)
 
     # Summary
     logger.info("=" * 60)
@@ -58,7 +71,15 @@ async def run_project(brief: str, data: str = "", name: str = "New Project") -> 
 async def run_single_phase(state: ProjectState, phase: str) -> ProjectState:
     """Run a single phase (for interactive/step-by-step mode)."""
     from orchestrator import run_phase_node
-    return await run_phase_node(state, phase)
+
+    async with telemetry_scope(
+        entry_point=ENTRY_POINT_CLI_SINGLE_PHASE,
+        project_id=state.project_id,
+        run_id=state.project_id,
+        phase=phase,
+        expected_phases=(phase,),
+    ):
+        return await run_phase_node(state, phase)
 
 
 # ═══ CLI ═══

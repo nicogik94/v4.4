@@ -27,6 +27,24 @@ from extensions.runtime import (
     RoutingContext,
     RoutingConfig,
 )
+from provider_telemetry import capture as attempt_capture
+from provider_telemetry import posture as telemetry_posture
+from provider_telemetry import service as telemetry_service
+from provider_telemetry.identity import current_identity, new_uuid, worker_id
+from provider_telemetry.models import (
+    BREAKER_CLOSED,
+    BREAKER_OPEN,
+    EVENT_COMPLETED,
+    EVENT_PROVIDER_FAILURE,
+    EVENT_SKIPPED,
+    INVOCATION_PROVIDER_CALL,
+    INVOCATION_SKIPPED_CANDIDATE,
+    BreakerSnapshot,
+    SdkInvocationRecord,
+    TelemetryCallRecord,
+    UNKNOWN_BREAKER,
+    utc_now,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -376,6 +394,7 @@ class DefaultProviderGateway:
         max_retries: int = MAX_RETRIES,
         retry_delays: list[float] | tuple[float, ...] = RETRY_DELAYS,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+        telemetry: Any | None = None,
     ):
         self._anthropic_executor = anthropic_executor
         self._openai_executor = openai_executor
@@ -386,6 +405,12 @@ class DefaultProviderGateway:
         self._max_retries = max(1, int(max_retries or 1))
         self._retry_delays = list(retry_delays)
         self._sleep = sleep
+        # Telemetry session override. Left as None in production, where the
+        # session is discovered from the ambient run scope; injected directly by
+        # tests. When there is no session, `_capturing` is False and not one
+        # extra clock read, breaker read, context-variable set or statement is
+        # issued anywhere in this module.
+        self._telemetry = telemetry
 
     async def call(
         self,
@@ -394,6 +419,14 @@ class DefaultProviderGateway:
         config_override: ModelConfig | None = None,
         before_attempt: BeforeAttemptHook | None = None,
     ) -> GatewayResponse:
+        # The worker invariant, checked at the top of the stack. A
+        # strict-required process refuses here — before routing, before the
+        # cache, before any candidate is selected — so a caller that forgot to
+        # open a telemetry scope gets a clear failure rather than a mysterious
+        # transport error several layers down. The transport wrapper checks the
+        # same invariant independently, which is what covers a path that never
+        # came through this method at all.
+        telemetry_posture.enforce_provider_call("provider_gateway.call")
         candidates = select_model_candidates(
             request.phase,
             config_override=config_override,
@@ -444,6 +477,26 @@ class DefaultProviderGateway:
         last_error = "No configured provider candidates were available"
         attempt_count = 0
 
+        # ─── telemetry state ───
+        # Nothing below this line is read by a routing, retry, fallback or
+        # breaker decision. The one place telemetry can change behavior is
+        # documented and deliberate: in *strict* posture a start that cannot be
+        # persisted raises out of `persist_invocation_start`, and the provider
+        # request is not made. Observational posture never raises.
+        session = self._session()
+        capturing = session is not None
+        call_id = new_uuid() if capturing else ""
+        telemetry_ordinal = 0
+        if capturing:
+            await self._persist_call_start(
+                session=session,
+                call_id=call_id,
+                request=request,
+                config=initial_config,
+                selection=initial_selection,
+                candidate_count=len(candidates),
+            )
+
         for candidate_index, (config, selection) in enumerate(candidates):
             key = _candidate_key(config)
             if not self._provider_available(config.provider):
@@ -455,6 +508,20 @@ class DefaultProviderGateway:
                 fallback_reason = fallback_reason or category
                 last_error_type = category
                 last_error = _safe_error_message(category, config.provider.value, config.model)
+                if capturing:
+                    telemetry_ordinal += 1
+                    await self._record_skipped_candidate(
+                        session=session,
+                        request=request,
+                        config=config,
+                        selection=selection,
+                        key=key,
+                        call_id=call_id,
+                        attempt_ordinal=telemetry_ordinal,
+                        candidate_index=candidate_index,
+                        error_category=category,
+                        initial_config=initial_config,
+                    )
                 continue
             if self._breaker.is_open(key):
                 category = PROVIDER_UNAVAILABLE
@@ -465,18 +532,88 @@ class DefaultProviderGateway:
                 fallback_reason = fallback_reason or category
                 last_error_type = category
                 last_error = _safe_error_message(category, config.provider.value, config.model)
+                if capturing:
+                    telemetry_ordinal += 1
+                    await self._record_skipped_candidate(
+                        session=session,
+                        request=request,
+                        config=config,
+                        selection=selection,
+                        key=key,
+                        call_id=call_id,
+                        attempt_ordinal=telemetry_ordinal,
+                        candidate_index=candidate_index,
+                        error_category=category,
+                        initial_config=initial_config,
+                        breaker_open=True,
+                    )
                 continue
 
             for retry_index in range(self._max_retries):
                 governance_response = await self._run_before_attempt(before_attempt, config)
                 if governance_response is not None:
+                    # A governance refusal is an *authorized* no-call outcome,
+                    # and reconciliation can only treat it as one if it is
+                    # durable. Without this the call envelope would carry no
+                    # invocation at all, which is indistinguishable from work
+                    # that simply went missing.
+                    if capturing:
+                        telemetry_ordinal += 1
+                        await self._record_skipped_candidate(
+                            session=session,
+                            request=request,
+                            config=config,
+                            selection=selection,
+                            key=key,
+                            call_id=call_id,
+                            attempt_ordinal=telemetry_ordinal,
+                            candidate_index=candidate_index,
+                            error_category=normalize_error_type(
+                                governance_response.error_type
+                            ),
+                            initial_config=initial_config,
+                        )
                     governance_response.attempts = attempts
                     governance_response.attempt_count = attempt_count
                     self._apply_selection_metadata(governance_response, initial_selection, initial_config)
                     return governance_response
 
                 attempt_count += 1
-                response = await self._execute(config, request)
+                if capturing:
+                    telemetry_ordinal += 1
+                # The invocation start is persisted *before* the provider is
+                # called. In strict posture a failure here raises and the request
+                # is never sent; that is the fail-closed guarantee, and it is the
+                # only telemetry-caused behavior change in this module.
+                probe = (
+                    await self._begin_invocation(
+                        session=session,
+                        request=request,
+                        config=config,
+                        selection=selection,
+                        key=key,
+                        call_id=call_id,
+                        attempt_ordinal=telemetry_ordinal,
+                        candidate_index=candidate_index,
+                        retry_index=retry_index,
+                        initial_config=initial_config,
+                    )
+                    if capturing
+                    else None
+                )
+                try:
+                    if probe is None:
+                        response = await self._execute(config, request)
+                    else:
+                        with probe.scope():
+                            response = await self._execute(config, request)
+                except BaseException as exc:  # noqa: BLE001 - re-raised unchanged
+                    # A cancellation (or any escape past `_execute`) must leave a
+                    # truthful terminal state rather than an unmatched start.
+                    if probe is not None:
+                        probe.record_escape(exc, self._breaker_snapshot(key))
+                        self._publish(session, probe)
+                    raise
                 category = normalize_error_type(response.error_type)
                 if response.error:
                     provider_detail = provider_error_detail_from_message(response.error)
@@ -490,6 +627,14 @@ class DefaultProviderGateway:
 
                 if not response.error:
                     self._breaker.reset(key)
+                    if probe is not None:
+                        # Submitted, never awaited: cache population and the
+                        # successful provider return below must not wait on a
+                        # database write.
+                        probe.record_terminal(
+                            EVENT_COMPLETED, "", self._breaker_snapshot(key)
+                        )
+                        self._publish(session, probe)
                     response.attempt_count = attempt_count
                     response.attempts = attempts + [
                         _attempt_metadata(config, selection, "success", "", "")
@@ -516,6 +661,15 @@ class DefaultProviderGateway:
                 last_error = response.error
                 if retryable:
                     self._breaker.record_failure(key)
+
+                if probe is not None:
+                    # Submitted before the retry / fallback / breaker decisions
+                    # below, and never awaited, so none of them can be delayed or
+                    # reordered by a slow or wedged telemetry sink.
+                    probe.record_terminal(
+                        EVENT_PROVIDER_FAILURE, category, self._breaker_snapshot(key)
+                    )
+                    self._publish(session, probe)
 
                 if category not in FALLBACK_ELIGIBLE_ERRORS:
                     return self._final_error_response(
@@ -589,6 +743,21 @@ class DefaultProviderGateway:
                 )
         except Exception as exc:
             category = normalize_exception_category(exc)
+            # An executor that raised past the adapter (so no adapter-level
+            # observation exists) still yields a sanitized, message-free failure
+            # identity. It is *appended*, never merged over a richer observation
+            # the adapter may already have captured.
+            capture = attempt_capture.current_capture()
+            if capture is not None:
+                _failure_class, identity = attempt_capture.observe_exception(exc)
+                capture.append(
+                    subject_kind="sdk_invocation",
+                    subject_id=capture.invocation_id,
+                    event_kind="observation",
+                    error_category=category,
+                    error_identity=identity,
+                    failure_class=_failure_class,
+                )
             return GatewayResponse(
                 text="",
                 model_used=config.model,
@@ -693,6 +862,256 @@ class DefaultProviderGateway:
             return True
         return bool(self._provider_availability.get(provider.value, False))
 
+    # ═══════════════════ provider-attempt telemetry ═══════════════════
+    #
+    # Everything below records what happened. Nothing below is read by any
+    # decision above it: the routing loop's control flow, the retry counts, the
+    # fallback ordering and the circuit-breaker transitions are identical
+    # whether a telemetry session is bound or not.
+    #
+    # There is exactly one exception, and it is deliberate: in *strict* posture
+    # `persist_invocation_start` and the transport-level attempt start are
+    # fail-closed, so a run that cannot record an attempt does not make it. That
+    # is the trade a paired experiment requires and is documented as such —
+    # strict posture is never described as behavior-neutral.
+
+    def _session(self):
+        """The telemetry session for this call, or None when telemetry is off."""
+        if self._telemetry is not None:
+            return self._telemetry
+        return telemetry_service.current_session()
+
+    @property
+    def _capturing(self) -> bool:
+        return self._session() is not None
+
+    def _breaker_snapshot(self, key: str) -> BreakerSnapshot:
+        """An *atomic* breaker reading, or an honest unknown.
+
+        State and failure count are taken together inside one guard. A partial
+        reading is never assembled: the previous design's independent
+        `except: state = closed` / `except: failures = 0` fallbacks reported
+        "closed with zero failures" for a snapshot that was never taken, which is
+        a fabricated observation rather than a missing one.
+        """
+        def read() -> BreakerSnapshot:
+            state = BREAKER_OPEN if self._breaker.is_open(key) else BREAKER_CLOSED
+            recorded = getattr(self._breaker, "failures", None)
+            if not isinstance(recorded, dict):
+                # A shape this build does not know how to read is not a failure
+                # to read: nothing raised, and `unknown` is the truthful answer.
+                return UNKNOWN_BREAKER
+            failures = len(recorded.get(key) or [])
+            return BreakerSnapshot.observed(state=state, failure_count=failures)
+
+        # Through the isolation boundary rather than a bare `except`, so a
+        # breaker that *raises* is recorded as a capture failure instead of
+        # silently becoming an `unknown` nobody can distinguish from a breaker
+        # this build simply did not understand. The returned value is identical
+        # either way, so nothing about routing changes.
+        return attempt_capture.guarded(
+            read, UNKNOWN_BREAKER, reason="breaker_snapshot"
+        )
+
+    def _routing_fingerprint(
+        self,
+        config: ModelConfig,
+        selection: ProviderSelection,
+        candidate_index: int,
+        retry_index: int,
+    ) -> str:
+        return telemetry_service.routing_decision_fingerprint(
+            provider=config.provider.value,
+            model=config.model,
+            candidate_ordinal=candidate_index + 1,
+            retry_ordinal=retry_index + 1,
+            selection_reason=getattr(selection, "reason", "") or "",
+            task_profile=getattr(selection, "task_profile", "") or "",
+        )
+
+    def _config_fingerprint(self, config: ModelConfig) -> str:
+        return telemetry_service.request_config_fingerprint(
+            provider=config.provider.value,
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            thinking_budget=config.thinking_budget,
+            max_retries=self._max_retries,
+            retry_delays=self._retry_delays,
+        )
+
+    def _identity_for(self, request: GatewayRequest):
+        """Merge the ambient identity with whatever this request carries."""
+        identity = current_identity()
+        return identity.merged(
+            phase=request.phase or identity.phase,
+            project_uuid=request.project_id or None,
+        ) if request.project_id or request.phase else identity
+
+    async def _persist_call_start(
+        self,
+        *,
+        session,
+        call_id: str,
+        request: GatewayRequest,
+        config: ModelConfig,
+        selection: ProviderSelection,
+        candidate_count: int,
+    ) -> None:
+        record = attempt_capture.guarded(
+            lambda: TelemetryCallRecord(
+                call_id=call_id,
+                telemetry_run_id=session.telemetry_run_id,
+                posture=session.posture,
+                identity=self._identity_for(request),
+                worker_id=worker_id(),
+                requested_provider=config.provider.value,
+                requested_model=config.model,
+                request_config_fingerprint=self._config_fingerprint(config),
+                routing_decision_fingerprint=self._routing_fingerprint(
+                    config, selection, 0, 0
+                ),
+                candidate_count=max(1, int(candidate_count or 1)),
+                started_at=utc_now(),
+            ),
+            None,
+            reason="call_record",
+        )
+        if record is not None:
+            await session.persist_call_start(record)
+
+    def _invocation_record(
+        self,
+        *,
+        session,
+        request: GatewayRequest,
+        config: ModelConfig,
+        selection: ProviderSelection,
+        key: str,
+        call_id: str,
+        attempt_ordinal: int,
+        candidate_index: int,
+        retry_index: int,
+        initial_config: ModelConfig,
+        invocation_kind: str,
+        breaker_before: BreakerSnapshot,
+    ):
+        is_fallback = candidate_index > 0
+        return attempt_capture.guarded(
+            lambda: SdkInvocationRecord(
+                invocation_id=new_uuid(),
+                call_id=call_id,
+                telemetry_run_id=session.telemetry_run_id,
+                posture=session.posture,
+                identity=self._identity_for(request),
+                worker_id=worker_id(),
+                invocation_kind=invocation_kind,
+                provider=config.provider.value,
+                requested_model=config.model,
+                # Ordinals are 1-based: "the first attempt" and "no attempt" have
+                # to be distinguishable.
+                candidate_ordinal=candidate_index + 1,
+                retry_ordinal=retry_index + 1,
+                attempt_ordinal=attempt_ordinal,
+                breaker_before=breaker_before,
+                fallback_candidate=is_fallback,
+                fallback_from_provider=initial_config.provider.value if is_fallback else "",
+                fallback_from_model=initial_config.model if is_fallback else "",
+                request_config_fingerprint=self._config_fingerprint(config),
+                routing_decision_fingerprint=self._routing_fingerprint(
+                    config, selection, candidate_index, retry_index
+                ),
+                started_at=utc_now(),
+            ),
+            None,
+            reason="invocation_record",
+        )
+
+    async def _record_skipped_candidate(
+        self,
+        *,
+        session,
+        request: GatewayRequest,
+        config: ModelConfig,
+        selection: ProviderSelection,
+        key: str,
+        call_id: str,
+        attempt_ordinal: int,
+        candidate_index: int,
+        error_category: str,
+        initial_config: ModelConfig,
+        breaker_open: bool = False,
+    ) -> None:
+        snapshot = self._breaker_snapshot(key)
+        if breaker_open and snapshot.status == "valid":
+            snapshot = BreakerSnapshot.observed(
+                state=BREAKER_OPEN, failure_count=snapshot.failure_count or 0
+            )
+        record = self._invocation_record(
+            session=session,
+            request=request,
+            config=config,
+            selection=selection,
+            key=key,
+            call_id=call_id,
+            attempt_ordinal=attempt_ordinal,
+            candidate_index=candidate_index,
+            retry_index=0,
+            initial_config=initial_config,
+            invocation_kind=INVOCATION_SKIPPED_CANDIDATE,
+            breaker_before=snapshot,
+        )
+        if record is None:
+            return
+        await session.persist_invocation_start(record)
+        probe = _InvocationProbe(record, session)
+        probe.capture.record_terminal(
+            EVENT_SKIPPED, error_category=error_category, breaker_after=snapshot
+        )
+        self._publish(session, probe)
+
+    async def _begin_invocation(
+        self,
+        *,
+        session,
+        request: GatewayRequest,
+        config: ModelConfig,
+        selection: ProviderSelection,
+        key: str,
+        call_id: str,
+        attempt_ordinal: int,
+        candidate_index: int,
+        retry_index: int,
+        initial_config: ModelConfig,
+    ):
+        record = self._invocation_record(
+            session=session,
+            request=request,
+            config=config,
+            selection=selection,
+            key=key,
+            call_id=call_id,
+            attempt_ordinal=attempt_ordinal,
+            candidate_index=candidate_index,
+            retry_index=retry_index,
+            initial_config=initial_config,
+            invocation_kind=INVOCATION_PROVIDER_CALL,
+            breaker_before=self._breaker_snapshot(key),
+        )
+        if record is None:
+            return None
+        await session.persist_invocation_start(record)
+        return _InvocationProbe(record, session)
+
+    @staticmethod
+    def _publish(session, probe) -> None:
+        """Hand every buffered event to the delivery worker. Never awaits."""
+        if probe is None or session is None:
+            return
+        attempt_capture.guarded(
+            lambda: session.submit_events(probe.drain()), 0, reason="publish"
+        )
+
     def _apply_selection_metadata(
         self,
         response: GatewayResponse,
@@ -741,6 +1160,99 @@ class DefaultProviderGateway:
                 "provider_detail": provider_error_detail_from_message(response.error),
             },
         )
+
+
+class _InvocationProbe:
+    """Brackets exactly one SDK invocation for telemetry.
+
+    Holds the already-persisted start record and an append-only capture buffer.
+    It owns no database connection and performs no I/O: events accumulate here
+    and are handed to the delivery worker by the gateway, so nothing on the
+    provider's critical path ever waits on a write.
+    """
+
+    __slots__ = ("record", "session", "capture", "_scope")
+
+    def __init__(self, record, session) -> None:
+        self.record = record
+        self.session = session
+        self.capture = attempt_capture.InvocationCapture(
+            invocation_id=record.invocation_id,
+            call_id=record.call_id,
+            telemetry_run_id=record.telemetry_run_id,
+            posture=record.posture,
+            worker_id=record.worker_id,
+            provider=record.provider,
+            requested_model=record.requested_model,
+            identity=record.identity,
+        )
+        self._scope = None
+
+    def scope(self):
+        """Bind the capture buffer for the duration of the provider call.
+
+        The adapter and the instrumented HTTP transport both publish into it,
+        which is how an SDK-internal retry gets its own attempt identity without
+        any executor signature changing.
+        """
+        return attempt_capture.capture_scope(self.capture)
+
+    def record_terminal(self, event_kind, error_category, breaker_after) -> None:
+        self.capture.record_terminal(
+            event_kind,
+            error_category=error_category or "",
+            breaker_after=breaker_after,
+        )
+
+    def record_escape(self, exc: BaseException, breaker_after) -> None:
+        """Terminal state for an exception that escaped past the executor.
+
+        Cancellation is classified as cancellation, never as a provider failure:
+        conflating the two would make a cancelled run look like a provider
+        outage in exactly the artifact meant to tell them apart.
+        """
+        kind = attempt_capture.terminal_kind_for_exception(exc)
+        failure_class, identity = attempt_capture.observe_exception(exc)
+        self.capture.record_terminal(
+            kind,
+            error_category="",
+            error_identity=identity,
+            # Kept, not discarded: a `TelemetryStartUnavailable` here is the
+            # durable record that this invocation was refused *before*
+            # transport, which is what lets reconciliation tell it apart from an
+            # invocation whose attempt row went missing.
+            failure_class=failure_class,
+            breaker_after=breaker_after,
+        )
+
+    def drain(self):
+        """Take the buffered events. Draining twice yields nothing the second time.
+
+        Capture failures are materialized here, at the one production point that
+        every invocation passes through on its way out. Everything the isolation
+        boundary absorbed during this invocation — a provider attribute that
+        raised, a validation that blew up, a fingerprint, a breaker snapshot, an
+        event that would not construct — has been accumulating as a note on the
+        buffer; this is where each of those becomes a durable ``capture_failure``
+        event instead of a list entry that dies with the process.
+
+        Anything that could not be represented even as a capture-failure event is
+        reported to the session as an undurable outcome, which reconciliation
+        refuses to certify. That is the honest end state: telemetry failed, and
+        it could not write down that it failed.
+        """
+        unrepresented = attempt_capture.guarded(
+            self.capture.flush_capture_failures, 0, reason="flush_capture_failures"
+        )
+        if unrepresented and self.session is not None:
+            attempt_capture.guarded(
+                lambda: self.session.note_unrepresented_capture_failures(unrepresented),
+                None,
+                reason="note_unrepresented",
+            )
+        events = list(self.capture.events)
+        self.capture.events.clear()
+        return events
 
 
 def normalize_error_type(error_type: str) -> str:
