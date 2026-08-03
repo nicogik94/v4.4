@@ -12,6 +12,11 @@ survive, and an empty delta makes a scope guard silently vacuous rather than
 loud. Reading untracked status was the earlier form, and it failed the instant
 the wave was committed without a single byte of the wave itself changing.
 
+Where an active change set is still consulted it is narrowed to telemetry-owned
+paths first. These guards answer "is the telemetry surface within its declared
+contract", not "does this worktree contain anything else" — the second question
+belongs to no wave, and asking it made an unrelated feature branch fail here.
+
 The source-level assertions here use the AST with docstrings stripped rather than
 substring matching. A module that *documents* what it refuses to do would
 otherwise trip a naive substring check on its own prose — the same false positive
@@ -223,6 +228,18 @@ def _names_the_telemetry(path: Path) -> bool:
     return any(marker in body for marker in TELEMETRY_MARKERS)
 
 
+def _is_telemetry_owned(rel: str) -> bool:
+    """Whether one repository-relative path belongs to this wave.
+
+    Name first, then code: a path named for the telemetry is the wave's even
+    when it cannot be read, and a path whose executable source names the
+    telemetry is the wave's whatever it happens to be called.
+    """
+    if any(marker in rel for marker in TELEMETRY_MARKERS):
+        return True
+    return _names_the_telemetry(ROOT / rel)
+
+
 def telemetry_surface() -> set[str]:
     """The wave's footprint, discovered from the checkout rather than from Git.
 
@@ -234,24 +251,41 @@ def telemetry_surface() -> set[str]:
     """
     owned = set()
     for rel in repository_files():
-        path = ROOT / rel
-        if not path.is_file():
+        if not (ROOT / rel).is_file():
             continue
-        if any(marker in rel for marker in TELEMETRY_MARKERS) or _names_the_telemetry(path):
+        if _is_telemetry_owned(rel):
             owned.add(rel)
     return owned
+
+
+def active_telemetry_changes() -> set[str]:
+    """The active change set, narrowed to the paths this wave owns.
+
+    The narrowing is the whole point. An unrelated file edited or added in the
+    same worktree is not evidence about the telemetry's scope, and unioning the
+    raw change set into the candidate below turned these guards into "the
+    repository has no other changes" — a claim no permanent test on main can
+    make, and one an unrelated feature branch falsifies with a single empty
+    file. Ownership, not co-residence in a worktree, decides membership.
+
+    What the narrowing keeps is the half that matters: a telemetry path being
+    edited or newly added is still measured against ``ALLOWED``, including a
+    path the tree walk cannot classify on its own.
+    """
+    active = {path for path in _git("diff", "--name-only") if path} | _untracked()
+    return {rel for rel in active if _is_telemetry_owned(rel)}
 
 
 class ChangeScopeTests(unittest.TestCase):
     """Requirement 24."""
 
     def _inventory(self) -> set[str]:
-        changed = _git("diff", "--name-only")
-        # An active change set still counts when there is one, so a dirty
-        # worktree cannot smuggle an out-of-scope edit past the guards below.
-        # It is unioned with — never substituted for — the discovered surface,
-        # which is what remains once the wave is committed.
-        return {path for path in changed if path} | _untracked() | telemetry_surface()
+        # The telemetry-owned half of an active change set still counts when
+        # there is one, so a dirty worktree cannot smuggle an out-of-scope
+        # telemetry edit past the guards below. It is unioned with — never
+        # substituted for — the discovered surface, which is what remains once
+        # the wave is committed.
+        return active_telemetry_changes() | telemetry_surface()
 
     def test_the_change_inventory_covers_the_whole_telemetry_surface(self):
         inventory = self._inventory()
@@ -261,9 +295,9 @@ class ChangeScopeTests(unittest.TestCase):
         # broken this would be empty and every scope assertion below trivial.
         self.assertTrue(package)
         self.assertTrue(surface <= inventory)
-        # And whatever is not yet tracked is covered too — the half a
+        # And whatever telemetry is not yet tracked is covered too — the half a
         # `git diff`-only check missed, still asserted where it exists.
-        self.assertTrue(_untracked() <= inventory)
+        self.assertTrue({p for p in _untracked() if _is_telemetry_owned(p)} <= inventory)
 
     def test_the_change_inventory_is_within_the_declared_scope(self):
         unexpected = self._inventory() - ALLOWED

@@ -114,3 +114,65 @@ def test_explainability_exposes_research_evidence_impact_field():
     text = _text(EXPLAINABILITY)
     assert "research_evidence_impact: Optional[ResearchEvidenceImpactSummary] = None" in text
     assert "build_phase_research_evidence_impact(state, phase)" in text
+
+
+# ═══ R3 — provenance carry-through surface ═══════════════════════════════════
+
+
+def test_consumer_uses_stable_keys_not_positional_labels():
+    text = _text(CONSUMER)
+    assert 'RESEARCH_EVIDENCE_CLAIM_KEY_PREFIX = "REC-"' in text
+    assert 'RESEARCH_EVIDENCE_SOURCE_KEY_PREFIX = "RES-"' in text
+    assert 'RESEARCH_EVIDENCE_EVIDENCE_KEY_PREFIX = "REE-"' in text
+    # No renderer line may reintroduce a phase-local positional reference.
+    for positional in ('f"  C{index}', 'f"  S{index}', 'f"  E{index}', 'f"  R{index}'):
+        assert positional not in text
+
+
+def test_provenance_carry_through_reads_only_the_durable_attestation():
+    """The downstream register must never re-open Research Evidence."""
+    text = _text(CONSUMER)
+    start = text.index("def build_research_evidence_provenance_register(")
+    end = text.index("def extract_research_evidence_references(")
+    register_body = text[start:end]
+    assert "policy_audit_log" in register_body
+    for forbidden in (
+        "project_research_evidence_presentation",
+        "open_consumer_connection",
+        "load_internal_analysis_projection_sync",
+        "asyncio",
+    ):
+        assert forbidden not in register_body
+
+
+def test_report_prompt_carries_provenance_byte_stably():
+    text = _text(ORCHESTRATOR)
+    # Sits directly against the locator register so an empty section keeps
+    # Research-Evidence-off report prompts byte-identical.
+    assert text.count("{evidence_locator_register}{research_evidence_provenance}") == 2
+    assert "build_downstream_provenance_section(state)" in text
+
+
+def test_attribution_check_observes_and_never_rewrites_the_report():
+    text = _text(ORCHESTRATOR)
+    start = text.index("def _record_research_evidence_attribution_check(")
+    end = text.index("def build_system_prompt(")
+    body = text[start:end]
+    # Reads the report; never assigns to it, and never touches provider routing.
+    assert "state.report" in body
+    assert "state.report =" not in body
+    for forbidden in ("call_llm", "provider", "fallback", "retry", "phase_status"):
+        assert forbidden not in body
+    # Runs after the report is recorded, and cannot fail the phase.
+    assign_index = text.index("state.report = response.text")
+    check_index = text.index("_record_research_evidence_attribution_check(state)")
+    assert assign_index < check_index
+
+
+def test_r3_adds_no_migration():
+    """Provenance rides the state snapshot the run already persists.
+
+    v63 is the merged provider-attempt-telemetry migration; v64 is the next
+    unused number and must stay unused by this wave.
+    """
+    assert not list((ROOT / "mas/sql").glob("v64_*.sql"))

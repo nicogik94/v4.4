@@ -349,6 +349,47 @@ def _build_report_evidence_locator_register(state: ProjectState, max_entries: in
     return "\n".join(lines)
 
 
+def _record_research_evidence_attribution_check(state: ProjectState) -> None:
+    """Attest whether the produced report attributed Research Evidence correctly.
+
+    Observation only. It never edits the report, never adds or removes a
+    citation, and never changes phase control flow — a provenance defect must be
+    visible to an operator, not silently repaired. Fail-soft: a defect in this
+    check must not fail a report that was otherwise produced.
+    """
+    try:
+        # Lazy import for the same reason run_phase_node does it: policy imports
+        # state, and orchestrator must not create a cycle at module load.
+        from policy import log_policy_event
+
+        register = research_evidence_context.build_research_evidence_provenance_register(state)
+        if register.empty:
+            return
+        findings = research_evidence_context.check_research_evidence_attribution(
+            state.report, register,
+        )
+        log_policy_event(
+            state,
+            research_evidence_context.RESEARCH_EVIDENCE_ATTRIBUTION_EVENT_TYPE,
+            {
+                "phase": "report",
+                "register_claim_count": len(register.claims),
+                "register_phases": list(register.phases),
+                "cited_claim_keys": [
+                    reference
+                    for reference in research_evidence_context.extract_research_evidence_references(state.report)
+                    if reference in register.by_key()
+                ],
+                "finding_count": len(findings),
+                "findings": findings,
+            },
+        )
+    except Exception as exc:  # pragma: no cover - fail-soft attestation
+        logger.warning(
+            "research evidence attribution check skipped: %s", type(exc).__name__
+        )
+
+
 def build_system_prompt(phase: str, json_mode: bool = True, calibration_hint: str = "") -> str:
     """Build phase-specific system prompt with only relevant frameworks.
 
@@ -609,6 +650,10 @@ def build_report_prompt(state: ProjectState) -> str:
     ctx_strategy = _sanitize_report_context(summarize_phase_output("strategy", state))
     ctx_monitor = _sanitize_report_context(summarize_phase_output("monitor", state))
     evidence_locator_register = _build_report_evidence_locator_register(state)
+    # R3: carry authorized Research Evidence provenance across the synthesis
+    # boundary. Empty string unless a consuming phase actually consumed
+    # evidence, so Research-Evidence-off report prompts stay byte-identical.
+    research_evidence_provenance = research_evidence_context.build_downstream_provenance_section(state)
     quality_context = assess_report_quality_context(state)
     report_quality_rules = _report_quality_prompt_block(quality_context)
     factual_safety_rules = _report_factual_safety_rules(quality_context)
@@ -627,6 +672,7 @@ def build_report_prompt(state: ProjectState) -> str:
             output_language=output_language,
             language_rules=language_rules,
             evidence_locator_register=evidence_locator_register,
+            research_evidence_provenance=research_evidence_provenance,
             report_quality_rules=report_quality_rules,
             factual_safety_rules=factual_safety_rules,
             research_depth_rules=research_depth_rules,
@@ -646,7 +692,7 @@ def build_report_prompt(state: ProjectState) -> str:
 
 {language_rules}
 
-{evidence_locator_register}
+{evidence_locator_register}{research_evidence_provenance}
 
 {REPORT_CITATION_DISCIPLINE}
 
@@ -835,6 +881,7 @@ def _build_decision_memo_pilot_plan_report_prompt(
     output_language: str,
     language_rules: str,
     evidence_locator_register: str,
+    research_evidence_provenance: str,
     report_quality_rules: str,
     factual_safety_rules: str,
     research_depth_rules: str,
@@ -860,7 +907,7 @@ Write a short decision-facing memo first, followed by a separated technical appe
 
 {language_rules}
 
-{evidence_locator_register}
+{evidence_locator_register}{research_evidence_provenance}
 
 {REPORT_CITATION_DISCIPLINE}
 
@@ -2197,6 +2244,7 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
             "report_generated",
             generation_metadata,
         )
+        _record_research_evidence_attribution_check(state)
         state.phase_status[phase] = PhaseStatus.COMPLETED
         state.phase_confidence[phase] = 1.0
         _clear_phase_failure(state, phase)

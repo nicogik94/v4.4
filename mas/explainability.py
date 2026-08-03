@@ -17,8 +17,11 @@ from decision_objects import ensure_decision_objects
 from knowledge.freshness import build_knowledge_health
 from knowledge.retrieval import RetrievalPhaseImpactSummary, build_phase_retrieval_impact
 from research_evidence_context import (
+    RESEARCH_EVIDENCE_CONSUMER_PHASES,
     ResearchEvidenceImpactSummary,
+    ResearchEvidenceProvenanceRegister,
     build_phase_research_evidence_impact,
+    build_research_evidence_provenance_register,
 )
 from state import ProjectState
 from tools.scoring import check_gate
@@ -154,6 +157,10 @@ class PhaseTraceSummary(BaseModel):
     next_step: str = ""
     retrieval_impact: Optional[RetrievalPhaseImpactSummary] = None
     research_evidence_impact: Optional[ResearchEvidenceImpactSummary] = None
+    # Populated for phases downstream of the consuming phases, so an operator
+    # can resolve a report's REC- references to their evidence, source family
+    # and limitations without replaying the run.
+    research_evidence_provenance: Optional[ResearchEvidenceProvenanceRegister] = None
     knowledge_usage: list[KnowledgeUsageSummary] = Field(default_factory=list)
     logic_separation: LogicSeparationSummary = Field(default_factory=LogicSeparationSummary)
     uncertainty: UncertaintySummary = Field(default_factory=UncertaintySummary)
@@ -256,10 +263,26 @@ def build_phase_trace(state: ProjectState, phase: str) -> PhaseTraceSummary:
         next_step=_next_step(state, phase, status),
         retrieval_impact=_phase_retrieval_impact(state, phase),
         research_evidence_impact=build_phase_research_evidence_impact(state, phase),
+        research_evidence_provenance=_phase_research_evidence_provenance(state, phase),
         knowledge_usage=_phase_knowledge_usage(state, phase),
         logic_separation=_logic_for_phase(state, phase, gate_trace),
         uncertainty=_phase_uncertainty(state, phase),
     )
+
+
+def _phase_research_evidence_provenance(
+    state: ProjectState, phase: str,
+) -> Optional[ResearchEvidenceProvenanceRegister]:
+    """Expose the carried provenance register to phases that consume it.
+
+    The consuming phases already expose their own impact summary; this is the
+    downstream view — what a later phase could resolve. None when nothing was
+    consumed, so Research-Evidence-off traces are unchanged.
+    """
+    if phase in RESEARCH_EVIDENCE_CONSUMER_PHASES:
+        return None
+    register = build_research_evidence_provenance_register(state)
+    return None if register.empty else register
 
 
 def _gate_trace(

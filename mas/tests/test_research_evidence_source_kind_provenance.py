@@ -164,7 +164,11 @@ def test_curated_record_kind_reaches_the_model_facing_block_verbatim():
     # same SOURCES entry — not somewhere the model could read it as unrelated.
     sources_section = block[block.index("SOURCES:"):block.index("CLAIMS:")]
     lines = sources_section.splitlines()
-    header = next(i for i, line in enumerate(lines) if line.startswith("  S1 "))
+    header = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("  " + rc.RESEARCH_EVIDENCE_SOURCE_KEY_PREFIX)
+    )
     assert lines[header + 1] == SOURCE_KIND_PREFIX + CURATED
     for label in (
         "citation_label", "canonical_source_locator", "publisher", "author",
@@ -227,7 +231,11 @@ def test_absent_source_kind_renders_the_attestation_blank_not_the_literal_none()
     # The line stays present and unconditional: absence is disclosed, not hidden.
     assert block.count(SOURCE_KIND_PREFIX) == 1
     lines = block.splitlines()
-    header = next(i for i, line in enumerate(lines) if line.startswith("  S1 "))
+    header = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("  " + rc.RESEARCH_EVIDENCE_SOURCE_KEY_PREFIX)
+    )
     assert lines[header + 1].startswith(SOURCE_KIND_PREFIX)
 
     # ...and its rendered value is blank, never Python's ``None`` repr.
