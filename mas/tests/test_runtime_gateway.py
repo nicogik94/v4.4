@@ -158,6 +158,54 @@ class TestRuntimeRouting(unittest.TestCase):
         self.assertEqual(config.model, "gpt-5-mini")
         self.assertEqual(selection.provider, "openai")
         self.assertEqual(selection.reason, "config_override")
+        self.assertIsNone(config.min_response_tokens)
+
+    def test_extended_thinking_config_must_reserve_response_text_budget(self):
+        with self.assertRaisesRegex(ValueError, "response text"):
+            ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model="claude-opus-4-6",
+                max_tokens=8000,
+                thinking_budget=20000,
+                min_response_tokens=4000,
+            )
+
+        strategy = MODEL_ROUTING["strategy"]
+        self.assertEqual(strategy.max_tokens, 8000)
+        self.assertGreaterEqual(strategy.min_response_tokens, 4000)
+        self.assertLessEqual(
+            strategy.thinking_budget + strategy.min_response_tokens,
+            strategy.max_tokens,
+        )
+
+    def test_strategy_reserve_does_not_change_unrelated_phase_thinking_budgets(self):
+        expected = {
+            "hypotheses": 15000,
+            "gauntlet": 2000,
+            "audit": 5000,
+            "sqi": 5000,
+            "report": 10000,
+            "scope": 5000,
+            "scientific_inventory": 5000,
+            "trl_diagnosis": 5000,
+            "research_industry_alignment": 5000,
+            "ip_protection_axis": 5000,
+            "next_level_recommendations": 5000,
+            "technical_validation_plan": 5000,
+            "industrial_transfer_plan": 5000,
+            "readiness_roadmap": 5000,
+            "executive_summary": 5000,
+        }
+
+        for phase, thinking_budget in expected.items():
+            with self.subTest(phase=phase):
+                self.assertEqual(MODEL_ROUTING[phase].thinking_budget, thinking_budget)
+                self.assertIsNone(MODEL_ROUTING[phase].min_response_tokens)
+
+    def test_llm_response_stop_reason_rejects_raw_provider_metadata(self):
+        response = llm_client.LLMResponse(stop_reason="raw-sensitive-provider-detail")
+
+        self.assertEqual(response.stop_reason, "other")
 
     def test_build_cache_key_is_stable(self):
         request = GatewayRequest(
@@ -683,6 +731,7 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
     async def test_call_llm_still_works_through_gateway(self):
         fake_response = llm_client.LLMResponse(
             text="llm ok",
+            stop_reason="max_tokens",
             ok=True,
             model_used=MODEL_ROUTING["classify"].model,
             provider_used="anthropic",
@@ -702,6 +751,57 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.text, "llm ok")
         self.assertEqual(response.provider_used, "anthropic")
         self.assertEqual(response.model_used, MODEL_ROUTING["classify"].model)
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertEqual(response.attempt_count, 1)
+        self.assertFalse(response.fallback_used)
+
+    async def test_anthropic_max_tokens_stop_reason_is_normalized_on_response(self):
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="{\"ok\":true}")],
+                usage=SimpleNamespace(
+                    input_tokens=11,
+                    output_tokens=8000,
+                    cache_read_input_tokens=0,
+                ),
+                stop_reason="max_tokens",
+            )
+        )
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+
+        with patch("llm_client._get_anthropic", return_value=fake_client):
+            response = await llm_client._call_anthropic(
+                "claude-opus-4-6", "system", "prompt", 8000, 0.4, 4000
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.text, '{"ok":true}')
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertEqual(create_mock.await_count, 1)
+        self.assertEqual(create_mock.await_args.kwargs["thinking"]["budget_tokens"], 4000)
+
+    async def test_unreserved_direct_anthropic_call_preserves_historical_clamp(self):
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="partial")],
+                usage=SimpleNamespace(
+                    input_tokens=11,
+                    output_tokens=1,
+                    cache_read_input_tokens=0,
+                ),
+                stop_reason="max_tokens",
+            )
+        )
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+
+        with patch("llm_client._get_anthropic", return_value=fake_client):
+            response = await llm_client._call_anthropic(
+                "claude-opus-4-6", "system", "prompt", 8000, 0.4, 20000
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(create_mock.await_count, 1)
+        self.assertEqual(create_mock.await_args.kwargs["thinking"]["budget_tokens"], 7999)
 
 
 def test_call_llm_default_shadow_store_uses_pytest_temp_sqlite(scenario_shadow_sqlite_path):
@@ -751,6 +851,26 @@ class TestOpenAICompatibility(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["temperature"], 1)
         self.assertNotIn("max_tokens", kwargs)
         self.assertTrue(response.ok)
+
+    async def test_openai_length_finish_reason_normalizes_to_max_tokens(self):
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="partial"),
+                    finish_reason="length",
+                )],
+                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=6),
+            )
+        )
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_mock)))
+
+        with patch("llm_client._get_openai", return_value=fake_client):
+            response = await llm_client._call_openai(
+                "gpt-5-mini", "system", "prompt", 123, 0.2
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.stop_reason, "max_tokens")
 
 
 class TestCircuitBreaker(unittest.TestCase):

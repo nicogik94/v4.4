@@ -245,6 +245,37 @@ def test_graph_hypotheses_node_runs_gauntlet_at_three_hypotheses_and_preserves_s
     assert updated.gauntlet.results[0].top_fmea["rpn"] == 60
 
 
+def test_failed_strategy_graph_node_aborts_before_sqi_scoring_monitor_and_report():
+    async def fake_run_phase(state: ProjectState, phase: str) -> ProjectState:
+        if phase == "strategy":
+            state.strategy = None
+            state.phase_status["strategy"] = PhaseStatus.FAILED
+        else:
+            raise AssertionError(f"unexpected downstream provider phase: {phase}")
+        return state
+
+    with patch("orchestrator.run_phase_node", new=AsyncMock(side_effect=fake_run_phase)) as run_mock:
+        graph = orchestrator.build_workflow_graph()
+        updated = asyncio.run(
+            graph.nodes["strategy"].runnable.ainvoke(_state("failed-strategy-graph"))
+        )
+
+    assert [call.args[1] for call in run_mock.await_args_list] == ["strategy"]
+    assert orchestrator.route_after_strategy(updated) == "abort"
+    assert ("strategy", "scoring") not in graph.edges
+    assert "strategy" in graph.branches
+
+
+def test_completed_strategy_and_sqi_graph_route_allows_scoring():
+    state = _state("valid-strategy-graph-route")
+    state.strategy = _strategy_output()
+    state.sqi = SQIOutput(sqi_overall=80)
+    state.phase_status["strategy"] = PhaseStatus.COMPLETED
+    state.phase_status["sqi"] = PhaseStatus.COMPLETED
+
+    assert orchestrator.route_after_strategy(state) == "scoring"
+
+
 def test_gauntlet_absence_is_safe_for_downstream_prompts():
     state = _state("gauntlet-absent")
     state.classify = _classify_output()
@@ -273,6 +304,7 @@ def test_gauntlet_phase_is_internal_and_not_a_delivery_approval_gate():
 def test_sqi_phase_preserves_weakest_link_shape_from_structured_output():
     state = _state("sqi-shape")
     state.strategy = _strategy_output()
+    state.phase_status["strategy"] = PhaseStatus.COMPLETED
     state.phase_status["sqi"] = PhaseStatus.PENDING
 
     with patch("orchestrator.call_llm", new=AsyncMock(return_value=_fake_response(_sqi_payload()))):

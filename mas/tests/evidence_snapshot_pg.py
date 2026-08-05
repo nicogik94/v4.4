@@ -392,14 +392,20 @@ def dedicated_negative_role_cluster():
     container = f"mas-r2a1-negative-role-{uuid.uuid4().hex[:12]}"
     database = f"mas_research_evidence_test_negative_{uuid.uuid4().hex[:10]}"
     bootstrap_password = secrets.token_urlsafe(32)
+    isolated_network = os.getenv("EVIDENCE_SNAPSHOT_DOCKER_NETWORK", "").strip()
     environment = os.environ.copy()
     environment["POSTGRES_PASSWORD"] = bootstrap_password
     command = [
         "docker", "run", "-d", "--pull=never", "--name", container,
         "-e", "POSTGRES_PASSWORD", "-e", f"POSTGRES_DB={database}",
-        "-p", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql/data",
-        "postgres:16-alpine",
     ]
+    if isolated_network:
+        command.extend(["--network", isolated_network])
+    else:
+        command.extend(["-p", "127.0.0.1::5432"])
+    command.extend([
+        "--tmpfs", "/var/lib/postgresql/data", "postgres:16-alpine",
+    ])
     subprocess.run(
         command, env=environment, check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -418,16 +424,21 @@ def dedicated_negative_role_cluster():
             raise ExternalRoleInfrastructureError(
                 "dedicated negative-role PostgreSQL cluster did not become ready"
             )
-        port_output = subprocess.run(
-            ["docker", "port", container, "5432/tcp"],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        port = int(port_output.rsplit(":", 1)[1])
+        if isolated_network:
+            host = container
+            port = 5432
+        else:
+            port_output = subprocess.run(
+                ["docker", "port", container, "5432/tcp"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            host = "127.0.0.1"
+            port = int(port_output.rsplit(":", 1)[1])
         connection = None
         for _ in range(100):
             try:
                 connection = psycopg.connect(
-                    host="127.0.0.1", port=port, dbname=database,
+                    host=host, port=port, dbname=database,
                     user="postgres", password=bootstrap_password,
                 )
                 break

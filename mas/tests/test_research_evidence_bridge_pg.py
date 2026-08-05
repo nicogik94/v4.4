@@ -3160,9 +3160,15 @@ def _socket_cluster(tag):
     sock_dir = tempfile.mkdtemp(prefix=f"pgs-probe-{tag}-")
     os.chmod(sock_dir, 0o777)
     name = f"r2a4b-probe-{tag}-{uuid.uuid4().hex[:10]}"
+    network_args = (
+        ["--network", "none"]
+        if os.getenv("EVIDENCE_SNAPSHOT_DOCKER_NETWORK", "").strip()
+        else []
+    )
     started = subprocess.run(
         [
             "docker", "run", "-d", "--rm", "--name", name,
+            *network_args,
             "-e", f"POSTGRES_PASSWORD={_CLUSTER_PASSWORD}",
             "-e", f"POSTGRES_DB={_IDENTICAL_DB}",
             "-e", "PGDATA=/var/lib/postgresql/data",

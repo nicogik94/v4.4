@@ -516,6 +516,57 @@ class StrategyOutput(BaseModel):
     reentry_check: str = ""
 
 
+STRATEGY_REQUIRED_TOP_LEVEL_KEYS = (
+    "preliminary_verdicts",
+    "executive_strategy",
+    "strategies",
+    "implementation_sequence",
+    "success_metrics",
+    "monitoring_plan",
+    "review_date",
+    "confidence",
+    "reentry_check",
+)
+
+
+def normalize_strategy_payload(payload):
+    """Normalize known flexible Strategy fields after raw key presence is checked."""
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    reentry_check = normalized.get("reentry_check")
+    if reentry_check is None:
+        normalized["reentry_check"] = ""
+    elif isinstance(reentry_check, str):
+        normalized["reentry_check"] = reentry_check
+    elif isinstance(reentry_check, (dict, list)):
+        import json
+
+        normalized["reentry_check"] = json.dumps(
+            reentry_check,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+    return normalized
+
+
+def validate_strategy_payload(payload) -> StrategyOutput:
+    """Enforce explicit Strategy key presence before typed/default validation."""
+    if not isinstance(payload, dict):
+        raise ValueError("Strategy output must be a JSON object")
+    missing = [
+        key for key in STRATEGY_REQUIRED_TOP_LEVEL_KEYS if key not in payload
+    ]
+    if missing:
+        raise ValueError(
+            "Strategy output missing contractual top-level keys: "
+            + ", ".join(missing)
+        )
+    return StrategyOutput(**normalize_strategy_payload(payload))
+
+
 # ═══ Phase 4: Monitor ═══
 
 class MonitorScheduleItem(BaseModel):
@@ -933,6 +984,58 @@ class PhaseFailureDiagnostic(BaseModel):
     captured_at: str = ""
 
 
+STRATEGY_DERIVED_PHASES = ("sqi", "monitor", "report")
+PERSISTED_STRATEGY_CONTRACT_FAILURE_CATEGORY = "persisted_strategy_contract"
+PERSISTED_STRATEGY_CONTRACT_FAILURE_MESSAGE = (
+    "Persisted completed Strategy failed the explicit nine-key contract and "
+    "was invalidated during state reconstruction."
+)
+
+
+def invalidate_strategy_dependency_cone(
+    state,
+    *,
+    strategy_status: PhaseStatus | None = None,
+    strategy_failure: PhaseFailureDiagnostic | None = None,
+) -> list[str]:
+    """Clear Strategy authority and its complete derived lifecycle cone."""
+    invalidated: list[str] = []
+    for phase in STRATEGY_DERIVED_PHASES:
+        value = getattr(state, phase, None)
+        had_output = bool(value) if phase == "report" else value is not None
+        had_lifecycle = (
+            state.phase_status.get(phase, PhaseStatus.PENDING) != PhaseStatus.PENDING
+            or phase in state.phase_confidence
+            or phase in state.phase_summaries
+            or phase in state.phase_run_completed_at
+            or phase in state.phase_failure_details
+        )
+        setattr(state, phase, None)
+        if phase == "report":
+            state.report_output_language = None
+            state.report_output_mode = None
+        if had_output or had_lifecycle:
+            state.phase_status[phase] = PhaseStatus.STALE
+            invalidated.append(phase)
+        state.phase_confidence.pop(phase, None)
+        state.phase_summaries.pop(phase, None)
+        state.phase_run_completed_at.pop(phase, None)
+        state.phase_failure_details.pop(phase, None)
+
+    state.strategy = None
+    state.strategy_raw = None
+    state.det_scores = None
+    state.phase_confidence.pop("strategy", None)
+    state.phase_summaries.pop("strategy", None)
+    state.phase_run_completed_at.pop("strategy", None)
+    state.phase_failure_details.pop("strategy", None)
+    if strategy_status is not None:
+        state.phase_status["strategy"] = strategy_status
+    if strategy_failure is not None:
+        state.phase_failure_details["strategy"] = strategy_failure
+    return invalidated
+
+
 # ═══ MASTER PROJECT STATE ═══
 
 class ProjectState(BaseModel):
@@ -1068,6 +1171,51 @@ class ProjectState(BaseModel):
     # The operator and any compliance reviewer reads this to verify
     # the deterministic enforcement layer worked correctly.
     policy_audit_log: list[dict] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw_completed_strategy_contract(cls, value):
+        """Preserve raw key-presence evidence before Strategy defaults apply."""
+        if not isinstance(value, dict):
+            return value
+        project_type = normalize_project_type(
+            value.get("project_type", DEFAULT_PROJECT_TYPE)
+        )
+        if "strategy" not in get_workflow_phase_sequence(project_type):
+            return value
+        phase_status = value.get("phase_status")
+        if not isinstance(phase_status, dict):
+            return value
+        if _coerce_phase_status(phase_status.get("strategy")) != PhaseStatus.COMPLETED:
+            return value
+        try:
+            validate_strategy_payload(value.get("strategy"))
+        except Exception:
+            normalized = dict(value)
+            normalized["strategy"] = None
+            failures = dict(value.get("phase_failure_details") or {})
+            failures["strategy"] = {
+                "phase": "strategy",
+                "category": PERSISTED_STRATEGY_CONTRACT_FAILURE_CATEGORY,
+                "message": PERSISTED_STRATEGY_CONTRACT_FAILURE_MESSAGE,
+            }
+            normalized["phase_failure_details"] = failures
+            return normalized
+        return value
+
+    @model_validator(mode="after")
+    def _invalidate_failed_raw_completed_strategy(self):
+        failure = self.phase_failure_details.get("strategy")
+        if (
+            failure is not None
+            and failure.category == PERSISTED_STRATEGY_CONTRACT_FAILURE_CATEGORY
+        ):
+            invalidate_strategy_dependency_cone(
+                self,
+                strategy_status=PhaseStatus.FAILED,
+                strategy_failure=failure,
+            )
+        return self
 
     @field_validator("project_type", mode="before")
     @classmethod

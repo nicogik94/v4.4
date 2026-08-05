@@ -86,8 +86,9 @@ from scenarios import (
 from state import (
     ProjectState, PhaseStatus,
     ClassifyOutput, Hypothesis, GauntletOutput,
-    AuditOutput, StrategyOutput, MonitorOutput, SQIOutput,
+    AuditOutput, MonitorOutput, SQIOutput,
     normalize_output_language, normalize_report_mode,
+    validate_strategy_payload,
     validate_technology_readiness_output,
     KnowledgeLayerState, SourceRegistryEntry,
 )
@@ -98,7 +99,12 @@ from extensions.connectors import (
 )
 from ingestion_contract import IngestionContractError, normalize_project_ingestion
 from ingestion import merge_imported_records
-from orchestrator import is_workflow_complete, run_phase_node, run_workflow_sequence
+from orchestrator import (
+    invalidate_strategy_replacement,
+    is_workflow_complete,
+    run_phase_node,
+    run_workflow_sequence,
+)
 from provider_telemetry import ENTRY_POINT_API_MANUAL_PHASE, ENTRY_POINT_API_WORKFLOW_RUN, telemetry_scope
 from runtime import run_state as workflow_run_state
 from runtime import work_queue as workflow_queue
@@ -1152,10 +1158,15 @@ async def patch_phase_output(project_id: str, phase: str, payload: Any = Body(..
     await _ensure_project_not_running(project_id)
 
     validated, changed_field_paths = _validate_phase_payload(phase, payload)
+    if phase == "strategy":
+        invalidated = invalidate_strategy_replacement(state)
+    else:
+        invalidated = []
     _apply_phase_output(state, phase, validated)
     _finalize_phase_output_edit(state, phase)
 
-    invalidated = _invalidate_from_phase(state, phase, include_self=False)
+    if phase != "strategy":
+        invalidated = _invalidate_from_phase(state, phase, include_self=False)
     state.current_phase = invalidated[0] if invalidated else phase
 
     _log_operator_edit(state, phase, changed_field_paths, invalidated)
@@ -1817,7 +1828,7 @@ def _validate_phase_payload(phase: str, payload: Any):
 
         if phase == "strategy":
             data = _require_dict_payload(phase, payload)
-            return StrategyOutput(**data), _field_paths_for_payload(phase, data)
+            return validate_strategy_payload(data), _field_paths_for_payload(phase, data)
 
         if phase == "monitor":
             data = _require_dict_payload(phase, payload)
