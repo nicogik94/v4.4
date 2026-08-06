@@ -3,7 +3,7 @@ import json
 
 from cdp.review_caveats import CDP_REVIEW_CAVEATS
 from config import Provider
-from state import ClassifyOutput
+from state import ClassifyOutput, ProjectState
 from evals.run_evals import (
     CaseResult,
     JUDGE_MODEL,
@@ -532,6 +532,129 @@ def _knowledge_item(evidence_id="ev1", locator="chunk=1", source_ref="fixture://
         "locator": locator,
         "title": "Eval evidence",
     }
+
+
+def _runtime_citation_case():
+    return {
+        "id": "CDP-RUNTIME-EVAL",
+        "brief": "Evaluate runtime citation applicability.",
+        "expected_domain": "Complicated",
+        "min_hypotheses": 0,
+        "max_hypotheses": 10,
+        "must_contain_frameworks": [],
+        "strategy_must_mention": [],
+        "strategy_must_not_mention": [],
+        "data_based_expected": False,
+    }
+
+
+def test_citation_without_fixture_and_without_report_key_is_not_applicable():
+    result = score_deterministic(_runtime_citation_case(), {})
+
+    assert result.citation_resolvability["status"] == "not_applicable"
+    assert result.citation_resolvability_ok is True
+
+
+def test_citation_without_fixture_and_report_none_is_not_applicable():
+    result = score_deterministic(_runtime_citation_case(), {"report": None})
+
+    assert result.citation_resolvability["status"] == "not_applicable"
+    assert result.citation_resolvability_ok is True
+
+
+def test_citation_without_fixture_and_empty_report_is_not_applicable():
+    result = score_deterministic(_runtime_citation_case(), {"report": ""})
+
+    assert result.citation_resolvability["status"] == "not_applicable"
+    assert result.citation_resolvability_ok is True
+
+
+def test_citation_without_fixture_and_whitespace_report_is_not_applicable():
+    result = score_deterministic(_runtime_citation_case(), {"report": " \n\t "})
+
+    assert result.citation_resolvability["status"] == "not_applicable"
+    assert result.citation_resolvability_ok is True
+
+
+def test_citation_without_fixture_and_non_dict_output_is_not_applicable():
+    summary = score_citation_resolvability(_runtime_citation_case(), None)
+
+    assert summary["status"] == "not_applicable"
+
+
+def test_serialized_project_state_without_report_is_not_applicable():
+    output = ProjectState(
+        project_id="citation-serialization-regression",
+        project_name="Citation serialization regression",
+        brief="Strategy-only eval output.",
+    ).model_dump(mode="json")
+
+    assert output["report"] is None
+    assert output["knowledge_layer"] is None
+    assert output["imported_evidence"] == []
+    assert output["decision_objects"] is None
+
+    result = score_deterministic(_runtime_citation_case(), output)
+
+    assert result.citation_resolvability["status"] == "not_applicable"
+    assert result.citation_resolvability_ok is True
+
+
+def test_empty_runtime_containers_without_report_are_not_applicable():
+    output = {
+        "report": None,
+        "knowledge_layer": {"items": []},
+        "imported_evidence": [],
+        "decision_objects": None,
+    }
+
+    result = score_deterministic(_runtime_citation_case(), output)
+
+    assert result.citation_resolvability["status"] == "not_applicable"
+    assert result.citation_resolvability_ok is True
+
+
+def test_real_report_without_resolvable_evidence_remains_fail_closed():
+    output = {
+        "report": "# Executive Summary\nA claim [Evidence: ev-missing | chunk=1].",
+    }
+
+    result = score_deterministic(_runtime_citation_case(), output)
+
+    assert result.citation_resolvability["status"] != "not_applicable"
+    assert result.citation_resolvability["status"] == "fail"
+    assert result.citation_resolvability_ok is False
+
+
+def test_explicit_citation_fixtures_preserve_expected_status_behavior():
+    cases = [
+        _citation_case(
+            "# Executive Summary\nA traceable claim [Evidence: ev1 | chunk=1].",
+            [_knowledge_item()],
+            expected_status="pass",
+        ),
+        _citation_case(
+            "# Executive Summary\nID-only claim [Evidence: ev1 | locator unavailable].",
+            [_knowledge_item(locator="", source_ref="fixture://source")],
+            expected_status="partial",
+        ),
+        _citation_case(
+            "# Executive Summary\nUnknown claim [Evidence: ev-missing | chunk=1].",
+            [],
+            expected_status="fail",
+        ),
+        _citation_case(
+            "# Executive Summary\nNo evidence markers appear in this report.",
+            [],
+            expected_status="no_markers",
+        ),
+    ]
+
+    for case in cases:
+        result = score_deterministic(case, {})
+        expected_status = case["citation_resolvability_fixture"]["expected_status"]
+        assert result.citation_resolvability["status"] == expected_status
+        assert result.citation_resolvability_ok is True
 
 
 def test_citation_resolvability_dimension_appears_in_eval_output():
