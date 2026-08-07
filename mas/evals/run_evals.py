@@ -648,7 +648,8 @@ def _citation_eval_state(case: dict, output: dict) -> ProjectState | None:
 
     if not isinstance(output, dict):
         return None
-    if not any(key in output for key in ("report", "knowledge_layer", "imported_evidence", "decision_objects")):
+    report = output.get("report")
+    if not isinstance(report, str) or not report.strip():
         return None
     payload = {
         "project_id": output.get("project_id") or f"eval-{case.get('id', 'case')}",
