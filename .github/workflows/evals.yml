@@ -2,6 +2,7 @@ name: evals
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - 'mas/prompts/**'
       - 'mas/orchestrator.py'
@@ -14,6 +15,10 @@ on:
         description: 'Pass rate threshold (0.0-1.0)'
         required: false
         default: '0.75'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
@@ -39,6 +44,7 @@ jobs:
         run: python -m evals.run_evals --mock
 
   real-eval-shard:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     needs: smoke
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -82,7 +88,7 @@ jobs:
 
   aggregate:
     needs: real-eval-shard
-    if: always()
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
