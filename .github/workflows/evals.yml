@@ -112,7 +112,7 @@ jobs:
           PY
 
   real-eval-shard:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval')) }}
+    if: ${{ needs.provider-preflight.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}
     needs: [smoke, provider-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
