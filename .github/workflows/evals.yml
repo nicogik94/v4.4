@@ -67,10 +67,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Verify OpenAI-only provider posture
+        working-directory: mas
+        env:
+          ANTHROPIC_API_KEY: ''
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY"
+          test -z "$ANTHROPIC_API_KEY"
+
       - name: Run eval shard
         working-directory: mas
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Intentionally empty: real evals must not make billable Anthropic calls.
+          ANTHROPIC_API_KEY: ''
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python -m evals.run_evals \
