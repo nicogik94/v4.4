@@ -64,6 +64,13 @@ INVALID_REQUEST = "invalid_request"
 TRANSPORT_MALFORMED_RESPONSE = "transport_malformed_response"
 MODEL_SCHEMA_INVALID = "model_schema_invalid"
 UNKNOWN_PROVIDER_ERROR = "unknown_provider_error"
+# A transport-level success that carried no usable visible text. These are
+# *content contract* failures, not transport outages: the HTTP call succeeded,
+# tokens were billed, and the provider still returned nothing this system can
+# analyse. They are kept distinct from each other because only one of them has
+# a known cause.
+OUTPUT_TOKEN_EXHAUSTED = "output_token_exhausted"
+EMPTY_PROVIDER_OUTPUT = "empty_provider_output"
 PROVIDER_DETAIL_MARKER = "; provider_detail="
 _PROVIDER_DETAIL_MESSAGE_MAX_CHARS = 500
 
@@ -76,12 +83,93 @@ RETRYABLE_PROVIDER_ERRORS = {
     TRANSPORT_MALFORMED_RESPONSE,
 }
 
-FALLBACK_ELIGIBLE_ERRORS = RETRYABLE_PROVIDER_ERRORS | {
+# Unusable output is deliberately *not* retryable. Re-issuing a byte-identical
+# request against the same candidate with the same token budget reproduces the
+# same exhaustion, so a retry buys nothing and bills twice. It is fallback
+# eligible because a different candidate has a genuinely different output-budget
+# regime. Because the breaker is only fed by retryable failures, an unusable
+# response also never counts toward opening a circuit: the provider is healthy,
+# this request's output contract is not.
+UNUSABLE_OUTPUT_ERRORS = {
+    OUTPUT_TOKEN_EXHAUSTED,
+    EMPTY_PROVIDER_OUTPUT,
+}
+
+FALLBACK_ELIGIBLE_ERRORS = RETRYABLE_PROVIDER_ERRORS | UNUSABLE_OUTPUT_ERRORS | {
     AUTH_ERROR,
     QUOTA_EXCEEDED,
 }
 
 GOVERNANCE_ERROR_TYPES = {"kill_switch", "budget", "breaker", "approval", "policy"}
+
+_NORMALIZED_STOP_REASONS = {
+    "end_turn": "end_turn",
+    "stop": "end_turn",
+    "max_tokens": "max_tokens",
+    "length": "max_tokens",
+    "stop_sequence": "stop_sequence",
+    "tool_use": "tool_use",
+    "tool_calls": "tool_use",
+    "pause_turn": "pause_turn",
+    "refusal": "refusal",
+    "content_filter": "content_filter",
+}
+
+# The normalized stop reasons that mean "the model ran out of output budget".
+_OUTPUT_EXHAUSTION_STOP_REASONS = frozenset({"max_tokens"})
+
+
+def normalize_stop_reason(value) -> str:
+    """Return a bounded cross-provider stop reason without raw metadata."""
+    if value is None:
+        return ""
+    return _NORMALIZED_STOP_REASONS.get(str(value).strip().lower(), "other")
+
+
+def has_usable_visible_text(text: Any) -> bool:
+    """True when a provider returned visible text a phase could actually use.
+
+    Whitespace-only output counts as unusable: every V4 phase consumes the
+    visible text either as JSON or as prose, and neither can be built from it.
+    """
+    return bool(str(text or "").strip())
+
+
+def classify_unusable_output(*, text: Any, stop_reason: Any) -> str:
+    """Return the failure category for output with no usable visible text.
+
+    Returns "" when the response carries usable text — including *partial*
+    text truncated at max_tokens, which stays a success so the deterministic
+    structured-output recovery downstream keeps its input.
+    """
+    if has_usable_visible_text(text):
+        return ""
+    if normalize_stop_reason(stop_reason) in _OUTPUT_EXHAUSTION_STOP_REASONS:
+        return OUTPUT_TOKEN_EXHAUSTED
+    return EMPTY_PROVIDER_OUTPUT
+
+
+def unusable_output_detail(*, text: Any, stop_reason: Any, output_tokens: Any) -> str:
+    """Bounded diagnostic for an unusable response.
+
+    Built only from a closed stop-reason vocabulary, an integer token count and
+    a fixed shape label. No provider text, refusal text, reasoning text, prompt
+    text or header ever reaches it.
+    """
+    if text is None:
+        shape = "none"
+    elif str(text) == "":
+        shape = "empty"
+    else:
+        shape = "whitespace"
+    try:
+        tokens = int(output_tokens or 0)
+    except (TypeError, ValueError):
+        tokens = 0
+    return (
+        f"stop_reason={normalize_stop_reason(stop_reason) or 'unset'} "
+        f"visible_text={shape} output_tokens={tokens}"
+    )
 
 
 def _safe_detail_scalar(value: Any, *, max_chars: int = _PROVIDER_DETAIL_MESSAGE_MAX_CHARS) -> str:
@@ -478,6 +566,11 @@ class DefaultProviderGateway:
         last_error_type = PROVIDER_UNAVAILABLE
         last_error = "No configured provider candidates were available"
         attempt_count = 0
+        # The first failure that came from a candidate actually called, as
+        # opposed to one skipped as unavailable or breaker-open. Only used to
+        # keep the headline truthful; see the headline selection below.
+        attempted_error_type = ""
+        attempted_error = ""
 
         # ─── telemetry state ───
         # Nothing below this line is read by a routing, retry, fallback or
@@ -661,6 +754,9 @@ class DefaultProviderGateway:
                 fallback_reason = fallback_reason or category
                 last_error_type = category
                 last_error = response.error
+                if not attempted_error_type:
+                    attempted_error_type = category
+                    attempted_error = response.error
                 if retryable:
                     self._breaker.record_failure(key)
 
@@ -699,6 +795,13 @@ class DefaultProviderGateway:
         if failed_error_type == QUOTA_EXCEEDED:
             headline_error = _safe_error_message(QUOTA_EXCEEDED, failed_provider, failed_model)
             headline_error_type = QUOTA_EXCEEDED
+        elif attempted_error_type in UNUSABLE_OUTPUT_ERRORS:
+            # Same rule, same reason. A provider that answered promptly with an
+            # unusable body is not "unavailable", and reporting the trailing
+            # skipped candidate would tell an operator to investigate a provider
+            # outage that never happened.
+            headline_error = attempted_error
+            headline_error_type = attempted_error_type
         else:
             headline_error = last_error or "All configured provider candidates failed or were unavailable"
             headline_error_type = last_error_type
@@ -782,9 +885,36 @@ class DefaultProviderGateway:
                 config.model,
                 provider_detail=provider_error_detail_from_message(getattr(raw, "error", "")),
             )
+
+        text = getattr(raw, "text", "")
+        stop_reason = getattr(raw, "stop_reason", "")
+        output_tokens = int(getattr(raw, "output_tokens", 0) or 0)
+        if not error:
+            # The invariant, enforced provider-neutrally at the one point every
+            # executor's result passes through. The adapters classify this too,
+            # so in production this is a backstop; it is what makes the guarantee
+            # hold for *any* executor rather than only the two shipped ones.
+            #
+            # Every invocation this gateway makes is text-required: neither
+            # adapter sends tools, so there is no supported response shape whose
+            # value lives somewhere other than the visible text.
+            unusable = classify_unusable_output(text=text, stop_reason=stop_reason)
+            if unusable:
+                category = unusable
+                error = _safe_error_message(
+                    category,
+                    config.provider.value,
+                    config.model,
+                    provider_detail=unusable_output_detail(
+                        text=text,
+                        stop_reason=stop_reason,
+                        output_tokens=output_tokens,
+                    ),
+                )
+
         return GatewayResponse(
-            text=getattr(raw, "text", ""),
-            stop_reason=getattr(raw, "stop_reason", ""),
+            text=text if has_usable_visible_text(text) else "",
+            stop_reason=stop_reason,
             model_used=getattr(raw, "model_used", config.model) or config.model,
             provider_used=config.provider.value,
             cache_hit=False,
@@ -792,7 +922,7 @@ class DefaultProviderGateway:
             fallback_used=False,
             latency_ms=int(getattr(raw, "latency_ms", 0) or 0),
             input_tokens=int(getattr(raw, "input_tokens", 0) or 0),
-            output_tokens=int(getattr(raw, "output_tokens", 0) or 0),
+            output_tokens=output_tokens,
             cache_read_tokens=int(getattr(raw, "cache_read_tokens", 0) or 0),
             cost_usd=float(getattr(raw, "cost_usd", 0.0) or 0.0),
             error=error,
@@ -1288,6 +1418,8 @@ def normalize_error_type(error_type: str) -> str:
         "malformed": TRANSPORT_MALFORMED_RESPONSE,
         "model_schema_invalid": MODEL_SCHEMA_INVALID,
         "schema": MODEL_SCHEMA_INVALID,
+        "output_token_exhausted": OUTPUT_TOKEN_EXHAUSTED,
+        "empty_provider_output": EMPTY_PROVIDER_OUTPUT,
         "unknown_provider_error": UNKNOWN_PROVIDER_ERROR,
     }
     if raw in aliases:

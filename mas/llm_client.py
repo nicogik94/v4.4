@@ -33,10 +33,13 @@ from runtime.cache import InMemorySemanticCache, NoOpSemanticCache
 from runtime.provider_gateway import (
     DefaultProviderGateway,
     TRANSPORT_MALFORMED_RESPONSE,
+    classify_unusable_output,
     normalize_exception_category,
     normalize_error_type,
+    normalize_stop_reason,
     safe_provider_error_detail,
     select_model_config,
+    unusable_output_detail,
 )
 from scenarios.engine import run_shadow_evaluation
 
@@ -108,26 +111,10 @@ class LLMResponse(BaseModel):
         return self.input_tokens + self.output_tokens
 
 
-_NORMALIZED_STOP_REASONS = {
-    "end_turn": "end_turn",
-    "stop": "end_turn",
-    "max_tokens": "max_tokens",
-    "length": "max_tokens",
-    "stop_sequence": "stop_sequence",
-    "tool_use": "tool_use",
-    "tool_calls": "tool_use",
-    "pause_turn": "pause_turn",
-    "refusal": "refusal",
-    "content_filter": "content_filter",
-}
-
-
-def normalize_stop_reason(value) -> str:
-    """Return a bounded cross-provider stop reason without raw metadata."""
-    if value is None:
-        return ""
-    return _NORMALIZED_STOP_REASONS.get(str(value).strip().lower(), "other")
-
+# `normalize_stop_reason` now lives in runtime.provider_gateway, next to the
+# unusable-output classifier that reads it, so the adapters and the gateway
+# share one stop-reason vocabulary instead of two copies. It is re-exported here
+# because this module's public surface has always carried it.
 
 # v4.3 — verified per-million-token pricing as of April 2026.
 # Source: compliance/eu-ai-act-classification.md and the v2.1 strategy bundle's
@@ -309,6 +296,53 @@ def _safe_provider_error(
     return message
 
 
+def _unusable_output_response(
+    *,
+    provider: str,
+    model: str,
+    text,
+    stop_reason: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    latency_ms: float,
+) -> LLMResponse | None:
+    """Typed failure for a transport-level success that returned no usable text.
+
+    Returns None when the response does carry usable visible text — including
+    partial text truncated at max_tokens, which is a different case and stays a
+    success so downstream deterministic recovery still receives it.
+
+    Billed usage is preserved: the HTTP call succeeded and these tokens were
+    charged, so dropping them here would understate real spend.
+    """
+    category = classify_unusable_output(text=text, stop_reason=stop_reason)
+    if not category:
+        return None
+    return LLMResponse(
+        text="",
+        stop_reason=stop_reason,
+        ok=False,
+        error=_safe_provider_error(
+            category,
+            provider,
+            model,
+            unusable_output_detail(
+                text=text,
+                stop_reason=stop_reason,
+                output_tokens=output_tokens,
+            ),
+        ),
+        error_type=category,
+        model_used=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cost_usd=estimate_cost(model, input_tokens, output_tokens, cache_read_tokens),
+        latency_ms=latency_ms,
+    )
+
+
 
 # ═══════════ adapter-level telemetry (isolated from the provider result) ═══════
 #
@@ -443,9 +477,25 @@ async def _call_anthropic(
         in_tok = getattr(usage, "input_tokens", 0)
         out_tok = getattr(usage, "output_tokens", 0)
         cache_tok = getattr(usage, "cache_read_input_tokens", 0)
+        stop_reason = normalize_stop_reason(getattr(response, "stop_reason", None))
+        # A reply made only of thinking blocks, or of no blocks at all, reaches
+        # here as text="". That is not an analytical result, so it must not
+        # leave this adapter looking like one.
+        unusable = _unusable_output_response(
+            provider=Provider.ANTHROPIC.value,
+            model=model,
+            text=text,
+            stop_reason=stop_reason,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_read_tokens=cache_tok,
+            latency_ms=(time.time() - start) * 1000,
+        )
+        if unusable is not None:
+            return unusable
         return LLMResponse(
             text=text, ok=True, model_used=model,
-            stop_reason=normalize_stop_reason(getattr(response, "stop_reason", None)),
+            stop_reason=stop_reason,
             input_tokens=in_tok,
             output_tokens=out_tok,
             cache_read_tokens=cache_tok,
@@ -509,15 +559,35 @@ async def _call_openai(
                 model_used=model,
                 latency_ms=(time.time() - start) * 1000,
             )
-        text = response.choices[0].message.content or ""
+        raw_content = response.choices[0].message.content
+        text = raw_content or ""
         usage = response.usage
         in_tok = getattr(usage, "prompt_tokens", 0)
         out_tok = getattr(usage, "completion_tokens", 0)
+        stop_reason = normalize_stop_reason(
+            getattr(response.choices[0], "finish_reason", None)
+        )
+        # `message.content` is None whenever a GPT-5 reasoning turn spent the
+        # whole completion budget before emitting visible text. The `or ""`
+        # above makes that indistinguishable from a real answer downstream, so
+        # classify it here instead.
+        unusable = _unusable_output_response(
+            provider=Provider.OPENAI.value,
+            model=model,
+            # The raw value, so the diagnostic can distinguish a missing
+            # content field from a present-but-empty one.
+            text=raw_content,
+            stop_reason=stop_reason,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_read_tokens=0,
+            latency_ms=(time.time() - start) * 1000,
+        )
+        if unusable is not None:
+            return unusable
         return LLMResponse(
             text=text, ok=True, model_used=model,
-            stop_reason=normalize_stop_reason(
-                getattr(response.choices[0], "finish_reason", None)
-            ),
+            stop_reason=stop_reason,
             input_tokens=in_tok,
             output_tokens=out_tok,
             cost_usd=estimate_cost(model, in_tok, out_tok),
