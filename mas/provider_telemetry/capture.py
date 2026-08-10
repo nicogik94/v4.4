@@ -458,7 +458,254 @@ def is_capturing() -> bool:
     return _capture.get() is not None
 
 
+# ─────────────────────── response-shape observation ───────────────────────
+#
+# The durable relations carry identity, effective model, stop reason and usage.
+# They carry nothing about the *shape* of what came back: an adapter-visible
+# text that was exactly empty, a message field the provider sent as an explicit
+# null, a refusal, or a reasoning-token count. A release observation that cannot
+# tell "the model answered badly" from "the model returned nothing" is not
+# interpretable, and none of those four facts survives past the adapter.
+#
+# They are published to an **observer** rather than added to ProviderObservation
+# on purpose. ProviderObservation is the durable record: every field on it has a
+# column, a status column and a CHECK, and adding a field that is never written
+# would put something in the durable type that durable storage does not carry.
+# The observer is bound by a caller that wants the extra evidence — today, the
+# evaluation harness — and is absent everywhere else, so a build nobody asked
+# pays one context-variable read and stores nothing at all.
+#
+# What is recorded is a status and, for visible text, a character count. The
+# text itself, any prefix of it, and any digest of it are never read into a
+# stored value: a digest of a response is still derived from the response.
+
+SHAPE_MISSING = "missing"
+SHAPE_ABSENT = "absent"
+SHAPE_NULL = "null"
+SHAPE_EMPTY = "empty"
+SHAPE_NONEMPTY = "nonempty"
+SHAPE_VALID = "valid"
+SHAPE_INVALID = "invalid"
+SHAPE_UNSUPPORTED = "unsupported"
+SHAPE_UNKNOWN = "unknown"
+
+# Two closed vocabularies over one universe. `missing` and `absent` are kept
+# apart deliberately: `missing` means the *container* was not reachable, so the
+# field could not even be looked for, and `absent` means the container was there
+# and did not carry the field. Collapsing them would make a response that
+# omitted one counter indistinguishable from an SDK shape this build could not
+# read at all.
+PRESENCE_STATUSES = (
+    SHAPE_MISSING,
+    SHAPE_ABSENT,
+    SHAPE_NULL,
+    SHAPE_EMPTY,
+    SHAPE_NONEMPTY,
+    SHAPE_UNSUPPORTED,
+    SHAPE_INVALID,
+    SHAPE_UNKNOWN,
+)
+COUNT_STATUSES = (
+    SHAPE_MISSING,
+    SHAPE_ABSENT,
+    SHAPE_NULL,
+    SHAPE_VALID,
+    SHAPE_UNSUPPORTED,
+    SHAPE_INVALID,
+    SHAPE_UNKNOWN,
+)
+
+RESPONSE_SHAPE_FIELDS = (
+    "content_status",
+    "visible_content_length",
+    "refusal_status",
+    "reasoning_tokens",
+)
+
+_MAX_SHAPE_DETAIL = 32
+
+
+def _shape(status: str, *, value: Any = None, detail: str = "") -> dict[str, Any]:
+    """One shape field: a status, a value only when the status carries one."""
+    cleaned = "".join(
+        ch for ch in str(detail or "") if ch.isprintable() and ch != " "
+    )[:_MAX_SHAPE_DETAIL]
+    return {"status": status, "value": value, "detail": cleaned}
+
+
+def _container_status(container: Any, *, detail: str) -> Optional[dict[str, Any]]:
+    """A verdict about the container itself, or ``None`` when it is readable."""
+    if container is _CAPTURE_FAILED:
+        return _shape(SHAPE_INVALID, detail="capture_failed")
+    if container is MISSING or container is None:
+        return _shape(SHAPE_MISSING, detail=detail)
+    return None
+
+
+def _text_presence(container: Any, name: str, *, with_length: bool) -> dict[str, Any]:
+    """Classify a provider text field without reading the text into a value.
+
+    ``with_length`` is the only thing that ever leaves this function carrying a
+    number, and it is a character count. A refusal is classified with
+    ``with_length=False`` because its length is a property of provider-authored
+    prose that nothing here has a reason to keep.
+    """
+    verdict = _container_status(container, detail="container_missing")
+    if verdict is not None:
+        return verdict
+    raw = _read(container, name)
+    if raw is _CAPTURE_FAILED:
+        return _shape(SHAPE_INVALID, detail="capture_failed")
+    if raw is MISSING:
+        return _shape(SHAPE_ABSENT)
+    if raw is None:
+        return _shape(SHAPE_NULL)
+    if not isinstance(raw, str):
+        return _shape(SHAPE_INVALID, detail=type(raw).__name__[:16])
+    length = guarded(lambda: len(raw), None, reason=f"length:{name}")
+    if length is None:
+        return _shape(SHAPE_INVALID, detail="length_unreadable")
+    if not with_length:
+        return _shape(SHAPE_EMPTY if length == 0 else SHAPE_NONEMPTY)
+    return _shape(
+        SHAPE_EMPTY if length == 0 else SHAPE_NONEMPTY,
+        value=int(length),
+    )
+
+
+def _visible_length(presence: dict[str, Any]) -> dict[str, Any]:
+    """The character count that goes beside a content status, or an honest gap."""
+    status = presence.get("status")
+    value = presence.get("value")
+    if status in (SHAPE_EMPTY, SHAPE_NONEMPTY) and isinstance(value, int):
+        return _shape(SHAPE_VALID, value=value)
+    if status in (SHAPE_MISSING, SHAPE_ABSENT, SHAPE_NULL, SHAPE_UNSUPPORTED):
+        return _shape(status, detail=str(presence.get("detail") or ""))
+    return _shape(SHAPE_INVALID, detail=str(presence.get("detail") or "unreadable"))
+
+
+def _count_from(container: Any, name: str, *, container_detail: str) -> dict[str, Any]:
+    """An exact nonnegative count, or the epistemic state that replaces one."""
+    verdict = _container_status(container, detail=container_detail)
+    if verdict is not None:
+        return verdict
+    raw = _read(container, name)
+    if raw is _CAPTURE_FAILED:
+        return _shape(SHAPE_INVALID, detail="capture_failed")
+    classified = guarded(
+        lambda: exact_nonnegative_int(raw), None, reason=f"count:{name}"
+    )
+    if classified is None:
+        return _shape(SHAPE_INVALID, detail="capture_failed")
+    if classified.status == "valid":
+        return _shape(SHAPE_VALID, value=int(classified.value))
+    if classified.status == "absent":
+        return _shape(SHAPE_ABSENT)
+    if classified.status == "null":
+        return _shape(SHAPE_NULL)
+    return _shape(SHAPE_INVALID, detail=classified.detail or classified.status)
+
+
+def openai_response_shape(response: Any) -> dict[str, Any]:
+    """Shape metadata for an OpenAI Chat Completions response.
+
+    Reads the first choice's message the same way the observation above reads
+    the finish reason, so a hostile container costs one field rather than the
+    whole record.
+    """
+    usage = _read(response, "usage")
+    message = _read(_first_choice(response), "message")
+    content = _text_presence(message, "content", with_length=True)
+    return {
+        "content_status": _shape(
+            content["status"], detail=content["detail"]
+        ),
+        "visible_content_length": _visible_length(content),
+        "refusal_status": _text_presence(message, "refusal", with_length=False),
+        "reasoning_tokens": _count_from(
+            _read(usage, "completion_tokens_details"),
+            "reasoning_tokens",
+            container_detail="details_missing" if usage is not MISSING else "usage_missing",
+        ),
+    }
+
+
+def anthropic_response_shape(response: Any) -> dict[str, Any]:
+    """Shape metadata for an Anthropic Message.
+
+    The Messages API exposes neither a refusal field nor a reasoning-token
+    counter, which is ``unsupported`` — a permanent property of the API, not a
+    response that happened to omit them. Visible text lives in typed content
+    blocks rather than one string field, and this build does not claim to
+    reconstruct it, so the two content fields are an explicit ``unknown``.
+    """
+    return {
+        "content_status": _shape(SHAPE_UNKNOWN, detail="block_shaped"),
+        "visible_content_length": _shape(SHAPE_UNKNOWN, detail="block_shaped"),
+        "refusal_status": _shape(SHAPE_UNSUPPORTED),
+        "reasoning_tokens": _shape(SHAPE_UNSUPPORTED),
+    }
+
+
+_shape_observer: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
+    "provider_telemetry_response_shape_observer", default=None
+)
+
+
+@contextlib.contextmanager
+def response_shape_scope(observer: Optional[Any]) -> Iterator[Optional[Any]]:
+    """Bind an observer for response-shape metadata. Default is none at all."""
+    token = _shape_observer.set(observer)
+    try:
+        yield observer
+    finally:
+        _shape_observer.reset(token)
+
+
+def current_response_shape_observer() -> Optional[Any]:
+    return _shape_observer.get()
+
+
+def _publish_response_shape(builder: Callable[[Any], dict[str, Any]], response: Any) -> None:
+    """Hand shape metadata to a bound observer. A no-op when there is none.
+
+    Wrapped in the isolation boundary in full: an observer that raises, a
+    builder that raises and a hostile response object all cost the shape record
+    and nothing else. The provider result, the ProviderObservation built beside
+    it, routing, retry, fallback, breaker state and the cache are untouched
+    either way, and ``guard`` re-raises BaseException so a cancellation still
+    propagates unchanged.
+    """
+    observer = _shape_observer.get()
+    if observer is None:
+        return
+    with guard("response_shape"):
+        payload = builder(response)
+        buffer = current_capture()
+        if buffer is not None:
+            payload["invocation_id"] = buffer.invocation_id
+            payload["call_id"] = buffer.call_id
+            payload["provider"] = buffer.provider
+            payload["requested_model"] = buffer.requested_model
+        observer.record_response_shape(payload)
+
+
 # ─────────────────────────── provider extraction ───────────────────────────
+
+
+def _first_choice(response: Any) -> Any:
+    """The first choice of a completion, or :data:`MISSING`."""
+    choices = _read(response, "choices")
+
+    def pick() -> Any:
+        if choices is MISSING or choices is _CAPTURE_FAILED or not choices:
+            return MISSING
+        try:
+            return choices[0]
+        except (TypeError, IndexError, KeyError):
+            return MISSING
+
+    return guarded(pick, MISSING, reason="read:choices")
 
 
 def observe_anthropic_response(response: Any) -> ProviderObservation:
@@ -469,7 +716,7 @@ def observe_anthropic_response(response: Any) -> ProviderObservation:
     ``stop_reason`` no longer exist anywhere.
     """
     usage = _read(response, "usage")
-    return ProviderObservation(
+    observation = ProviderObservation(
         provider_response_id=_text_value(response, "id", redaction.provider_response_id),
         effective_model=_text_value(response, "model", redaction.provider_model),
         stop_reason=_text_value(response, "stop_reason", redaction.stop_reason),
@@ -478,6 +725,8 @@ def observe_anthropic_response(response: Any) -> ProviderObservation:
         cache_read_tokens=_int_value(usage, "cache_read_input_tokens"),
         cache_creation_tokens=_int_value(usage, "cache_creation_input_tokens"),
     )
+    _publish_response_shape(anthropic_response_shape, response)
+    return observation
 
 
 def observe_openai_response(response: Any) -> ProviderObservation:
@@ -490,20 +739,10 @@ def observe_openai_response(response: Any) -> ProviderObservation:
     omitted it.
     """
     usage = _read(response, "usage")
-    choices = _read(response, "choices")
-
-    def first_choice() -> Any:
-        if choices is MISSING or not choices:
-            return MISSING
-        try:
-            return choices[0]
-        except (TypeError, IndexError, KeyError):
-            return MISSING
-
-    choice = guarded(first_choice, MISSING, reason="read:choices")
+    choice = _first_choice(response)
     cached = _read(usage, "prompt_tokens_details")
 
-    return ProviderObservation(
+    observation = ProviderObservation(
         provider_response_id=_text_value(response, "id", redaction.provider_response_id),
         effective_model=_text_value(response, "model", redaction.provider_model),
         stop_reason=_text_value(choice, "finish_reason", redaction.stop_reason),
@@ -512,6 +751,8 @@ def observe_openai_response(response: Any) -> ProviderObservation:
         cache_read_tokens=_int_value(cached, "cached_tokens"),
         cache_creation_tokens=UNSUPPORTED,
     )
+    _publish_response_shape(openai_response_shape, response)
+    return observation
 
 
 def observe_exception(exc: BaseException) -> tuple[str, str]:
@@ -543,6 +784,7 @@ def transport_outcome_for_exception(exc: BaseException) -> str:
 
 
 __all__ = [
+    "COUNT_STATUSES",
     "EVENT_CANCELLED",
     "EVENT_CAPTURE_FAILURE",
     "EVENT_COMPLETED",
@@ -550,17 +792,32 @@ __all__ = [
     "EVENT_PROVIDER_FAILURE",
     "EVENT_TRANSFORMATION_FAILURE",
     "EVENT_UNKNOWN",
+    "PRESENCE_STATUSES",
+    "RESPONSE_SHAPE_FIELDS",
+    "SHAPE_ABSENT",
+    "SHAPE_EMPTY",
+    "SHAPE_INVALID",
+    "SHAPE_MISSING",
+    "SHAPE_NONEMPTY",
+    "SHAPE_NULL",
+    "SHAPE_UNKNOWN",
+    "SHAPE_UNSUPPORTED",
+    "SHAPE_VALID",
     "TRANSPORT_RESPONSE",
     "InvocationCapture",
+    "anthropic_response_shape",
     "capture_scope",
     "current_capture",
+    "current_response_shape_observer",
     "guard",
     "guarded",
     "is_capturing",
     "observe_anthropic_response",
     "observe_exception",
     "observe_openai_response",
+    "openai_response_shape",
     "reset_capture_log_latch",
+    "response_shape_scope",
     "terminal_kind_for_exception",
     "transport_outcome_for_exception",
 ]
