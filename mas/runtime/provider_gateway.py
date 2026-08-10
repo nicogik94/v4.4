@@ -471,6 +471,63 @@ def _dedupe_candidates(
     return deduped
 
 
+class _UsageLedger:
+    """Cumulative provider usage for one logical gateway call.
+
+    A ``GatewayResponse`` returned by ``_call_with_fallbacks`` describes the
+    *logical call*, not one attempt: it already carries ``attempt_count``, the
+    ``attempts`` list and the fallback identity. Its usage fields are consumed
+    exactly once per logical call by the budget ledger — ``call_llm`` copies
+    them onto ``LLMResponse`` and the orchestrator hands them to
+    ``policy.record_consumption_to_state``, which also increments
+    ``llm_call_count`` by one. So the usage a logical response reports has to be
+    that call's *total* provider spend. Reporting only the attempt whose
+    response object happened to be returned makes every other executed attempt
+    invisible to the ``max_total_cost_usd`` cap even though it was billed.
+
+    Two properties keep the accounting honest:
+
+    * every executed attempt is recorded exactly once, at the single point where
+      a real provider response first exists — so a candidate skipped as
+      unavailable, skipped with the breaker open, or refused by governance
+      before the provider was called contributes nothing;
+    * ``apply`` *assigns* the totals rather than adding to them, so no return
+      path can count the same response twice however often it runs.
+
+    Per-attempt truth is unaffected: the ``attempts`` metadata and the
+    provider-attempt telemetry records stay per-attempt and are never
+    overwritten with these aggregates.
+    """
+
+    __slots__ = ("input_tokens", "output_tokens", "cache_read_tokens", "cost_usd")
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.cost_usd = 0.0
+
+    def record(self, response: GatewayResponse) -> None:
+        """Add one executed provider attempt's *measured* usage.
+
+        Usage the provider did not report arrives here as zero and is added as
+        zero. Nothing is estimated, inferred or back-filled: a transport failure
+        that never produced a billable response still contributes nothing.
+        """
+        self.input_tokens += int(response.input_tokens or 0)
+        self.output_tokens += int(response.output_tokens or 0)
+        self.cache_read_tokens += int(response.cache_read_tokens or 0)
+        self.cost_usd += float(response.cost_usd or 0.0)
+
+    def apply(self, response: GatewayResponse) -> GatewayResponse:
+        """Publish the logical-call totals onto the response being returned."""
+        response.input_tokens = self.input_tokens
+        response.output_tokens = self.output_tokens
+        response.cache_read_tokens = self.cache_read_tokens
+        response.cost_usd = self.cost_usd
+        return response
+
+
 class DefaultProviderGateway:
     def __init__(
         self,
@@ -571,6 +628,11 @@ class DefaultProviderGateway:
         # keep the headline truthful; see the headline selection below.
         attempted_error_type = ""
         attempted_error = ""
+        # Provider spend for this logical call. Advanced only by a real
+        # `_execute` result and read by every return path below, so work that
+        # actually happened cannot disappear because the attempt that did it was
+        # not the attempt that answered.
+        usage = _UsageLedger()
 
         # ─── telemetry state ───
         # Nothing below this line is read by a routing, retry, fallback or
@@ -671,7 +733,10 @@ class DefaultProviderGateway:
                     governance_response.attempts = attempts
                     governance_response.attempt_count = attempt_count
                     self._apply_selection_metadata(governance_response, initial_selection, initial_config)
-                    return governance_response
+                    # The refused call adds nothing — no provider was reached —
+                    # but spend from attempts that ran before the gate closed
+                    # must still reach the budget ledger.
+                    return usage.apply(governance_response)
 
                 attempt_count += 1
                 if capturing:
@@ -709,6 +774,11 @@ class DefaultProviderGateway:
                         probe.record_escape(exc, self._breaker_snapshot(key))
                         self._publish(session, probe)
                     raise
+                # The one accumulation point, reached only once a provider
+                # response actually exists. Everything below either returns this
+                # response or moves on to another candidate, and both outcomes
+                # owe the budget ledger whatever this attempt just cost.
+                usage.record(response)
                 category = normalize_error_type(response.error_type)
                 if response.error:
                     provider_detail = provider_error_detail_from_message(response.error)
@@ -743,7 +813,11 @@ class DefaultProviderGateway:
                         response.fallback_provider = config.provider.value
                         response.fallback_model = response.model_used or config.model
                     self._apply_selection_metadata(response, initial_selection, initial_config)
-                    return response
+                    # Winner-only usage would erase every earlier executed
+                    # attempt. The ledger already holds this response's own
+                    # usage, so assigning the totals adds the earlier spend
+                    # without counting the winner twice.
+                    return usage.apply(response)
 
                 retryable = category in RETRYABLE_PROVIDER_ERRORS
                 response.retryable = retryable
@@ -780,6 +854,7 @@ class DefaultProviderGateway:
                         failed_model,
                         failed_error_type,
                         fallback_reason,
+                        usage,
                     )
 
                 if category not in RETRYABLE_PROVIDER_ERRORS:
@@ -806,7 +881,12 @@ class DefaultProviderGateway:
             headline_error = last_error or "All configured provider candidates failed or were unavailable"
             headline_error_type = last_error_type
 
-        return GatewayResponse(
+        # Built fresh rather than reusing an attempt's response, so it starts
+        # with zero usage. That is exactly why the ledger has to be applied: the
+        # candidates that ran were billed, and a terminal failure is the case
+        # where losing their spend is most dangerous — nothing downstream ever
+        # sees a successful response to account for it instead.
+        return usage.apply(GatewayResponse(
             text="",
             model_used=initial_config.model,
             provider_used=initial_config.provider.value,
@@ -825,7 +905,7 @@ class DefaultProviderGateway:
             error=headline_error,
             error_type=headline_error_type,
             retryable=headline_error_type in RETRYABLE_PROVIDER_ERRORS,
-        )
+        ))
 
     async def _execute(self, config: ModelConfig, request: GatewayRequest) -> GatewayResponse:
         try:
@@ -979,6 +1059,7 @@ class DefaultProviderGateway:
         failed_model: str,
         failed_error_type: str,
         fallback_reason: str,
+        usage: _UsageLedger,
     ) -> GatewayResponse:
         response.attempts = attempts
         response.attempt_count = attempt_count
@@ -988,7 +1069,10 @@ class DefaultProviderGateway:
         response.fallback_reason = fallback_reason
         response.fallback_used = False
         self._apply_selection_metadata(response, initial_selection, initial_config)
-        return response
+        # A terminal failure is still billable. This response carries its own
+        # attempt's usage already; the ledger adds whatever earlier executed
+        # attempts cost before this one ended the call.
+        return usage.apply(response)
 
     def _provider_available(self, provider: Provider) -> bool:
         if self._provider_availability is None:

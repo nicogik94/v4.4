@@ -1469,6 +1469,419 @@ class TestUnusableOutputGatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.stop_reason, "max_tokens")
 
 
+class _ExecutorMustNotRun(BaseException):
+    """Raised by a test double for a candidate that must never be executed."""
+
+
+class TestLogicalCallUsageAccounting(unittest.IsolatedAsyncioTestCase):
+    """Provider work that actually happened must not disappear from accounting.
+
+    A gateway response describes the *logical call*, not one attempt: `call_llm`
+    copies its usage onto `LLMResponse` and the orchestrator hands that to
+    `policy.record_consumption_to_state` exactly once per logical call, which is
+    what feeds the `max_total_cost_usd` hard cap. Reporting only the attempt
+    whose response object happened to be returned therefore hid real, billed
+    spend from the cap — including the unusable-output attempts PR #115 turned
+    into typed failures, which are transport successes and are charged for.
+
+    Every test here tallies what the fake executors were actually asked to bill
+    and requires the logical response to report that tally exactly: not less
+    (lost spend), not more (phantom or double-counted spend).
+    """
+
+    def setUp(self):
+        self.billed = SimpleNamespace(
+            input_tokens=0, output_tokens=0, cache_read_tokens=0, cost_usd=0.0,
+            calls=[],
+        )
+
+    def _bill(self, model, *, in_tok, out_tok, cost, cache_tok=0):
+        self.billed.calls.append(model)
+        self.billed.input_tokens += in_tok
+        self.billed.output_tokens += out_tok
+        self.billed.cache_read_tokens += cache_tok
+        self.billed.cost_usd += cost
+
+    def _assert_reports_every_billed_token(self, response):
+        self.assertEqual(response.input_tokens, self.billed.input_tokens)
+        self.assertEqual(response.output_tokens, self.billed.output_tokens)
+        self.assertEqual(response.cache_read_tokens, self.billed.cache_read_tokens)
+        self.assertAlmostEqual(response.cost_usd, self.billed.cost_usd, places=9)
+
+    def _gateway(self, *, anthropic, openai, openai_available=True,
+                 anthropic_available=True, max_retries=1):
+        return DefaultProviderGateway(
+            anthropic_executor=anthropic,
+            openai_executor=openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            routing_config=RoutingConfig(
+                task_profile_candidates={"deep_reasoning": ["phase_default"]}
+            ),
+            provider_availability={
+                "anthropic": anthropic_available, "openai": openai_available,
+            },
+            max_retries=max_retries,
+            # No test here exercises a real delay; a retry must not cost the
+            # suite ten seconds of wall clock.
+            sleep=AsyncMock(),
+        )
+
+    async def _call(self, gateway, *, before_attempt=None):
+        return await gateway.call(
+            GatewayRequest(
+                phase="strategy",
+                system_prompt="system",
+                user_prompt="prompt",
+                routing_context=RoutingContext(phase="strategy"),
+            ),
+            before_attempt=before_attempt,
+        )
+
+    def _unusable_executor(self, *, in_tok=9200, out_tok=4000, cost=0.25, cache_tok=0):
+        """A transport success that returned no usable text — and was billed."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=in_tok, out_tok=out_tok, cost=cost, cache_tok=cache_tok)
+            return SimpleNamespace(
+                text="", stop_reason="max_tokens", model_used=model,
+                input_tokens=in_tok, output_tokens=out_tok,
+                cache_read_tokens=cache_tok, cost_usd=cost, latency_ms=9,
+                error="", error_type="",
+            )
+        return anthropic
+
+    def _success_executor(self, *, text='{"recovered": true}', in_tok=500,
+                          out_tok=300, cost=0.01, cache_tok=0, stop_reason="end_turn"):
+        async def openai(model, system, prompt, max_tokens, temperature):
+            self._bill(model, in_tok=in_tok, out_tok=out_tok, cost=cost, cache_tok=cache_tok)
+            return SimpleNamespace(
+                text=text, stop_reason=stop_reason, model_used=model,
+                input_tokens=in_tok, output_tokens=out_tok,
+                cache_read_tokens=cache_tok, cost_usd=cost, latency_ms=5,
+                error="", error_type="",
+            )
+        return openai
+
+    @staticmethod
+    def _never_called(*args, **kwargs):
+        # Derived from BaseException on purpose. `_execute` catches `Exception`
+        # and turns it into a typed failure response, so a plain AssertionError
+        # here would be swallowed into zero-usage error output and a test
+        # asserting "this candidate was skipped" could still pass while the
+        # candidate had in fact been executed.
+        raise _ExecutorMustNotRun("this candidate must never be executed")
+
+    # ─── T1 ───────────────────────────────────────────────────────────────
+    async def test_t1_single_successful_attempt_reports_its_own_usage_exactly(self):
+        """U1: no aggregation artifact on the ordinary path."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=500, out_tok=300, cost=0.01, cache_tok=40)
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=model,
+                input_tokens=500, output_tokens=300, cache_read_tokens=40,
+                cost_usd=0.01, latency_ms=5, error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called, openai_available=False,
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(len(self.billed.calls), 1)
+        self.assertEqual(response.attempt_count, 1)
+        # Exact equality, not approximate: one attempt must round-trip untouched.
+        self.assertEqual(response.input_tokens, 500)
+        self.assertEqual(response.output_tokens, 300)
+        self.assertEqual(response.cache_read_tokens, 40)
+        self.assertEqual(response.cost_usd, 0.01)
+
+    # ─── T2 ───────────────────────────────────────────────────────────────
+    async def test_t2_unusable_terminal_failure_retains_its_billed_usage(self):
+        """U5: the terminal response is built fresh, and must not be born at zero."""
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(),
+            openai=self._never_called,
+            openai_available=False,
+        ))
+
+        self.assertTrue(response.error)
+        self.assertEqual(response.error_type, OUTPUT_TOKEN_EXHAUSTED)
+        self.assertTrue(self.billed.calls, "the failure must be a billed one")
+        self.assertGreater(response.cost_usd, 0.0)
+        self.assertGreater(response.input_tokens + response.output_tokens, 0)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T3 ───────────────────────────────────────────────────────────────
+    async def test_t3_unusable_then_fallback_success_reports_the_sum(self):
+        """U4: the unusable attempt was a billed provider execution; fallback
+        succeeding later does not un-bill it."""
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(), openai=self._success_executor(),
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(response.text, '{"recovered": true}')
+        self.assertTrue(response.fallback_used)
+        unusable_calls = len(self.billed.calls) - 1
+        self.assertGreaterEqual(unusable_calls, 1, "an unusable attempt must precede the winner")
+        # A + B, not B alone.
+        self.assertAlmostEqual(
+            response.cost_usd, 0.25 * unusable_calls + 0.01, places=9
+        )
+        self.assertEqual(response.input_tokens, 9200 * unusable_calls + 500)
+        self.assertEqual(response.output_tokens, 4000 * unusable_calls + 300)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T4 ───────────────────────────────────────────────────────────────
+    async def test_t4_unavailable_fallback_contributes_nothing_and_erases_nothing(self):
+        """U6: skipped candidates are free; the executed one still cost money."""
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(),
+            openai=self._never_called,
+            openai_available=False,
+        ))
+
+        executed = len(self.billed.calls)
+        self.assertTrue(response.error)
+        self.assertIn("openai", {a["provider"] for a in response.attempts})
+        self.assertTrue(
+            any(a["status"] == "skipped" for a in response.attempts),
+            "the unavailable candidate must appear as skipped",
+        )
+        # Exactly the executed attempts — the skipped ones added no phantom spend.
+        self.assertAlmostEqual(response.cost_usd, 0.25 * executed, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T5 ───────────────────────────────────────────────────────────────
+    async def test_t5_every_executed_unusable_attempt_contributes_exactly_once(self):
+        """U5 with both providers executing: no attempt lost, none counted twice."""
+        async def openai(model, system, prompt, max_tokens, temperature):
+            self._bill(model, in_tok=9200, out_tok=4000, cost=0.25)
+            return SimpleNamespace(
+                text="", stop_reason="max_tokens", model_used=model,
+                input_tokens=9200, output_tokens=4000, cache_read_tokens=0,
+                cost_usd=0.25, latency_ms=9, error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(), openai=openai,
+        ))
+
+        executed = len(self.billed.calls)
+        self.assertGreater(executed, 2, "this matrix needs several executed candidates")
+        self.assertEqual(response.attempt_count, executed)
+        self.assertEqual(response.input_tokens, 9200 * executed)
+        self.assertEqual(response.output_tokens, 4000 * executed)
+        self.assertAlmostEqual(response.cost_usd, 0.25 * executed, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T6 ───────────────────────────────────────────────────────────────
+    async def test_t6_skipped_only_candidates_report_zero_usage(self):
+        """U9: no provider was reached, so there is nothing to account for."""
+        response = await self._call(self._gateway(
+            anthropic=self._never_called,
+            openai=self._never_called,
+            anthropic_available=False,
+            openai_available=False,
+        ))
+
+        self.assertEqual(self.billed.calls, [])
+        self.assertEqual(response.error_type, PROVIDER_UNAVAILABLE)
+        self.assertEqual(response.attempt_count, 0)
+        self.assertEqual(response.input_tokens, 0)
+        self.assertEqual(response.output_tokens, 0)
+        self.assertEqual(response.cache_read_tokens, 0)
+        self.assertEqual(response.cost_usd, 0.0)
+
+    # ─── T7 ───────────────────────────────────────────────────────────────
+    async def test_t7_retried_attempt_with_usage_is_counted_once_each(self):
+        """U2: a retryable failure that still reported usage is real spend, and
+        the retry that follows it is a second, separate charge."""
+        attempts = []
+
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            attempts.append(model)
+            if len(attempts) == 1:
+                self._bill(model, in_tok=800, out_tok=120, cost=0.05)
+                return SimpleNamespace(
+                    text="", stop_reason="", model_used=model,
+                    input_tokens=800, output_tokens=120, cache_read_tokens=0,
+                    cost_usd=0.05, latency_ms=9,
+                    error="server error", error_type="server_error",
+                )
+            self._bill(model, in_tok=500, out_tok=300, cost=0.01)
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=model,
+                input_tokens=500, output_tokens=300, cache_read_tokens=0,
+                cost_usd=0.01, latency_ms=5, error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called,
+            openai_available=False, max_retries=3,
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(len(self.billed.calls), 2, "one retry of the same candidate")
+        self.assertEqual(response.attempt_count, 2)
+        self.assertEqual(response.input_tokens, 1300)
+        self.assertEqual(response.output_tokens, 420)
+        self.assertAlmostEqual(response.cost_usd, 0.06, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    async def test_t7b_transport_failure_without_usage_invents_none(self):
+        """The other half of U2/U10: absent usage stays absent."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self.billed.calls.append(model)
+            raise TimeoutError("connection timed out")
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called,
+            openai_available=False, max_retries=2,
+        ))
+
+        self.assertTrue(response.error)
+        self.assertTrue(self.billed.calls, "attempts really were made")
+        self.assertEqual(response.input_tokens, 0)
+        self.assertEqual(response.output_tokens, 0)
+        self.assertEqual(response.cost_usd, 0.0)
+
+    # ─── T8 ───────────────────────────────────────────────────────────────
+    async def test_t8_governance_refusal_preserves_earlier_spend_and_adds_none(self):
+        """U8: the gate closing after money was spent must not un-spend it."""
+        seen = []
+
+        def before_attempt(config):
+            seen.append(config.model)
+            if len(seen) == 1:
+                return None
+            return {"reason": "budget cap reached", "category": "budget"}
+
+        response = await self._call(
+            self._gateway(
+                anthropic=self._unusable_executor(),
+                openai=self._never_called,
+                openai_available=False,
+            ),
+            before_attempt=before_attempt,
+        )
+
+        self.assertEqual(response.error_type, "budget")
+        self.assertEqual(len(self.billed.calls), 1, "only the pre-refusal attempt ran")
+        # The refused call itself contributes nothing...
+        self.assertEqual(response.attempt_count, 1)
+        # ...and the spend that preceded it survives.
+        self.assertEqual(response.input_tokens, 9200)
+        self.assertEqual(response.output_tokens, 4000)
+        self.assertAlmostEqual(response.cost_usd, 0.25, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T9 ───────────────────────────────────────────────────────────────
+    async def test_t9_partial_nonempty_max_tokens_success_does_not_regress(self):
+        """PR #115 semantics preserved: partial text is a success, and it is
+        accounted for as exactly its own attempt."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=11, out_tok=8000, cost=0.2)
+            return SimpleNamespace(
+                text='{"executive_strategy": "partial', stop_reason="max_tokens",
+                model_used=model, input_tokens=11, output_tokens=8000,
+                cache_read_tokens=0, cost_usd=0.2, latency_ms=9,
+                error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called, openai_available=False,
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(response.text, '{"executive_strategy": "partial')
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertEqual(len(self.billed.calls), 1)
+        self.assertEqual(response.input_tokens, 11)
+        self.assertEqual(response.output_tokens, 8000)
+        self.assertEqual(response.cost_usd, 0.2)
+
+    # ─── T10 ──────────────────────────────────────────────────────────────
+    #
+    # End to end, provider-free, through the real consumer: `call_llm` builds
+    # the LLMResponse and `policy.record_consumption_to_state` is the function
+    # the orchestrator calls with `total_tokens` / `cost_usd` — the one that
+    # advances the `max_total_cost_usd` ledger. These two cases are the §6
+    # cost-governance invariant: spend from an unusable first attempt stays
+    # visible after (A) terminal failure and (B) successful fallback.
+
+    async def _consume_through_call_llm(self, *, anthropic, openai, openai_key):
+        import policy
+
+        state = SimpleNamespace(budget_consumed={
+            "total_tokens": 0, "total_cost_usd": 0.0, "llm_call_count": 0,
+            "consecutive_failures": 0,
+        })
+        with (
+            patch("llm_client.ANTHROPIC_API_KEY", "test-key"),
+            patch("llm_client.OPENAI_API_KEY", openai_key),
+            patch("llm_client._call_anthropic", new=anthropic),
+            patch("llm_client._call_openai", new=openai),
+        ):
+            response = await llm_client.call_llm("strategy", "system", "prompt")
+        policy.record_consumption_to_state(
+            state, response.total_tokens, response.cost_usd, success=response.ok
+        )
+        return response, state.budget_consumed
+
+    async def test_t10a_terminal_failure_spend_reaches_the_budget_ledger(self):
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=9200, out_tok=4000, cost=0.25)
+            return llm_client.LLMResponse(
+                text="", stop_reason="max_tokens", ok=False,
+                error="unusable", error_type=OUTPUT_TOKEN_EXHAUSTED,
+                model_used=model, input_tokens=9200, output_tokens=4000,
+                cost_usd=0.25, latency_ms=9,
+            )
+
+        response, consumed = await self._consume_through_call_llm(
+            anthropic=anthropic, openai=AsyncMock(side_effect=self._never_called),
+            openai_key="",
+        )
+
+        self.assertFalse(response.ok)
+        self.assertTrue(self.billed.calls)
+        # The failure is fail-closed *and* fully accounted for.
+        self.assertEqual(consumed["total_tokens"], self.billed.input_tokens + self.billed.output_tokens)
+        self.assertAlmostEqual(consumed["total_cost_usd"], self.billed.cost_usd, places=9)
+        self.assertGreater(consumed["total_cost_usd"], 0.0)
+
+    async def test_t10b_fallback_success_spend_reaches_the_budget_ledger(self):
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=9200, out_tok=4000, cost=0.25)
+            return llm_client.LLMResponse(
+                text="", stop_reason="max_tokens", ok=False,
+                error="unusable", error_type=OUTPUT_TOKEN_EXHAUSTED,
+                model_used=model, input_tokens=9200, output_tokens=4000,
+                cost_usd=0.25, latency_ms=9,
+            )
+
+        async def openai(model, system, prompt, max_tokens, temperature):
+            self._bill(model, in_tok=500, out_tok=300, cost=0.01)
+            return llm_client.LLMResponse(
+                text='{"recovered": true}', stop_reason="end_turn", ok=True,
+                model_used=model, input_tokens=500, output_tokens=300,
+                cost_usd=0.01, latency_ms=5,
+            )
+
+        response, consumed = await self._consume_through_call_llm(
+            anthropic=anthropic, openai=openai, openai_key="test-key",
+        )
+
+        self.assertTrue(response.ok)
+        self.assertTrue(response.fallback_used)
+        self.assertGreater(len(self.billed.calls), 1)
+        self.assertEqual(consumed["total_tokens"], self.billed.input_tokens + self.billed.output_tokens)
+        self.assertAlmostEqual(consumed["total_cost_usd"], self.billed.cost_usd, places=9)
+        # The winning fallback alone would have hidden the unusable attempt.
+        self.assertGreater(consumed["total_cost_usd"], 0.01)
+
+
 class TestProviderOutputBudgetParity(unittest.TestCase):
     """Pins the parity finding this remediation documents but does not change:
     Strategy's response-token reservation is an Anthropic-only guarantee."""
