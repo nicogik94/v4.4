@@ -107,6 +107,12 @@ jobs:
           # Intentionally empty: real evals must not make billable Anthropic calls.
           ANTHROPIC_API_KEY: ''
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Failure provenance for this shard only. Observational: it records
+          # what each provider invocation returned so a future release
+          # observation is interpretable. It adds no provider call, no shard, no
+          # judge call and no model call, and it does not change scoring. Off by
+          # default everywhere else, including mock/smoke and aggregate.
+          MAS_EVAL_PROVENANCE: '1'
         run: |
           python -m evals.run_evals \
             --shard-index ${{ matrix.shard }} \

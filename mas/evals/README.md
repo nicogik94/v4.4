@@ -98,6 +98,37 @@ Aggregate summaries include `provider_failure_count`, `provider_failure_categori
 
 CI does not treat a provider-unavailable-only aggregate as an eval-quality regression. It still writes `ok: false` and `quality_ok: "unknown"` because the judge did not fully evaluate quality. Deterministic false fields on those same provider-failed cases are not treated as separate quality failures. Aggregation errors, deterministic failures on cases without provider-failure rationale, claim-traceability failures without provider-failure rationale, schema failures, mixed failures, and real quality regressions remain blocking.
 
+### Failure provenance (`eval_provenance.v1`)
+
+A pass rate is only interpretable if you can tell a case that reasoned badly
+from a case whose model returned nothing to reason with. Reports therefore carry
+an **observational** provenance block: `summary.eval_provenance` at the top
+level, and `provenance` on each case.
+
+It is off by default. `MAS_EVAL_PROVENANCE=1` enables it, and CI sets it on the
+real eval shard step only. When it is off, or in `--mock`, the block is present
+and says `captured: false` — never a clean-looking record of nothing.
+
+Per phase it records: whether the phase started, its final status
+(`completed` / `structural_failure` / `skipped` / `expected_halt` / `unknown`),
+the first response's content status and stop reason, whether a structured repair
+was issued and whether it worked, the failure kind from a closed vocabulary, and
+whether the eval kept running afterwards. Per provider invocation it records
+provider, requested and effective model, candidate/retry ordinals, stop reason,
+input/output/cache tokens, reasoning tokens where the SDK reports them, and the
+response's content and refusal **status**. The judge record adds its requested
+and effective configuration and the pre/post-truncation length of its input.
+
+Two rules govern what is stored. **Only metadata**: never a prompt, a response,
+a refusal, reasoning text, a header, a credential, or a digest of any of them —
+visible output is a status plus a character count, a refusal is a status alone.
+**Only observation**: nothing in the block is read by `pass_fail`, `passed`,
+`total`, `pass_rate`, `threshold` or `ok`, and no corrected, adjusted or
+counterfactual pass rate is derived from it. Fields this build cannot observe
+without changing a certified runtime file — the orchestrator's deterministic
+Strategy payload repair, for instance — are recorded as `unknown` with a reason
+rather than guessed. Summaries written before this wave aggregate unchanged.
+
 ### Batch runner (nightly + regression sweeps)
 
 ```bash
