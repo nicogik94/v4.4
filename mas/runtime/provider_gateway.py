@@ -335,6 +335,7 @@ def _profile_and_chain_candidates(
                 max_tokens=base.max_tokens,
                 temperature=base.temperature,
                 thinking_budget=base.thinking_budget if provider == Provider.ANTHROPIC else 0,
+                min_response_tokens=base.min_response_tokens,
             )
             candidates.append((
                 config,
@@ -364,6 +365,7 @@ def _config_from_model_alias(alias: str, base: ModelConfig, default_provider: st
         max_tokens=base.max_tokens,
         temperature=base.temperature,
         thinking_budget=base.thinking_budget if provider == Provider.ANTHROPIC else 0,
+        min_response_tokens=base.min_response_tokens,
     )
 
 
@@ -782,6 +784,7 @@ class DefaultProviderGateway:
             )
         return GatewayResponse(
             text=getattr(raw, "text", ""),
+            stop_reason=getattr(raw, "stop_reason", ""),
             model_used=getattr(raw, "model_used", config.model) or config.model,
             provider_used=config.provider.value,
             cache_hit=False,

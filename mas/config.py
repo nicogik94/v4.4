@@ -16,6 +16,7 @@ class Provider(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
 
+
 @dataclass
 class ModelConfig:
     provider: Provider
@@ -23,6 +24,26 @@ class ModelConfig:
     max_tokens: int = 4000
     temperature: float = 0.3
     thinking_budget: int = 0  # Claude extended thinking (0 = off)
+    min_response_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject extended-thinking configurations that crowd out the response."""
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+        if self.thinking_budget < 0:
+            raise ValueError("thinking_budget cannot be negative")
+        if self.min_response_tokens is not None and self.min_response_tokens < 0:
+            raise ValueError("min_response_tokens cannot be negative")
+        if (
+            self.thinking_budget > 0
+            and self.min_response_tokens is not None
+            and self.thinking_budget + self.min_response_tokens > self.max_tokens
+        ):
+            raise ValueError(
+                "extended thinking must leave at least "
+                f"{self.min_response_tokens} tokens for response text "
+                f"(max_tokens={self.max_tokens}, thinking_budget={self.thinking_budget})"
+            )
 
 
 @dataclass
@@ -94,7 +115,8 @@ MODEL_ROUTING: dict[str, ModelConfig] = {
     ),
     "strategy": ModelConfig(
         provider=Provider.ANTHROPIC, model="claude-opus-4-6",
-        max_tokens=8000, temperature=0.4, thinking_budget=20000
+        max_tokens=8000, temperature=0.4, thinking_budget=4000,
+        min_response_tokens=4000,
     ),
     "sqi": ModelConfig(
         provider=Provider.ANTHROPIC, model="claude-sonnet-4-6",

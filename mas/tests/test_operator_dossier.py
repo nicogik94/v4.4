@@ -12,7 +12,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import api
-from orchestrator import get_first_unfinished_phase
+from orchestrator import (
+    STRATEGY_REQUIRED_TOP_LEVEL_KEYS,
+    get_first_unfinished_phase,
+    is_workflow_complete,
+)
 from state import (
     AuditOutput,
     ClassifyOutput,
@@ -216,6 +220,71 @@ class TestOperatorDossierApi(unittest.IsolatedAsyncioTestCase):
                 await api.patch_phase_output(state.project_id, "strategy", ["not", "an", "object"])
         self.assertEqual(ctx.exception.status_code, 400)
 
+    async def test_strategy_patch_enforces_shared_explicit_nine_key_contract(self):
+        valid = make_strategy_output().model_dump(mode="json")
+        invalid_payloads = [
+            ("executive_only", {"executive_strategy": "only explicit key"}),
+            (
+                "nested_verdict",
+                {
+                    "id": "H1",
+                    "verdict": "NEEDS_MONITORING",
+                    "evidence": "nested",
+                    "monitoring_plan": "observe",
+                },
+            ),
+            ("wrong_type", {**valid, "strategies": "not-a-list"}),
+        ]
+        invalid_payloads.extend(
+            (f"missing_{key}", {name: value for name, value in valid.items() if name != key})
+            for key in STRATEGY_REQUIRED_TOP_LEVEL_KEYS
+        )
+
+        for label, payload in invalid_payloads:
+            with self.subTest(label=label):
+                state = ProjectState(
+                    project_id=f"operator-invalid-{label}",
+                    project_name="Invalid Strategy",
+                    brief="Test",
+                )
+                with patch("api.store.load", new=AsyncMock(return_value=state)), patch(
+                    "api.store.save", new=AsyncMock()
+                ) as save_mock:
+                    with self.assertRaises(HTTPException) as ctx:
+                        await api.patch_phase_output(state.project_id, "strategy", payload)
+                self.assertEqual(ctx.exception.status_code, 400)
+                self.assertIsNone(state.strategy)
+                self.assertNotEqual(state.phase_status["strategy"], PhaseStatus.COMPLETED)
+                save_mock.assert_not_awaited()
+
+    async def test_invalid_operator_strategy_cannot_unlock_manual_dependent_phases(self):
+        for phase in ("sqi", "monitor", "report"):
+            with self.subTest(phase=phase):
+                state = ProjectState(
+                    project_id=f"operator-invalid-then-{phase}",
+                    project_name="Invalid Strategy",
+                    brief="Test",
+                )
+                with patch("api.store.load", new=AsyncMock(return_value=state)), patch(
+                    "api.store.save", new=AsyncMock()
+                ):
+                    with self.assertRaises(HTTPException):
+                        await api.patch_phase_output(
+                            state.project_id,
+                            "strategy",
+                            {"executive_strategy": "only explicit key"},
+                        )
+                    with patch("orchestrator.call_llm", new=AsyncMock()) as call_mock:
+                        result = await api.run_single_phase_endpoint(
+                            state.project_id,
+                            api.RunPhaseRequest(phase=phase),
+                        )
+
+                self.assertEqual(call_mock.await_count, 0)
+                self.assertEqual(result["status"], "failed")
+                self.assertIsNone(state.strategy)
+                self.assertFalse(is_workflow_complete(state))
+
     async def test_hypotheses_patch_sets_seal_and_invalidates_downstream(self):
         state = make_completed_state("hypothesis-edit")
         new_payload = make_hypotheses_payload()
@@ -235,6 +304,10 @@ class TestOperatorDossierApi(unittest.IsolatedAsyncioTestCase):
 
     async def test_strategy_patch_invalidates_sqi_monitor_and_report(self):
         state = make_completed_state("strategy-edit")
+        for phase in ("strategy", "sqi", "monitor", "report"):
+            state.phase_run_completed_at[phase] = "2026-08-01T00:00:00"
+        state.report_output_language = "es-MX"
+        state.report_output_mode = "full"
         payload = make_strategy_output().model_dump(mode="json")
         payload["strategies"][0]["justification"] = "Operator override justification."
         with patch("api.store.load", new=AsyncMock(return_value=state)), patch("api.store.save", new=AsyncMock()):
@@ -249,6 +322,12 @@ class TestOperatorDossierApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.phase_status["sqi"], PhaseStatus.STALE)
         self.assertEqual(state.phase_status["monitor"], PhaseStatus.STALE)
         self.assertEqual(state.phase_status["report"], PhaseStatus.STALE)
+        self.assertNotIn("strategy", state.phase_run_completed_at)
+        self.assertNotIn("sqi", state.phase_run_completed_at)
+        self.assertNotIn("monitor", state.phase_run_completed_at)
+        self.assertNotIn("report", state.phase_run_completed_at)
+        self.assertIsNone(state.report_output_language)
+        self.assertIsNone(state.report_output_mode)
 
     async def test_monitor_patch_invalidates_only_report(self):
         state = make_completed_state("monitor-edit")
