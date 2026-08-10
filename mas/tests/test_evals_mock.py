@@ -1,6 +1,10 @@
 import asyncio
 import json
+import sys
 
+import pytest
+
+import evals.run_evals as eval_runner
 from cdp.review_caveats import CDP_REVIEW_CAVEATS
 from config import Provider
 from state import ClassifyOutput, ProjectState
@@ -221,7 +225,11 @@ def test_aggregate_preserves_provider_failure_rationale(tmp_path):
     assert first_case["judge_rationale"] == provider_rationale
 
 
-def test_provider_quota_only_aggregate_failure_is_provider_unavailable(tmp_path):
+def test_provider_quota_only_aggregate_failure_is_provider_unavailable_and_fails_closed(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
     cases = load_cases()
     provider_rationale = (
         "judge error: Provider call failed: category=quota_exceeded, "
@@ -232,10 +240,8 @@ def test_provider_quota_only_aggregate_failure_is_provider_unavailable(tmp_path)
         for case in cases
     }
 
-    aggregate = aggregate_summaries(
-        _write_sharded_summaries(tmp_path, results_by_id),
-        threshold=0.75,
-    )
+    shard_dirs = _write_sharded_summaries(tmp_path, results_by_id)
+    aggregate = aggregate_summaries(shard_dirs, threshold=0.75)
 
     assert aggregate["ok"] is False
     assert aggregate["aggregate_failure_kind"] == "provider_unavailable"
@@ -244,11 +250,55 @@ def test_provider_quota_only_aggregate_failure_is_provider_unavailable(tmp_path)
     assert aggregate["provider_failure_detected"] is True
     assert aggregate["provider_failure_count"] == len(cases)
     assert aggregate["provider_failure_categories"] == ["quota_exceeded"]
+    assert aggregate["provider_failure_case_ids"] == [case["id"] for case in cases]
     assert aggregate["quality_failure_count"] == 0
     assert aggregate["quality_failure_case_ids"] == []
     assert aggregate["quality_ok"] == "unknown"
     assert all(case["citation_resolvability_ok"] is False for case in aggregate["cases"])
-    assert aggregate_exit_code(aggregate) == 0
+    assert aggregate_exit_code(aggregate) == 1
+
+    async def unexpected_provider_call(*args, **kwargs):
+        pytest.fail("aggregate mode must not call a provider")
+
+    monkeypatch.setattr(eval_runner, "run_case_real", unexpected_provider_call)
+    monkeypatch.setattr(eval_runner, "judge_case", unexpected_provider_call)
+    report_dir = tmp_path / "aggregate"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_evals",
+            "--aggregate",
+            *shard_dirs,
+            "--report",
+            str(report_dir),
+            "--threshold",
+            "0.75",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        asyncio.run(eval_runner.main())
+
+    assert exit_info.value.code == 1
+    cli_summary = json.loads((report_dir / "summary.json").read_text())
+    assert cli_summary["aggregate_failure_kind"] == "provider_unavailable"
+    assert cli_summary["quality_ok"] == "unknown"
+    assert cli_summary["provider_failure_categories"] == ["quota_exceeded"]
+    assert cli_summary["provider_failure_case_ids"] == [case["id"] for case in cases]
+    assert cli_summary["quality_failure_count"] == 0
+    assert cli_summary["quality_failure_case_ids"] == []
+    assert all(
+        case["judge_rationale"] == provider_rationale
+        for case in cli_summary["cases"]
+    )
+
+    output = capsys.readouterr().out
+    assert "PROVIDER UNAVAILABLE:" in output
+    assert "Provider failure categories: quota_exceeded" in output
+    assert "FAIL CLOSED:" in output
+    assert "eval_quality_failure" not in output
+    assert "PASS: aggregate did not fail as an eval-quality regression" not in output
 
 
 def test_provider_quota_only_aggregate_is_not_eval_quality_failure(tmp_path):

@@ -390,8 +390,6 @@ def classify_provider_failure(rationale: str) -> str:
 def aggregate_exit_code(summary: dict) -> int:
     if summary.get("ok"):
         return 0
-    if summary.get("aggregate_failure_kind") == AGGREGATE_FAILURE_PROVIDER_UNAVAILABLE:
-        return 0
     return 1
 
 
@@ -795,8 +793,10 @@ async def main():
             elif summary.get("aggregate_failure_kind") == AGGREGATE_FAILURE_PROVIDER_UNAVAILABLE:
                 print("PROVIDER UNAVAILABLE: judge provider/quota failure prevented full quality evaluation")
                 print(f"Provider failure categories: {', '.join(summary.get('provider_failure_categories') or [])}")
-                print("PASS: aggregate did not fail as an eval-quality regression")
-                return
+                print(
+                    "FAIL CLOSED: provider unavailability prevented quality evaluation; "
+                    "this is not an eval-quality regression"
+                )
             else:
                 kind = summary.get("aggregate_failure_kind") or AGGREGATE_FAILURE_EVAL_QUALITY
                 print(f"FAIL: {kind}; pass rate {summary['pass_rate']:.1%} < threshold {args.threshold:.1%}")
