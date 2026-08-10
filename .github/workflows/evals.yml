@@ -2,7 +2,7 @@ name: evals
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled]
     paths:
       - 'mas/prompts/**'
       - 'mas/orchestrator.py'
@@ -43,9 +43,77 @@ jobs:
         working-directory: mas
         run: python -m evals.run_evals --mock
 
-  real-eval-shard:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+  provider-preflight:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval')) }}
     needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify OpenAI provider availability
+        env:
+          ANTHROPIC_API_KEY: ''
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python -m pip install 'openai>=1.60.0'
+          python - <<'PY'
+          import os
+          import sys
+
+          from openai import OpenAI
+
+          key = os.environ.get("OPENAI_API_KEY", "")
+          if not key:
+              print(
+                  "OPENAI_PROVIDER_PREFLIGHT=FAIL reason=missing_key",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          client = OpenAI(
+              api_key=key,
+              timeout=30.0,
+              max_retries=0,
+          )
+
+          for model in ("gpt-5-mini", "gpt-5"):
+              try:
+                  client.chat.completions.create(
+                      model=model,
+                      messages=[
+                          {
+                              "role": "user",
+                              "content": "Reply with OK.",
+                          }
+                      ],
+                      max_completion_tokens=64,
+                  )
+              except Exception as exc:
+                  status = getattr(exc, "status_code", "")
+                  print(
+                      f"OPENAI_PROVIDER_PREFLIGHT=FAIL "
+                      f"model={model} "
+                      f"type={type(exc).__name__} "
+                      f"status={status}",
+                      file=sys.stderr,
+                  )
+                  raise SystemExit(1)
+
+              print(
+                  f"OPENAI_PROVIDER_PREFLIGHT_MODEL=PASS "
+                  f"model={model}"
+              )
+
+          print("OPENAI_PROVIDER_PREFLIGHT=PASS")
+          PY
+
+  real-eval-shard:
+    if: ${{ needs.provider-preflight.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}
+    needs: [smoke, provider-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -97,8 +165,8 @@ jobs:
           path: mas/evals/out/shard-${{ matrix.shard }}/
 
   aggregate:
-    needs: real-eval-shard
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) }}
+    needs: [provider-preflight, real-eval-shard]
+    if: ${{ always() && needs.provider-preflight.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
