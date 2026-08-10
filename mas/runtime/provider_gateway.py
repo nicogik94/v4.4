@@ -64,6 +64,13 @@ INVALID_REQUEST = "invalid_request"
 TRANSPORT_MALFORMED_RESPONSE = "transport_malformed_response"
 MODEL_SCHEMA_INVALID = "model_schema_invalid"
 UNKNOWN_PROVIDER_ERROR = "unknown_provider_error"
+# A transport-level success that carried no usable visible text. These are
+# *content contract* failures, not transport outages: the HTTP call succeeded,
+# tokens were billed, and the provider still returned nothing this system can
+# analyse. They are kept distinct from each other because only one of them has
+# a known cause.
+OUTPUT_TOKEN_EXHAUSTED = "output_token_exhausted"
+EMPTY_PROVIDER_OUTPUT = "empty_provider_output"
 PROVIDER_DETAIL_MARKER = "; provider_detail="
 _PROVIDER_DETAIL_MESSAGE_MAX_CHARS = 500
 
@@ -76,12 +83,93 @@ RETRYABLE_PROVIDER_ERRORS = {
     TRANSPORT_MALFORMED_RESPONSE,
 }
 
-FALLBACK_ELIGIBLE_ERRORS = RETRYABLE_PROVIDER_ERRORS | {
+# Unusable output is deliberately *not* retryable. Re-issuing a byte-identical
+# request against the same candidate with the same token budget reproduces the
+# same exhaustion, so a retry buys nothing and bills twice. It is fallback
+# eligible because a different candidate has a genuinely different output-budget
+# regime. Because the breaker is only fed by retryable failures, an unusable
+# response also never counts toward opening a circuit: the provider is healthy,
+# this request's output contract is not.
+UNUSABLE_OUTPUT_ERRORS = {
+    OUTPUT_TOKEN_EXHAUSTED,
+    EMPTY_PROVIDER_OUTPUT,
+}
+
+FALLBACK_ELIGIBLE_ERRORS = RETRYABLE_PROVIDER_ERRORS | UNUSABLE_OUTPUT_ERRORS | {
     AUTH_ERROR,
     QUOTA_EXCEEDED,
 }
 
 GOVERNANCE_ERROR_TYPES = {"kill_switch", "budget", "breaker", "approval", "policy"}
+
+_NORMALIZED_STOP_REASONS = {
+    "end_turn": "end_turn",
+    "stop": "end_turn",
+    "max_tokens": "max_tokens",
+    "length": "max_tokens",
+    "stop_sequence": "stop_sequence",
+    "tool_use": "tool_use",
+    "tool_calls": "tool_use",
+    "pause_turn": "pause_turn",
+    "refusal": "refusal",
+    "content_filter": "content_filter",
+}
+
+# The normalized stop reasons that mean "the model ran out of output budget".
+_OUTPUT_EXHAUSTION_STOP_REASONS = frozenset({"max_tokens"})
+
+
+def normalize_stop_reason(value) -> str:
+    """Return a bounded cross-provider stop reason without raw metadata."""
+    if value is None:
+        return ""
+    return _NORMALIZED_STOP_REASONS.get(str(value).strip().lower(), "other")
+
+
+def has_usable_visible_text(text: Any) -> bool:
+    """True when a provider returned visible text a phase could actually use.
+
+    Whitespace-only output counts as unusable: every V4 phase consumes the
+    visible text either as JSON or as prose, and neither can be built from it.
+    """
+    return bool(str(text or "").strip())
+
+
+def classify_unusable_output(*, text: Any, stop_reason: Any) -> str:
+    """Return the failure category for output with no usable visible text.
+
+    Returns "" when the response carries usable text — including *partial*
+    text truncated at max_tokens, which stays a success so the deterministic
+    structured-output recovery downstream keeps its input.
+    """
+    if has_usable_visible_text(text):
+        return ""
+    if normalize_stop_reason(stop_reason) in _OUTPUT_EXHAUSTION_STOP_REASONS:
+        return OUTPUT_TOKEN_EXHAUSTED
+    return EMPTY_PROVIDER_OUTPUT
+
+
+def unusable_output_detail(*, text: Any, stop_reason: Any, output_tokens: Any) -> str:
+    """Bounded diagnostic for an unusable response.
+
+    Built only from a closed stop-reason vocabulary, an integer token count and
+    a fixed shape label. No provider text, refusal text, reasoning text, prompt
+    text or header ever reaches it.
+    """
+    if text is None:
+        shape = "none"
+    elif str(text) == "":
+        shape = "empty"
+    else:
+        shape = "whitespace"
+    try:
+        tokens = int(output_tokens or 0)
+    except (TypeError, ValueError):
+        tokens = 0
+    return (
+        f"stop_reason={normalize_stop_reason(stop_reason) or 'unset'} "
+        f"visible_text={shape} output_tokens={tokens}"
+    )
 
 
 def _safe_detail_scalar(value: Any, *, max_chars: int = _PROVIDER_DETAIL_MESSAGE_MAX_CHARS) -> str:
@@ -383,6 +471,63 @@ def _dedupe_candidates(
     return deduped
 
 
+class _UsageLedger:
+    """Cumulative provider usage for one logical gateway call.
+
+    A ``GatewayResponse`` returned by ``_call_with_fallbacks`` describes the
+    *logical call*, not one attempt: it already carries ``attempt_count``, the
+    ``attempts`` list and the fallback identity. Its usage fields are consumed
+    exactly once per logical call by the budget ledger — ``call_llm`` copies
+    them onto ``LLMResponse`` and the orchestrator hands them to
+    ``policy.record_consumption_to_state``, which also increments
+    ``llm_call_count`` by one. So the usage a logical response reports has to be
+    that call's *total* provider spend. Reporting only the attempt whose
+    response object happened to be returned makes every other executed attempt
+    invisible to the ``max_total_cost_usd`` cap even though it was billed.
+
+    Two properties keep the accounting honest:
+
+    * every executed attempt is recorded exactly once, at the single point where
+      a real provider response first exists — so a candidate skipped as
+      unavailable, skipped with the breaker open, or refused by governance
+      before the provider was called contributes nothing;
+    * ``apply`` *assigns* the totals rather than adding to them, so no return
+      path can count the same response twice however often it runs.
+
+    Per-attempt truth is unaffected: the ``attempts`` metadata and the
+    provider-attempt telemetry records stay per-attempt and are never
+    overwritten with these aggregates.
+    """
+
+    __slots__ = ("input_tokens", "output_tokens", "cache_read_tokens", "cost_usd")
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.cost_usd = 0.0
+
+    def record(self, response: GatewayResponse) -> None:
+        """Add one executed provider attempt's *measured* usage.
+
+        Usage the provider did not report arrives here as zero and is added as
+        zero. Nothing is estimated, inferred or back-filled: a transport failure
+        that never produced a billable response still contributes nothing.
+        """
+        self.input_tokens += int(response.input_tokens or 0)
+        self.output_tokens += int(response.output_tokens or 0)
+        self.cache_read_tokens += int(response.cache_read_tokens or 0)
+        self.cost_usd += float(response.cost_usd or 0.0)
+
+    def apply(self, response: GatewayResponse) -> GatewayResponse:
+        """Publish the logical-call totals onto the response being returned."""
+        response.input_tokens = self.input_tokens
+        response.output_tokens = self.output_tokens
+        response.cache_read_tokens = self.cache_read_tokens
+        response.cost_usd = self.cost_usd
+        return response
+
+
 class DefaultProviderGateway:
     def __init__(
         self,
@@ -478,6 +623,16 @@ class DefaultProviderGateway:
         last_error_type = PROVIDER_UNAVAILABLE
         last_error = "No configured provider candidates were available"
         attempt_count = 0
+        # The first failure that came from a candidate actually called, as
+        # opposed to one skipped as unavailable or breaker-open. Only used to
+        # keep the headline truthful; see the headline selection below.
+        attempted_error_type = ""
+        attempted_error = ""
+        # Provider spend for this logical call. Advanced only by a real
+        # `_execute` result and read by every return path below, so work that
+        # actually happened cannot disappear because the attempt that did it was
+        # not the attempt that answered.
+        usage = _UsageLedger()
 
         # ─── telemetry state ───
         # Nothing below this line is read by a routing, retry, fallback or
@@ -578,7 +733,10 @@ class DefaultProviderGateway:
                     governance_response.attempts = attempts
                     governance_response.attempt_count = attempt_count
                     self._apply_selection_metadata(governance_response, initial_selection, initial_config)
-                    return governance_response
+                    # The refused call adds nothing — no provider was reached —
+                    # but spend from attempts that ran before the gate closed
+                    # must still reach the budget ledger.
+                    return usage.apply(governance_response)
 
                 attempt_count += 1
                 if capturing:
@@ -616,6 +774,11 @@ class DefaultProviderGateway:
                         probe.record_escape(exc, self._breaker_snapshot(key))
                         self._publish(session, probe)
                     raise
+                # The one accumulation point, reached only once a provider
+                # response actually exists. Everything below either returns this
+                # response or moves on to another candidate, and both outcomes
+                # owe the budget ledger whatever this attempt just cost.
+                usage.record(response)
                 category = normalize_error_type(response.error_type)
                 if response.error:
                     provider_detail = provider_error_detail_from_message(response.error)
@@ -650,7 +813,11 @@ class DefaultProviderGateway:
                         response.fallback_provider = config.provider.value
                         response.fallback_model = response.model_used or config.model
                     self._apply_selection_metadata(response, initial_selection, initial_config)
-                    return response
+                    # Winner-only usage would erase every earlier executed
+                    # attempt. The ledger already holds this response's own
+                    # usage, so assigning the totals adds the earlier spend
+                    # without counting the winner twice.
+                    return usage.apply(response)
 
                 retryable = category in RETRYABLE_PROVIDER_ERRORS
                 response.retryable = retryable
@@ -661,6 +828,9 @@ class DefaultProviderGateway:
                 fallback_reason = fallback_reason or category
                 last_error_type = category
                 last_error = response.error
+                if not attempted_error_type:
+                    attempted_error_type = category
+                    attempted_error = response.error
                 if retryable:
                     self._breaker.record_failure(key)
 
@@ -684,6 +854,7 @@ class DefaultProviderGateway:
                         failed_model,
                         failed_error_type,
                         fallback_reason,
+                        usage,
                     )
 
                 if category not in RETRYABLE_PROVIDER_ERRORS:
@@ -699,11 +870,23 @@ class DefaultProviderGateway:
         if failed_error_type == QUOTA_EXCEEDED:
             headline_error = _safe_error_message(QUOTA_EXCEEDED, failed_provider, failed_model)
             headline_error_type = QUOTA_EXCEEDED
+        elif attempted_error_type in UNUSABLE_OUTPUT_ERRORS:
+            # Same rule, same reason. A provider that answered promptly with an
+            # unusable body is not "unavailable", and reporting the trailing
+            # skipped candidate would tell an operator to investigate a provider
+            # outage that never happened.
+            headline_error = attempted_error
+            headline_error_type = attempted_error_type
         else:
             headline_error = last_error or "All configured provider candidates failed or were unavailable"
             headline_error_type = last_error_type
 
-        return GatewayResponse(
+        # Built fresh rather than reusing an attempt's response, so it starts
+        # with zero usage. That is exactly why the ledger has to be applied: the
+        # candidates that ran were billed, and a terminal failure is the case
+        # where losing their spend is most dangerous — nothing downstream ever
+        # sees a successful response to account for it instead.
+        return usage.apply(GatewayResponse(
             text="",
             model_used=initial_config.model,
             provider_used=initial_config.provider.value,
@@ -722,7 +905,7 @@ class DefaultProviderGateway:
             error=headline_error,
             error_type=headline_error_type,
             retryable=headline_error_type in RETRYABLE_PROVIDER_ERRORS,
-        )
+        ))
 
     async def _execute(self, config: ModelConfig, request: GatewayRequest) -> GatewayResponse:
         try:
@@ -782,9 +965,36 @@ class DefaultProviderGateway:
                 config.model,
                 provider_detail=provider_error_detail_from_message(getattr(raw, "error", "")),
             )
+
+        text = getattr(raw, "text", "")
+        stop_reason = getattr(raw, "stop_reason", "")
+        output_tokens = int(getattr(raw, "output_tokens", 0) or 0)
+        if not error:
+            # The invariant, enforced provider-neutrally at the one point every
+            # executor's result passes through. The adapters classify this too,
+            # so in production this is a backstop; it is what makes the guarantee
+            # hold for *any* executor rather than only the two shipped ones.
+            #
+            # Every invocation this gateway makes is text-required: neither
+            # adapter sends tools, so there is no supported response shape whose
+            # value lives somewhere other than the visible text.
+            unusable = classify_unusable_output(text=text, stop_reason=stop_reason)
+            if unusable:
+                category = unusable
+                error = _safe_error_message(
+                    category,
+                    config.provider.value,
+                    config.model,
+                    provider_detail=unusable_output_detail(
+                        text=text,
+                        stop_reason=stop_reason,
+                        output_tokens=output_tokens,
+                    ),
+                )
+
         return GatewayResponse(
-            text=getattr(raw, "text", ""),
-            stop_reason=getattr(raw, "stop_reason", ""),
+            text=text if has_usable_visible_text(text) else "",
+            stop_reason=stop_reason,
             model_used=getattr(raw, "model_used", config.model) or config.model,
             provider_used=config.provider.value,
             cache_hit=False,
@@ -792,7 +1002,7 @@ class DefaultProviderGateway:
             fallback_used=False,
             latency_ms=int(getattr(raw, "latency_ms", 0) or 0),
             input_tokens=int(getattr(raw, "input_tokens", 0) or 0),
-            output_tokens=int(getattr(raw, "output_tokens", 0) or 0),
+            output_tokens=output_tokens,
             cache_read_tokens=int(getattr(raw, "cache_read_tokens", 0) or 0),
             cost_usd=float(getattr(raw, "cost_usd", 0.0) or 0.0),
             error=error,
@@ -849,6 +1059,7 @@ class DefaultProviderGateway:
         failed_model: str,
         failed_error_type: str,
         fallback_reason: str,
+        usage: _UsageLedger,
     ) -> GatewayResponse:
         response.attempts = attempts
         response.attempt_count = attempt_count
@@ -858,7 +1069,10 @@ class DefaultProviderGateway:
         response.fallback_reason = fallback_reason
         response.fallback_used = False
         self._apply_selection_metadata(response, initial_selection, initial_config)
-        return response
+        # A terminal failure is still billable. This response carries its own
+        # attempt's usage already; the ledger adds whatever earlier executed
+        # attempts cost before this one ended the call.
+        return usage.apply(response)
 
     def _provider_available(self, provider: Provider) -> bool:
         if self._provider_availability is None:
@@ -1288,6 +1502,8 @@ def normalize_error_type(error_type: str) -> str:
         "malformed": TRANSPORT_MALFORMED_RESPONSE,
         "model_schema_invalid": MODEL_SCHEMA_INVALID,
         "schema": MODEL_SCHEMA_INVALID,
+        "output_token_exhausted": OUTPUT_TOKEN_EXHAUSTED,
+        "empty_provider_output": EMPTY_PROVIDER_OUTPUT,
         "unknown_provider_error": UNKNOWN_PROVIDER_ERROR,
     }
     if raw in aliases:

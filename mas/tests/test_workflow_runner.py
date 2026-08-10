@@ -6,6 +6,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import BackgroundTasks, HTTPException
@@ -4386,6 +4387,117 @@ class TestApiRunWorkflow(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as ctx:
                 await api.run_single_phase_endpoint(state.project_id, api.RunPhaseRequest(phase="report"))
         self.assertEqual(ctx.exception.status_code, 409)
+
+
+class TestStrategyUnusableProviderOutput(unittest.IsolatedAsyncioTestCase):
+    """Empty provider output must fail before it can be mistaken for structured
+    output, while *partial* output keeps its deterministic recovery path."""
+
+    async def test_s1_truncated_strategy_output_still_reaches_deterministic_recovery(self):
+        """Case C: non-empty + max_tokens is recovered locally, with no second call."""
+        state = make_completed_state("strategy-partial-output-recovers")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        payload = make_strategy_payload()
+        payload["executive_strategy"] = "Recovered from completed top-level fields."
+        truncated = json.dumps(payload)[:-1] + ',"appendix":"cut'
+        response = make_response(truncated, stop_reason="max_tokens")
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)) as call_mock:
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(call_mock.await_count, 1, "deterministic recovery must not call the provider again")
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.COMPLETED)
+        self.assertEqual(
+            updated.strategy.executive_strategy,
+            "Recovered from completed top-level fields.",
+        )
+
+    async def test_s2_empty_strategy_output_fails_without_a_second_provider_call(self):
+        """The incident shape: max_tokens stop with no visible text. It must fail
+        closed rather than enter recovery with nothing to recover from."""
+        state = make_completed_state("strategy-empty-output-fails-closed")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+        failure = LLMResponse(
+            text="",
+            stop_reason="max_tokens",
+            ok=False,
+            error=(
+                "Provider call failed: category=output_token_exhausted, "
+                "provider=openai, model=gpt-5; provider_detail=stop_reason=max_tokens "
+                "visible_text=none output_tokens=8000"
+            ),
+            error_type="output_token_exhausted",
+            model_used="gpt-5",
+            provider_used="openai",
+            input_tokens=1200,
+            output_tokens=8000,
+        )
+
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=failure)) as call_mock:
+            with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
+                updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(
+            call_mock.await_count, 1,
+            "an empty response must not trigger a bounded-recovery call with no material",
+        )
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.FAILED)
+        self.assertIsNone(updated.strategy)
+        self.assertEqual(updated.phase_failure_details["strategy"].category, "provider_error")
+
+    async def test_s2_end_to_end_empty_provider_body_never_reaches_the_parser(self):
+        """The whole chain, provider-free: SDK response -> adapter -> gateway ->
+        call_llm -> orchestrator. An empty body must never arrive as success."""
+        state = make_completed_state("strategy-empty-output-end-to-end")
+        state.phase_status["strategy"] = PhaseStatus.PENDING
+
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(type="thinking", thinking="private reasoning")],
+                usage=SimpleNamespace(
+                    input_tokens=1200, output_tokens=8000, cache_read_input_tokens=0
+                ),
+                stop_reason="max_tokens",
+            )
+        )
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+
+        with (
+            patch("llm_client.ANTHROPIC_API_KEY", "test-key"),
+            patch("llm_client.OPENAI_API_KEY", ""),
+            patch("llm_client._get_anthropic", return_value=fake_client),
+            patch("priors.get_prior_hint", new=AsyncMock(return_value="")),
+        ):
+            updated = await run_phase_node(state, "strategy")
+
+        self.assertEqual(updated.phase_status["strategy"], PhaseStatus.FAILED)
+        self.assertIsNone(updated.strategy)
+        self.assertTrue(create_mock.await_count >= 1)
+        # Every candidate was tried at most once: no identical request was repeated.
+        attempted = [c.kwargs["model"] for c in create_mock.await_args_list]
+        self.assertEqual(len(attempted), len(set(attempted)))
+        # The private reasoning text never leaves the adapter.
+        self.assertNotIn(
+            "private reasoning",
+            str(updated.phase_failure_details["strategy"].message),
+        )
+
+    async def test_s3_completed_field_recovery_is_unchanged_for_its_intended_cases(self):
+        """The deterministic repair itself is untouched by the new contract."""
+        payload = make_strategy_payload()
+        payload["executive_strategy"] = "Intended deterministic recovery case."
+        truncated = json.dumps(payload)[:-1] + ',"appendix":"cut'
+
+        repaired = _repair_strategy_payload(truncated)
+
+        self.assertIsNotNone(repaired)
+        self.assertEqual(
+            repaired["executive_strategy"], "Intended deterministic recovery case."
+        )
+        # Empty and whitespace-only text remain unrecoverable, as before.
+        self.assertIsNone(_repair_strategy_payload(""))
+        self.assertIsNone(_repair_strategy_payload("   "))
 
 
 if __name__ == "__main__":
