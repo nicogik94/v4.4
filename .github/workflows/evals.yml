@@ -2,7 +2,7 @@ name: evals
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled]
     paths:
       - 'mas/prompts/**'
       - 'mas/orchestrator.py'
