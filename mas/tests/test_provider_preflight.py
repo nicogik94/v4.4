@@ -619,6 +619,23 @@ def test_p10_unusable_first_model_stops_before_second():
     assert "OPENAI_PROVIDER_PREFLIGHT=PASS" not in stdout
 
 
+def test_p10b_unusable_second_model_fails_overall_after_a_usable_first():
+    # A later model's failure must not be hidden behind the earlier success.
+    ok, stdout, stderr, calls = _run(
+        _usable_response(),
+        _response(_choice(None, finish_reason="length")),
+    )
+
+    assert not ok
+    assert [call["model"] for call in calls] == ["gpt-5-mini", "gpt-5"]
+    assert stdout.splitlines() == [
+        "OPENAI_PROVIDER_PREFLIGHT_MODEL=PASS model=gpt-5-mini"
+    ]
+    assert "OPENAI_PROVIDER_PREFLIGHT=PASS" not in stdout
+    assert "model=gpt-5 " in stderr
+    assert "reason=output_token_exhausted" in stderr
+
+
 def test_p11_both_models_usable_passes_overall():
     ok, stdout, stderr, calls = _run(_usable_response(), _usable_response())
 
