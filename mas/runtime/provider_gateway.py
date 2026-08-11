@@ -423,7 +423,13 @@ def _profile_and_chain_candidates(
                 max_tokens=base.max_tokens,
                 temperature=base.temperature,
                 thinking_budget=base.thinking_budget if provider == Provider.ANTHROPIC else 0,
-                min_response_tokens=base.min_response_tokens,
+                # Dropped for the same reason as thinking_budget: both are
+                # Anthropic-only controls on `base`, and this chain candidate may
+                # be a different provider. Carrying the reservation across that
+                # boundary would claim a guarantee _call_openai never implements.
+                min_response_tokens=(
+                    base.min_response_tokens if provider == Provider.ANTHROPIC else None
+                ),
             )
             candidates.append((
                 config,
@@ -453,7 +459,11 @@ def _config_from_model_alias(alias: str, base: ModelConfig, default_provider: st
         max_tokens=base.max_tokens,
         temperature=base.temperature,
         thinking_budget=base.thinking_budget if provider == Provider.ANTHROPIC else 0,
-        min_response_tokens=base.min_response_tokens,
+        # See _profile_and_chain_candidates: an alias may resolve to a provider
+        # other than `base`'s, and the reservation does not survive that crossing.
+        min_response_tokens=(
+            base.min_response_tokens if provider == Provider.ANTHROPIC else None
+        ),
     )
 
 
