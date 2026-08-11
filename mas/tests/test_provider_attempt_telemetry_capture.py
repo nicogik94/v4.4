@@ -691,20 +691,27 @@ class RuntimeCaptureChainTests(unittest.TestCase):
         finally:
             llm_client._openai, llm_client.OPENAI_API_KEY, llm_client.ANTHROPIC_API_KEY = previous
 
-        # The runtime is unaffected: one SDK call, a successful result.
-        self.assertEqual(completions.calls, 1)
-        self.assertTrue(result.ok)
+        # This fixture is the V7 live signature, and the provider-output
+        # contract (#115) now fails closed on it instead of reporting a
+        # success that carried no text. So the gateway exhausts the OpenAI
+        # fallback chain rather than stopping at the first candidate, and the
+        # call ends unusable. Both are the corrected behaviour, not a
+        # regression: an empty completion is no longer a usable result.
+        self.assertEqual(completions.calls, 2)
+        self.assertFalse(result.ok)
+        self.assertIn("output_token_exhausted", result.error)
 
         records = recorder.invocation_records()
         answered = [r for r in records if r["provider"] == "openai"]
-        self.assertEqual(len(answered), 1)
+        # One record per OpenAI candidate actually attempted.
+        self.assertEqual(len(answered), 2)
         record = answered[0]
 
         # Channel one: the runtime's own invocation start and attempt events.
         self.assertEqual(record["phase"], "strategy")
         self.assertGreaterEqual(record["candidate_ordinal"], 1)
         self.assertEqual(record["retry_ordinal"], 1)
-        self.assertEqual(record["terminal_event_kind"], "completed")
+        self.assertEqual(record["terminal_event_kind"], "provider_failure")
         self.assertEqual(record["effective_model"]["value"], "gpt-5-2026-01-01")
         self.assertEqual(record["stop_reason"]["value"], "length")
         self.assertEqual(record["input_tokens"]["value"], 120)

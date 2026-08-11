@@ -39,6 +39,7 @@ from provider_telemetry import (
     telemetry_scope,
 )
 from evals import provenance
+from evals import release_gates
 from config import ModelConfig, Provider
 
 PASS_THRESHOLD = 0.75  # fail CI if <75% of cases pass
@@ -219,6 +220,7 @@ def summarize_results(
     shard_index: int | None = None,
     shard_count: int | None = None,
     aggregation_errors: list[str] | None = None,
+    provider_gate: str | None = None,
 ) -> dict:
     passed = sum(1 for r in results if r.passed)
     total = len(results)
@@ -233,6 +235,13 @@ def summarize_results(
     return {
         "timestamp": datetime.now().isoformat(),
         "mode": mode,
+        # Which release gate produced this result. Resolved from the closed
+        # vocabulary, never guessed: an unset or unrecognized value records
+        # `none`, so an artifact can state "no gate" but can never silently
+        # claim the wrong one.
+        "provider_gate": release_gates.normalize_gate(
+            release_gates.gate_from_env() if provider_gate is None else provider_gate
+        ),
         "shard_index": shard_index,
         "shard_count": shard_count,
         "case_ids": case_ids,
@@ -263,12 +272,29 @@ def _case_result_from_dict(data: dict) -> CaseResult:
     return CaseResult(**{key: value for key, value in data.items() if key in allowed})
 
 
-def aggregate_summaries(report_dirs: list[str], *, threshold: float) -> dict:
+def aggregate_summaries(
+    report_dirs: list[str],
+    *,
+    threshold: float,
+    expect_gate: str | None = None,
+    expect_shard_count: int | None = None,
+) -> dict:
+    """Combine shard summaries, refusing to mix release gates.
+
+    `expect_gate` is the gate the caller believes it is aggregating. A shard
+    whose recorded identity differs is an aggregation error, not a silently
+    absorbed row: Gate A and Gate B make different claims, so combining their
+    cases would manufacture a result that describes neither provider posture.
+    """
+
+    expected_gate = release_gates.normalize_gate(expect_gate) if expect_gate is not None else None
     expected_ids = _case_ids(load_cases())
     expected_set = set(expected_ids)
     by_id: dict[str, CaseResult] = {}
     duplicates: list[str] = []
     aggregation_errors: list[str] = []
+    seen_shards: set[int] = set()
+    contributing_dirs = 0
 
     for report_dir in report_dirs:
         summary_path = Path(report_dir) / "summary.json"
@@ -280,6 +306,20 @@ def aggregate_summaries(report_dirs: list[str], *, threshold: float) -> dict:
         except Exception as exc:
             aggregation_errors.append(f"failed to read {summary_path}: {exc}")
             continue
+
+        shard_gate = release_gates.normalize_gate(data.get("provider_gate"))
+        if expected_gate is not None and shard_gate != expected_gate:
+            aggregation_errors.append(
+                f"gate identity mismatch in {summary_path}: "
+                f"expected {expected_gate}, shard reports {shard_gate}"
+            )
+            continue
+
+        contributing_dirs += 1
+        shard_index = data.get("shard_index")
+        if isinstance(shard_index, int):
+            seen_shards.add(shard_index)
+
         for case_data in data.get("cases", []):
             case_id = str(case_data.get("case_id", ""))
             if not case_id:
@@ -300,6 +340,21 @@ def aggregate_summaries(report_dirs: list[str], *, threshold: float) -> dict:
     if missing:
         aggregation_errors.append(f"missing case IDs: {', '.join(missing)}")
 
+    if expect_shard_count is not None:
+        # Structural completeness is asserted over the shards that actually
+        # reported, not over the directories the glob happened to match: a shard
+        # whose job died uploads nothing, and its absence must be an error
+        # rather than a smaller denominator.
+        if contributing_dirs != expect_shard_count:
+            aggregation_errors.append(
+                f"expected {expect_shard_count} shard reports, {contributing_dirs} contributed"
+            )
+        absent = [index for index in range(expect_shard_count) if index not in seen_shards]
+        if absent:
+            aggregation_errors.append(
+                f"missing shard indices: {', '.join(str(index) for index in absent)}"
+            )
+
     ordered_results = [by_id[case_id] for case_id in expected_ids if case_id in by_id]
     return summarize_results(
         ordered_results,
@@ -307,6 +362,7 @@ def aggregate_summaries(report_dirs: list[str], *, threshold: float) -> dict:
         mode="aggregate",
         case_ids=[result.case_id for result in ordered_results],
         aggregation_errors=aggregation_errors,
+        provider_gate=expected_gate,
     )
 
 
@@ -928,11 +984,27 @@ async def main():
     parser.add_argument("--shard-index", type=int, help="Zero-based shard index to run")
     parser.add_argument("--shard-count", type=int, help="Total number of shards")
     parser.add_argument("--aggregate", nargs="+", help="Shard report directories to aggregate")
+    parser.add_argument(
+        "--expect-gate",
+        choices=release_gates.GATE_CHOICES,
+        help="Release gate whose shards these must be; mismatched shards are refused",
+    )
+    parser.add_argument(
+        "--expect-shard-count",
+        type=int,
+        help="Number of shards that must have contributed a report",
+    )
     args = parser.parse_args()
 
     if args.aggregate:
-        summary = aggregate_summaries(args.aggregate, threshold=args.threshold)
+        summary = aggregate_summaries(
+            args.aggregate,
+            threshold=args.threshold,
+            expect_gate=args.expect_gate,
+            expect_shard_count=args.expect_shard_count,
+        )
         print(f"Aggregating {len(args.aggregate)} shard report directories")
+        print(f"Release gate: {summary.get('provider_gate')}")
         for error in summary.get("aggregation_errors", []):
             print(f"AGGREGATION ERROR: {error}")
         print(

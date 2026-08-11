@@ -150,10 +150,66 @@ The batch runner runs the same phase pipeline locally, but submits **all 12 judg
 
 Two GitHub Actions workflows:
 
-- **`.github/workflows/evals.yml`** — runs `run_evals.py` (real-time) on every PR that touches `mas/prompts/**`, `mas/orchestrator.py`, `mas/llm_client.py`, or `mas/config.py`. Fast feedback, fails build if pass rate < 75%.
+- **`.github/workflows/evals.yml`** — a free mock smoke job on every PR that touches `mas/prompts/**`, `mas/orchestrator.py`, `mas/llm_client.py`, `mas/config.py` or `mas/evals/**`, plus two **paid release gates** described below.
 - **`.github/workflows/evals-nightly-batch.yml`** — runs `run_evals_batch.py` on a 06:00 UTC cron. Opens a GitHub issue tagged `eval-regression` if the threshold fails, with the failing case IDs in the body.
 
 Set the `ANTHROPIC_API_KEY` secret in repo settings before enabling either.
+
+## Release provider gates (V7)
+
+Release validation runs as **two gates that make two different claims**. They
+share the golden-case universe, the judge rubric, the six-shard split and the
+0.75 threshold — so their results are comparable — but a PASS means something
+different in each, and their artifacts are never interchangeable.
+
+| | Gate A | Gate B |
+|---|---|---|
+| identity | `gate_a_anthropic_primary` | `gate_b_openai_fallback` |
+| Anthropic key | **present** | blank |
+| OpenAI key | blank | **present** |
+| preflight | `evals.anthropic_preflight` | `evals.provider_preflight` |
+| a PASS claims | the normal production posture meets the release threshold | the certified contract stays usable on the OpenAI fallback path |
+| a PASS does **not** claim | anything about fallback | **anything about the release** |
+
+Gate B is *not* release validation. It exists because a blank Anthropic key
+makes every Anthropic candidate unavailable, which is the only way to reach the
+OpenAI fallback candidates without changing routing code.
+
+### Authorizing a live run
+
+Selecting a gate and authorizing spend are separate acts, and a live job needs
+both. Nothing is authorized by default.
+
+* **Pull request** — the PR must be **non-Draft**, carry the **`paid-eval`**
+  label, and carry **exactly one** gate label (`gate-a-anthropic-primary` or
+  `gate-b-openai-fallback`). Both gate labels at once authorizes neither.
+* **Manual dispatch** — choose `provider_gate` (default `none`, which runs
+  nothing paid) **and** type `RUN-PAID` into `confirm_paid_execution`.
+
+Each preflight probes exactly the models that gate's provider can actually be
+routed to, derived from the routing tables by
+`release_gates.required_models()` rather than restated, and requires **usable
+visible text** from each — not merely that the SDK call returned.
+
+### Reading the result
+
+`summary.json` carries `provider_gate`, and the aggregator is told which gate it
+is aggregating (`--expect-gate`) and how many shards must have contributed
+(`--expect-shard-count`). A shard from the other gate is refused as an
+aggregation error rather than silently absorbed, so a Gate B artifact can never
+be counted as Gate A evidence.
+
+Results use a closed taxonomy that never reports provider or infrastructure
+inability as a quality failure: `pass`, `quality_failure`,
+`provider_unavailable`, `preflight_failure`, `structural_failure`,
+`infrastructure_failure`, `authorization_not_satisfied`,
+`gate_identity_mismatch`.
+
+Shard runs set `MAS_EVAL_PROVENANCE=1`, so a failing gate can be attributed:
+effective model, stop reason, visible-content status and length, refusal status
+and reasoning tokens where the provider reports them. Reasoning-token counts are
+recorded only when observed — an unreported count stays `unknown`, never `0`.
+No prompt, response, refusal or reasoning **text** is ever recorded.
 
 ## Calibration philosophy
 
