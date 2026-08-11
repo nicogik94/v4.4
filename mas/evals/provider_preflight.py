@@ -4,6 +4,13 @@ The probe mirrors the material GPT-5-family request shape used by the runtime,
 while keeping credentials in the workflow environment and diagnostics narrowly
 allowlisted.  Tests inject fake clients; this module is the only executable
 preflight implementation used by the workflow.
+
+``OPENAI_PROVIDER_PREFLIGHT_MODEL=PASS`` means the configured model produced
+**usable visible text** under the preflight request shape -- not merely that the
+SDK call returned without raising.  Usable is deliberately narrow: a visible
+content value that is a ``str`` whose ``strip()`` is non-empty.  The probe
+validates provider/model output capability, so it never inspects semantic
+correctness and never requires any particular reply text.
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -24,6 +32,45 @@ PROBE_TEMPERATURE = 1
 PROBE_SYSTEM_PROMPT = "You are a concise assistant."
 PROBE_USER_PROMPT = "Reply with OK."
 DIAGNOSTIC_MESSAGE_MAX_CHARS = 500
+
+# Closed failure vocabulary.  A local equivalent of the runtime's taxonomy is
+# used deliberately: importing the product's classifier would couple this
+# eval-only harness to a certified product module for two string constants, and
+# the preflight classifies a raw SDK response rather than a GatewayResponse.
+CATEGORY_OUTPUT_TOKEN_EXHAUSTED = "output_token_exhausted"
+CATEGORY_EMPTY_PROVIDER_OUTPUT = "empty_provider_output"
+CATEGORY_MALFORMED_RESPONSE = "malformed_response"
+
+# Closed content-status vocabulary.  ``malformed`` covers a present but
+# non-string content value, which would otherwise have to be misreported.
+CONTENT_MISSING = "missing"
+CONTENT_NONE = "none"
+CONTENT_EMPTY = "empty"
+CONTENT_WHITESPACE = "whitespace"
+CONTENT_NONEMPTY = "nonempty"
+CONTENT_MALFORMED = "malformed"
+
+REFUSAL_PRESENT = "present"
+REFUSAL_ABSENT = "absent"
+REFUSAL_UNKNOWN = "unknown"
+
+# Chat Completions signals token exhaustion with exactly ``length``.  No alias
+# is accepted; inventing one would assert provider semantics this probe has not
+# observed.
+FINISH_REASON_LENGTH = "length"
+FINISH_REASON_ABSENT = ""
+FINISH_REASON_OTHER = "other"
+KNOWN_FINISH_REASONS = frozenset(
+    {
+        "stop",
+        FINISH_REASON_LENGTH,
+        "content_filter",
+        "tool_calls",
+        "function_call",
+    }
+)
+
+_MISSING = object()
 
 _AUTHORIZATION_RE = re.compile(
     r"(?i)\bauthorization\b\s*[\"']?\s*[:=]\s*[^\r\n]+"
@@ -208,6 +255,195 @@ def format_failure(model: str, exc: BaseException) -> str:
         )
 
 
+@dataclass(frozen=True)
+class OutputAssessment:
+    """Bounded verdict on a preflight response.
+
+    Every field is drawn from a closed vocabulary, so an assessment can be
+    rendered to the workflow log without any provider-controlled bytes.
+    """
+
+    usable: bool
+    category: str
+    finish_reason: str
+    content_status: str
+    refusal_status: str
+
+
+def _field(container: object, name: str) -> Any:
+    """Attribute-or-key lookup that never raises.
+
+    Returns ``_MISSING`` when the field is absent or unreadable, which keeps
+    "absent" distinguishable from a genuine ``None`` value.
+    """
+
+    try:
+        value = getattr(container, name, _MISSING)
+    except Exception:
+        # A property that raises reaches here rather than returning the default.
+        return _MISSING
+    if value is not _MISSING:
+        return value
+    if isinstance(container, Mapping):
+        try:
+            if name in container:
+                return container[name]
+        except Exception:
+            return _MISSING
+    return _MISSING
+
+
+def _normalized_finish_reason(value: object) -> str:
+    """Collapse the finish reason onto a closed vocabulary.
+
+    Any unrecognized value becomes ``other`` so no provider-controlled text can
+    reach the diagnostic line.
+    """
+
+    if value is _MISSING or value is None:
+        return FINISH_REASON_ABSENT
+    if not isinstance(value, str):
+        return FINISH_REASON_OTHER
+    normalized = value.strip().lower()
+    if not normalized:
+        return FINISH_REASON_ABSENT
+    if normalized in KNOWN_FINISH_REASONS:
+        return normalized
+    return FINISH_REASON_OTHER
+
+
+def _content_status(content: object) -> str:
+    if content is _MISSING:
+        return CONTENT_MISSING
+    if content is None:
+        return CONTENT_NONE
+    if not isinstance(content, str):
+        return CONTENT_MALFORMED
+    if content == "":
+        return CONTENT_EMPTY
+    if content.strip() == "":
+        return CONTENT_WHITESPACE
+    return CONTENT_NONEMPTY
+
+
+def _refusal_status(message: object) -> str:
+    refusal = _field(message, "refusal")
+    if refusal is _MISSING:
+        return REFUSAL_UNKNOWN
+    if refusal is None:
+        return REFUSAL_ABSENT
+    if isinstance(refusal, str):
+        return REFUSAL_PRESENT if refusal.strip() else REFUSAL_ABSENT
+    return REFUSAL_PRESENT
+
+
+def _malformed(
+    finish_reason: str,
+    content_status: str,
+    refusal_status: str,
+) -> OutputAssessment:
+    return OutputAssessment(
+        usable=False,
+        category=CATEGORY_MALFORMED_RESPONSE,
+        finish_reason=finish_reason,
+        content_status=content_status,
+        refusal_status=refusal_status,
+    )
+
+
+def _assess_output(response: object) -> OutputAssessment:
+    choices = _field(response, "choices")
+    if choices is _MISSING or choices is None:
+        return _malformed(
+            FINISH_REASON_ABSENT,
+            CONTENT_MISSING,
+            REFUSAL_UNKNOWN,
+        )
+
+    try:
+        # Covers empty sequences and non-subscriptable values alike.
+        first_choice = choices[0]
+    except Exception:
+        return _malformed(
+            FINISH_REASON_ABSENT,
+            CONTENT_MISSING,
+            REFUSAL_UNKNOWN,
+        )
+
+    finish_reason = _normalized_finish_reason(_field(first_choice, "finish_reason"))
+    message = _field(first_choice, "message")
+    if message is _MISSING or message is None:
+        return _malformed(finish_reason, CONTENT_MISSING, REFUSAL_UNKNOWN)
+
+    refusal_status = _refusal_status(message)
+    content_status = _content_status(_field(message, "content"))
+
+    if content_status == CONTENT_NONEMPTY:
+        # Visible text proves output capability even when truncated, and even
+        # when a refusal field is also populated.  This probe deliberately does
+        # not adjudicate refusals; see the module docstring.
+        return OutputAssessment(
+            usable=True,
+            category="",
+            finish_reason=finish_reason,
+            content_status=content_status,
+            refusal_status=refusal_status,
+        )
+
+    if content_status in (CONTENT_MISSING, CONTENT_MALFORMED):
+        # A structurally broken response is reported as such even when the
+        # finish reason would otherwise suggest exhaustion.
+        return _malformed(finish_reason, content_status, refusal_status)
+
+    category = (
+        CATEGORY_OUTPUT_TOKEN_EXHAUSTED
+        if finish_reason == FINISH_REASON_LENGTH
+        else CATEGORY_EMPTY_PROVIDER_OUTPUT
+    )
+    return OutputAssessment(
+        usable=False,
+        category=category,
+        finish_reason=finish_reason,
+        content_status=content_status,
+        refusal_status=refusal_status,
+    )
+
+
+def assess_output(response: object) -> OutputAssessment:
+    """Classify a preflight response, failing closed on any inspection error."""
+
+    try:
+        return _assess_output(response)
+    except Exception:
+        return _malformed(
+            FINISH_REASON_ABSENT,
+            CONTENT_MISSING,
+            REFUSAL_UNKNOWN,
+        )
+
+
+def format_unusable_output(model: str, assessment: OutputAssessment) -> str:
+    try:
+        safe_model = _sanitized_token(model, max_chars=80)
+        return " ".join(
+            (
+                "OPENAI_PROVIDER_PREFLIGHT=FAIL",
+                f"model={safe_model}",
+                f"reason={assessment.category}",
+                f"finish_reason={assessment.finish_reason}",
+                f"content={assessment.content_status}",
+                f"refusal={assessment.refusal_status}",
+            )
+        )
+    except Exception:
+        safe_model = model if type(model) is str and model in PROBE_MODELS else ""
+        return (
+            "OPENAI_PROVIDER_PREFLIGHT=FAIL "
+            f"model={safe_model} reason={CATEGORY_MALFORMED_RESPONSE} "
+            "finish_reason= content=missing refusal=unknown"
+        )
+
+
 def probe_request(model: str) -> dict[str, object]:
     return {
         "model": model,
@@ -226,9 +462,14 @@ def run_preflight(client: object, *, stdout=None, stderr=None) -> bool:
 
     for model in PROBE_MODELS:
         try:
-            client.chat.completions.create(**probe_request(model))
+            response = client.chat.completions.create(**probe_request(model))
         except Exception as exc:
             print(format_failure(model, exc), file=stderr)
+            return False
+
+        assessment = assess_output(response)
+        if not assessment.usable:
+            print(format_unusable_output(model, assessment), file=stderr)
             return False
 
         print(
