@@ -76,6 +76,11 @@ ALLOWED = {
     # channel to prove the OpenAI fallback path is diagnosable. They add no
     # telemetry behaviour and touch no telemetry module.
     "mas/tests/test_gate_b_fallback_evidence.py",
+    # Another read-only consumer: the V7 release-gate harness tests name the
+    # telemetry package in a path allow-list used for diff hygiene. They add no
+    # telemetry behaviour and import no telemetry module -- but the ownership
+    # predicate reads code, not intent, and is right to flag the reference.
+    "mas/tests/test_release_gates_workflow.py",
     "mas/tests/test_provider_attempt_telemetry_capture.py",
     "mas/tests/test_provider_attempt_telemetry_capture_failures.py",
     "mas/tests/test_provider_attempt_telemetry_credentials.py",

@@ -181,10 +181,92 @@ Selecting a gate and authorizing spend are separate acts, and a live job needs
 both. Nothing is authorized by default.
 
 * **Pull request** — the PR must be **non-Draft**, carry the **`paid-eval`**
-  label, and carry **exactly one** gate label (`gate-a-anthropic-primary` or
-  `gate-b-openai-fallback`). Both gate labels at once authorizes neither.
+  label, carry **exactly one** gate label (`gate-a-anthropic-primary` or
+  `gate-b-openai-fallback`), *and* the event itself must be the act that
+  completed that state. Both gate labels at once authorizes neither.
 * **Manual dispatch** — choose `provider_gate` (default `none`, which runs
-  nothing paid) **and** type `RUN-PAID` into `confirm_paid_execution`.
+  nothing paid) **and** tick `confirm_paid_execution` (a boolean, default
+  `false`).
+
+#### The event must authorize, not just the labels
+
+Label *presence* is sticky: once `paid-eval` and a gate label are on a Ready PR
+they stay there, and a guard that tests only presence treats every later
+`labeled` event as a fresh instruction to spend. Adding `documentation` to an
+already-labelled PR started a full paid eval.
+
+So `github.event.label.name` must itself be a label that **materially completes**
+the authorization, which is exactly two labels per gate:
+
+| newly added label | authorizes | only when |
+|---|---|---|
+| `paid-eval` | that gate | exactly one gate label was already present |
+| `gate-a-anthropic-primary` | Gate A | `paid-eval` already present, Gate B label absent |
+| `gate-b-openai-fallback` | Gate B | `paid-eval` already present, Gate A label absent |
+| anything else | **nothing** | — |
+
+`ready_for_review` also authorizes, but only when the PR is already in a complete
+and unambiguous state at that instant.
+
+`opened`, `synchronize`, `reopened`, `unlabeled` and `converted_to_draft`
+authorize nothing, ever. A `git push` to a fully-labelled PR does not re-spend.
+
+Re-adding a label that is already present emits no `labeled` event at all.
+Removing and re-adding one does — and that is a deliberate human act on a
+materially-authorizing label, so it is treated as a genuine new authorization
+rather than an accident.
+
+#### Concurrency: what may cancel what
+
+Runs are bucketed by whether they could spend money.
+
+| event class | concurrency group | `cancel-in-progress` |
+|---|---|---|
+| `labeled`, `ready_for_review`, `workflow_dispatch` | `evals-<pr>-paid-<head-sha>` | **false** |
+| everything else | `evals-<pr>-routine` | true |
+
+* An event that authorizes nothing **cannot terminate a paid gate mid-call** —
+  routine events are in a different bucket, and same-SHA authorizing events
+  queue rather than cancel.
+* Evidence stays bound to the commit it was measured on: a new authorization on
+  a **new** head SHA gets its own group and its own run, so an older run's
+  artifacts are never silently replaced by a newer commit's results under the
+  same identity.
+* Only the free mock smoke job runs under a routine event, so cancelling those
+  costs nothing.
+
+#### Pre-merge dispatch is not available
+
+`workflow_dispatch` inputs are read from the workflow file on the **default
+branch**. `provider_gate` and `confirm_paid_execution` do not exist on `main`
+yet, so dispatching this workflow from the branch offers only `threshold` and
+cannot select a gate or confirm spend.
+
+**Pre-merge Gate A must therefore be authorized by the PR-event route above.**
+Manual dispatch becomes available after integration. Either way the guard fails
+closed: an unsupplied gate input is not a gate identity, so nothing paid runs.
+
+#### Threshold is data, never code
+
+`threshold` reaches the runner as a quoted environment value (`$EVAL_THRESHOLD`),
+never interpolated into shell source, and is validated by
+`python -m evals.release_gates --validate-threshold` **before** any provider
+credential is in scope. Only a plain decimal in `[0.0, 1.0]` is accepted; `nan`,
+`inf`, shell metacharacters and command substitutions are refused as
+configuration errors. The rejected value is never echoed into a log. The release
+default remains `0.75`.
+
+#### Operational precondition: the nightly Anthropic cron
+
+`.github/workflows/evals-nightly-batch.yml` runs `evals.run_evals_batch` against
+`secrets.ANTHROPIC_API_KEY` on a `0 6 * * *` schedule. It is a **separate
+workflow with no concurrency group**, so it neither cancels nor is cancelled by
+a release gate — but it does spend on the same Anthropic account.
+
+Before authorizing a live Gate A run, confirm no nightly batch run is active or
+imminent. Disabling or cancelling that automation is a **separate act requiring
+its own authorization**; it is not part of gate authorization and must not be
+done implicitly.
 
 Each preflight probes exactly the models that gate's provider can actually be
 routed to, derived from the routing tables by
@@ -210,6 +292,37 @@ effective model, stop reason, visible-content status and length, refusal status
 and reasoning tokens where the provider reports them. Reasoning-token counts are
 recorded only when observed — an unreported count stays `unknown`, never `0`.
 No prompt, response, refusal or reasoning **text** is ever recorded.
+
+#### Three identities, three sources
+
+Requested, selected and provider-observed identity are different facts, and the
+artifact keeps them apart:
+
+| field | source | shape |
+|---|---|---|
+| `requested_provider` / `requested_model` | configuration / the request | plain string |
+| `selected_provider` / `selected_model` | gateway routing decision | plain string |
+| `used_provider` | gateway's record of which provider it called | plain string |
+| `effective_model` | **provider observation only** | value envelope |
+| `stop_reason`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `reasoning_tokens`, `content_status`, `visible_content_length`, `refusal_status` | **provider observation only** | value envelope |
+
+`LLMResponse.model_used` is **not** provider evidence — every construction site
+in both adapters sets it from the *requested* model, and the gateway re-asserts
+it from `config.model`. Reading it as an effective model reported the request
+back as though the provider had confirmed it, so no provider-observed field is
+sourced from it.
+
+When the provider supplies no model identity, `effective_model` carries the
+epistemic status (`absent`, `null`, `unsupported`, `invalid`, `unknown`) and a
+`value` of `null`. **There is no fallback to the requested or selected model.**
+
+There is no `effective_provider`: no provider echoes its own identity, so
+naming one would be a claim nothing supports. The runtime's own routing record
+is `used_provider`, and it is described as exactly that.
+
+Usage counters are envelopes for the same reason — `LLMResponse` defaults them
+to `0`, which made "never reached a provider" indistinguishable from a genuine
+zero. An observed zero is still reported as `{"status": "valid", "value": 0}`.
 
 ## Calibration philosophy
 

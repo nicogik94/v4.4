@@ -730,6 +730,29 @@ def judge_provenance(
 ) -> dict[str, Any]:
     """Provenance for the judge call. Configuration is observed, never altered.
 
+    Three different identities are recorded because they are three different
+    facts, and conflating them is how an artifact ends up asserting something no
+    provider ever said:
+
+    ``requested_*``
+        What the harness asked for. Source: `judge_config`. Always known.
+
+    ``selected_*`` / ``used_provider``
+        What the gateway decided to call, and which provider it routed to.
+        Source: the gateway's own record of its routing. Always known when a
+        call was attempted, and still *not* provider evidence.
+
+    ``effective_model``
+        What the provider said it actually ran, read off the response by the
+        telemetry channel. Source: provider observation, and **nothing else** --
+        when the provider supplies no model identity the envelope says so rather
+        than falling back to the requested or selected name.
+
+    `LLMResponse.model_used` is deliberately not consulted for the last of
+    these: every construction site in the adapters sets it from the *requested*
+    model, so reading it as provider evidence reports the request back as though
+    the provider had confirmed it. That was F-2.
+
     The judge's prompt text and response text are not read here. The rationale
     the harness already retains is unchanged and is not duplicated.
     """
@@ -738,7 +761,11 @@ def judge_provenance(
     invocations = (
         recorder.invocation_records(phases=(JUDGE_PHASE,)) if recorder is not None else []
     )
-    first = invocations[0] if invocations else None
+    # The gateway returns as soon as a candidate succeeds, so the LAST judge
+    # invocation is the one that produced the answer. Reading the first would
+    # describe a *failed* Anthropic attempt whenever the judge fell back to
+    # OpenAI -- exactly the case Gate B exists to exercise.
+    answering = invocations[-1] if invocations else None
     record = {
         "requested_provider": _label(requested_provider, limit=64),
         "requested_model": _label(requested_model, limit=128),
@@ -753,15 +780,21 @@ def judge_provenance(
         "input_chars_post_truncation": post,
         "input_truncated": bool(pre is not None and post is not None and post < pre),
         "invocation_count": len(invocations),
-        "effective_provider": _label(
+        # Runtime routing fact, not a provider echo: no provider returns its own
+        # identity, so the honest name for "which provider the gateway called"
+        # is `used_provider`. It is never called an *observed* effective provider.
+        "used_provider": _label(
             getattr(response, "provider_used", "") or "", limit=64
         ),
-        "effective_model": _label(getattr(response, "model_used", "") or "", limit=128),
         "selected_provider": _label(
             getattr(response, "selected_provider", "") or "", limit=64
         ),
         "selected_model": _label(
             getattr(response, "selected_model", "") or "", limit=128
+        ),
+        # Provider observation only. No fallback to requested or selected.
+        "effective_model": (
+            answering["effective_model"] if answering else unknown("no_invocation")
         ),
         "selection_reason": _label(
             getattr(response, "selection_reason", "") or "", limit=64
@@ -771,18 +804,30 @@ def judge_provenance(
         "attempt_count": _ordinal(getattr(response, "attempt_count", None)),
         "response_ok": bool(getattr(response, "ok", False)),
         "error_type": _token(getattr(response, "error_type", "") or "", limit=64),
-        "input_tokens": _ordinal(getattr(response, "input_tokens", None)),
-        "output_tokens": _ordinal(getattr(response, "output_tokens", None)),
-        "cache_read_tokens": _ordinal(getattr(response, "cache_read_tokens", None)),
-        "stop_reason": first["stop_reason"] if first else unknown("no_invocation"),
+        # Usage is provider observation, so it is carried in envelopes like the
+        # rest of it. `LLMResponse` defaults these counters to 0, which made a
+        # call that never reached a provider indistinguishable from one that
+        # genuinely reported zero -- the same mislabeling as F-2, one field over.
+        "input_tokens": answering["input_tokens"] if answering else unknown("no_invocation"),
+        "output_tokens": (
+            answering["output_tokens"] if answering else unknown("no_invocation")
+        ),
+        "cache_read_tokens": (
+            answering["cache_read_tokens"] if answering else unknown("no_invocation")
+        ),
+        "stop_reason": answering["stop_reason"] if answering else unknown("no_invocation"),
         "reasoning_tokens": (
-            first["reasoning_tokens"] if first else unknown("no_invocation")
+            answering["reasoning_tokens"] if answering else unknown("no_invocation")
         ),
-        "content_status": first["content_status"] if first else unknown("no_invocation"),
+        "content_status": (
+            answering["content_status"] if answering else unknown("no_invocation")
+        ),
         "visible_content_length": (
-            first["visible_content_length"] if first else unknown("no_invocation")
+            answering["visible_content_length"] if answering else unknown("no_invocation")
         ),
-        "refusal_status": first["refusal_status"] if first else unknown("no_invocation"),
+        "refusal_status": (
+            answering["refusal_status"] if answering else unknown("no_invocation")
+        ),
     }
     return record
 

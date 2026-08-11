@@ -26,6 +26,7 @@ certified product path.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from config import (
@@ -61,10 +62,45 @@ GATE_LABELS = {
 }
 PAID_EVAL_LABEL = "paid-eval"
 
-# The literal a `workflow_dispatch` operator must type to confirm paid spend.
-# A checkbox default can drift to `true`; a free-text literal cannot be
-# satisfied by omission.
-DISPATCH_CONFIRMATION_VALUE = "RUN-PAID"
+# ── Which *label event* may authorize which gate ──
+#
+# Label *presence* says what the PR is asking for.  It does not say that anyone
+# just asked for it: presence persists across every later event, so a workflow
+# keyed on presence alone treats an unrelated `labeled` event -- adding
+# `documentation` -- as a fresh instruction to spend money.  That was F-1.
+#
+# Authorization therefore needs a second fact: the event itself must be the act
+# that *completes* the authorization state.  Exactly two labels can complete it
+# for a given gate:
+#
+#   `paid-eval`      -- spend was just authorized, and this gate was already the
+#                       one selected;
+#   the gate's label -- this gate was just selected, and spend was already
+#                       authorized.
+#
+# Adding any other label completes nothing and authorizes nothing, however the
+# PR happens to be labelled at that moment.
+AUTHORIZING_LABELS = {
+    GATE_A: (PAID_EVAL_LABEL, GATE_LABELS[GATE_A]),
+    GATE_B: (PAID_EVAL_LABEL, GATE_LABELS[GATE_B]),
+}
+
+# The `pull_request` actions that can carry an authorization at all.  Every
+# other action in the trigger list -- `opened`, `synchronize`, `reopened`,
+# `unlabeled`, `converted_to_draft` -- is a state change that authorizes
+# nothing, and a push in particular must never re-spend on its own.
+AUTHORIZING_ACTIONS = ("labeled", "ready_for_review")
+
+# `workflow_dispatch` confirmation is a typed boolean, not a free-text literal.
+#
+# The previous free-text `RUN-PAID` sentinel was defended as un-satisfiable by
+# omission, which is true -- but it is satisfied by *case-insensitive
+# near-misses being rejected*, i.e. it turns a safety property into a string
+# comparison, and it gives the operator no schema-level signal that the field is
+# a confirmation.  A `type: boolean` input defaults to `false`, is rendered as an
+# unchecked box, and cannot be satisfied by any typo.
+DISPATCH_CONFIRMATION_INPUT = "confirm_paid_execution"
+DISPATCH_GATE_INPUT = "provider_gate"
 
 GATE_TITLES = {
     GATE_A: "Gate A - Anthropic primary release validation",
@@ -225,6 +261,78 @@ def gate_from_env(environ: dict | None = None) -> str:
     return normalize_gate(source.get(GATE_ENV_VAR, ""))
 
 
+# ═══ Threshold input ═══
+#
+# The pass-rate threshold is the one live input an operator types by hand, and
+# it used to be interpolated by `${{ }}` directly into the shell source of steps
+# that hold a provider secret.  There it was *code*, so `0.75; env` was a
+# command.  It is now passed as an environment value and quoted as a single
+# argument, and validated here before any provider-touching step runs.
+#
+# Validation is deliberately strict rather than forgiving: a threshold that
+# cannot be read as a number is a *configuration* failure, and configuration
+# failures must stop the run before it can become a provider failure.
+
+THRESHOLD_ENV_VAR = "EVAL_THRESHOLD"
+DEFAULT_THRESHOLD = 0.75
+
+
+class ThresholdError(ValueError):
+    """An operator-supplied threshold that must not reach a provider job."""
+
+
+# A plain decimal literal and nothing else. `float()` on its own would accept
+# `nan`, `inf`, `1_0`, and embedded newlines -- none of which is a pass rate.
+_DECIMAL_RE = re.compile(r"\+?\d+(?:\.\d*)?|\+?\.\d+")
+
+
+def normalize_threshold(raw: object) -> float:
+    """Parse an operator-supplied threshold, or refuse it.
+
+    Accepts only a finite decimal number in ``[0.0, 1.0]``.  Everything else --
+    shell metacharacters, command substitutions, newlines, `nan`, `inf`,
+    hex/underscore Python float literals -- is refused, because the value's only
+    legitimate shape is a plain pass-rate.
+    """
+
+    if isinstance(raw, bool):
+        raise ThresholdError("threshold must be a number, not a boolean")
+    if isinstance(raw, (int, float)):
+        text = repr(float(raw))
+    elif isinstance(raw, str):
+        text = raw.strip()
+    else:
+        raise ThresholdError(f"threshold must be a number, got {type(raw).__name__}")
+
+    if not text:
+        raise ThresholdError("threshold is empty")
+    # `float()` accepts `nan`, `inf`, `1_0` and surrounding whitespace/newlines;
+    # none of those are a pass rate, so the shape is pinned before conversion.
+    #
+    # The rejected text is deliberately NOT quoted back. This message reaches
+    # the log of a job that holds a provider secret, and echoing operator input
+    # there would let a hostile threshold place chosen text in that log.
+    if not _DECIMAL_RE.fullmatch(text):
+        raise ThresholdError("threshold is not a plain decimal number")
+    parsed = float(text)
+    if not 0.0 <= parsed <= 1.0:
+        # Also not echoed. A parsed float is harmless in isolation, but "never
+        # echo operator input" is only a usable invariant if it has no
+        # exceptions to reason about at the call site.
+        raise ThresholdError("threshold is outside [0.0, 1.0]")
+    return parsed
+
+
+def threshold_from_env(environ: dict | None = None) -> float:
+    """The validated threshold for this job, defaulting to the release value."""
+
+    source = os.environ if environ is None else environ
+    raw = source.get(THRESHOLD_ENV_VAR, "")
+    if not str(raw).strip():
+        return DEFAULT_THRESHOLD
+    return normalize_threshold(raw)
+
+
 def is_live_gate(gate: str) -> bool:
     return normalize_gate(gate) in GATE_IDENTITIES
 
@@ -314,3 +422,41 @@ def evaluate_gate_outcome(
         return GateOutcome(normalized, RESULT_QUALITY_FAILURE, (f"pass_rate {pass_rate:.4f} < {threshold}",))
 
     return GateOutcome(normalized, RESULT_PASS, ())
+
+
+def _main() -> int:
+    """`python -m evals.release_gates --validate-threshold`.
+
+    Runs as the first step of each gate's preflight job, before any provider
+    credential is used, so a malformed threshold fails the gate as a
+    configuration error rather than surfacing later as a provider or quality
+    problem.  The value is never echoed back: it is operator input, and a
+    diagnostic that prints it would put attacker-chosen text in a log line of a
+    job that holds a secret.
+    """
+
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="evals.release_gates")
+    parser.add_argument(
+        "--validate-threshold",
+        action="store_true",
+        help=f"Validate ${THRESHOLD_ENV_VAR} and exit non-zero if it is unusable",
+    )
+    args = parser.parse_args()
+
+    if not args.validate_threshold:
+        parser.error("nothing to do; pass --validate-threshold")
+
+    try:
+        threshold = threshold_from_env()
+    except ThresholdError as exc:
+        print(f"THRESHOLD REJECTED: {exc.args[0] if exc.args else 'invalid'}")
+        print("Refusing to start a provider job with an unusable threshold.")
+        return 2
+    print(f"Threshold OK: {threshold}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    raise SystemExit(_main())

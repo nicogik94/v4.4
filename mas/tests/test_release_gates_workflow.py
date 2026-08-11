@@ -11,6 +11,8 @@ workflow breaks these tests rather than quietly widening what can spend money.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from copy import deepcopy
 from functools import lru_cache
@@ -31,6 +33,7 @@ from gha_expressions import (  # noqa: E402
     dispatch_context,
     evaluate,
     pull_request_context,
+    render,
     with_needs,
 )
 
@@ -39,7 +42,6 @@ GATE_B = release_gates.GATE_B
 LABEL_A = release_gates.GATE_LABELS[GATE_A]
 LABEL_B = release_gates.GATE_LABELS[GATE_B]
 PAID = release_gates.PAID_EVAL_LABEL
-CONFIRM = release_gates.DISPATCH_CONFIRMATION_VALUE
 
 GATE_A_PREFLIGHT = "gate-a-anthropic-preflight"
 GATE_A_SHARD = "gate-a-real-eval-shard"
@@ -108,83 +110,178 @@ def _job_text(name: str) -> str:
     return yaml.safe_dump(jobs()[name], default_flow_style=False, width=10**9)
 
 
+def _run_scripts(name: str) -> list[str]:
+    """Every step's `run:` script, verbatim.
+
+    `_job_text` round-trips through the YAML dumper, which re-escapes quotes --
+    so a shell-quoting assertion made against it would be asserting about the
+    dumper, not about what the runner executes.
+    """
+
+    return [
+        step["run"]
+        for step in jobs()[name].get("steps", [])
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+
+
+def _all_run_text(name: str) -> str:
+    return "\n".join(_run_scripts(name))
+
+
 # ════════════════════ §25 static authorization matrix ════════════════════
 #
 # A live provider job requires BOTH an authorization act and a gate selection.
 # Neither alone is sufficient, and no default supplies either.
 
+UNRELATED = "documentation"
+
 AUTHORIZATION_MATRIX = [
     # id, context, jobs expected eligible
-    ("A1 draft + no label", pull_request_context(draft=True, labels=[]), ()),
-    ("A2 ready + no label", pull_request_context(draft=False, labels=[]), ()),
-    ("A3 draft + paid-eval", pull_request_context(draft=True, labels=[PAID]), ()),
+    #
+    # ── the F-1 rows ──────────────────────────────────────────────────────
+    #
+    # Label *presence* is sticky; a label *event* is not. The workflow used to
+    # test only presence, so adding any label at all to an already-labelled
+    # Ready PR re-authorized a full paid eval. A2/A3 are that exact defect.
     (
-        "A3b draft + paid-eval + gate A",
-        pull_request_context(draft=True, labels=[PAID, LABEL_A]),
+        "A1 draft + every authorizing label",
+        pull_request_context(draft=True, labels=[PAID, LABEL_A], label=PAID),
         (),
     ),
     (
-        "A4 ready + paid-eval + gate A",
-        pull_request_context(draft=False, labels=[PAID, LABEL_A]),
+        "A2 ready + paid + gate A, unrelated label added",
+        pull_request_context(
+            draft=False, labels=[PAID, LABEL_A, UNRELATED], label=UNRELATED
+        ),
+        (),
+    ),
+    (
+        "A3 ready + paid + gate B, unrelated label added",
+        pull_request_context(
+            draft=False, labels=[PAID, LABEL_B, UNRELATED], label=UNRELATED
+        ),
+        (),
+    ),
+    (
+        "A4 paid-eval added while gate A already present",
+        pull_request_context(draft=False, labels=[PAID, LABEL_A], label=PAID),
         GATE_A_JOBS,
     ),
     (
-        "A5 ready + paid-eval + gate B",
-        pull_request_context(draft=False, labels=[PAID, LABEL_B]),
-        GATE_B_JOBS,
-    ),
-    (
-        "A6 dispatch gate A + confirmation",
-        dispatch_context(provider_gate=GATE_A, confirm=CONFIRM),
+        "A5 gate A added while paid-eval already present",
+        pull_request_context(draft=False, labels=[PAID, LABEL_A], label=LABEL_A),
         GATE_A_JOBS,
     ),
     (
-        "A7 dispatch gate B + confirmation",
-        dispatch_context(provider_gate=GATE_B, confirm=CONFIRM),
+        "A6 gate B added while paid-eval already present",
+        pull_request_context(draft=False, labels=[PAID, LABEL_B], label=LABEL_B),
         GATE_B_JOBS,
     ),
-    ("A8a dispatch gate none", dispatch_context(provider_gate="none", confirm=CONFIRM), ()),
-    ("A8b dispatch gate absent", dispatch_context(provider_gate=None, confirm=CONFIRM), ()),
-    ("A8c dispatch invalid gate", dispatch_context(provider_gate="gate_c", confirm=CONFIRM), ()),
     (
-        "A8d dispatch gate A, no confirmation",
-        dispatch_context(provider_gate=GATE_A, confirm=None),
+        "A7 both gate labels present",
+        pull_request_context(draft=False, labels=[PAID, LABEL_A, LABEL_B], label=PAID),
         (),
     ),
     (
-        "A8e dispatch gate A, wrong confirmation",
-        dispatch_context(provider_gate=GATE_A, confirm="yes"),
-        (),
-    ),
-    (
-        "A8f ready + gate label but no paid-eval",
-        pull_request_context(draft=False, labels=[LABEL_A]),
-        (),
-    ),
-    (
-        "A8g ready + paid-eval + BOTH gate labels",
-        pull_request_context(draft=False, labels=[PAID, LABEL_A, LABEL_B]),
-        (),
-    ),
-    (
-        "A9 fully authorized PR, ordinary push (synchronize)",
+        "A8 synchronize after a prior authorization",
         pull_request_context(draft=False, labels=[PAID, LABEL_A], action="synchronize"),
         (),
     ),
     (
-        "A9b fully authorized PR, reopened",
-        pull_request_context(draft=False, labels=[PAID, LABEL_B], action="reopened"),
+        "A9 reopened",
+        pull_request_context(draft=False, labels=[PAID, LABEL_A], action="reopened"),
         (),
     ),
     (
-        "A9c fully authorized PR, opened",
+        "A10 unlabeled",
+        pull_request_context(
+            draft=False, labels=[PAID, LABEL_A], action="unlabeled", label=UNRELATED
+        ),
+        (),
+    ),
+    (
+        "A11 converted_to_draft",
+        pull_request_context(
+            draft=True, labels=[PAID, LABEL_A], action="converted_to_draft"
+        ),
+        (),
+    ),
+    (
+        "A12 ready_for_review in a correct Gate A state",
+        pull_request_context(draft=False, labels=[PAID, LABEL_A], action="ready_for_review"),
+        GATE_A_JOBS,
+    ),
+    (
+        "A13 ready_for_review in a correct Gate B state",
+        pull_request_context(draft=False, labels=[PAID, LABEL_B], action="ready_for_review"),
+        GATE_B_JOBS,
+    ),
+    (
+        "A14 gate A added while the competing gate is also present",
+        pull_request_context(draft=False, labels=[PAID, LABEL_A, LABEL_B], label=LABEL_A),
+        (),
+    ),
+    #
+    # ── incomplete authorization states ───────────────────────────────────
+    #
+    ("A17 draft + no label", pull_request_context(draft=True, labels=[]), ()),
+    ("A18 ready + no label", pull_request_context(draft=False, labels=[]), ()),
+    (
+        "A19 paid-eval alone, just added",
+        pull_request_context(draft=False, labels=[PAID], label=PAID),
+        (),
+    ),
+    (
+        "A20 gate label alone, just added",
+        pull_request_context(draft=False, labels=[LABEL_A], label=LABEL_A),
+        (),
+    ),
+    (
+        "A21 ready_for_review with no labels at all",
+        pull_request_context(draft=False, labels=[], action="ready_for_review"),
+        (),
+    ),
+    (
+        "A22 opened with a full label set",
         pull_request_context(draft=False, labels=[PAID, LABEL_B], action="opened"),
         (),
     ),
+    #
+    # ── workflow_dispatch ─────────────────────────────────────────────────
+    #
     (
-        "A10 ready_for_review with full authorization",
-        pull_request_context(draft=False, labels=[PAID, LABEL_B], action="ready_for_review"),
+        "A23 dispatch gate A + confirmed",
+        dispatch_context(provider_gate=GATE_A, confirm=True),
+        GATE_A_JOBS,
+    ),
+    (
+        "A24 dispatch gate B + confirmed",
+        dispatch_context(provider_gate=GATE_B, confirm=True),
         GATE_B_JOBS,
+    ),
+    ("A25 dispatch gate none", dispatch_context(provider_gate="none", confirm=True), ()),
+    ("A26 dispatch gate absent", dispatch_context(provider_gate=None, confirm=True), ()),
+    ("A27 dispatch invalid gate", dispatch_context(provider_gate="gate_c", confirm=True), ()),
+    (
+        "A28 dispatch gate A, confirmation omitted",
+        dispatch_context(provider_gate=GATE_A, confirm=None),
+        (),
+    ),
+    (
+        "A29 dispatch gate A, confirmation false",
+        dispatch_context(provider_gate=GATE_A, confirm=False),
+        (),
+    ),
+    (
+        "A30 dispatch gate A, confirmation as a string",
+        dispatch_context(provider_gate=GATE_A, confirm="true"),
+        (),
+    ),
+    (
+        "A31 dispatch gate A, retired RUN-PAID sentinel",
+        dispatch_context(provider_gate=GATE_A, confirm="RUN-PAID"),
+        (),
     ),
 ]
 
@@ -247,6 +344,93 @@ def test_ordinary_synchronize_on_an_unlabeled_pr_authorizes_nothing():
 
 
 @pytest.mark.parametrize("gate_label", [LABEL_A, LABEL_B])
+@pytest.mark.parametrize(
+    "unrelated", ["documentation", "bug", "needs-review", PAID + "-x", ""]
+)
+def test_f1_an_unrelated_label_never_authorizes_paid_execution(gate_label, unrelated):
+    """F-1, the demonstrated MAJOR finding.
+
+    Pre-fix, the guards asked only `action == 'labeled'` and then checked label
+    *presence*. On a Ready PR already carrying `paid-eval` and one gate label,
+    adding ANY label re-satisfied every clause and a full paid eval started.
+    """
+
+    context = with_needs(
+        pull_request_context(
+            draft=False,
+            labels=[PAID, gate_label, unrelated],
+            action="labeled",
+            label=unrelated,
+        ),
+        gate_a_anthropic_preflight="success",
+        gate_b_openai_preflight="success",
+    )
+    for job in LIVE_JOBS:
+        assert not evaluate(job_if(job), context), job
+
+
+@pytest.mark.parametrize("gate_label", [LABEL_A, LABEL_B])
+def test_f1_only_a_materially_completing_label_authorizes(gate_label):
+    """The minimal accepted label set is exactly {paid-eval, this gate's label}.
+
+    Nothing else completes the authorization state, so nothing else may start a
+    provider job -- and each guard names only its OWN gate label, so the other
+    gate's label cannot authorize it either.
+    """
+
+    accepted = set(release_gates.AUTHORIZING_LABELS[
+        GATE_A if gate_label == LABEL_A else GATE_B
+    ])
+    assert accepted == {PAID, gate_label}
+
+    expected = GATE_A_JOBS if gate_label == LABEL_A else GATE_B_JOBS
+    for candidate in {PAID, LABEL_A, LABEL_B, "documentation"}:
+        context = with_needs(
+            pull_request_context(
+                draft=False, labels=[PAID, gate_label], action="labeled", label=candidate
+            ),
+            gate_a_anthropic_preflight="success",
+            gate_b_openai_preflight="success",
+        )
+        eligible = tuple(job for job in LIVE_JOBS if evaluate(job_if(job), context))
+        if candidate in accepted:
+            assert eligible == expected, f"label {candidate!r} should authorize"
+        else:
+            assert eligible == (), f"label {candidate!r} must not authorize"
+
+
+@pytest.mark.parametrize(
+    "action", ["opened", "synchronize", "reopened", "unlabeled", "converted_to_draft"]
+)
+@pytest.mark.parametrize("gate_label", [LABEL_A, LABEL_B])
+def test_only_labeled_and_ready_for_review_can_ever_authorize(action, gate_label):
+    """Every other trigger type in `on.pull_request.types` authorizes nothing."""
+
+    context = with_needs(
+        pull_request_context(
+            draft=False, labels=[PAID, gate_label], action=action, label=PAID
+        ),
+        gate_a_anthropic_preflight="success",
+        gate_b_openai_preflight="success",
+    )
+    for job in LIVE_JOBS:
+        assert not evaluate(job_if(job), context), f"{action}: {job}"
+
+
+def test_every_authorizing_guard_reads_the_event_label_name():
+    """The structural form of the F-1 fix, not just its behavior.
+
+    A guard that accepts `labeled` without consulting `github.event.label.name`
+    is the defect, whatever else it checks.
+    """
+
+    for job in LIVE_JOBS:
+        expression = job_if(job)
+        assert "github.event.action == 'labeled'" in expression, job
+        assert "github.event.label.name" in expression, job
+
+
+@pytest.mark.parametrize("gate_label", [LABEL_A, LABEL_B])
 def test_a_push_to_an_already_authorized_pr_does_not_respend(gate_label):
     """§34.20, the sharper form.
 
@@ -266,12 +450,292 @@ def test_a_push_to_an_already_authorized_pr_does_not_respend(gate_label):
         assert not evaluate(job_if(job), context), job
 
 
+# ════════════════════ concurrency / immutable evidence ════════════════════
+#
+# Two properties, one expression pair:
+#
+#   A15  an event that authorizes nothing must not be able to destroy paid work
+#        that is already running;
+#   A16  evidence must stay bound to the commit it was measured on, so a newer
+#        authorization gets its own run rather than replacing an older one's
+#        results.
+
+
+def _concurrency(context):
+    """The rendered group and the resolved cancel policy for one event."""
+
+    group = render(workflow()["concurrency"]["group"], context)
+    cancel = evaluate(workflow()["concurrency"]["cancel-in-progress"], context)
+    return group, cancel
+
+
+AUTHORIZING_EVENTS = [
+    ("labeled", lambda sha: pull_request_context(
+        draft=False, labels=[PAID, LABEL_A], action="labeled", label=PAID, head_sha=sha)),
+    ("ready_for_review", lambda sha: pull_request_context(
+        draft=False, labels=[PAID, LABEL_A], action="ready_for_review", head_sha=sha)),
+]
+ROUTINE_EVENTS = [
+    ("synchronize", lambda sha: pull_request_context(
+        draft=False, labels=[PAID, LABEL_A], action="synchronize", head_sha=sha)),
+    ("opened", lambda sha: pull_request_context(
+        draft=False, labels=[], action="opened", head_sha=sha)),
+    ("reopened", lambda sha: pull_request_context(
+        draft=False, labels=[PAID, LABEL_A], action="reopened", head_sha=sha)),
+    ("unlabeled", lambda sha: pull_request_context(
+        draft=False, labels=[PAID], action="unlabeled", label=LABEL_A, head_sha=sha)),
+    ("converted_to_draft", lambda sha: pull_request_context(
+        draft=True, labels=[PAID, LABEL_A], action="converted_to_draft", head_sha=sha)),
+]
+
+
+@pytest.mark.parametrize("name,build", AUTHORIZING_EVENTS, ids=[n for n, _ in AUTHORIZING_EVENTS])
+def test_a15_an_event_that_could_spend_never_cancels_work_in_progress(name, build):
+    group, cancel = _concurrency(build("AAA"))
+    assert cancel is False, f"{name} may cancel a running paid gate"
+    assert group.endswith("paid-AAA"), group
+
+
+@pytest.mark.parametrize("name,build", ROUTINE_EVENTS, ids=[n for n, _ in ROUTINE_EVENTS])
+def test_a15_routine_events_share_one_cancellable_bucket(name, build):
+    """Only the free mock smoke job runs under these, so superseding is savings."""
+
+    group, cancel = _concurrency(build("AAA"))
+    assert cancel is True, name
+    assert group.endswith("-routine"), group
+
+
+def test_a15_an_unrelated_label_cannot_replace_a_running_paid_gate():
+    """The F-1 concurrency consequence, stated as its own property.
+
+    An unrelated label lands in the same bucket as the paid run it might have
+    displaced -- but `cancel-in-progress` is false there, so it queues behind
+    that run instead of terminating it. It also authorizes no job of its own.
+    """
+
+    running, _ = _concurrency(
+        pull_request_context(draft=False, labels=[PAID, LABEL_A],
+                             action="labeled", label=PAID, head_sha="AAA")
+    )
+    incidental_context = pull_request_context(
+        draft=False, labels=[PAID, LABEL_A, "documentation"],
+        action="labeled", label="documentation", head_sha="AAA",
+    )
+    incidental, cancel = _concurrency(incidental_context)
+
+    assert cancel is False
+    assert incidental == running
+
+    full = with_needs(incidental_context, gate_a_anthropic_preflight="success",
+                      gate_b_openai_preflight="success")
+    for job in LIVE_JOBS:
+        assert not evaluate(job_if(job), full), job
+
+
+def test_a15_a_push_cannot_reach_the_bucket_a_paid_gate_runs_in():
+    running, _ = _concurrency(
+        pull_request_context(draft=False, labels=[PAID, LABEL_A],
+                             action="labeled", label=PAID, head_sha="AAA")
+    )
+    pushed, cancel = _concurrency(
+        pull_request_context(draft=False, labels=[PAID, LABEL_A],
+                             action="synchronize", head_sha="BBB")
+    )
+    assert cancel is True
+    assert pushed != running
+
+
+def test_a16_evidence_for_one_sha_is_never_superseded_by_another():
+    """A new authorization on a new commit gets its own group and its own run.
+
+    Nothing cancels the older run, so its artifacts keep describing the commit
+    they were actually measured on rather than being silently replaced by a
+    newer commit's results under the same identity.
+    """
+
+    old, _ = _concurrency(
+        pull_request_context(draft=False, labels=[PAID, LABEL_A],
+                             action="labeled", label=PAID, head_sha="AAA")
+    )
+    new, cancel = _concurrency(
+        pull_request_context(draft=False, labels=[PAID, LABEL_A],
+                             action="labeled", label=PAID, head_sha="BBB")
+    )
+    assert old != new
+    assert "AAA" in old and "BBB" in new
+    assert cancel is False
+
+
+def test_a16_the_paid_group_is_keyed_to_the_head_commit():
+    expression = workflow()["concurrency"]["group"]
+    assert "github.event.pull_request.head.sha" in expression
+    assert "format('paid-{0}'" in expression
+
+
+def test_dispatch_runs_are_also_never_cancelled():
+    _, cancel = _concurrency(dispatch_context(provider_gate=GATE_A, confirm=True))
+    assert cancel is False
+
+
 def test_smoke_has_no_if_guard_and_is_always_free():
     smoke = jobs()["smoke"]
     assert "if" not in smoke
     text = _job_text("smoke")
     assert "secrets." not in text
     assert "--mock" in text
+
+
+# ════════════════════ threshold input safety ════════════════════
+#
+# `threshold` is the one live input an operator types by hand. It used to be
+# interpolated by `${{ }}` straight into the `run:` script of steps holding a
+# provider secret, where `0.75; env` is not a bad number -- it is a command.
+
+HOSTILE_THRESHOLDS = [
+    "0.75; env",
+    "0.75; echo $ANTHROPIC_API_KEY",
+    "0.75 && echo pwned",
+    "0.75 | tee /tmp/pwned",
+    "$(env)",
+    "`env`",
+    "0.75$(echo INJECTED)",
+    "'; env; '",
+    '" ; env ; "',
+    "0.75\nenv",
+    "0.75 > /tmp/pwned",
+    "0.75 & env",
+    "--threshold 0.0",
+    "nan",
+    "inf",
+    "-inf",
+    "1_0",
+    "0x1",
+    "2.0",
+    "-0.5",
+    "sk-ant-SENTINEL",
+]
+
+# Blank is the ABSENCE of an override, not a hostile value: it legitimately
+# resolves to the release default.
+BLANK_THRESHOLDS = ["", "   ", "\n", "\t"]
+
+
+@pytest.mark.parametrize("job", [GATE_A_SHARD, GATE_B_SHARD, GATE_A_AGGREGATE, GATE_B_AGGREGATE])
+def test_threshold_is_never_interpolated_into_shell_source(job):
+    """The structural property: no `${{ }}` anywhere in an executable script."""
+
+    for script in _run_scripts(job):
+        assert "${{" not in script, f"{job}: expression interpolated into shell source"
+    assert '--threshold "$EVAL_THRESHOLD"' in _all_run_text(job)
+
+
+@pytest.mark.parametrize("job", LIVE_JOBS)
+def test_no_live_job_interpolates_any_expression_into_a_run_script(job):
+    for script in _run_scripts(job):
+        assert "${{" not in script, job
+
+
+@pytest.mark.parametrize("job", [GATE_A_SHARD, GATE_B_SHARD, GATE_A_AGGREGATE, GATE_B_AGGREGATE])
+def test_threshold_arrives_through_the_environment(job):
+    envs = _all_env(jobs()[job])
+    assert any("EVAL_THRESHOLD" in env for env in envs), job
+
+
+@pytest.mark.parametrize("preflight", [GATE_A_PREFLIGHT, GATE_B_PREFLIGHT])
+def test_threshold_is_validated_before_any_credential_is_used(preflight):
+    """A malformed threshold must fail as configuration, not as a provider error."""
+
+    steps = jobs()[preflight]["steps"]
+    validate_at = next(
+        i for i, s in enumerate(steps) if s.get("name") == "Validate threshold input"
+    )
+    secret_at = [
+        i
+        for i, s in enumerate(steps)
+        if "secrets." in yaml.safe_dump(s.get("env") or {}, width=10**9)
+    ]
+    assert secret_at, preflight
+    assert validate_at < min(secret_at), "threshold validated after a secret is in scope"
+    assert "${{" not in steps[validate_at]["run"]
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_THRESHOLDS)
+def test_a_hostile_threshold_is_refused_by_the_real_validator(hostile):
+    """The value is read the way the runner supplies it: an env var, not code."""
+
+    with pytest.raises(release_gates.ThresholdError):
+        release_gates.threshold_from_env({release_gates.THRESHOLD_ENV_VAR: hostile})
+
+
+@pytest.mark.parametrize("blank", BLANK_THRESHOLDS)
+def test_an_absent_threshold_resolves_to_the_release_default(blank):
+    assert release_gates.threshold_from_env(
+        {release_gates.THRESHOLD_ENV_VAR: blank}
+    ) == 0.75
+
+
+@pytest.mark.parametrize("hostile", HOSTILE_THRESHOLDS)
+def test_a_hostile_threshold_reaches_the_subprocess_as_inert_data(hostile, tmp_path):
+    """End-to-end through the actual `--validate-threshold` entry point.
+
+    The value is passed exactly as the workflow passes it. If any of these were
+    still shell source, the sentinel would execute; the assertion is that the
+    process exits non-zero having executed nothing.
+    """
+
+
+
+    marker = tmp_path / "pwned"
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(MAS_ROOT),
+        release_gates.THRESHOLD_ENV_VAR: hostile.replace("/tmp/pwned", str(marker)),
+        "ANTHROPIC_API_KEY": "",
+        "OPENAI_API_KEY": "",
+        "SENTINEL_SECRET": "sk-ant-DO-NOT-LEAK",
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "evals.release_gates", "--validate-threshold"],
+        cwd=MAS_ROOT, env=env, capture_output=True, text=True, timeout=120,
+    )
+
+    assert result.returncode != 0, f"{hostile!r} was accepted"
+    assert not marker.exists(), f"{hostile!r} executed a redirect"
+    combined = result.stdout + result.stderr
+    assert "sk-ant-DO-NOT-LEAK" not in combined
+    assert "INJECTED" not in combined
+    # The rejected value itself is never echoed into the log of a job that
+    # holds a provider secret.
+    assert hostile not in combined
+
+
+def test_the_release_threshold_default_is_unchanged():
+    assert release_gates.DEFAULT_THRESHOLD == 0.75
+    assert release_gates.threshold_from_env({}) == 0.75
+    assert release_gates.threshold_from_env({release_gates.THRESHOLD_ENV_VAR: ""}) == 0.75
+    assert release_gates.normalize_threshold("0.75") == 0.75
+
+
+@pytest.mark.parametrize("good", ["0", "1", "0.0", "1.0", "0.75", ".5", "0.", "+0.75"])
+def test_legitimate_thresholds_are_still_accepted(good):
+    value = release_gates.normalize_threshold(good)
+    assert 0.0 <= value <= 1.0
+
+
+def test_validate_threshold_entry_point_accepts_the_default(tmp_path):
+
+
+    result = subprocess.run(
+        [sys.executable, "-m", "evals.release_gates", "--validate-threshold"],
+        cwd=MAS_ROOT,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(MAS_ROOT),
+            release_gates.THRESHOLD_ENV_VAR: "0.75",
+        },
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ════════════════════ §26 credential matrix ════════════════════
@@ -398,7 +862,7 @@ def test_a_non_successful_preflight_blocks_shards_and_aggregate(
     """§27 and §34.8 -- a skipped preflight must never produce an aggregate."""
 
     context = with_needs(
-        dispatch_context(provider_gate=gate, confirm=CONFIRM),
+        dispatch_context(provider_gate=gate, confirm=True),
         **{preflight: preflight_result},
     )
     assert not evaluate(job_if(shard), context)
@@ -510,10 +974,13 @@ def test_case_universe_shard_split_and_threshold_are_unchanged():
         text = _job_text(job)
         assert jobs()[job]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3, 4, 5]
         assert "--shard-count 6" in text
-        assert "--threshold ${{ github.event.inputs.threshold || '0.75' }}" in text
+        # The threshold still defaults to 0.75 and still reaches the runner --
+        # but as a quoted environment value, never as shell source. See the
+        # injection tests below.
+        assert '--threshold "$EVAL_THRESHOLD"' in _all_run_text(job)
         assert jobs()[job]["strategy"]["fail-fast"] is False
     for job in (GATE_A_AGGREGATE, GATE_B_AGGREGATE):
-        assert "--threshold ${{ github.event.inputs.threshold || '0.75' }}" in _job_text(job)
+        assert '--threshold "$EVAL_THRESHOLD"' in _all_run_text(job)
 
 
 def test_both_gates_run_the_same_case_definitions():
@@ -590,7 +1057,11 @@ def test_dispatch_inputs_default_to_no_gate_and_no_confirmation():
         workflow()["on"]["workflow_dispatch"]["inputs"]
     assert inputs["provider_gate"]["default"] == release_gates.GATE_NONE
     assert inputs["provider_gate"]["options"] == list(release_gates.GATE_CHOICES)
-    assert inputs["confirm_paid_execution"]["default"] == ""
+    # A typed boolean, defaulting to false: an unchecked box, not a free-text
+    # sentinel whose safety rests on a string comparison.
+    assert inputs["confirm_paid_execution"]["type"] == "boolean"
+    assert inputs["confirm_paid_execution"]["default"] is False
+    assert inputs["threshold"]["default"] == "0.75"
 
 
 # ════════════════════ result taxonomy (§22 / §23) ════════════════════
@@ -820,3 +1291,330 @@ def test_a_gateless_shard_cannot_be_absorbed_into_a_gate_aggregate(tmp_path):
 
     assert summary["aggregation_errors"]
     assert summary["ok"] is False
+
+
+# ════════════════════ mutation tests ════════════════════
+#
+# The matrices above prove the guards behave correctly TODAY. These prove the
+# matrices would NOTICE if the guards were loosened -- which is the only reason
+# to trust them as a safety net rather than as documentation.
+#
+# Every mutation carries its own applicability assertion. A mutation that fails
+# to apply -- because the text it rewrites no longer exists -- would otherwise
+# masquerade as a detected safeguard, so a non-applying mutation is a harness
+# failure and is reported as one, never as a pass.
+
+MUTATION_CONTEXTS = {
+    "unrelated label on a fully labelled Ready PR": (
+        pull_request_context(
+            draft=False, labels=[PAID, LABEL_A, UNRELATED], label=UNRELATED
+        ),
+        (),
+    ),
+    "push to a fully authorized PR": (
+        pull_request_context(draft=False, labels=[PAID, LABEL_A], action="synchronize"),
+        (),
+    ),
+    "draft PR carrying every label": (
+        pull_request_context(draft=True, labels=[PAID, LABEL_A], label=PAID),
+        (),
+    ),
+    "gate label present but paid-eval absent": (
+        pull_request_context(draft=False, labels=[LABEL_A], label=LABEL_A),
+        (),
+    ),
+    "both gate labels present": (
+        pull_request_context(draft=False, labels=[PAID, LABEL_A, LABEL_B], label=PAID),
+        (),
+    ),
+    "dispatch with no confirmation": (
+        dispatch_context(provider_gate=GATE_A, confirm=None),
+        (),
+    ),
+    "dispatch with confirmation false": (
+        dispatch_context(provider_gate=GATE_A, confirm=False),
+        (),
+    ),
+    "dispatch with a string confirmation": (
+        dispatch_context(provider_gate=GATE_A, confirm="true"),
+        (),
+    ),
+    "dispatch with no gate selected": (
+        dispatch_context(provider_gate="none", confirm=True),
+        (),
+    ),
+}
+
+
+def _eligible_under(guards: dict[str, str], context: dict) -> tuple[str, ...]:
+    full = with_needs(
+        context,
+        gate_a_anthropic_preflight="success",
+        gate_b_openai_preflight="success",
+    )
+    return tuple(job for job in LIVE_JOBS if evaluate(guards[job], full))
+
+
+def _current_guards() -> dict[str, str]:
+    return {job: job_if(job) for job in LIVE_JOBS}
+
+
+# name -> (old, new) applied to every live guard
+GUARD_MUTATIONS = {
+    "remove the event.label.name requirement": (
+        "&& (github.event.action == 'ready_for_review' "
+        "|| (github.event.action == 'labeled' "
+        "&& (github.event.label.name == 'paid-eval' "
+        "|| github.event.label.name == '{gate_label}')))",
+        "&& (github.event.action == 'ready_for_review' "
+        "|| github.event.action == 'labeled')",
+    ),
+    "accept any label event generically": (
+        "(github.event.label.name == 'paid-eval' "
+        "|| github.event.label.name == '{gate_label}')",
+        "true",
+    ),
+    "drop the draft check": (
+        "github.event.pull_request.draft == false && ",
+        "",
+    ),
+    "drop the paid-eval requirement": (
+        "contains(github.event.pull_request.labels.*.name, 'paid-eval') && ",
+        "",
+    ),
+    "drop the competing-gate exclusion": (
+        "&& !contains(github.event.pull_request.labels.*.name, '{other_label}') ",
+        " ",
+    ),
+    "allow synchronize to authorize": (
+        "github.event.action == 'ready_for_review'",
+        "(github.event.action == 'ready_for_review' "
+        "|| github.event.action == 'synchronize')",
+    ),
+    "remove the dispatch confirmation": (
+        " && inputs.confirm_paid_execution == true",
+        "",
+    ),
+    "weaken the confirmation from boolean true": (
+        "inputs.confirm_paid_execution == true",
+        "inputs.confirm_paid_execution",
+    ),
+    "make the dispatch gate default live": (
+        "inputs.provider_gate == '{gate}'",
+        "(inputs.provider_gate == '{gate}' || inputs.provider_gate == 'none')",
+    ),
+}
+
+
+def _apply_guard_mutation(old: str, new: str) -> tuple[dict[str, str], int]:
+    """Rewrite every live guard, reporting how many actually changed."""
+
+    mutated, applied = {}, 0
+    for job in LIVE_JOBS:
+        expression = job_if(job)
+        is_a = job in GATE_A_JOBS
+        fields = {
+            "gate_label": LABEL_A if is_a else LABEL_B,
+            "other_label": LABEL_B if is_a else LABEL_A,
+            "gate": GATE_A if is_a else GATE_B,
+        }
+        target, replacement = old.format(**fields), new.format(**fields)
+        if target in expression:
+            expression = expression.replace(target, replacement)
+            applied += 1
+        mutated[job] = expression
+    return mutated, applied
+
+
+@pytest.mark.parametrize("name", sorted(GUARD_MUTATIONS))
+def test_every_guard_mutation_is_detected(name):
+    old, new = GUARD_MUTATIONS[name]
+    mutated, applied = _apply_guard_mutation(old, new)
+
+    # Applicability first: a mutation that did not apply proves nothing.
+    assert applied == len(LIVE_JOBS), (
+        f"mutation {name!r} applied to {applied}/{len(LIVE_JOBS)} guards -- "
+        "the guard text it rewrites no longer exists, so this test is not "
+        "exercising a safeguard. Fix the mutation, do not delete it."
+    )
+    assert mutated != _current_guards()
+
+    # ...then detection: at least one context that authorizes nothing today
+    # must start authorizing under the mutation.
+    escaped = [
+        label
+        for label, (context, expected) in MUTATION_CONTEXTS.items()
+        if _eligible_under(mutated, context) != tuple(expected)
+    ]
+    assert escaped, (
+        f"mutation {name!r} applied cleanly but no matrix row noticed. "
+        "The authorization matrix has a hole."
+    )
+
+
+def test_the_unmutated_guards_authorize_nothing_in_any_mutation_context():
+    """The control: every mutation context is a genuine non-authorizing state."""
+
+    guards = _current_guards()
+    for label, (context, expected) in MUTATION_CONTEXTS.items():
+        assert _eligible_under(guards, context) == tuple(expected), label
+
+
+# ── mutations of things that are not `if:` expressions ──
+
+
+def test_restoring_the_unsafe_concurrency_policy_is_detected():
+    """`cancel-in-progress: true` for everything is the pre-fix policy."""
+
+    unsafe = "true"
+    authorizing = pull_request_context(
+        draft=False, labels=[PAID, LABEL_A], action="labeled", label=PAID
+    )
+    assert evaluate(workflow()["concurrency"]["cancel-in-progress"], authorizing) is False
+    assert evaluate(unsafe, authorizing) is True
+
+
+def test_dropping_the_sha_from_the_concurrency_group_is_detected():
+    current = workflow()["concurrency"]["group"]
+    mutated = current.replace(
+        "format('paid-{0}', github.event.pull_request.head.sha || github.sha)",
+        "'paid'",
+    )
+    assert mutated != current, "the SHA-keyed group text no longer exists"
+
+    old = pull_request_context(draft=False, labels=[PAID, LABEL_A],
+                               action="labeled", label=PAID, head_sha="AAA")
+    new = pull_request_context(draft=False, labels=[PAID, LABEL_A],
+                               action="labeled", label=PAID, head_sha="BBB")
+    assert render(current, old) != render(current, new)
+    assert render(mutated, old) == render(mutated, new)
+
+
+@pytest.mark.parametrize("job", LIVE_JOBS)
+def test_reintroducing_a_shell_interpolated_threshold_is_detected(job):
+    scripts = _run_scripts(job)
+    mutated = [
+        s + "\n--threshold ${{ github.event.inputs.threshold || '0.75' }}" for s in scripts
+    ]
+    assert all("${{" not in s for s in scripts), job
+    assert any("${{" in s for s in mutated)
+
+
+def test_granting_a_job_both_provider_secrets_is_detected():
+    """The credential matrix must fail if a gate is handed both keys."""
+
+    for job in (GATE_A_PREFLIGHT, GATE_B_PREFLIGHT):
+        envs = _all_env(jobs()[job])
+        rendered = yaml.safe_dump(envs, width=10**9)
+        has_anthropic_secret = "secrets.ANTHROPIC_API_KEY" in rendered
+        has_openai_secret = "secrets.OPENAI_API_KEY" in rendered
+        assert not (has_anthropic_secret and has_openai_secret), job
+
+        mutated = rendered + "\n  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n" \
+                             "  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n"
+        assert "secrets.ANTHROPIC_API_KEY" in mutated and "secrets.OPENAI_API_KEY" in mutated
+
+
+def test_removing_the_aggregate_gate_identity_check_is_detected(tmp_path):
+    """`--expect-gate` is what stops one gate's shards feeding the other's report."""
+
+    from evals.run_evals import aggregate_summaries, load_cases
+
+    for job, gate in ((GATE_A_AGGREGATE, GATE_A), (GATE_B_AGGREGATE, GATE_B)):
+        assert f"--expect-gate {gate}" in _all_run_text(job), job
+
+    all_ids = [case["id"] for case in load_cases()]
+    dirs = [_write_shard(tmp_path, GATE_B, i, all_ids[i::6]) for i in range(6)]
+
+    guarded = aggregate_summaries(dirs, threshold=0.75, expect_gate=GATE_A,
+                                  expect_shard_count=6)
+    assert guarded["aggregation_errors"], "cross-gate shards were absorbed"
+
+    unguarded = aggregate_summaries(dirs, threshold=0.75, expect_gate=None,
+                                    expect_shard_count=6)
+    assert not unguarded["aggregation_errors"], (
+        "dropping --expect-gate changed nothing, so the flag is not what "
+        "enforces gate identity and this test proves nothing"
+    )
+
+
+# ════════════════════ diff hygiene ════════════════════
+#
+# The harness diff must contain the harness and nothing else. A runtime artifact
+# that rides along -- a local DB mutated by a mock run, a log, a cache -- is not
+# a change anyone reviewed, and it silently rebases the "what changed" question.
+
+CERTIFIED_PRODUCT_BASELINE = "0ead418afa0447ae0a90535aaf8ae392df06b403"
+HARNESS_BASELINE = "46c4fbeb303f91c6434f94eb8bb103287f37879b"
+
+CERTIFIED_PRODUCT_PATHS = (
+    "mas/api.py",
+    "mas/config.py",
+    "mas/extensions/runtime.py",
+    "mas/llm_client.py",
+    "mas/orchestrator.py",
+    "mas/prompts/phases/03-strategy.md",
+    "mas/runtime/provider_gateway.py",
+    "mas/state.py",
+    "mas/tests/evidence_snapshot_pg.py",
+    "mas/tests/test_classify_schema_repair.py",
+    "mas/tests/test_operator_dossier.py",
+    "mas/tests/test_research_evidence_bridge_pg.py",
+    "mas/tests/test_runtime_gateway.py",
+    "mas/tests/test_strategy_retrieval_integration.py",
+    "mas/tests/test_support_phases.py",
+    "mas/tests/test_workflow_runner.py",
+)
+
+GENERATED_RESIDUE_SUFFIXES = (".sqlite3", ".sqlite", ".db", ".log", ".pyc")
+
+
+def _git(*args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120
+    )
+    if result.returncode != 0:
+        pytest.skip(f"git unavailable or ref missing: {result.stderr.strip()[:200]}")
+    return result.stdout
+
+
+def _changed_since_harness_baseline() -> list[str]:
+    return [p for p in _git("diff", "--name-only", HARNESS_BASELINE, "--").split("\n") if p]
+
+
+def test_the_certified_product_boundary_is_byte_identical():
+    """All 16 certified paths must still match the certified commit exactly."""
+
+    changed = _git(
+        "diff", "--name-only", CERTIFIED_PRODUCT_BASELINE, "--", *CERTIFIED_PRODUCT_PATHS
+    ).strip()
+    assert changed == "", f"certified product blob changed: {changed}"
+
+
+def test_no_generated_runtime_data_rides_along_in_the_harness_diff():
+    """`mas/scenario_shadow.sqlite3` is a tracked fixture that a local mock eval
+    rewrites in place. It reached #118's inventory as residue, not as a change."""
+
+    residue = [
+        path
+        for path in _changed_since_harness_baseline()
+        if path.endswith(GENERATED_RESIDUE_SUFFIXES)
+    ]
+    assert residue == [], f"generated runtime data in the harness diff: {residue}"
+
+
+def test_the_scenario_shadow_fixture_is_unchanged():
+    changed = _git(
+        "diff", "--name-only", HARNESS_BASELINE, "--", "mas/scenario_shadow.sqlite3"
+    ).strip()
+    assert changed == "", "scenario_shadow.sqlite3 differs from the harness baseline"
+
+
+def test_the_harness_diff_touches_only_harness_paths():
+    allowed_prefixes = (".github/workflows/", "mas/evals/", "mas/tests/", "mas/provider_telemetry/")
+    stray = [
+        path
+        for path in _changed_since_harness_baseline()
+        if not path.startswith(allowed_prefixes)
+    ]
+    assert stray == [], f"unexpected paths in the harness diff: {stray}"

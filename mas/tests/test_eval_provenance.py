@@ -825,8 +825,19 @@ class JudgeProvenanceTests(unittest.TestCase):
         self.assertEqual(record["requested_model"], JUDGE_MODEL)
         self.assertEqual(record["requested_max_tokens"], 1000)
         self.assertEqual(record["requested_temperature"], 0.0)
-        self.assertEqual(record["effective_model"], "claude-sonnet-4-6-20260101")
-        self.assertEqual(record["effective_provider"], "anthropic")
+        # `used_provider` is the gateway's routing record, which is a real fact
+        # and is reported as one. What it is NOT is provider evidence, so it no
+        # longer carries the `effective_` name.
+        self.assertEqual(record["used_provider"], "anthropic")
+        self.assertNotIn("effective_provider", record)
+        # This fixture drives the response directly and supplies no telemetry
+        # observation, so there is no provider-observed model. Before the F-2
+        # fix this asserted `"claude-sonnet-4-6-20260101"` -- the value the
+        # *gateway* put on `model_used`, reported as though the provider had
+        # confirmed it.
+        self.assertIsInstance(record["effective_model"], dict)
+        self.assertNotEqual(record["effective_model"]["status"], provenance.STATUS_VALID)
+        self.assertIsNone(record["effective_model"]["value"])
         self.assertTrue(record["response_ok"])
 
     def test_the_judge_record_stores_no_prompt_and_no_response_text(self):
@@ -931,3 +942,212 @@ class HarnessWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+# ════════════════════ F-2: provider-observed identity ════════════════════
+#
+# Three identities, three sources, and the artifact must not blur them:
+#
+#   requested_*   configuration          always known
+#   selected_*    gateway routing        known once routing ran
+#   used_provider gateway routing        known once a call was attempted
+#   effective_model  PROVIDER OBSERVATION  known only if the provider said so
+#
+# `LLMResponse.model_used` is set from the REQUESTED model at every construction
+# site in both adapters and is re-asserted from `config.model` in the gateway. It
+# is therefore never evidence of what ran, and reading it as `effective_model`
+# reported the request back as though the provider had confirmed it.
+
+
+def _judge_response(**overrides):
+    base = dict(
+        ok=True,
+        model_used="claude-sonnet-4-6",
+        provider_used="anthropic",
+        selected_model="claude-sonnet-4-6",
+        selected_provider="anthropic",
+        selection_reason="config_override",
+        task_profile="judge",
+        fallback_used=False,
+        attempt_count=1,
+        error_type="",
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=0,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _judge_record(recorder=None, **overrides):
+    return provenance.judge_provenance(
+        requested_provider="anthropic",
+        requested_model="claude-sonnet-4-6",
+        requested_max_tokens=1000,
+        requested_temperature=0.0,
+        input_chars_pre_truncation=10,
+        input_chars_post_truncation=10,
+        response=_judge_response(**overrides),
+        recorder=recorder,
+    )
+
+
+def _judge_recorder(observation, *, invocation_id="j1"):
+    recorder = _recorder()
+    _feed(recorder, "jc", invocation_id, provenance.JUDGE_PHASE, observation=observation)
+    return recorder
+
+
+class JudgeProviderIdentityTests(unittest.TestCase):
+    def test_p1_a_requested_model_never_becomes_a_provider_observation(self):
+        """P1/P11 -- the F-2 finding itself."""
+
+        record = _judge_record(recorder=None, model_used="gpt-5", selected_model="gpt-5")
+
+        self.assertEqual(record["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(record["selected_model"], "gpt-5")
+        self.assertIsInstance(record["effective_model"], dict)
+        self.assertNotEqual(record["effective_model"]["status"], provenance.STATUS_VALID)
+        self.assertIsNone(record["effective_model"]["value"])
+        # The decisive assertion: no requested or selected identity leaked into
+        # the provider-observed field.
+        self.assertNotIn("gpt-5", json.dumps(record["effective_model"]))
+
+    def test_p2_a_selected_model_never_becomes_a_provider_observation(self):
+        recorder = _judge_recorder(
+            SimpleNamespace(
+                effective_model=_Value("absent"),
+                stop_reason=_Value("valid", "stop"),
+                input_tokens=_Value("valid", 10),
+                output_tokens=_Value("valid", 5),
+                cache_read_tokens=_Value("absent"),
+            )
+        )
+        record = _judge_record(recorder=recorder)
+
+        self.assertEqual(record["effective_model"]["status"], provenance.STATUS_ABSENT)
+        self.assertIsNone(record["effective_model"]["value"])
+        self.assertEqual(record["selected_model"], "claude-sonnet-4-6")
+
+    def test_p3_a_matching_observed_model_is_preserved(self):
+        recorder = _judge_recorder(_observation(model="claude-sonnet-4-6"))
+        record = _judge_record(recorder=recorder)
+
+        self.assertEqual(record["effective_model"]["status"], provenance.STATUS_VALID)
+        self.assertEqual(record["effective_model"]["value"], "claude-sonnet-4-6")
+
+    def test_p4_an_observed_model_that_differs_is_preserved_truthfully(self):
+        recorder = _judge_recorder(_observation(model="claude-sonnet-4-6-20260101"))
+        record = _judge_record(recorder=recorder)
+
+        self.assertEqual(record["effective_model"]["value"], "claude-sonnet-4-6-20260101")
+        self.assertNotEqual(record["effective_model"]["value"], record["requested_model"])
+
+    def test_p5_p9_every_non_valid_provider_status_is_carried_not_replaced(self):
+        """P5 missing · P6 absent · P7 null · P8 unsupported · P9 invalid."""
+
+        for status, expected in (
+            ("missing", provenance.STATUS_INVALID),  # no runtime counterpart
+            ("absent", provenance.STATUS_ABSENT),
+            ("null", provenance.STATUS_NULL),
+            ("unsupported", provenance.STATUS_UNSUPPORTED),
+            ("invalid", provenance.STATUS_INVALID),
+        ):
+            with self.subTest(status=status):
+                recorder = _judge_recorder(
+                    SimpleNamespace(
+                        effective_model=_Value(status),
+                        stop_reason=_Value("absent"),
+                        input_tokens=_Value("absent"),
+                        output_tokens=_Value("absent"),
+                        cache_read_tokens=_Value("absent"),
+                    )
+                )
+                record = _judge_record(recorder=recorder)
+                self.assertEqual(record["effective_model"]["status"], expected)
+                self.assertIsNone(record["effective_model"]["value"])
+
+    def test_p10_a_fallback_reports_the_invocation_that_actually_answered(self):
+        """The judge falls back to OpenAI whenever Anthropic is blank -- the
+        Gate B posture. Reading the FIRST invocation would describe the failed
+        Anthropic attempt as though it had produced the answer."""
+
+        recorder = _recorder()
+        _feed(
+            recorder, "jc", "j1", provenance.JUDGE_PHASE,
+            kind="provider_failure", category="authentication_error",
+            observation=SimpleNamespace(
+                effective_model=_Value("absent"),
+                stop_reason=_Value("absent"),
+                input_tokens=_Value("absent"),
+                output_tokens=_Value("absent"),
+                cache_read_tokens=_Value("absent"),
+            ),
+        )
+        _feed(
+            recorder, "jc", "j2", provenance.JUDGE_PHASE,
+            observation=_observation(model="gpt-5-2026-01-01", inp=900, out=120),
+        )
+        record = _judge_record(recorder=recorder)
+
+        self.assertEqual(record["invocation_count"], 2)
+        self.assertEqual(record["effective_model"]["value"], "gpt-5-2026-01-01")
+        self.assertEqual(record["input_tokens"]["value"], 900)
+
+    def test_p12_no_field_claims_a_provider_observed_provider(self):
+        """No provider echoes its own identity, so nothing may be named as if
+        one had. The gateway's routing record is reported as `used_provider`."""
+
+        recorder = _judge_recorder(_observation())
+        record = _judge_record(recorder=recorder)
+
+        self.assertEqual(record["used_provider"], "anthropic")
+        self.assertNotIn("effective_provider", record)
+        for key in record:
+            self.assertFalse(
+                key.startswith("effective_") and key != "effective_model",
+                f"{key} claims provider-observed truth with no provider evidence",
+            )
+
+    def test_p13_usage_is_an_envelope_so_zero_is_not_mistaken_for_unobserved(self):
+        """`LLMResponse` defaults every counter to 0, so a call that never
+        reached a provider used to report a confident `0`."""
+
+        record = _judge_record(recorder=None)
+
+        for field in ("input_tokens", "output_tokens", "cache_read_tokens"):
+            with self.subTest(field=field):
+                self.assertIsInstance(record[field], dict)
+                self.assertNotEqual(record[field]["status"], provenance.STATUS_VALID)
+                self.assertIsNone(record[field]["value"])
+
+    def test_p13_an_observed_zero_is_still_reported_as_observed(self):
+        recorder = _judge_recorder(_observation(inp=0, out=0))
+        record = _judge_record(recorder=recorder)
+
+        self.assertEqual(record["input_tokens"]["status"], provenance.STATUS_VALID)
+        self.assertEqual(record["input_tokens"]["value"], 0)
+
+    def test_p14_every_provider_observed_field_is_a_well_formed_envelope(self):
+        recorder = _judge_recorder(_observation())
+        record = _judge_record(recorder=recorder)
+
+        for field in (
+            "effective_model", "stop_reason", "input_tokens", "output_tokens",
+            "cache_read_tokens", "reasoning_tokens", "content_status",
+            "visible_content_length", "refusal_status",
+        ):
+            with self.subTest(field=field):
+                envelope = record[field]
+                self.assertIsInstance(envelope, dict, field)
+                self.assertIn(envelope["status"], provenance.VALUE_STATUSES)
+                self.assertIn("value", envelope)
+                self.assertIn("detail", envelope)
+
+    def test_the_judge_record_still_carries_no_raw_provider_text(self):
+        recorder = _judge_recorder(_observation(model="gpt-5-2026"))
+        record = _judge_record(recorder=recorder, error_type="refusal")
+        payload = json.dumps(record)
+
+        self.assertNotIn("system-sentinel", payload)
+        self.assertNotIn("user-sentinel", payload)

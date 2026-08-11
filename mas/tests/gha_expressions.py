@@ -73,12 +73,18 @@ class _Parser:
             raise ExpressionError(f"expected {value!r}, got {text!r}")
 
     # or := and ('||' and)*
+    #
+    # GitHub's `&&` and `||` return an OPERAND, not a boolean -- which is what
+    # makes `cond && 'a' || 'b'` the idiomatic ternary used by `concurrency.group`.
+    # Coercing to bool here would still give the right answer for a pure boolean
+    # `if:`, but it would silently mis-evaluate every group expression, so the
+    # real semantics are implemented instead.
     def parse_or(self) -> Any:
         value = self.parse_and()
         while (token := self.peek()) and token[1] == "||":
             self.take()
             right = self.parse_and()
-            value = _truthy(value) or _truthy(right)
+            value = value if _truthy(value) else right
         return value
 
     # and := unary ('&&' unary)*
@@ -87,7 +93,7 @@ class _Parser:
         while (token := self.peek()) and token[1] == "&&":
             self.take()
             right = self.parse_comparison()
-            value = _truthy(value) and _truthy(right)
+            value = right if _truthy(value) else value
         return value
 
     # comparison := unary (('=='|'!=') unary)?
@@ -151,6 +157,14 @@ class _Parser:
             return True
         if name == "success":
             return bool(self.context.get("__success__", True))
+        if name == "format":
+            if not args:
+                raise ExpressionError("format() takes at least 1 argument")
+            template, *rest = args
+            text = str(_render_scalar(template))
+            for index, argument in enumerate(rest):
+                text = text.replace("{%d}" % index, str(_render_scalar(argument)))
+            return text
         raise ExpressionError(f"unsupported function {name!r}")
 
     def lookup(self, path: str) -> Any:
@@ -214,17 +228,47 @@ def _equals(left: Any, right: Any) -> bool:
     return left == right
 
 
+def _render_scalar(value: Any) -> Any:
+    """How GitHub stringifies a value inside `format()` / interpolation."""
+
+    if value is _MISSING or value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
+
+
+def _evaluate_raw(text: str, context: dict) -> Any:
+    parser = _Parser(_tokenize(text), context)
+    value = parser.parse_or()
+    if parser.peek() is not None:
+        raise ExpressionError(f"trailing tokens from {parser.peek()!r}")
+    return value
+
+
 def evaluate(expression: str, context: dict) -> bool:
     """Evaluate a `${{ ... }}` expression (wrapper optional) to a boolean."""
 
     text = expression.strip()
     if text.startswith("${{") and text.endswith("}}"):
         text = text[3:-2].strip()
-    parser = _Parser(_tokenize(text), context)
-    value = parser.parse_or()
-    if parser.peek() is not None:
-        raise ExpressionError(f"trailing tokens from {parser.peek()!r}")
-    return _truthy(value)
+    return _truthy(_evaluate_raw(text, context))
+
+
+_INTERPOLATION_RE = re.compile(r"\$\{\{(.+?)\}\}", re.DOTALL)
+
+
+def render(template: str, context: dict) -> str:
+    """Render a string that interleaves literal text with `${{ ... }}` segments.
+
+    `concurrency.group` is exactly this shape, and its VALUE -- not its
+    truthiness -- is what decides which runs share a cancellation bucket.
+    """
+
+    def substitute(match: re.Match) -> str:
+        return str(_render_scalar(_evaluate_raw(match.group(1).strip(), context)))
+
+    return _INTERPOLATION_RE.sub(substitute, template)
 
 
 def pull_request_context(
@@ -233,39 +277,74 @@ def pull_request_context(
     labels: list[str],
     event_name: str = "pull_request",
     action: str = "labeled",
+    label: str | None = None,
+    head_sha: str = "deadbeef",
+    number: int = 118,
 ) -> dict:
     """A pull_request event context.
 
-    `action` defaults to `labeled` -- the moment a human explicitly authorizes
-    spend. Tests that care about ordinary pushes pass `synchronize`.
+    `label` is the label carried by THIS event -- `github.event.label.name` --
+    and it is what distinguishes "someone just authorized spend" from "this PR
+    happens to be labelled".  On a `labeled` event it defaults to the last label
+    in `labels`, mirroring the only way GitHub can produce that state; pass it
+    explicitly to model an unrelated label being added.  On every other action
+    GitHub sends no `label` object at all, so none is synthesized.
     """
 
+    event: dict[str, Any] = {
+        "action": action,
+        "pull_request": {
+            "draft": draft,
+            "number": number,
+            "labels": [{"name": name} for name in labels],
+            "head": {"sha": head_sha},
+        },
+    }
+    if action == "labeled":
+        chosen = label if label is not None else (labels[-1] if labels else None)
+        if chosen is not None:
+            event["label"] = {"name": chosen}
+    elif label is not None:
+        event["label"] = {"name": label}
     return {
         "github": {
+            "workflow": "evals",
             "event_name": event_name,
-            "event": {
-                "action": action,
-                "pull_request": {
-                    "draft": draft,
-                    "labels": [{"name": name} for name in labels],
-                },
-            },
+            "ref": f"refs/pull/{number}/merge",
+            "sha": "mergecommit",
+            "event": event,
         },
     }
 
 
-def dispatch_context(*, provider_gate: str | None, confirm: str | None) -> dict:
+def dispatch_context(
+    *, provider_gate: str | None, confirm: object | None, threshold: str | None = None
+) -> dict:
+    """A workflow_dispatch context.
+
+    `confirm_paid_execution` is a **typed boolean** input, so the `inputs`
+    context carries a real `True`/`False` -- not the string `'true'`.  Passing a
+    string here models an operator (or a mutation) supplying the wrong type, and
+    must not authorize.
+    """
+
     inputs: dict[str, Any] = {}
     if provider_gate is not None:
         inputs["provider_gate"] = provider_gate
     if confirm is not None:
         inputs["confirm_paid_execution"] = confirm
+    if threshold is not None:
+        inputs["threshold"] = threshold
     return {
         "github": {
+            "workflow": "evals",
             "event_name": "workflow_dispatch",
+            "ref": "refs/heads/release-v7-provider-gates",
+            "sha": "deadbeef",
             "event": {"inputs": inputs},
             "inputs": inputs,
         },
+        "inputs": inputs,
     }
 
 

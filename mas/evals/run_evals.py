@@ -980,7 +980,15 @@ async def main():
     parser.add_argument("--cases", help="Comma-separated case IDs (default: all)")
     parser.add_argument("--mock", action="store_true", help="Skip real LLM calls")
     parser.add_argument("--report", help="Directory to write per-case JSON reports")
-    parser.add_argument("--threshold", type=float, default=PASS_THRESHOLD)
+    # `type=float` alone accepts `nan`, `inf` and out-of-range values, any of
+    # which silently changes what the gate means. `normalize_threshold` refuses
+    # them, so a malformed threshold is an argparse error before a single case
+    # runs -- never a quality verdict.
+    parser.add_argument(
+        "--threshold",
+        type=release_gates.normalize_threshold,
+        default=PASS_THRESHOLD,
+    )
     parser.add_argument("--shard-index", type=int, help="Zero-based shard index to run")
     parser.add_argument("--shard-count", type=int, help="Total number of shards")
     parser.add_argument("--aggregate", nargs="+", help="Shard report directories to aggregate")
