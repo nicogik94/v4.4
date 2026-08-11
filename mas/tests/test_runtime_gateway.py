@@ -1883,8 +1883,13 @@ class TestLogicalCallUsageAccounting(unittest.IsolatedAsyncioTestCase):
 
 
 class TestProviderOutputBudgetParity(unittest.TestCase):
-    """Pins the parity finding this remediation documents but does not change:
-    Strategy's response-token reservation is an Anthropic-only guarantee."""
+    """Pins the M2 invariant: a provider-specific config must never carry a
+    response reservation that that provider's execution path does not implement.
+
+    Anthropic keeps the reservation because its adapter receives a bounded
+    thinking budget; OpenAI must not carry it, because ``_call_openai`` is handed
+    only max_tokens and temperature and reserves nothing for visible text.
+    """
 
     def test_openai_strategy_candidates_carry_no_response_token_reservation(self):
         candidates = select_model_candidates("strategy")
@@ -1895,13 +1900,13 @@ class TestProviderOutputBudgetParity(unittest.TestCase):
         self.assertTrue(openai_configs, "strategy must have OpenAI fallback candidates")
         for config in openai_configs:
             with self.subTest(model=config.model):
-                # thinking_budget is dropped for OpenAI, which is correct — it is
-                # an Anthropic control. But min_response_tokens rides along and
-                # nothing consumes it: ModelConfig only validates it against
-                # thinking_budget, and _call_openai never reads it. So no part of
-                # max_completion_tokens is reserved for visible text.
+                # thinking_budget is dropped for OpenAI because it is an Anthropic
+                # control; min_response_tokens is dropped for exactly the same
+                # reason. Nothing on the OpenAI path reserves any part of
+                # max_completion_tokens, so claiming a reservation would be false.
                 self.assertEqual(config.thinking_budget, 0)
-                self.assertEqual(config.min_response_tokens, 4000)
+                self.assertIsNone(config.min_response_tokens)
+                # The token budget itself is deliberately unchanged by M2.
                 self.assertEqual(config.max_tokens, 8000)
 
     def test_anthropic_strategy_primary_reserves_response_tokens_locally(self):
@@ -1923,6 +1928,271 @@ class TestProviderOutputBudgetParity(unittest.TestCase):
                 thinking_budget=6000,
                 min_response_tokens=4000,
             )
+
+
+class TestProviderResponseReservationTruthfulness(unittest.IsolatedAsyncioTestCase):
+    """M2 — configuration must never promise a provider capability that the
+    execution path does not implement.
+
+    ``min_response_tokens`` is a real guarantee on Anthropic only: the adapter is
+    handed an explicit bounded ``thinking_budget``, and ``ModelConfig`` enforces
+    ``thinking_budget + min_response_tokens <= max_tokens``, so capping thinking
+    is what actually leaves the reserved tokens for visible text. ``_call_openai``
+    receives neither field and reserves no part of ``max_completion_tokens``, so
+    an OpenAI config carrying the reservation would be advertising a mechanism
+    that does not exist. These tests pin both halves of that boundary.
+    """
+
+    _STRATEGY_SYSTEM = "system"
+    _STRATEGY_PROMPT = "prompt"
+
+    @staticmethod
+    def _failing_anthropic():
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            return SimpleNamespace(
+                text="", stop_reason="", model_used=model,
+                input_tokens=0, output_tokens=0, cache_read_tokens=0,
+                cost_usd=0.0, latency_ms=1,
+                error="upstream unavailable", error_type=SERVER_ERROR,
+            )
+        return anthropic
+
+    def _gateway(self, *, anthropic, openai):
+        return DefaultProviderGateway(
+            anthropic_executor=anthropic,
+            openai_executor=openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            max_retries=1,
+            sleep=AsyncMock(),
+        )
+
+    async def _call_strategy(self, gateway):
+        return await gateway.call(GatewayRequest(
+            phase="strategy",
+            system_prompt=self._STRATEGY_SYSTEM,
+            user_prompt=self._STRATEGY_PROMPT,
+            routing_context=RoutingContext(phase="strategy"),
+        ))
+
+    # ─── T1 ───────────────────────────────────────────────────────────────
+    def test_t1_anthropic_phase_default_preserves_reservation(self):
+        base = MODEL_ROUTING["strategy"]
+        self.assertIs(base.provider, Provider.ANTHROPIC)
+        self.assertEqual(base.max_tokens, 8000)
+        self.assertEqual(base.thinking_budget, 4000)
+        self.assertEqual(base.min_response_tokens, 4000)
+
+        primary, selection = select_model_config("strategy")
+
+        self.assertIs(primary.provider, Provider.ANTHROPIC)
+        self.assertEqual(primary.model, "claude-opus-4-6")
+        self.assertEqual(selection.reason, "phase_routing")
+        self.assertEqual(primary.max_tokens, 8000)
+        self.assertEqual(primary.thinking_budget, 4000)
+        self.assertEqual(primary.min_response_tokens, 4000)
+
+    # ─── T2 ───────────────────────────────────────────────────────────────
+    def test_t2_anthropic_same_provider_fallbacks_preserve_reservation(self):
+        fallbacks = [
+            (config, selection)
+            for config, selection in select_model_candidates("strategy")
+            if config.provider is Provider.ANTHROPIC and selection.reason != "phase_routing"
+        ]
+
+        # Both derivation paths are covered: the task-profile alias and the
+        # provider fallback chain.
+        self.assertEqual(
+            [(c.model, s.reason) for c, s in fallbacks],
+            [
+                ("claude-sonnet-4-6", "task_profile:deep_reasoning"),
+                ("claude-haiku-4-5-20251001", "fallback_chain:anthropic"),
+            ],
+        )
+        for config, _selection in fallbacks:
+            with self.subTest(model=config.model):
+                self.assertEqual(config.min_response_tokens, 4000)
+                self.assertEqual(config.thinking_budget, 4000)
+                # Still a load-bearing invariant, not a decorative label.
+                self.assertLessEqual(
+                    config.thinking_budget + config.min_response_tokens,
+                    config.max_tokens,
+                )
+
+    # ─── T3 ───────────────────────────────────────────────────────────────
+    def test_t3_openai_task_profile_candidate_carries_no_reservation(self):
+        matches = [
+            config for config, selection in select_model_candidates("strategy")
+            if config.provider is Provider.OPENAI
+            and selection.reason == "task_profile:deep_reasoning"
+        ]
+
+        self.assertEqual([c.model for c in matches], ["gpt-5"])
+        config = matches[0]
+        self.assertIsNone(config.min_response_tokens)
+        self.assertEqual(config.thinking_budget, 0)
+        # M2 corrects the claim, never the budget.
+        self.assertEqual(config.max_tokens, 8000)
+        self.assertEqual(config.temperature, MODEL_ROUTING["strategy"].temperature)
+
+    # ─── T4 ───────────────────────────────────────────────────────────────
+    def test_t4_openai_fallback_chain_candidate_carries_no_reservation(self):
+        matches = [
+            config for config, selection in select_model_candidates("strategy")
+            if selection.reason == "fallback_chain:openai"
+        ]
+
+        self.assertEqual([c.model for c in matches], ["gpt-5-mini"])
+        config = matches[0]
+        self.assertIs(config.provider, Provider.OPENAI)
+        self.assertIsNone(config.min_response_tokens)
+        self.assertEqual(config.thinking_budget, 0)
+        self.assertEqual(config.max_tokens, 8000)
+
+    # ─── T5 ───────────────────────────────────────────────────────────────
+    def test_t5_explicit_openai_alias_does_not_inherit_the_reservation(self):
+        config, selection = select_model_config(
+            "strategy",
+            routing_context=RoutingContext(
+                phase="strategy", explicit_model="openai:gpt-5"
+            ),
+        )
+
+        self.assertEqual(selection.reason, "explicit_model")
+        self.assertIs(config.provider, Provider.OPENAI)
+        self.assertIsNone(config.min_response_tokens)
+        self.assertEqual(config.thinking_budget, 0)
+
+        # The same alias path against Anthropic still inherits it, which is what
+        # makes this a provider boundary rather than a blanket removal.
+        sibling, sibling_selection = select_model_config(
+            "strategy",
+            routing_context=RoutingContext(
+                phase="strategy", explicit_model="anthropic:claude-sonnet-4-6"
+            ),
+        )
+        self.assertEqual(sibling_selection.reason, "explicit_model")
+        self.assertEqual(sibling.min_response_tokens, 4000)
+        self.assertEqual(sibling.thinking_budget, 4000)
+
+    # ─── T6 ───────────────────────────────────────────────────────────────
+    def test_t6_explicitly_configured_openai_reservation_is_rejected(self):
+        # Rejected, not normalized away: an explicitly supplied reservation is an
+        # operator instruction, and silently dropping it would answer a request
+        # for a guarantee with silence — the same untruth, relocated.
+        with self.assertRaisesRegex(ValueError, "response reservation"):
+            ModelConfig(
+                provider=Provider.OPENAI, model="gpt-5",
+                max_tokens=8000, min_response_tokens=4000,
+            )
+
+        # Zero is a value, not an absence: it still asserts that a reservation
+        # mechanism is being addressed, so it fails on the same grounds.
+        with self.assertRaisesRegex(ValueError, "response reservation"):
+            ModelConfig(provider=Provider.OPENAI, model="gpt-5", min_response_tokens=0)
+
+        # An OpenAI override that claims nothing stays valid and fully routable.
+        override = ModelConfig(provider=Provider.OPENAI, model="gpt-5-mini")
+        config, selection = select_model_config("strategy", config_override=override)
+        self.assertEqual(selection.reason, "config_override")
+        self.assertIs(config.provider, Provider.OPENAI)
+        self.assertIsNone(config.min_response_tokens)
+
+        # An Anthropic override keeps the ability to reserve.
+        reserved = ModelConfig(
+            provider=Provider.ANTHROPIC, model="claude-opus-4-6",
+            max_tokens=8000, thinking_budget=4000, min_response_tokens=4000,
+        )
+        config, _selection = select_model_config("strategy", config_override=reserved)
+        self.assertEqual(config.min_response_tokens, 4000)
+
+    # ─── T7 ───────────────────────────────────────────────────────────────
+    def test_t7_candidate_identity_and_order_are_unchanged(self):
+        # Pinned against the pre-M2 tree: provider, model, selection reason and
+        # every token budget are identical candidate-for-candidate; the only
+        # difference anywhere in the 76-candidate cross-phase set is the
+        # unsupported field on the two OpenAI strategy rows.
+        expected = [
+            ("anthropic", "claude-opus-4-6", "phase_routing", 8000, 0.4, 4000, 4000),
+            ("anthropic", "claude-sonnet-4-6", "task_profile:deep_reasoning",
+             8000, 0.4, 4000, 4000),
+            ("openai", "gpt-5", "task_profile:deep_reasoning", 8000, 0.4, 0, None),
+            ("anthropic", "claude-haiku-4-5-20251001", "fallback_chain:anthropic",
+             8000, 0.4, 4000, 4000),
+            ("openai", "gpt-5-mini", "fallback_chain:openai", 8000, 0.4, 0, None),
+        ]
+        actual = [
+            (config.provider.value, config.model, selection.reason, config.max_tokens,
+             config.temperature, config.thinking_budget, config.min_response_tokens)
+            for config, selection in select_model_candidates("strategy")
+        ]
+        self.assertEqual(actual, expected)
+
+        # Strategy is the only phase that reserves anything, so no other phase's
+        # candidate set could have moved: every candidate everywhere else already
+        # carried None before this change and must still.
+        for phase in MODEL_ROUTING:
+            if phase == "strategy":
+                continue
+            with self.subTest(phase=phase):
+                self.assertIsNone(MODEL_ROUTING[phase].min_response_tokens)
+                for config, _selection in select_model_candidates(phase):
+                    self.assertIsNone(config.min_response_tokens)
+
+    # ─── T8 ───────────────────────────────────────────────────────────────
+    async def test_t8_openai_executor_arguments_are_unchanged(self):
+        recorded: list[tuple] = []
+
+        async def openai(*args, **kwargs):
+            recorded.append((args, kwargs))
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=args[0],
+                input_tokens=5, output_tokens=5, cache_read_tokens=0,
+                cost_usd=0.01, latency_ms=1, error="", error_type="",
+            )
+
+        gateway = self._gateway(anthropic=self._failing_anthropic(), openai=openai)
+        response = await self._call_strategy(gateway)
+
+        self.assertTrue(response.text)
+        self.assertTrue(recorded, "the OpenAI fallback candidate must have executed")
+        args, kwargs = recorded[0]
+        # Exactly the pre-M2 call shape: five positionals, no keywords. M2 adds
+        # no reservation argument, because there is no mechanism to hand one to.
+        self.assertEqual(kwargs, {})
+        self.assertEqual(
+            args, ("gpt-5", self._STRATEGY_SYSTEM, self._STRATEGY_PROMPT, 8000, 0.4)
+        )
+
+    # ─── T9 ───────────────────────────────────────────────────────────────
+    async def test_t9_anthropic_executor_arguments_are_unchanged(self):
+        recorded: list[tuple] = []
+
+        async def anthropic(*args, **kwargs):
+            recorded.append((args, kwargs))
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=args[0],
+                input_tokens=5, output_tokens=5, cache_read_tokens=0,
+                cost_usd=0.01, latency_ms=1, error="", error_type="",
+            )
+
+        async def openai(*args, **kwargs):
+            raise _ExecutorMustNotRun("Anthropic primary succeeded; no fallback")
+
+        gateway = self._gateway(anthropic=anthropic, openai=openai)
+        response = await self._call_strategy(gateway)
+
+        self.assertTrue(response.text)
+        self.assertEqual(len(recorded), 1)
+        args, kwargs = recorded[0]
+        self.assertEqual(kwargs, {})
+        # The sixth positional is the bounded thinking budget — the mechanism the
+        # Anthropic reservation is built on. It is untouched by M2.
+        self.assertEqual(
+            args,
+            ("claude-opus-4-6", self._STRATEGY_SYSTEM, self._STRATEGY_PROMPT,
+             8000, 0.4, 4000),
+        )
 
 
 class TestUnusableOutputClassifier(unittest.TestCase):

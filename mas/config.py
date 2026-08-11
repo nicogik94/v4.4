@@ -17,6 +17,17 @@ class Provider(str, Enum):
     OPENAI = "openai"
 
 
+# A response-token reservation is only a guarantee where the execution path
+# actually enforces one. Anthropic is the only provider whose adapter receives an
+# explicit bounded thinking budget, which is what makes the
+# `thinking_budget + min_response_tokens <= max_tokens` invariant below a real
+# reservation: capping thinking is precisely what leaves the reserved tokens for
+# visible text. The OpenAI adapter is handed max_tokens and temperature only — it
+# never reserves any part of max_completion_tokens for the response — so the same
+# field on an OpenAI config would advertise a guarantee nothing implements.
+RESPONSE_RESERVATION_PROVIDER_VALUES = frozenset({Provider.ANTHROPIC.value})
+
+
 @dataclass
 class ModelConfig:
     provider: Provider
@@ -34,6 +45,23 @@ class ModelConfig:
             raise ValueError("thinking_budget cannot be negative")
         if self.min_response_tokens is not None and self.min_response_tokens < 0:
             raise ValueError("min_response_tokens cannot be negative")
+        # Fail closed rather than normalizing the value away: an explicitly
+        # supplied reservation is an operator instruction, and silently dropping
+        # it would answer a request for a guarantee with silence — the same
+        # untruth as carrying it inertly, just moved. A config *derived* across a
+        # provider boundary is not an instruction, so the gateway drops the field
+        # deliberately at the point of derivation instead of arriving here.
+        provider_value = getattr(self.provider, "value", self.provider)
+        if (
+            self.min_response_tokens is not None
+            and provider_value not in RESPONSE_RESERVATION_PROVIDER_VALUES
+        ):
+            raise ValueError(
+                "min_response_tokens is a response reservation only the Anthropic "
+                f"execution path implements; provider={provider_value!r} "
+                f"(model={self.model!r}) reserves no response tokens, so the "
+                "value cannot be honoured"
+            )
         if (
             self.thinking_budget > 0
             and self.min_response_tokens is not None
