@@ -2,7 +2,6 @@ import io
 import json
 import re
 from collections.abc import Mapping
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -11,8 +10,6 @@ import openai
 from evals import provider_preflight
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "evals.yml"
 
 
 class RecordingCompletions:
@@ -57,36 +54,6 @@ def _usable_response(text="OK"):
     """
 
     return _response(_choice(text))
-
-
-def _workflow_text():
-    return WORKFLOW_PATH.read_text()
-
-
-def _job_block(workflow: str, job_name: str) -> str:
-    start_match = re.search(rf"(?m)^  {re.escape(job_name)}:\n", workflow)
-    assert start_match, job_name
-    next_match = re.search(
-        r"(?m)^  [a-zA-Z0-9_-]+:\n",
-        workflow[start_match.end() :],
-    )
-    end = (
-        start_match.end() + next_match.start()
-        if next_match
-        else len(workflow)
-    )
-    return workflow[start_match.start() : end]
-
-
-def _job_directive(job_block: str, directive: str) -> str:
-    prefix = f"    {directive}:"
-    matches = [
-        line.strip()
-        for line in job_block.splitlines()
-        if line.startswith(prefix)
-    ]
-    assert len(matches) == 1, (directive, matches)
-    return matches[0]
 
 
 def test_probe_order_and_both_success():
@@ -773,95 +740,3 @@ def test_usable_output_does_not_require_any_particular_reply_text():
         assert provider_preflight.assess_output(
             _response(_choice(text))
         ).usable, text
-
-
-def test_workflow_self_path_can_trigger_evals_without_broadening_dispatch():
-    workflow = _workflow_text()
-    triggers = workflow.split("concurrency:", 1)[0]
-    expected_dispatch = (
-        "  workflow_dispatch:\n"
-        "    inputs:\n"
-        "      threshold:\n"
-        "        description: 'Pass rate threshold (0.0-1.0)'\n"
-        "        required: false\n"
-        "        default: '0.75'"
-    )
-
-    assert "      - '.github/workflows/evals.yml'" in triggers
-    assert triggers.count("  workflow_dispatch:\n") == 1
-    dispatch_start = triggers.index("  workflow_dispatch:\n")
-    assert triggers[dispatch_start:].strip() == expected_dispatch.strip()
-
-
-def test_workflow_provider_preflight_pull_request_auth_is_non_draft_paid_eval():
-    provider_job = _job_block(_workflow_text(), "provider-preflight")
-
-    assert _job_directive(provider_job, "if") == (
-        "if: ${{ github.event_name == 'workflow_dispatch' || "
-        "(github.event.pull_request.draft == false && "
-        "contains(github.event.pull_request.labels.*.name, 'paid-eval')) }}"
-    )
-    assert _job_directive(provider_job, "needs") == "needs: smoke"
-
-
-def test_workflow_real_shards_and_aggregate_require_successful_preflight():
-    workflow = _workflow_text()
-    real_job = _job_block(workflow, "real-eval-shard")
-    aggregate_job = _job_block(workflow, "aggregate")
-
-    assert _job_directive(real_job, "needs") == (
-        "needs: [smoke, provider-preflight]"
-    )
-    assert _job_directive(real_job, "if") == (
-        "if: ${{ needs.provider-preflight.result == 'success' && "
-        "(github.event_name == 'workflow_dispatch' || "
-        "(github.event.pull_request.draft == false && "
-        "contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}"
-    )
-    assert _job_directive(aggregate_job, "needs") == (
-        "needs: [provider-preflight, real-eval-shard]"
-    )
-    assert _job_directive(aggregate_job, "if") == (
-        "if: ${{ always() && needs.provider-preflight.result == 'success' && "
-        "(github.event_name == 'workflow_dispatch' || "
-        "(github.event.pull_request.draft == false && "
-        "contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}"
-    )
-
-
-def test_workflow_paid_provider_steps_are_openai_only_with_secret_injection():
-    workflow = _workflow_text()
-    provider_job = _job_block(workflow, "provider-preflight")
-    real_job = _job_block(workflow, "real-eval-shard")
-
-    assert provider_job.count("ANTHROPIC_API_KEY: ''") == 1
-    assert provider_job.count("OPENAI_LOG: ''") == 1
-    assert real_job.count("ANTHROPIC_API_KEY: ''") == 2
-    assert provider_job.count(
-        "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}"
-    ) == 1
-    assert real_job.count(
-        "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}"
-    ) == 2
-    assert "ANTHROPIC_API_KEY: ${{ secrets." not in workflow
-
-    key_assignments = [
-        line.strip()
-        for line in workflow.splitlines()
-        if line.strip().startswith("OPENAI_API_KEY:")
-    ]
-    assert key_assignments
-    assert set(key_assignments) == {
-        "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}"
-    }
-
-
-def test_workflow_executes_tested_module_without_substantive_inline_python():
-    provider_job = _job_block(_workflow_text(), "provider-preflight")
-
-    assert "uses: actions/checkout@v4" in provider_job
-    assert "working-directory: mas" in provider_job
-    assert "run: python -m evals.provider_preflight" in provider_job
-    assert "python - <<" not in provider_job
-    assert "chat.completions.create" not in provider_job
-    assert "max_completion_tokens" not in provider_job

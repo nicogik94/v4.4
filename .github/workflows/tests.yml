@@ -9,7 +9,16 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The suite takes ~28 minutes against the Postgres service, so a 30-minute
+    # cap left under two minutes of headroom -- and a runner that stalls on I/O
+    # spends that instantly. One run was killed at 77% with zero failures after
+    # the Postgres container logged a 270-second checkpoint.
+    #
+    # A timeout is a runaway-job backstop, not a performance budget: when it
+    # fires this close to the normal runtime it reports infrastructure variance
+    # as a red build, which is exactly the "provider/infra inability reported as
+    # a quality failure" confusion this release is trying to eliminate.
+    timeout-minutes: 45
 
     services:
       postgres:
