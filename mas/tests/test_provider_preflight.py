@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -865,3 +866,112 @@ def test_workflow_executes_tested_module_without_substantive_inline_python():
     assert "python - <<" not in provider_job
     assert "chat.completions.create" not in provider_job
     assert "max_completion_tokens" not in provider_job
+
+
+# ═════════ eval failure provenance: bounded, and paid posture unchanged ═════════
+#
+# The provenance wave is observational. These pin the two things that make that
+# claim checkable from the workflow alone: the release posture it was added
+# beside is byte-for-byte the posture that ran before it, and the mechanism is
+# switched on in exactly one place.
+
+EVAL_PROVENANCE_FLAG = "MAS_EVAL_PROVENANCE"
+
+
+def _job_names(workflow: str) -> list[str]:
+    body = workflow.split("\njobs:\n", 1)[1]
+    return [
+        line[2:-1]
+        for line in body.splitlines()
+        if re.fullmatch(r"  [a-zA-Z0-9_-]+:", line)
+    ]
+
+
+def test_workflow_declares_no_new_job_and_no_new_provider_bearing_job():
+    workflow = _workflow_text()
+
+    assert _job_names(workflow) == [
+        "smoke",
+        "provider-preflight",
+        "real-eval-shard",
+        "aggregate",
+    ]
+    # A provider-bearing job is one the OpenAI secret is injected into. The set
+    # is unchanged: preflight and the shard, and nothing else.
+    provider_bearing = [
+        name
+        for name in _job_names(workflow)
+        if "secrets.OPENAI_API_KEY" in _job_block(workflow, name)
+    ]
+    assert provider_bearing == ["provider-preflight", "real-eval-shard"]
+
+
+def test_real_eval_shard_count_and_threshold_are_unchanged():
+    real_job = _job_block(_workflow_text(), "real-eval-shard")
+
+    assert "shard: [0, 1, 2, 3, 4, 5]" in real_job
+    assert "fail-fast: false" in real_job
+    assert "--shard-count 6" in real_job
+    assert "--threshold ${{ github.event.inputs.threshold || '0.75' }}" in real_job
+
+
+def test_aggregate_threshold_is_unchanged():
+    aggregate_job = _job_block(_workflow_text(), "aggregate")
+
+    assert "--threshold ${{ github.event.inputs.threshold || '0.75' }}" in aggregate_job
+    assert "--aggregate evals/shards/eval-report-shard-*" in aggregate_job
+
+
+def test_provenance_is_enabled_in_exactly_one_place_and_nowhere_else():
+    workflow = _workflow_text()
+
+    assert workflow.count(EVAL_PROVENANCE_FLAG) == 1
+    assert f"{EVAL_PROVENANCE_FLAG}: '1'" in _job_block(workflow, "real-eval-shard")
+    for job in ("smoke", "provider-preflight", "aggregate"):
+        assert EVAL_PROVENANCE_FLAG not in _job_block(workflow, job)
+
+
+def test_provenance_is_scoped_to_the_shard_run_step_only():
+    real_job = _job_block(_workflow_text(), "real-eval-shard")
+    steps = real_job.split("      - name: ")
+
+    carrying = [step.splitlines()[0] for step in steps if EVAL_PROVENANCE_FLAG in step]
+
+    assert carrying == ["Run eval shard"]
+
+
+def test_provenance_adds_no_provider_call_shard_judge_or_model_invocation():
+    before = subprocess.run(
+        ["git", "show", f"HEAD:{WORKFLOW_PATH.relative_to(REPO_ROOT).as_posix()}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    after = _workflow_text()
+
+    def significant(text: str) -> list[str]:
+        """Every line that could cause work, comments and blanks removed."""
+        return [
+            line.rstrip()
+            for line in text.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+    added = [line for line in significant(after) if line not in significant(before)]
+    removed = [line for line in significant(before) if line not in significant(after)]
+
+    # The whole executable delta of this wave against its own base: one env
+    # assignment. No step, no job, no matrix entry, no run command.
+    assert added == [f"          {EVAL_PROVENANCE_FLAG}: '1'"]
+    assert removed == []
+
+
+def test_smoke_remains_zero_provider():
+    smoke_job = _job_block(_workflow_text(), "smoke")
+
+    assert "python -m evals.run_evals --mock" in smoke_job
+    assert "secrets." not in smoke_job
+    assert "OPENAI_API_KEY" not in smoke_job
+    assert "ANTHROPIC_API_KEY" not in smoke_job
+    assert EVAL_PROVENANCE_FLAG not in smoke_job

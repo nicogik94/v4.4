@@ -16,6 +16,7 @@ import sys
 import json
 import asyncio
 import argparse
+import contextlib
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
@@ -32,13 +33,24 @@ from llm_client import call_llm, LLMResponse, parse_json
 from provider_telemetry import (
     ENTRY_POINT_EVALUATION_JUDGE,
     ENTRY_POINT_EVALUATION_PHASE,
+    POSTURE_OBSERVATIONAL,
+    configured_posture,
+    response_shape_scope,
     telemetry_scope,
 )
+from evals import provenance
 from config import ModelConfig, Provider
 
 PASS_THRESHOLD = 0.75  # fail CI if <75% of cases pass
 JUDGE_MODEL = "claude-sonnet-4-6"
 JUDGE_SYSTEM_PROMPT = "You are a harsh but fair evaluator. Return only JSON."
+# Unchanged bound on the judge's serialized view of a case. Named so the
+# provenance ledger can record how many characters were dropped by it without
+# anyone having to re-derive the number from a slice expression.
+JUDGE_INPUT_MAX_CHARS = 16000
+# The phases a real eval case runs, in order. Previously a local list; named so
+# the provenance ledger walks exactly the phases the harness executed.
+REAL_CASE_PHASES = ("classify", "hypotheses", "gauntlet", "audit", "strategy")
 EVAL_CASES_PATH = Path(__file__).parent / "golden_cases.jsonl"
 CITATION_RESOLVABILITY_SCHEMA_VERSION = "citation_resolvability_eval.v0.1"
 CITATION_RESOLVABILITY_PASS_STATUSES = {"pass", "not_applicable"}
@@ -172,6 +184,8 @@ class CaseResult:
     judge_overall: int = 0               # 0-100 from LLM judge
     judge_rationale: str = ""
     errors: list[str] = field(default_factory=list)
+    # Observational only. Never read by pass_fail(); see evals.provenance.
+    provenance: dict = field(default_factory=dict)
 
 
 def load_cases(subset: Optional[set[str]] = None) -> list[dict]:
@@ -229,6 +243,12 @@ def summarize_results(
         "ok": pass_rate >= threshold and not errors,
         "aggregation_errors": errors,
         **aggregate_diagnostics,
+        # Additive and namespaced: a historical reader that does not know this
+        # key is unaffected, and nothing inside it feeds `ok`, `pass_rate`,
+        # `passed`, `total` or `threshold` above.
+        "eval_provenance": build_aggregate_provenance(
+            results, aggregation_errors=errors
+        ),
         "cases": [asdict(r) for r in results],
     }
 
@@ -405,8 +425,101 @@ def _normalize_provider_failure_text(value: str) -> str:
     return " ".join(str(value or "").strip().casefold().split())
 
 
-async def run_case_real(case: dict) -> ProjectState:
-    """Run a case through classify + hypotheses + audit + strategy."""
+# ═══════════ eval failure provenance (observational, default off) ═══════════
+#
+# Everything below records evidence. None of it decides anything: no branch in
+# this module reads a provenance value, and pass_fail() cannot see one. When no
+# recorder is bound, every helper here returns the value that makes the harness
+# behave exactly as it did before this wave — the same telemetry scope, the same
+# phase loop, the same continuation after a failed phase.
+
+
+def new_provenance_recorder(case_id: str):
+    """A recorder for one real case, or ``None`` when provenance is not wanted.
+
+    Refuses to engage when this process is already running the durable attempt
+    telemetry: an eval-local sink is the right sink for an eval, and quietly
+    displacing a configured durable posture would make this harness the reason
+    a run's telemetry went somewhere else.
+    """
+    try:
+        if not provenance.provenance_enabled():
+            return None
+        if configured_posture() != "off":
+            return None
+        return provenance.EvalProvenanceRecorder(case_id=case_id)
+    except Exception:  # noqa: BLE001 - provenance never breaks a case
+        return None
+
+
+def _disabled_capture_mode() -> str:
+    """Why provenance is absent, when it is."""
+    try:
+        if not provenance.provenance_enabled():
+            return provenance.CAPTURE_MODE_DISABLED
+        if configured_posture() != "off":
+            return provenance.CAPTURE_MODE_DEFERRED
+    except Exception:  # noqa: BLE001 - provenance never breaks a case
+        pass
+    return provenance.CAPTURE_MODE_DISABLED
+
+
+def _provenance_session_kwargs(recorder) -> dict:
+    """Route the runtime's own attempt telemetry into eval memory.
+
+    An explicit observational posture with an in-memory sink, so the durable
+    PostgreSQL relations are neither required nor written and the SDK transport
+    is not instrumented — the process posture stays off, which is what the
+    adapter reads when it decides whether to wrap its client.
+    """
+    if recorder is None:
+        return {}
+    return {"posture": POSTURE_OBSERVATIONAL, "sink": recorder}
+
+
+def _shape_observer(recorder):
+    if recorder is None:
+        return contextlib.nullcontext()
+    return response_shape_scope(recorder)
+
+
+def build_case_provenance(case_id: str, output: dict, recorder) -> dict:
+    """Assemble one case's ledger. Cannot raise into the harness."""
+    try:
+        if recorder is None:
+            return provenance.empty_case_provenance(
+                case_id=case_id, capture_mode=_disabled_capture_mode()
+            )
+        return provenance.case_provenance(
+            case_id=case_id,
+            output=output,
+            phases=REAL_CASE_PHASES,
+            recorder=recorder,
+            judge=getattr(recorder, "judge_record", {}),
+            capture_mode=provenance.CAPTURE_MODE_TELEMETRY,
+        )
+    except Exception:  # noqa: BLE001 - provenance never breaks a case
+        return provenance.empty_case_provenance(
+            case_id=case_id, capture_mode=provenance.CAPTURE_MODE_DISABLED
+        )
+
+
+def build_aggregate_provenance(results, *, aggregation_errors) -> dict:
+    """Aggregate counters. Cannot raise into the summary writer."""
+    try:
+        return provenance.aggregate_provenance(
+            results, aggregation_errors=aggregation_errors
+        )
+    except Exception:  # noqa: BLE001 - provenance never breaks a summary
+        return {"schema_version": provenance.SCHEMA_VERSION, "cases_with_provenance": 0}
+
+
+async def run_case_real(case: dict, recorder=None) -> ProjectState:
+    """Run a case through classify + hypotheses + audit + strategy.
+
+    The loop, the Confused halt and the continue-after-failure behavior are
+    unchanged: this wave observes that behavior and does not alter it.
+    """
     state = ProjectState(
         project_id=f"eval-{case['id']}",
         project_name=f"eval {case['id']}",
@@ -414,24 +527,26 @@ async def run_case_real(case: dict) -> ProjectState:
         data=_case_data_payload(case),
         created_at=datetime.now(),
     )
-    phases = ["classify", "hypotheses", "gauntlet", "audit", "strategy"]
+    phases = list(REAL_CASE_PHASES)
     # `eval-<id>` is not a UUID, and is deliberately not treated as one: it is
     # recorded as an external project identity, never cast into a UUID column.
-    async with telemetry_scope(
-        entry_point=ENTRY_POINT_EVALUATION_PHASE,
-        project_id=state.project_id,
-        run_id=state.project_id,
-        expected_phases=tuple(phases),
-    ):
-        for phase in phases:
-            try:
-                state = await run_phase_node(state, phase)
-                if phase == "classify" and _is_confused_classification(state):
-                    _append_eval_error(state, "workflow halted after Confused classification")
-                    break
-            except Exception as e:
-                # Log error but continue — judge can still evaluate partial output
-                _append_eval_error(state, f"{phase}: {e}")
+    with _shape_observer(recorder):
+        async with telemetry_scope(
+            entry_point=ENTRY_POINT_EVALUATION_PHASE,
+            project_id=state.project_id,
+            run_id=state.project_id,
+            expected_phases=tuple(phases),
+            **_provenance_session_kwargs(recorder),
+        ):
+            for phase in phases:
+                try:
+                    state = await run_phase_node(state, phase)
+                    if phase == "classify" and _is_confused_classification(state):
+                        _append_eval_error(state, "workflow halted after Confused classification")
+                        break
+                except Exception as e:
+                    # Log error but continue — judge can still evaluate partial output
+                    _append_eval_error(state, f"{phase}: {e}")
     return state
 
 
@@ -706,7 +821,12 @@ Score the output 0-100 on overall quality. Penalize heavily for: missing framewo
 Return JSON only: {{"score": 0-100, "rationale": "2-3 sentences", "critical_failures": []}}"""
 
 
-async def judge_case(case: dict, output: dict) -> tuple[int, str]:
+async def judge_case(case: dict, output: dict, recorder=None) -> tuple[int, str]:
+    # Serialized once so the ledger can record how many characters the unchanged
+    # 16000-character bound dropped. The bound, the slice and the judge's model,
+    # provider, token cap, temperature, system prompt and rubric are untouched.
+    serialized_output = json.dumps(_compact_output_for_judge(output), default=str)
+    judge_input = serialized_output[:JUDGE_INPUT_MAX_CHARS]
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         brief=case["brief"],
         expected_domain=case["expected_domain"],
@@ -716,27 +836,37 @@ async def judge_case(case: dict, output: dict) -> tuple[int, str]:
         must_mention=", ".join(case.get("strategy_must_mention", [])),
         must_not_mention=", ".join(case.get("strategy_must_not_mention", [])),
         data_based=case.get("data_based_expected", False),
-        output=json.dumps(_compact_output_for_judge(output), default=str)[:16000],
+        output=judge_input,
     )
-    async with telemetry_scope(
-        entry_point=ENTRY_POINT_EVALUATION_JUDGE,
-        project_id=f"eval-{case['id']}",
-        run_id=f"eval-{case['id']}",
-        phase="eval_judge",
-        expected_phases=("eval_judge",),
-    ):
-        resp: LLMResponse = await call_llm(
-            "eval_judge",
-            JUDGE_SYSTEM_PROMPT,
-            prompt,
-            config_override=ModelConfig(
-                provider=Provider.ANTHROPIC,
-                model=JUDGE_MODEL,
-                max_tokens=1000,
-                temperature=0.0,
-            ),
+    judge_config = ModelConfig(
+        provider=Provider.ANTHROPIC,
+        model=JUDGE_MODEL,
+        max_tokens=1000,
+        temperature=0.0,
+    )
+    with _shape_observer(recorder):
+        async with telemetry_scope(
+            entry_point=ENTRY_POINT_EVALUATION_JUDGE,
             project_id=f"eval-{case['id']}",
-        )
+            run_id=f"eval-{case['id']}",
+            phase="eval_judge",
+            expected_phases=("eval_judge",),
+            **_provenance_session_kwargs(recorder),
+        ):
+            resp: LLMResponse = await call_llm(
+                "eval_judge",
+                JUDGE_SYSTEM_PROMPT,
+                prompt,
+                config_override=judge_config,
+                project_id=f"eval-{case['id']}",
+            )
+    _record_judge_provenance(
+        recorder,
+        judge_config=judge_config,
+        pre_truncation_chars=len(serialized_output),
+        post_truncation_chars=len(judge_input),
+        response=resp,
+    )
     if not resp.ok:
         return 0, f"judge error: {resp.error}"
     try:
@@ -748,6 +878,32 @@ async def judge_case(case: dict, output: dict) -> tuple[int, str]:
         return int(data["score"]), data.get("rationale", "")
     except Exception as e:
         return 0, f"judge parse error: {e}"
+
+
+def _record_judge_provenance(
+    recorder,
+    *,
+    judge_config: ModelConfig,
+    pre_truncation_chars: int,
+    post_truncation_chars: int,
+    response,
+) -> None:
+    """Record what the judge was asked for and what answered. Never raises."""
+    if recorder is None:
+        return
+    try:
+        recorder.judge_record = provenance.judge_provenance(
+            requested_provider=judge_config.provider.value,
+            requested_model=judge_config.model,
+            requested_max_tokens=judge_config.max_tokens,
+            requested_temperature=judge_config.temperature,
+            input_chars_pre_truncation=pre_truncation_chars,
+            input_chars_post_truncation=post_truncation_chars,
+            response=response,
+            recorder=recorder,
+        )
+    except Exception:  # noqa: BLE001 - provenance never breaks a case
+        recorder.note(provenance.NOTE_RECORDER_FAULT)
 
 
 def pass_fail(r: CaseResult) -> bool:
@@ -821,17 +977,25 @@ async def main():
     for case in cases:
         print(f"  [{case['id']}] {case['brief'][:60]}...")
         try:
+            recorder = None
             if args.mock:
                 output = await run_case_mock(case)
             else:
-                state = await run_case_real(case)
+                recorder = new_provenance_recorder(case["id"])
+                state = await run_case_real(case, recorder)
                 output = state.model_dump(mode="json")
             r = score_deterministic(case, output)
             if not args.mock:
-                r.judge_overall, r.judge_rationale = await judge_case(case, output)
+                r.judge_overall, r.judge_rationale = await judge_case(
+                    case, output, recorder
+                )
+                r.provenance = build_case_provenance(case["id"], output, recorder)
             else:
                 r.judge_overall = 70 if r.domain_match else 40
                 r.judge_rationale = "mock"
+                r.provenance = provenance.empty_case_provenance(
+                    case_id=case["id"], capture_mode=provenance.CAPTURE_MODE_MOCK
+                )
             r.passed = pass_fail(r)
             results.append(r)
             status = "✓" if r.passed else "✗"
