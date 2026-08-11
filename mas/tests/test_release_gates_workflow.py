@@ -166,6 +166,26 @@ AUTHORIZATION_MATRIX = [
         pull_request_context(draft=False, labels=[PAID, LABEL_A, LABEL_B]),
         (),
     ),
+    (
+        "A9 fully authorized PR, ordinary push (synchronize)",
+        pull_request_context(draft=False, labels=[PAID, LABEL_A], action="synchronize"),
+        (),
+    ),
+    (
+        "A9b fully authorized PR, reopened",
+        pull_request_context(draft=False, labels=[PAID, LABEL_B], action="reopened"),
+        (),
+    ),
+    (
+        "A9c fully authorized PR, opened",
+        pull_request_context(draft=False, labels=[PAID, LABEL_B], action="opened"),
+        (),
+    ),
+    (
+        "A10 ready_for_review with full authorization",
+        pull_request_context(draft=False, labels=[PAID, LABEL_B], action="ready_for_review"),
+        GATE_B_JOBS,
+    ),
 ]
 
 
@@ -218,7 +238,27 @@ def test_ordinary_synchronize_on_an_unlabeled_pr_authorizes_nothing():
     """§34.20 -- a push to an ordinary PR must not start paid work."""
 
     context = with_needs(
-        pull_request_context(draft=False, labels=["documentation"]),
+        pull_request_context(draft=False, labels=["documentation"], action="synchronize"),
+        gate_a_anthropic_preflight="success",
+        gate_b_openai_preflight="success",
+    )
+    for job in LIVE_JOBS:
+        assert not evaluate(job_if(job), context), job
+
+
+@pytest.mark.parametrize("gate_label", [LABEL_A, LABEL_B])
+def test_a_push_to_an_already_authorized_pr_does_not_respend(gate_label):
+    """§34.20, the sharper form.
+
+    Labels are sticky: once `paid-eval` and a gate label are on a Ready PR, an
+    `if:` that accepts any `pull_request` event would bill a full eval on every
+    subsequent push. Paid PR runs are therefore restricted to the events that
+    *are* the authorization -- `labeled` and `ready_for_review` -- so spending
+    again takes a deliberate act rather than a `git push`.
+    """
+
+    context = with_needs(
+        pull_request_context(draft=False, labels=[PAID, gate_label], action="synchronize"),
         gate_a_anthropic_preflight="success",
         gate_b_openai_preflight="success",
     )

@@ -227,11 +227,24 @@ def evaluate(expression: str, context: dict) -> bool:
     return _truthy(value)
 
 
-def pull_request_context(*, draft: bool, labels: list[str], event_name: str = "pull_request") -> dict:
+def pull_request_context(
+    *,
+    draft: bool,
+    labels: list[str],
+    event_name: str = "pull_request",
+    action: str = "labeled",
+) -> dict:
+    """A pull_request event context.
+
+    `action` defaults to `labeled` -- the moment a human explicitly authorizes
+    spend. Tests that care about ordinary pushes pass `synchronize`.
+    """
+
     return {
         "github": {
             "event_name": event_name,
             "event": {
+                "action": action,
                 "pull_request": {
                     "draft": draft,
                     "labels": [{"name": name} for name in labels],
