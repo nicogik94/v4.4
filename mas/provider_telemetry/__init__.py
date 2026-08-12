@@ -32,16 +32,32 @@ out of durable storage.
 from __future__ import annotations
 
 from .capture import (
+    COUNT_STATUSES,
+    PRESENCE_STATUSES,
+    RESPONSE_SHAPE_FIELDS,
+    SHAPE_ABSENT,
+    SHAPE_EMPTY,
+    SHAPE_INVALID,
+    SHAPE_MISSING,
+    SHAPE_NONEMPTY,
+    SHAPE_NULL,
+    SHAPE_UNKNOWN,
+    SHAPE_UNSUPPORTED,
+    SHAPE_VALID,
     InvocationCapture,
+    anthropic_response_shape,
     capture_scope,
     current_capture,
+    current_response_shape_observer,
     guard,
     guarded,
     is_capturing,
     observe_anthropic_response,
     observe_exception,
     observe_openai_response,
+    openai_response_shape,
     reset_capture_log_latch,
+    response_shape_scope,
 )
 from .delivery import (
     AmbiguousWrite,

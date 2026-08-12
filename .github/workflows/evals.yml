@@ -1,8 +1,27 @@
 name: evals
 
+# V7's supported release validation is Anthropic-only. The workflow retains
+# two historical gate identities, but only Gate A is a V7 release claim.
+#
+#   Gate A -- gate_a_anthropic_primary -- Anthropic present, OpenAI blank.
+#             Validates the normal production posture. A PASS is a statement
+#             about the release.
+#
+#   Gate B -- gate_b_openai_fallback   -- OpenAI present, Anthropic blank.
+#             Historical compatibility harness for a capability deferred from
+#             V7. Its historical FAIL remains evidence; it is NOT a release
+#             requirement and a future PASS would NOT validate this release.
+#
+# Neither gate's artifacts may be read as the other's: the gate identity is in
+# the job name, the environment, the report summary and the artifact name, and
+# the aggregator refuses shards whose recorded identity does not match.
+#
+# Selecting a gate and authorizing spend are separate acts. A live job requires
+# BOTH, and no default selects a gate.
+
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
     paths:
       - 'mas/prompts/**'
       - 'mas/orchestrator.py'
@@ -12,17 +31,54 @@ on:
       - '.github/workflows/evals.yml'
   workflow_dispatch:
     inputs:
+      provider_gate:
+        description: 'Which release gate to run. "none" runs nothing paid.'
+        required: true
+        type: choice
+        default: 'none'
+        options:
+          - 'none'
+          - 'gate_a_anthropic_primary'
+          - 'gate_b_openai_fallback'
+      confirm_paid_execution:
+        description: 'Confirm billable provider execution (leave unchecked for a dry selection).'
+        required: false
+        type: boolean
+        default: false
       threshold:
         description: 'Pass rate threshold (0.0-1.0)'
         required: false
         default: '0.75'
 
+# Two different cancellation policies, because two different things are at risk.
+#
+#   routine   -- everything that authorizes nothing (pushes, opens, reopens,
+#                unlabels, draft flips). Only the free mock smoke job can run
+#                under these, so superseding them is pure savings.
+#
+#   paid-<sha> -- an event that *could* start provider spend. Keyed to the exact
+#                commit whose evidence the run would produce, and never
+#                cancelled. This is what stops an incidental metadata event from
+#                terminating a paid gate that is already talking to a provider,
+#                and it is what keeps a run's evidence bound to the SHA it was
+#                actually measured on: a newer commit gets a different group and
+#                its own run rather than silently replacing the older one's.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
+    (github.event_name == 'workflow_dispatch'
+    || github.event.action == 'labeled'
+    || github.event.action == 'ready_for_review')
+    && format('paid-{0}', github.event.pull_request.head.sha || github.sha)
+    || 'routine' }}
+  cancel-in-progress: >-
+    ${{ !(github.event_name == 'workflow_dispatch'
+    || github.event.action == 'labeled'
+    || github.event.action == 'ready_for_review') }}
 
 jobs:
   smoke:
+    name: smoke (mock, zero provider)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -44,8 +100,26 @@ jobs:
         working-directory: mas
         run: python -m evals.run_evals --mock
 
-  provider-preflight:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval')) }}
+  # ════════════════════ GATE A -- Anthropic primary ════════════════════
+
+  gate-a-anthropic-preflight:
+    name: Gate A (Anthropic primary) - provider preflight
+    # Label PRESENCE says what the PR is asking for; the LABEL EVENT says that
+    # someone just asked for it. Both are required: without the second, adding
+    # an unrelated label to an already-labelled PR re-authorizes fresh spend.
+    if: >-
+      ${{ (github.event_name == 'pull_request'
+      && github.event.pull_request.draft == false
+      && contains(github.event.pull_request.labels.*.name, 'paid-eval')
+      && contains(github.event.pull_request.labels.*.name, 'gate-a-anthropic-primary')
+      && !contains(github.event.pull_request.labels.*.name, 'gate-b-openai-fallback')
+      && (github.event.action == 'ready_for_review'
+      || (github.event.action == 'labeled'
+      && (github.event.label.name == 'paid-eval'
+      || github.event.label.name == 'gate-a-anthropic-primary'))))
+      || (github.event_name == 'workflow_dispatch'
+      && inputs.provider_gate == 'gate_a_anthropic_primary'
+      && inputs.confirm_paid_execution == true) }}
     needs: smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -57,20 +131,44 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install OpenAI SDK
-        run: python -m pip install 'openai>=1.60.0'
-
-      - name: Verify OpenAI provider availability
+      # Runs before any credential is used: an unusable threshold is a
+      # configuration failure, and must stop the gate before it can be mistaken
+      # for a provider or quality failure. No secret is in scope in this step.
+      - name: Validate threshold input
         working-directory: mas
         env:
-          ANTHROPIC_API_KEY: ''
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_LOG: ''
-        run: python -m evals.provider_preflight
+          EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
+        run: python -m evals.release_gates --validate-threshold
 
-  real-eval-shard:
-    if: ${{ needs.provider-preflight.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}
-    needs: [smoke, provider-preflight]
+      - name: Install Anthropic SDK
+        run: python -m pip install 'anthropic>=0.40.0'
+
+      - name: Verify Anthropic provider availability
+        working-directory: mas
+        env:
+          MAS_PROVIDER_GATE: 'gate_a_anthropic_primary'
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ''
+          ANTHROPIC_LOG: ''
+        run: python -m evals.anthropic_preflight
+
+  gate-a-real-eval-shard:
+    name: Gate A (Anthropic primary) - eval shard
+    if: >-
+      ${{ needs.gate-a-anthropic-preflight.result == 'success'
+      && ((github.event_name == 'pull_request'
+      && github.event.pull_request.draft == false
+      && contains(github.event.pull_request.labels.*.name, 'paid-eval')
+      && contains(github.event.pull_request.labels.*.name, 'gate-a-anthropic-primary')
+      && !contains(github.event.pull_request.labels.*.name, 'gate-b-openai-fallback')
+      && (github.event.action == 'ready_for_review'
+      || (github.event.action == 'labeled'
+      && (github.event.label.name == 'paid-eval'
+      || github.event.label.name == 'gate-a-anthropic-primary'))))
+      || (github.event_name == 'workflow_dispatch'
+      && inputs.provider_gate == 'gate_a_anthropic_primary'
+      && inputs.confirm_paid_execution == true)) }}
+    needs: [smoke, gate-a-anthropic-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -92,38 +190,58 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Verify OpenAI-only provider posture
+      - name: Verify Anthropic-primary provider posture
         working-directory: mas
         env:
-          ANTHROPIC_API_KEY: ''
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ''
         run: |
-          test -n "$OPENAI_API_KEY"
-          test -z "$ANTHROPIC_API_KEY"
+          test -n "$ANTHROPIC_API_KEY"
+          test -z "$OPENAI_API_KEY"
 
       - name: Run eval shard
         working-directory: mas
         env:
-          # Intentionally empty: real evals must not make billable Anthropic calls.
-          ANTHROPIC_API_KEY: ''
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MAS_PROVIDER_GATE: 'gate_a_anthropic_primary'
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Intentionally blank: Gate A validates the Anthropic-primary posture,
+          # so an OpenAI fallback must not be reachable and must not be billed.
+          OPENAI_API_KEY: ''
+          MAS_EVAL_PROVENANCE: '1'
+          # Operator input reaches the process as DATA, never as shell source.
+          EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           python -m evals.run_evals \
-            --shard-index ${{ matrix.shard }} \
+            --shard-index "$SHARD_INDEX" \
             --shard-count 6 \
-            --report evals/out/shard-${{ matrix.shard }} \
-            --threshold ${{ github.event.inputs.threshold || '0.75' }}
+            --report "evals/out/shard-$SHARD_INDEX" \
+            --threshold "$EVAL_THRESHOLD"
 
       - name: Upload shard report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-report-shard-${{ matrix.shard }}
+          name: eval-report-gate-a-anthropic-primary-shard-${{ matrix.shard }}
           path: mas/evals/out/shard-${{ matrix.shard }}/
 
-  aggregate:
-    needs: [provider-preflight, real-eval-shard]
-    if: ${{ always() && needs.provider-preflight.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}
+  gate-a-aggregate:
+    name: Gate A (Anthropic primary) - aggregate
+    needs: [gate-a-anthropic-preflight, gate-a-real-eval-shard]
+    if: >-
+      ${{ always() && needs.gate-a-anthropic-preflight.result == 'success'
+      && ((github.event_name == 'pull_request'
+      && github.event.pull_request.draft == false
+      && contains(github.event.pull_request.labels.*.name, 'paid-eval')
+      && contains(github.event.pull_request.labels.*.name, 'gate-a-anthropic-primary')
+      && !contains(github.event.pull_request.labels.*.name, 'gate-b-openai-fallback')
+      && (github.event.action == 'ready_for_review'
+      || (github.event.action == 'labeled'
+      && (github.event.label.name == 'paid-eval'
+      || github.event.label.name == 'gate-a-anthropic-primary'))))
+      || (github.event_name == 'workflow_dispatch'
+      && inputs.provider_gate == 'gate_a_anthropic_primary'
+      && inputs.confirm_paid_execution == true)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -141,47 +259,229 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download shard reports
+      - name: Download Gate A shard reports
         uses: actions/download-artifact@v4
         with:
-          pattern: eval-report-shard-*
+          pattern: eval-report-gate-a-anthropic-primary-shard-*
           path: mas/evals/shards
 
-      - name: Aggregate eval reports
+      - name: Aggregate Gate A eval reports
         working-directory: mas
+        env:
+          MAS_PROVIDER_GATE: 'gate_a_anthropic_primary'
+          # Operator input reaches the process as DATA, never as shell source.
+          EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
         run: |
           python -m evals.run_evals \
-            --aggregate evals/shards/eval-report-shard-* \
+            --aggregate evals/shards/eval-report-gate-a-anthropic-primary-shard-* \
+            --expect-gate gate_a_anthropic_primary \
+            --expect-shard-count 6 \
             --report evals/out/ \
-            --threshold ${{ github.event.inputs.threshold || '0.75' }}
+            --threshold "$EVAL_THRESHOLD"
 
-      - name: Upload aggregate eval report
+      - name: Upload Gate A aggregate report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-report
+          name: eval-report-gate-a-anthropic-primary
           path: mas/evals/out/
 
-      - name: Post summary
+      - name: Post Gate A summary
         if: always()
         working-directory: mas
+        env:
+          MAS_PROVIDER_GATE: 'gate_a_anthropic_primary'
+        run: python -m evals.gate_summary --report evals/out/ >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════ GATE B -- OpenAI fallback ════════════════════
+
+  gate-b-openai-preflight:
+    name: Gate B (OpenAI fallback) - provider preflight
+    # See Gate A: presence alone is not an authorization, the event must be the
+    # act that completed it.
+    if: >-
+      ${{ (github.event_name == 'pull_request'
+      && github.event.pull_request.draft == false
+      && contains(github.event.pull_request.labels.*.name, 'paid-eval')
+      && contains(github.event.pull_request.labels.*.name, 'gate-b-openai-fallback')
+      && !contains(github.event.pull_request.labels.*.name, 'gate-a-anthropic-primary')
+      && (github.event.action == 'ready_for_review'
+      || (github.event.action == 'labeled'
+      && (github.event.label.name == 'paid-eval'
+      || github.event.label.name == 'gate-b-openai-fallback'))))
+      || (github.event_name == 'workflow_dispatch'
+      && inputs.provider_gate == 'gate_b_openai_fallback'
+      && inputs.confirm_paid_execution == true) }}
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # See Gate A: threshold validated before any credential is used.
+      - name: Validate threshold input
+        working-directory: mas
+        env:
+          EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
+        run: python -m evals.release_gates --validate-threshold
+
+      - name: Install OpenAI SDK
+        run: python -m pip install 'openai==2.54.0'
+
+      # The audited M3 implementation, invoked as a module. Its exit code is the
+      # gate: there is no second, weaker OpenAI preflight inlined in YAML.
+      - name: Verify OpenAI provider availability
+        working-directory: mas
+        env:
+          MAS_PROVIDER_GATE: 'gate_b_openai_fallback'
+          ANTHROPIC_API_KEY: ''
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_LOG: ''
+        run: python -m evals.provider_preflight
+
+  gate-b-real-eval-shard:
+    name: Gate B (OpenAI fallback) - eval shard
+    if: >-
+      ${{ needs.gate-b-openai-preflight.result == 'success'
+      && ((github.event_name == 'pull_request'
+      && github.event.pull_request.draft == false
+      && contains(github.event.pull_request.labels.*.name, 'paid-eval')
+      && contains(github.event.pull_request.labels.*.name, 'gate-b-openai-fallback')
+      && !contains(github.event.pull_request.labels.*.name, 'gate-a-anthropic-primary')
+      && (github.event.action == 'ready_for_review'
+      || (github.event.action == 'labeled'
+      && (github.event.label.name == 'paid-eval'
+      || github.event.label.name == 'gate-b-openai-fallback'))))
+      || (github.event_name == 'workflow_dispatch'
+      && inputs.provider_gate == 'gate_b_openai_fallback'
+      && inputs.confirm_paid_execution == true)) }}
+    needs: [smoke, gate-b-openai-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: mas
         run: |
-          if [ -f evals/out/summary.json ]; then
-            echo "## Eval Results" >> $GITHUB_STEP_SUMMARY
-            python -c "
-          import json
-          d = json.load(open('evals/out/summary.json'))
-          print(f\"**{d['passed']}/{d['total']} passed** ({d['pass_rate']:.1%})\")
-          if d.get('aggregation_errors'):
-              print()
-              print('Aggregation errors:')
-              for e in d['aggregation_errors']:
-                  print(f'- {e}')
-          print()
-          print('| Case | Pass | Judge | Domain | FW | Must-mention |')
-          print('|------|------|-------|--------|----|--------------|')
-          for c in d['cases']:
-              icon = '✅' if c['passed'] else '❌'
-              print(f\"| {c['case_id']} | {icon} | {c['judge_overall']} | {c['domain_match']} | {c['frameworks_covered']:.2f} | {c['must_mention_hits']:.2f} |\")
-          " >> $GITHUB_STEP_SUMMARY
-          fi
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify OpenAI-fallback provider posture
+        working-directory: mas
+        env:
+          ANTHROPIC_API_KEY: ''
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY"
+          test -z "$ANTHROPIC_API_KEY"
+
+      - name: Run eval shard
+        working-directory: mas
+        env:
+          MAS_PROVIDER_GATE: 'gate_b_openai_fallback'
+          # Historical Gate B posture. Supported V7 now removes OpenAI from the
+          # eligible candidate set, so this retained harness fails closed and is
+          # not a release requirement.
+          ANTHROPIC_API_KEY: ''
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MAS_EVAL_PROVENANCE: '1'
+          # Operator input reaches the process as DATA, never as shell source.
+          EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
+          python -m evals.run_evals \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count 6 \
+            --report "evals/out/shard-$SHARD_INDEX" \
+            --threshold "$EVAL_THRESHOLD"
+
+      - name: Upload shard report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-gate-b-openai-fallback-shard-${{ matrix.shard }}
+          path: mas/evals/out/shard-${{ matrix.shard }}/
+
+  gate-b-aggregate:
+    name: Gate B (OpenAI fallback) - aggregate
+    needs: [gate-b-openai-preflight, gate-b-real-eval-shard]
+    if: >-
+      ${{ always() && needs.gate-b-openai-preflight.result == 'success'
+      && ((github.event_name == 'pull_request'
+      && github.event.pull_request.draft == false
+      && contains(github.event.pull_request.labels.*.name, 'paid-eval')
+      && contains(github.event.pull_request.labels.*.name, 'gate-b-openai-fallback')
+      && !contains(github.event.pull_request.labels.*.name, 'gate-a-anthropic-primary')
+      && (github.event.action == 'ready_for_review'
+      || (github.event.action == 'labeled'
+      && (github.event.label.name == 'paid-eval'
+      || github.event.label.name == 'gate-b-openai-fallback'))))
+      || (github.event_name == 'workflow_dispatch'
+      && inputs.provider_gate == 'gate_b_openai_fallback'
+      && inputs.confirm_paid_execution == true)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: mas
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download Gate B shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: eval-report-gate-b-openai-fallback-shard-*
+          path: mas/evals/shards
+
+      - name: Aggregate Gate B eval reports
+        working-directory: mas
+        env:
+          MAS_PROVIDER_GATE: 'gate_b_openai_fallback'
+          # Operator input reaches the process as DATA, never as shell source.
+          EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
+        run: |
+          python -m evals.run_evals \
+            --aggregate evals/shards/eval-report-gate-b-openai-fallback-shard-* \
+            --expect-gate gate_b_openai_fallback \
+            --expect-shard-count 6 \
+            --report evals/out/ \
+            --threshold "$EVAL_THRESHOLD"
+
+      - name: Upload Gate B aggregate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-gate-b-openai-fallback
+          path: mas/evals/out/
+
+      - name: Post Gate B summary
+        if: always()
+        working-directory: mas
+        env:
+          MAS_PROVIDER_GATE: 'gate_b_openai_fallback'
+        run: python -m evals.gate_summary --report evals/out/ >> $GITHUB_STEP_SUMMARY

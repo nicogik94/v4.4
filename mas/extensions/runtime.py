@@ -41,6 +41,7 @@ class GatewayRequest:
 @dataclass
 class GatewayResponse:
     text: str
+    stop_reason: str = ""
     model_used: str = ""
     provider_used: str = ""
     selected_model: str = ""

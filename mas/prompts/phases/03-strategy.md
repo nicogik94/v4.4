@@ -2,7 +2,7 @@
 
 **Agent:** StrategyAgent
 **Primary model:** claude-opus-4-6
-**Thinking budget:** 20000 tokens
+**Thinking budget:** 4000 tokens, with 4000 of the 8000-token completion budget reserved for response text
 **Frameworks:** [#15] Prospect Theory · [#2] PREMORTEM · [#5] SISTÉMICO · [#6] LADDER · [#25] EVOI · [#1] STEELMAN
 **Sub-agent:** SQIAgent (sonnet-4-6) scores strategy quality along 8 dimensions
 **Temperature:** 0.4
@@ -26,7 +26,7 @@ Full outputs from phase_0, phase_1, phase_2.
 ## What "good" looks like
 
 1. **Preliminary verdicts first.** Before recommending actions, for each hypothesis give one of: `LIKELY_CONFIRMED`, `LIKELY_REJECTED`, `NEEDS_MONITORING`, with evidence.
-2. **Executive strategy in 2–3 sentences.** No jargon. No "leverage synergies."
+2. **Executive strategy in 1–2 concise sentences.** No jargon. No "leverage synergies."
 3. **Ranked strategies.** Each with: priority (CRITICAL / HIGH / MEDIUM / LOW), action, justification (why it works, not just what it is), evidence_chain (`H_X + FMEA_Y + audit_finding_Z → action`), expected impact, effort (Low/Med/High), timeline, risk_if_ignored, framework_source.
 4. **Implementation sequence.** The order in which the top actions should be executed, with dependencies.
    If explicit operator constraints allow only one focused initiative plus one small experiment, the implementation sequence must contain only that constrained action set.
@@ -34,12 +34,24 @@ Full outputs from phase_0, phase_1, phase_2.
 6. **Monitoring plan.** What MonitorAgent needs to watch for re-entry triggers.
 7. **Re-entry check.** Did any evidence surface that fires R1–R8? If so, flag it and halt.
 
+## Generation compactness targets
+
+These are prompt-level generation targets, not structural cardinality validators. The hard acceptance boundary is the provider token budget plus required-key and typed/schema validation.
+
+- Emit exactly one preliminary verdict per supplied hypothesis. Keep its evidence and monitoring plan to one sentence and at most 35 words each.
+- Keep `executive_strategy` to at most 2 sentences and 80 words.
+- Emit at most 5 strategy actions, or fewer when operator constraints require fewer. Retain every required action field and keep each explanatory string to one sentence and 40 words.
+- Keep `implementation_sequence` to at most 6 steps and 120 words.
+- Emit 3–6 concise `success_metrics`, at most 25 words each.
+- Keep the top-level `monitoring_plan` to at most 100 words and all remaining scalar strings terse.
+- Do not repeat upstream analysis, restate the brief, add appendices, or add fields outside the schema.
+
 ## Output schema (abbreviated)
 
 ```json
 {
   "preliminary_verdicts": [{"id":"H1","verdict":"LIKELY_CONFIRMED","evidence":"","monitoring_plan":""}],
-  "executive_strategy": "2-3 sentences",
+  "executive_strategy": "1-2 concise sentences",
   "strategies": [
     {
       "priority": "CRITICAL",

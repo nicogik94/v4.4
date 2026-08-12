@@ -17,10 +17,23 @@ from extensions.runtime import GatewayRequest, ProviderSelection, RoutingConfig,
 from runtime.cache import InMemorySemanticCache, NoOpSemanticCache  # noqa: E402
 from runtime.provider_gateway import (  # noqa: E402
     AUTH_ERROR,
+    CONNECTION_ERROR,
     DefaultProviderGateway,
+    EMPTY_PROVIDER_OUTPUT,
+    FALLBACK_ELIGIBLE_ERRORS,
     INVALID_REQUEST,
+    OUTPUT_TOKEN_EXHAUSTED,
+    PROVIDER_UNAVAILABLE,
     QUOTA_EXCEEDED,
+    RATE_LIMITED,
+    RETRYABLE_PROVIDER_ERRORS,
+    SERVER_ERROR,
+    TIMEOUT,
+    TRANSPORT_MALFORMED_RESPONSE,
+    UNUSABLE_OUTPUT_ERRORS,
+    V7_SUPPORTED_PROVIDERS,
     build_cache_key,
+    classify_unusable_output,
     normalize_exception_category,
     safe_provider_error_detail,
     select_model_candidates,
@@ -108,6 +121,16 @@ class TestRuntimeRouting(unittest.TestCase):
                 self.assertEqual(selection.task_profile, expected_profile)
                 self.assertEqual(task_profile_for_phase(phase), expected_profile)
 
+    def test_every_normal_phase_selects_anthropic_first(self):
+        for phase in MODEL_ROUTING:
+            with self.subTest(phase=phase):
+                candidates = select_model_candidates(phase)
+                self.assertTrue(candidates)
+                self.assertIs(candidates[0][0].provider, Provider.ANTHROPIC)
+
+    def test_v7_supported_provider_boundary_is_anthropic_only(self):
+        self.assertEqual(V7_SUPPORTED_PROVIDERS, frozenset({Provider.ANTHROPIC}))
+
     def test_unknown_phase_uses_safe_default(self):
         config, selection = select_model_config("unknown-phase")
 
@@ -158,6 +181,54 @@ class TestRuntimeRouting(unittest.TestCase):
         self.assertEqual(config.model, "gpt-5-mini")
         self.assertEqual(selection.provider, "openai")
         self.assertEqual(selection.reason, "config_override")
+        self.assertIsNone(config.min_response_tokens)
+
+    def test_extended_thinking_config_must_reserve_response_text_budget(self):
+        with self.assertRaisesRegex(ValueError, "response text"):
+            ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model="claude-opus-4-6",
+                max_tokens=8000,
+                thinking_budget=20000,
+                min_response_tokens=4000,
+            )
+
+        strategy = MODEL_ROUTING["strategy"]
+        self.assertEqual(strategy.max_tokens, 8000)
+        self.assertGreaterEqual(strategy.min_response_tokens, 4000)
+        self.assertLessEqual(
+            strategy.thinking_budget + strategy.min_response_tokens,
+            strategy.max_tokens,
+        )
+
+    def test_strategy_reserve_does_not_change_unrelated_phase_thinking_budgets(self):
+        expected = {
+            "hypotheses": 15000,
+            "gauntlet": 2000,
+            "audit": 5000,
+            "sqi": 5000,
+            "report": 10000,
+            "scope": 5000,
+            "scientific_inventory": 5000,
+            "trl_diagnosis": 5000,
+            "research_industry_alignment": 5000,
+            "ip_protection_axis": 5000,
+            "next_level_recommendations": 5000,
+            "technical_validation_plan": 5000,
+            "industrial_transfer_plan": 5000,
+            "readiness_roadmap": 5000,
+            "executive_summary": 5000,
+        }
+
+        for phase, thinking_budget in expected.items():
+            with self.subTest(phase=phase):
+                self.assertEqual(MODEL_ROUTING[phase].thinking_budget, thinking_budget)
+                self.assertIsNone(MODEL_ROUTING[phase].min_response_tokens)
+
+    def test_llm_response_stop_reason_rejects_raw_provider_metadata(self):
+        response = llm_client.LLMResponse(stop_reason="raw-sensitive-provider-detail")
+
+        self.assertEqual(response.stop_reason, "other")
 
     def test_build_cache_key_is_stable(self):
         request = GatewayRequest(
@@ -481,12 +552,13 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime_events[-1]["fallback_model"], "claude-sonnet-4-6")
         self.assertEqual(runtime_events[-1]["cache_status"], "disabled")
 
-    async def test_unavailable_first_candidate_falls_back_to_second(self):
+    async def test_openai_key_cannot_rescue_an_unavailable_anthropic_path(self):
         async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             raise AssertionError("anthropic should be skipped when unavailable")
 
-        async def fake_openai(model, system, prompt, max_tokens, temperature):
-            return SimpleNamespace(text="openai ok", model_used=model, error="", error_type="")
+        fake_openai = AsyncMock(
+            side_effect=AssertionError("OpenAI is outside the supported V7 runtime")
+        )
 
         gateway = DefaultProviderGateway(
             anthropic_executor=fake_anthropic,
@@ -509,12 +581,137 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(response.text, "openai ok")
-        self.assertTrue(response.fallback_used)
+        self.assertEqual(response.text, "")
+        self.assertTrue(response.error)
+        self.assertFalse(response.fallback_used)
         self.assertEqual(response.fallback_reason, "provider_unavailable")
         self.assertEqual(response.failed_provider, "anthropic")
-        self.assertEqual(response.fallback_provider, "openai")
-        self.assertEqual(response.fallback_model, "gpt-5-mini")
+        self.assertEqual(response.fallback_provider, "")
+        self.assertEqual(response.fallback_model, "")
+        fake_openai.assert_not_awaited()
+        openai_attempts = [
+            attempt for attempt in response.attempts if attempt["provider"] == "openai"
+        ]
+        self.assertEqual(openai_attempts, [])
+
+    async def test_no_runtime_override_can_make_openai_eligible(self):
+        cases = (
+            (
+                "config_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(),
+                ModelConfig(provider=Provider.OPENAI, model="gpt-5-mini"),
+            ),
+            (
+                "explicit_model",
+                RoutingContext(phase="classify", explicit_model="openai:gpt-5"),
+                RoutingConfig(),
+                None,
+            ),
+            (
+                "phase_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(phase_overrides={"classify": "openai:gpt-5-mini"}),
+                None,
+            ),
+            (
+                "complexity_override",
+                RoutingContext(phase="classify", complexity_hint="deep"),
+                RoutingConfig(complexity_routes={"deep": "openai:gpt-5"}),
+                None,
+            ),
+            (
+                "default_provider_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(
+                    default_provider="openai",
+                    phase_overrides={"classify": "custom-openai-model"},
+                ),
+                None,
+            ),
+            (
+                "task_profile_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(
+                    task_profile_candidates={
+                        "fast_classification": ["openai:gpt-5-mini"]
+                    }
+                ),
+                None,
+            ),
+        )
+
+        for label, context, routing_config, config_override in cases:
+            with self.subTest(source=label):
+                anthropic = AsyncMock(return_value=SimpleNamespace(
+                    text="anthropic ok",
+                    model_used=MODEL_ROUTING["classify"].model,
+                    error="",
+                    error_type="",
+                ))
+                openai = AsyncMock(
+                    side_effect=AssertionError("runtime override reached OpenAI")
+                )
+                gateway = DefaultProviderGateway(
+                    anthropic_executor=anthropic,
+                    openai_executor=openai,
+                    cache=NoOpSemanticCache(),
+                    breaker=_BreakerStub(),
+                    routing_config=routing_config,
+                    provider_availability={"anthropic": True, "openai": True},
+                    max_retries=1,
+                )
+
+                response = await gateway.call(
+                    GatewayRequest(
+                        phase="classify",
+                        system_prompt="system",
+                        user_prompt="prompt",
+                        routing_context=context,
+                    ),
+                    config_override=config_override,
+                )
+
+                self.assertEqual(response.provider_used, "anthropic")
+                self.assertEqual(response.text, "anthropic ok")
+                openai.assert_not_awaited()
+                self.assertTrue(all(
+                    attempt["provider"] == "anthropic"
+                    for attempt in response.attempts
+                ))
+
+    async def test_anthropic_errors_never_cross_into_openai(self):
+        async def failing_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            return SimpleNamespace(
+                text="", model_used=model, error="rate limited", error_type=RATE_LIMITED
+            )
+
+        openai = AsyncMock(side_effect=AssertionError("Anthropic failure reached OpenAI"))
+        gateway = DefaultProviderGateway(
+            anthropic_executor=failing_anthropic,
+            openai_executor=openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            provider_availability={"anthropic": True, "openai": True},
+            max_retries=1,
+        )
+
+        response = await gateway.call(GatewayRequest(
+            phase="classify",
+            system_prompt="system",
+            user_prompt="prompt",
+            routing_context=RoutingContext(phase="classify"),
+        ))
+
+        self.assertTrue(response.error)
+        self.assertEqual(response.failed_provider, "anthropic")
+        self.assertFalse(response.fallback_used)
+        openai.assert_not_awaited()
+        self.assertTrue(all(
+            attempt["provider"] == "anthropic"
+            for attempt in response.attempts
+            if attempt["status"] != "skipped"
+        ))
 
     async def test_unhealthy_candidate_is_skipped(self):
         breaker = _BreakerStub()
@@ -623,7 +820,11 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.fallback_used)
         self.assertEqual(calls, [MODEL_ROUTING["audit"].model])
 
-    async def test_runtime_metadata_sanitizes_failed_primary_and_fallback(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_runtime_metadata_sanitizes_failed_primary_and_deferred_fallback(self):
         async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             return SimpleNamespace(
                 text="",
@@ -683,6 +884,7 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
     async def test_call_llm_still_works_through_gateway(self):
         fake_response = llm_client.LLMResponse(
             text="llm ok",
+            stop_reason="max_tokens",
             ok=True,
             model_used=MODEL_ROUTING["classify"].model,
             provider_used="anthropic",
@@ -702,6 +904,57 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.text, "llm ok")
         self.assertEqual(response.provider_used, "anthropic")
         self.assertEqual(response.model_used, MODEL_ROUTING["classify"].model)
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertEqual(response.attempt_count, 1)
+        self.assertFalse(response.fallback_used)
+
+    async def test_anthropic_max_tokens_stop_reason_is_normalized_on_response(self):
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="{\"ok\":true}")],
+                usage=SimpleNamespace(
+                    input_tokens=11,
+                    output_tokens=8000,
+                    cache_read_input_tokens=0,
+                ),
+                stop_reason="max_tokens",
+            )
+        )
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+
+        with patch("llm_client._get_anthropic", return_value=fake_client):
+            response = await llm_client._call_anthropic(
+                "claude-opus-4-6", "system", "prompt", 8000, 0.4, 4000
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.text, '{"ok":true}')
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertEqual(create_mock.await_count, 1)
+        self.assertEqual(create_mock.await_args.kwargs["thinking"]["budget_tokens"], 4000)
+
+    async def test_unreserved_direct_anthropic_call_preserves_historical_clamp(self):
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="partial")],
+                usage=SimpleNamespace(
+                    input_tokens=11,
+                    output_tokens=1,
+                    cache_read_input_tokens=0,
+                ),
+                stop_reason="max_tokens",
+            )
+        )
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+
+        with patch("llm_client._get_anthropic", return_value=fake_client):
+            response = await llm_client._call_anthropic(
+                "claude-opus-4-6", "system", "prompt", 8000, 0.4, 20000
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(create_mock.await_count, 1)
+        self.assertEqual(create_mock.await_args.kwargs["thinking"]["budget_tokens"], 7999)
 
 
 def test_call_llm_default_shadow_store_uses_pytest_temp_sqlite(scenario_shadow_sqlite_path):
@@ -752,6 +1005,26 @@ class TestOpenAICompatibility(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("max_tokens", kwargs)
         self.assertTrue(response.ok)
 
+    async def test_openai_length_finish_reason_normalizes_to_max_tokens(self):
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="partial"),
+                    finish_reason="length",
+                )],
+                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=6),
+            )
+        )
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_mock)))
+
+        with patch("llm_client._get_openai", return_value=fake_client):
+            response = await llm_client._call_openai(
+                "gpt-5-mini", "system", "prompt", 123, 0.2
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.stop_reason, "max_tokens")
+
 
 class TestCircuitBreaker(unittest.TestCase):
     def test_process_local_breaker_opens_and_resets_by_candidate_key(self):
@@ -786,7 +1059,11 @@ class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
         exc = _FakeAnthropicBadRequest("model does not support extended thinking")
         self.assertEqual(normalize_exception_category(exc), INVALID_REQUEST)
 
-    async def test_judge_config_override_falls_back_to_openai_on_quota_exceeded(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_deferred_judge_fallback_handles_quota_exceeded(self):
         anthropic_calls: list[str] = []
         openai_calls: list[str] = []
 
@@ -884,7 +1161,11 @@ class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.failed_provider, "anthropic")
         self.assertEqual(response.failed_error_type, QUOTA_EXCEEDED)
 
-    async def test_quota_exhaustion_fallback_metadata_preserved(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_deferred_quota_fallback_metadata_preserved(self):
         async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             raise _FakeAnthropicLowCreditError()
 
@@ -936,7 +1217,11 @@ class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.fallback_model, "gpt-5")
         self.assertFalse(response.error)
 
-    async def test_quota_exhausted_anthropic_candidate_not_retried_repeatedly(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_deferred_quota_fallback_does_not_retry_anthropic_repeatedly(self):
         """Quota-exhausted Anthropic must break out of the retry loop immediately
         (QUOTA_EXCEEDED is not in RETRYABLE_PROVIDER_ERRORS)."""
         anthropic_call_count = 0
@@ -977,6 +1262,1123 @@ class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(anthropic_call_count, 1, "quota-exhausted candidate must not be retried")
+
+
+def _openai_response(content, finish_reason, completion_tokens=64):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content),
+            finish_reason=finish_reason,
+        )],
+        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=completion_tokens),
+    )
+
+
+def _anthropic_response(blocks, stop_reason, output_tokens=64):
+    return SimpleNamespace(
+        content=blocks,
+        usage=SimpleNamespace(
+            input_tokens=11,
+            output_tokens=output_tokens,
+            cache_read_input_tokens=0,
+        ),
+        stop_reason=stop_reason,
+    )
+
+
+class TestUnusableOpenAIOutput(unittest.IsolatedAsyncioTestCase):
+    """A GPT-5 turn that spends its whole completion budget on reasoning returns
+    no visible text. That must never leave the adapter as a success."""
+
+    async def _call(self, content, finish_reason, completion_tokens=64):
+        create_mock = AsyncMock(
+            return_value=_openai_response(content, finish_reason, completion_tokens)
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create_mock))
+        )
+        with patch("llm_client._get_openai", return_value=fake_client):
+            return await llm_client._call_openai("gpt-5", "system", "prompt", 8000, 0.4)
+
+    async def test_o1_none_content_with_length_stop_is_output_exhaustion(self):
+        response = await self._call(None, "length", completion_tokens=8000)
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error_type, OUTPUT_TOKEN_EXHAUSTED)
+        self.assertEqual(response.text, "")
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertIn("visible_text=none", response.error)
+        self.assertIn("output_tokens=8000", response.error)
+        # Billed usage survives the failure: these tokens were charged.
+        self.assertEqual(response.output_tokens, 8000)
+
+    async def test_o2_empty_content_with_length_stop_is_output_exhaustion(self):
+        response = await self._call("", "length", completion_tokens=8000)
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error_type, OUTPUT_TOKEN_EXHAUSTED)
+        self.assertEqual(response.text, "")
+        self.assertIn("visible_text=empty", response.error)
+
+    async def test_o3_empty_content_with_normal_stop_is_empty_provider_output(self):
+        response = await self._call("", "stop")
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error_type, EMPTY_PROVIDER_OUTPUT)
+        self.assertEqual(response.text, "")
+        self.assertIn("stop_reason=end_turn", response.error)
+
+    async def test_o3_whitespace_only_content_is_empty_provider_output(self):
+        response = await self._call("   \n\t ", "stop")
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error_type, EMPTY_PROVIDER_OUTPUT)
+        self.assertIn("visible_text=whitespace", response.error)
+
+    async def test_o4_partial_content_with_length_stop_stays_a_success(self):
+        response = await self._call('{"executive_strategy": "partial', "length")
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.error, "")
+        self.assertEqual(response.error_type, "")
+        self.assertEqual(response.text, '{"executive_strategy": "partial')
+        self.assertEqual(response.stop_reason, "max_tokens")
+
+    async def test_o5_normal_completion_does_not_regress(self):
+        response = await self._call('{"ok":true}', "stop")
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.error, "")
+        self.assertEqual(response.text, '{"ok":true}')
+        self.assertEqual(response.stop_reason, "end_turn")
+
+
+class TestUnusableAnthropicOutput(unittest.IsolatedAsyncioTestCase):
+    """The same invariant at the primary provider: a reply carrying no text
+    block is not an analytical result either."""
+
+    async def _call(self, blocks, stop_reason, output_tokens=64):
+        create_mock = AsyncMock(
+            return_value=_anthropic_response(blocks, stop_reason, output_tokens)
+        )
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+        with patch("llm_client._get_anthropic", return_value=fake_client):
+            return await llm_client._call_anthropic(
+                "claude-opus-4-6", "system", "prompt", 8000, 0.4, 4000
+            )
+
+    async def test_a1_no_usable_text_block_is_a_typed_failure(self):
+        response = await self._call(
+            [SimpleNamespace(type="thinking", thinking="reasoned privately")],
+            "end_turn",
+        )
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error_type, EMPTY_PROVIDER_OUTPUT)
+        self.assertEqual(response.text, "")
+        # The thinking block's content never reaches the diagnostic.
+        self.assertNotIn("reasoned privately", response.error)
+
+    async def test_a1_no_content_blocks_at_all_is_a_typed_failure(self):
+        response = await self._call([], "end_turn")
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error_type, EMPTY_PROVIDER_OUTPUT)
+
+    async def test_a2_empty_text_with_max_tokens_is_output_exhaustion(self):
+        response = await self._call(
+            [SimpleNamespace(type="text", text="")], "max_tokens", output_tokens=8000
+        )
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error_type, OUTPUT_TOKEN_EXHAUSTED)
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertIn("output_tokens=8000", response.error)
+        self.assertEqual(response.output_tokens, 8000)
+
+    async def test_a3_partial_text_with_max_tokens_stays_a_success(self):
+        response = await self._call(
+            [SimpleNamespace(type="text", text='{"executive_strategy": "partial')],
+            "max_tokens",
+        )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.error, "")
+        self.assertEqual(response.text, '{"executive_strategy": "partial')
+        self.assertEqual(response.stop_reason, "max_tokens")
+
+    async def test_a4_normal_completion_does_not_regress(self):
+        response = await self._call(
+            [SimpleNamespace(type="text", text='{"ok":true}')], "end_turn"
+        )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(response.error, "")
+        self.assertEqual(response.text, '{"ok":true}')
+
+
+class TestUnusableOutputGatewayContract(unittest.IsolatedAsyncioTestCase):
+    """The invariant at the gateway: enforced for *any* executor, not only the
+    two shipped adapters."""
+
+    def _gateway(self, *, anthropic, openai, breaker, openai_available=True, max_retries=3):
+        return DefaultProviderGateway(
+            anthropic_executor=anthropic,
+            openai_executor=openai,
+            cache=NoOpSemanticCache(),
+            breaker=breaker,
+            routing_config=RoutingConfig(
+                task_profile_candidates={"deep_reasoning": ["phase_default"]}
+            ),
+            provider_availability={"anthropic": True, "openai": openai_available},
+            max_retries=max_retries,
+        )
+
+    async def _call(self, gateway):
+        return await gateway.call(
+            GatewayRequest(
+                phase="strategy",
+                system_prompt="system",
+                user_prompt="prompt",
+                routing_context=RoutingContext(phase="strategy"),
+            )
+        )
+
+    async def test_g1_empty_output_never_appears_as_a_successful_attempt(self):
+        """An executor that reports no error and no text still fails closed."""
+        breaker = _BreakerStub()
+        calls: list[str] = []
+
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            calls.append(model)
+            return SimpleNamespace(
+                text="",
+                stop_reason="max_tokens",
+                model_used=model,
+                input_tokens=11,
+                output_tokens=8000,
+                cache_read_tokens=0,
+                cost_usd=0.2,
+                latency_ms=9,
+                error="",
+                error_type="",
+            )
+
+        gateway = self._gateway(
+            anthropic=fake_anthropic,
+            openai=AsyncMock(side_effect=AssertionError("openai is unavailable here")),
+            breaker=breaker,
+            openai_available=False,
+        )
+
+        response = await self._call(gateway)
+
+        self.assertTrue(response.error)
+        self.assertEqual(response.error_type, OUTPUT_TOKEN_EXHAUSTED)
+        self.assertEqual(response.text, "")
+        statuses = {attempt["status"] for attempt in response.attempts}
+        self.assertNotIn("success", statuses)
+        self.assertTrue(
+            all(
+                attempt["error_type"] == OUTPUT_TOKEN_EXHAUSTED
+                for attempt in response.attempts
+                if attempt["status"] == "failed"
+            )
+        )
+        self.assertTrue(calls, "the anthropic candidates must actually be attempted")
+
+    async def test_g2_g4_unusable_output_never_retries_the_same_candidate(self):
+        """max_retries=3 must not turn one empty answer into three billed ones."""
+        breaker = _BreakerStub()
+        calls: list[str] = []
+
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            calls.append(model)
+            return SimpleNamespace(
+                text="", stop_reason="max_tokens", model_used=model,
+                input_tokens=11, output_tokens=8000, cache_read_tokens=0,
+                cost_usd=0.2, latency_ms=9, error="", error_type="",
+            )
+
+        gateway = self._gateway(
+            anthropic=fake_anthropic,
+            openai=AsyncMock(side_effect=AssertionError("openai is unavailable here")),
+            breaker=breaker,
+            openai_available=False,
+            max_retries=3,
+        )
+
+        response = await self._call(gateway)
+
+        self.assertEqual(
+            len(calls), len(set(calls)),
+            "no candidate may be called twice for unusable output",
+        )
+        self.assertEqual(response.attempt_count, len(calls))
+        self.assertNotIn(OUTPUT_TOKEN_EXHAUSTED, RETRYABLE_PROVIDER_ERRORS)
+
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_g3_unusable_output_reaches_deferred_fallback_in_isolation(self):
+        breaker = _BreakerStub()
+        openai_calls: list[str] = []
+
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            return SimpleNamespace(
+                text="", stop_reason="max_tokens", model_used=model,
+                input_tokens=11, output_tokens=8000, cache_read_tokens=0,
+                cost_usd=0.2, latency_ms=9, error="", error_type="",
+            )
+
+        async def fake_openai(model, system, prompt, max_tokens, temperature):
+            openai_calls.append(model)
+            return SimpleNamespace(
+                text='{"recovered": true}', stop_reason="end_turn", model_used=model,
+                input_tokens=20, output_tokens=10, cache_read_tokens=0,
+                cost_usd=0.01, latency_ms=5, error="", error_type="",
+            )
+
+        gateway = self._gateway(
+            anthropic=fake_anthropic, openai=fake_openai, breaker=breaker
+        )
+
+        response = await self._call(gateway)
+
+        self.assertEqual(response.text, '{"recovered": true}')
+        self.assertFalse(response.error)
+        self.assertTrue(response.fallback_used)
+        self.assertEqual(response.failed_provider, "anthropic")
+        self.assertEqual(response.failed_error_type, OUTPUT_TOKEN_EXHAUSTED)
+        self.assertEqual(response.fallback_provider, "openai")
+        self.assertTrue(openai_calls)
+        self.assertIn(OUTPUT_TOKEN_EXHAUSTED, FALLBACK_ELIGIBLE_ERRORS)
+        self.assertIn(EMPTY_PROVIDER_OUTPUT, FALLBACK_ELIGIBLE_ERRORS)
+
+    async def test_g5_unusable_output_does_not_trip_the_circuit_breaker(self):
+        """A provider answering promptly with an empty body is reachable and
+        healthy; only this request's output contract failed."""
+        breaker = _BreakerStub()
+
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            return SimpleNamespace(
+                text="", stop_reason="end_turn", model_used=model,
+                input_tokens=11, output_tokens=0, cache_read_tokens=0,
+                cost_usd=0.0, latency_ms=9, error="", error_type="",
+            )
+
+        gateway = self._gateway(
+            anthropic=fake_anthropic,
+            openai=AsyncMock(side_effect=AssertionError("openai is unavailable here")),
+            breaker=breaker,
+            openai_available=False,
+        )
+
+        response = await self._call(gateway)
+
+        self.assertEqual(response.error_type, EMPTY_PROVIDER_OUTPUT)
+        self.assertFalse(response.retryable)
+        self.assertEqual(
+            breaker.failure_calls, [],
+            "a content-contract failure must not be recorded as a transport outage",
+        )
+
+    async def test_g6_existing_transport_error_semantics_do_not_regress(self):
+        for category in (
+            RATE_LIMITED, TIMEOUT, PROVIDER_UNAVAILABLE,
+            SERVER_ERROR, CONNECTION_ERROR, TRANSPORT_MALFORMED_RESPONSE,
+        ):
+            with self.subTest(category=category):
+                self.assertIn(category, RETRYABLE_PROVIDER_ERRORS)
+                self.assertIn(category, FALLBACK_ELIGIBLE_ERRORS)
+        for category in (AUTH_ERROR, QUOTA_EXCEEDED):
+            with self.subTest(category=category):
+                self.assertNotIn(category, RETRYABLE_PROVIDER_ERRORS)
+                self.assertIn(category, FALLBACK_ELIGIBLE_ERRORS)
+        self.assertNotIn(INVALID_REQUEST, FALLBACK_ELIGIBLE_ERRORS)
+        self.assertEqual(
+            UNUSABLE_OUTPUT_ERRORS & RETRYABLE_PROVIDER_ERRORS, set(),
+            "unusable output must never be retried in place",
+        )
+
+    async def test_usable_text_with_max_tokens_still_succeeds_through_the_gateway(self):
+        """Case C at the gateway: partial output stays available downstream."""
+        async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            return SimpleNamespace(
+                text='{"executive_strategy": "partial', stop_reason="max_tokens",
+                model_used=model, input_tokens=11, output_tokens=8000,
+                cache_read_tokens=0, cost_usd=0.2, latency_ms=9,
+                error="", error_type="",
+            )
+
+        gateway = self._gateway(
+            anthropic=fake_anthropic,
+            openai=AsyncMock(side_effect=AssertionError("no fallback expected")),
+            breaker=_BreakerStub(),
+            openai_available=False,
+        )
+
+        response = await self._call(gateway)
+
+        self.assertFalse(response.error)
+        self.assertEqual(response.text, '{"executive_strategy": "partial')
+        self.assertEqual(response.stop_reason, "max_tokens")
+
+
+class _ExecutorMustNotRun(BaseException):
+    """Raised by a test double for a candidate that must never be executed."""
+
+
+class TestLogicalCallUsageAccounting(unittest.IsolatedAsyncioTestCase):
+    """Provider work that actually happened must not disappear from accounting.
+
+    A gateway response describes the *logical call*, not one attempt: `call_llm`
+    copies its usage onto `LLMResponse` and the orchestrator hands that to
+    `policy.record_consumption_to_state` exactly once per logical call, which is
+    what feeds the `max_total_cost_usd` hard cap. Reporting only the attempt
+    whose response object happened to be returned therefore hid real, billed
+    spend from the cap — including the unusable-output attempts PR #115 turned
+    into typed failures, which are transport successes and are charged for.
+
+    Every test here tallies what the fake executors were actually asked to bill
+    and requires the logical response to report that tally exactly: not less
+    (lost spend), not more (phantom or double-counted spend).
+    """
+
+    def setUp(self):
+        self.billed = SimpleNamespace(
+            input_tokens=0, output_tokens=0, cache_read_tokens=0, cost_usd=0.0,
+            calls=[],
+        )
+
+    def _bill(self, model, *, in_tok, out_tok, cost, cache_tok=0):
+        self.billed.calls.append(model)
+        self.billed.input_tokens += in_tok
+        self.billed.output_tokens += out_tok
+        self.billed.cache_read_tokens += cache_tok
+        self.billed.cost_usd += cost
+
+    def _assert_reports_every_billed_token(self, response):
+        self.assertEqual(response.input_tokens, self.billed.input_tokens)
+        self.assertEqual(response.output_tokens, self.billed.output_tokens)
+        self.assertEqual(response.cache_read_tokens, self.billed.cache_read_tokens)
+        self.assertAlmostEqual(response.cost_usd, self.billed.cost_usd, places=9)
+
+    def _gateway(self, *, anthropic, openai, openai_available=True,
+                 anthropic_available=True, max_retries=1):
+        return DefaultProviderGateway(
+            anthropic_executor=anthropic,
+            openai_executor=openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            routing_config=RoutingConfig(
+                task_profile_candidates={"deep_reasoning": ["phase_default"]}
+            ),
+            provider_availability={
+                "anthropic": anthropic_available, "openai": openai_available,
+            },
+            max_retries=max_retries,
+            # No test here exercises a real delay; a retry must not cost the
+            # suite ten seconds of wall clock.
+            sleep=AsyncMock(),
+        )
+
+    async def _call(self, gateway, *, before_attempt=None):
+        return await gateway.call(
+            GatewayRequest(
+                phase="strategy",
+                system_prompt="system",
+                user_prompt="prompt",
+                routing_context=RoutingContext(phase="strategy"),
+            ),
+            before_attempt=before_attempt,
+        )
+
+    def _unusable_executor(self, *, in_tok=9200, out_tok=4000, cost=0.25, cache_tok=0):
+        """A transport success that returned no usable text — and was billed."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=in_tok, out_tok=out_tok, cost=cost, cache_tok=cache_tok)
+            return SimpleNamespace(
+                text="", stop_reason="max_tokens", model_used=model,
+                input_tokens=in_tok, output_tokens=out_tok,
+                cache_read_tokens=cache_tok, cost_usd=cost, latency_ms=9,
+                error="", error_type="",
+            )
+        return anthropic
+
+    def _success_executor(self, *, text='{"recovered": true}', in_tok=500,
+                          out_tok=300, cost=0.01, cache_tok=0, stop_reason="end_turn"):
+        async def openai(model, system, prompt, max_tokens, temperature):
+            self._bill(model, in_tok=in_tok, out_tok=out_tok, cost=cost, cache_tok=cache_tok)
+            return SimpleNamespace(
+                text=text, stop_reason=stop_reason, model_used=model,
+                input_tokens=in_tok, output_tokens=out_tok,
+                cache_read_tokens=cache_tok, cost_usd=cost, latency_ms=5,
+                error="", error_type="",
+            )
+        return openai
+
+    @staticmethod
+    def _never_called(*args, **kwargs):
+        # Derived from BaseException on purpose. `_execute` catches `Exception`
+        # and turns it into a typed failure response, so a plain AssertionError
+        # here would be swallowed into zero-usage error output and a test
+        # asserting "this candidate was skipped" could still pass while the
+        # candidate had in fact been executed.
+        raise _ExecutorMustNotRun("this candidate must never be executed")
+
+    # ─── T1 ───────────────────────────────────────────────────────────────
+    async def test_t1_single_successful_attempt_reports_its_own_usage_exactly(self):
+        """U1: no aggregation artifact on the ordinary path."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=500, out_tok=300, cost=0.01, cache_tok=40)
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=model,
+                input_tokens=500, output_tokens=300, cache_read_tokens=40,
+                cost_usd=0.01, latency_ms=5, error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called, openai_available=False,
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(len(self.billed.calls), 1)
+        self.assertEqual(response.attempt_count, 1)
+        # Exact equality, not approximate: one attempt must round-trip untouched.
+        self.assertEqual(response.input_tokens, 500)
+        self.assertEqual(response.output_tokens, 300)
+        self.assertEqual(response.cache_read_tokens, 40)
+        self.assertEqual(response.cost_usd, 0.01)
+
+    # ─── T2 ───────────────────────────────────────────────────────────────
+    async def test_t2_unusable_terminal_failure_retains_its_billed_usage(self):
+        """U5: the terminal response is built fresh, and must not be born at zero."""
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(),
+            openai=self._never_called,
+            openai_available=False,
+        ))
+
+        self.assertTrue(response.error)
+        self.assertEqual(response.error_type, OUTPUT_TOKEN_EXHAUSTED)
+        self.assertTrue(self.billed.calls, "the failure must be a billed one")
+        self.assertGreater(response.cost_usd, 0.0)
+        self.assertGreater(response.input_tokens + response.output_tokens, 0)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T3 ───────────────────────────────────────────────────────────────
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_t3_deferred_fallback_success_reports_the_sum(self):
+        """U4: the unusable attempt was a billed provider execution; fallback
+        succeeding later does not un-bill it."""
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(), openai=self._success_executor(),
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(response.text, '{"recovered": true}')
+        self.assertTrue(response.fallback_used)
+        unusable_calls = len(self.billed.calls) - 1
+        self.assertGreaterEqual(unusable_calls, 1, "an unusable attempt must precede the winner")
+        # A + B, not B alone.
+        self.assertAlmostEqual(
+            response.cost_usd, 0.25 * unusable_calls + 0.01, places=9
+        )
+        self.assertEqual(response.input_tokens, 9200 * unusable_calls + 500)
+        self.assertEqual(response.output_tokens, 4000 * unusable_calls + 300)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T4 ───────────────────────────────────────────────────────────────
+    async def test_t4_ineligible_fallback_contributes_nothing_and_erases_nothing(self):
+        """U6: ineligible candidates are absent; executed attempts still cost money."""
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(),
+            openai=self._never_called,
+            openai_available=False,
+        ))
+
+        executed = len(self.billed.calls)
+        self.assertTrue(response.error)
+        self.assertEqual({a["provider"] for a in response.attempts}, {"anthropic"})
+        # Exactly the executed attempts — the deferred provider added no phantom spend.
+        self.assertAlmostEqual(response.cost_usd, 0.25 * executed, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T5 ───────────────────────────────────────────────────────────────
+    async def test_t5_every_executed_unusable_attempt_contributes_exactly_once(self):
+        """U5 with both providers executing: no attempt lost, none counted twice."""
+        async def openai(model, system, prompt, max_tokens, temperature):
+            self._bill(model, in_tok=9200, out_tok=4000, cost=0.25)
+            return SimpleNamespace(
+                text="", stop_reason="max_tokens", model_used=model,
+                input_tokens=9200, output_tokens=4000, cache_read_tokens=0,
+                cost_usd=0.25, latency_ms=9, error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=self._unusable_executor(), openai=openai,
+        ))
+
+        executed = len(self.billed.calls)
+        self.assertGreater(executed, 2, "this matrix needs several executed candidates")
+        self.assertEqual(response.attempt_count, executed)
+        self.assertEqual(response.input_tokens, 9200 * executed)
+        self.assertEqual(response.output_tokens, 4000 * executed)
+        self.assertAlmostEqual(response.cost_usd, 0.25 * executed, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T6 ───────────────────────────────────────────────────────────────
+    async def test_t6_skipped_only_candidates_report_zero_usage(self):
+        """U9: no provider was reached, so there is nothing to account for."""
+        response = await self._call(self._gateway(
+            anthropic=self._never_called,
+            openai=self._never_called,
+            anthropic_available=False,
+            openai_available=False,
+        ))
+
+        self.assertEqual(self.billed.calls, [])
+        self.assertEqual(response.error_type, PROVIDER_UNAVAILABLE)
+        self.assertEqual(response.attempt_count, 0)
+        self.assertEqual(response.input_tokens, 0)
+        self.assertEqual(response.output_tokens, 0)
+        self.assertEqual(response.cache_read_tokens, 0)
+        self.assertEqual(response.cost_usd, 0.0)
+
+    # ─── T7 ───────────────────────────────────────────────────────────────
+    async def test_t7_retried_attempt_with_usage_is_counted_once_each(self):
+        """U2: a retryable failure that still reported usage is real spend, and
+        the retry that follows it is a second, separate charge."""
+        attempts = []
+
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            attempts.append(model)
+            if len(attempts) == 1:
+                self._bill(model, in_tok=800, out_tok=120, cost=0.05)
+                return SimpleNamespace(
+                    text="", stop_reason="", model_used=model,
+                    input_tokens=800, output_tokens=120, cache_read_tokens=0,
+                    cost_usd=0.05, latency_ms=9,
+                    error="server error", error_type="server_error",
+                )
+            self._bill(model, in_tok=500, out_tok=300, cost=0.01)
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=model,
+                input_tokens=500, output_tokens=300, cache_read_tokens=0,
+                cost_usd=0.01, latency_ms=5, error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called,
+            openai_available=False, max_retries=3,
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(len(self.billed.calls), 2, "one retry of the same candidate")
+        self.assertEqual(response.attempt_count, 2)
+        self.assertEqual(response.input_tokens, 1300)
+        self.assertEqual(response.output_tokens, 420)
+        self.assertAlmostEqual(response.cost_usd, 0.06, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    async def test_t7b_transport_failure_without_usage_invents_none(self):
+        """The other half of U2/U10: absent usage stays absent."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self.billed.calls.append(model)
+            raise TimeoutError("connection timed out")
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called,
+            openai_available=False, max_retries=2,
+        ))
+
+        self.assertTrue(response.error)
+        self.assertTrue(self.billed.calls, "attempts really were made")
+        self.assertEqual(response.input_tokens, 0)
+        self.assertEqual(response.output_tokens, 0)
+        self.assertEqual(response.cost_usd, 0.0)
+
+    # ─── T8 ───────────────────────────────────────────────────────────────
+    async def test_t8_governance_refusal_preserves_earlier_spend_and_adds_none(self):
+        """U8: the gate closing after money was spent must not un-spend it."""
+        seen = []
+
+        def before_attempt(config):
+            seen.append(config.model)
+            if len(seen) == 1:
+                return None
+            return {"reason": "budget cap reached", "category": "budget"}
+
+        response = await self._call(
+            self._gateway(
+                anthropic=self._unusable_executor(),
+                openai=self._never_called,
+                openai_available=False,
+            ),
+            before_attempt=before_attempt,
+        )
+
+        self.assertEqual(response.error_type, "budget")
+        self.assertEqual(len(self.billed.calls), 1, "only the pre-refusal attempt ran")
+        # The refused call itself contributes nothing...
+        self.assertEqual(response.attempt_count, 1)
+        # ...and the spend that preceded it survives.
+        self.assertEqual(response.input_tokens, 9200)
+        self.assertEqual(response.output_tokens, 4000)
+        self.assertAlmostEqual(response.cost_usd, 0.25, places=9)
+        self._assert_reports_every_billed_token(response)
+
+    # ─── T9 ───────────────────────────────────────────────────────────────
+    async def test_t9_partial_nonempty_max_tokens_success_does_not_regress(self):
+        """PR #115 semantics preserved: partial text is a success, and it is
+        accounted for as exactly its own attempt."""
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=11, out_tok=8000, cost=0.2)
+            return SimpleNamespace(
+                text='{"executive_strategy": "partial', stop_reason="max_tokens",
+                model_used=model, input_tokens=11, output_tokens=8000,
+                cache_read_tokens=0, cost_usd=0.2, latency_ms=9,
+                error="", error_type="",
+            )
+
+        response = await self._call(self._gateway(
+            anthropic=anthropic, openai=self._never_called, openai_available=False,
+        ))
+
+        self.assertFalse(response.error)
+        self.assertEqual(response.text, '{"executive_strategy": "partial')
+        self.assertEqual(response.stop_reason, "max_tokens")
+        self.assertEqual(len(self.billed.calls), 1)
+        self.assertEqual(response.input_tokens, 11)
+        self.assertEqual(response.output_tokens, 8000)
+        self.assertEqual(response.cost_usd, 0.2)
+
+    # ─── T10 ──────────────────────────────────────────────────────────────
+    #
+    # End to end, provider-free, through the real consumer: `call_llm` builds
+    # the LLMResponse and `policy.record_consumption_to_state` is the function
+    # the orchestrator calls with `total_tokens` / `cost_usd` — the one that
+    # advances the `max_total_cost_usd` ledger. These two cases are the §6
+    # cost-governance invariant: spend from an unusable first attempt stays
+    # visible after (A) terminal failure and (B) successful fallback.
+
+    async def _consume_through_call_llm(self, *, anthropic, openai, openai_key):
+        import policy
+
+        state = SimpleNamespace(budget_consumed={
+            "total_tokens": 0, "total_cost_usd": 0.0, "llm_call_count": 0,
+            "consecutive_failures": 0,
+        })
+        with (
+            patch("llm_client.ANTHROPIC_API_KEY", "test-key"),
+            patch("llm_client.OPENAI_API_KEY", openai_key),
+            patch("llm_client._call_anthropic", new=anthropic),
+            patch("llm_client._call_openai", new=openai),
+        ):
+            response = await llm_client.call_llm("strategy", "system", "prompt")
+        policy.record_consumption_to_state(
+            state, response.total_tokens, response.cost_usd, success=response.ok
+        )
+        return response, state.budget_consumed
+
+    async def test_t10a_terminal_failure_spend_reaches_the_budget_ledger(self):
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=9200, out_tok=4000, cost=0.25)
+            return llm_client.LLMResponse(
+                text="", stop_reason="max_tokens", ok=False,
+                error="unusable", error_type=OUTPUT_TOKEN_EXHAUSTED,
+                model_used=model, input_tokens=9200, output_tokens=4000,
+                cost_usd=0.25, latency_ms=9,
+            )
+
+        response, consumed = await self._consume_through_call_llm(
+            anthropic=anthropic, openai=AsyncMock(side_effect=self._never_called),
+            openai_key="",
+        )
+
+        self.assertFalse(response.ok)
+        self.assertTrue(self.billed.calls)
+        # The failure is fail-closed *and* fully accounted for.
+        self.assertEqual(consumed["total_tokens"], self.billed.input_tokens + self.billed.output_tokens)
+        self.assertAlmostEqual(consumed["total_cost_usd"], self.billed.cost_usd, places=9)
+        self.assertGreater(consumed["total_cost_usd"], 0.0)
+
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_t10b_deferred_fallback_spend_reaches_the_budget_ledger(self):
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            self._bill(model, in_tok=9200, out_tok=4000, cost=0.25)
+            return llm_client.LLMResponse(
+                text="", stop_reason="max_tokens", ok=False,
+                error="unusable", error_type=OUTPUT_TOKEN_EXHAUSTED,
+                model_used=model, input_tokens=9200, output_tokens=4000,
+                cost_usd=0.25, latency_ms=9,
+            )
+
+        async def openai(model, system, prompt, max_tokens, temperature):
+            self._bill(model, in_tok=500, out_tok=300, cost=0.01)
+            return llm_client.LLMResponse(
+                text='{"recovered": true}', stop_reason="end_turn", ok=True,
+                model_used=model, input_tokens=500, output_tokens=300,
+                cost_usd=0.01, latency_ms=5,
+            )
+
+        response, consumed = await self._consume_through_call_llm(
+            anthropic=anthropic, openai=openai, openai_key="test-key",
+        )
+
+        self.assertTrue(response.ok)
+        self.assertTrue(response.fallback_used)
+        self.assertGreater(len(self.billed.calls), 1)
+        self.assertEqual(consumed["total_tokens"], self.billed.input_tokens + self.billed.output_tokens)
+        self.assertAlmostEqual(consumed["total_cost_usd"], self.billed.cost_usd, places=9)
+        # The winning fallback alone would have hidden the unusable attempt.
+        self.assertGreater(consumed["total_cost_usd"], 0.01)
+
+
+class TestProviderOutputBudgetParity(unittest.TestCase):
+    """Pins the M2 invariant: a provider-specific config must never carry a
+    response reservation that that provider's execution path does not implement.
+
+    Anthropic keeps the reservation because its adapter receives a bounded
+    thinking budget; OpenAI must not carry it, because ``_call_openai`` is handed
+    only max_tokens and temperature and reserves nothing for visible text.
+    """
+
+    def test_openai_strategy_candidates_carry_no_response_token_reservation(self):
+        candidates = select_model_candidates("strategy")
+        openai_configs = [
+            config for config, _ in candidates
+            if config.provider is Provider.OPENAI
+        ]
+        self.assertTrue(openai_configs, "strategy must have OpenAI fallback candidates")
+        for config in openai_configs:
+            with self.subTest(model=config.model):
+                # thinking_budget is dropped for OpenAI because it is an Anthropic
+                # control; min_response_tokens is dropped for exactly the same
+                # reason. Nothing on the OpenAI path reserves any part of
+                # max_completion_tokens, so claiming a reservation would be false.
+                self.assertEqual(config.thinking_budget, 0)
+                self.assertIsNone(config.min_response_tokens)
+                # The token budget itself is deliberately unchanged by M2.
+                self.assertEqual(config.max_tokens, 8000)
+
+    def test_anthropic_strategy_primary_reserves_response_tokens_locally(self):
+        config = MODEL_ROUTING["strategy"]
+
+        self.assertIs(config.provider, Provider.ANTHROPIC)
+        self.assertEqual(config.thinking_budget, 4000)
+        self.assertEqual(config.min_response_tokens, 4000)
+        # The local invariant that makes the reservation real: thinking can never
+        # be budgeted into the tokens reserved for the response.
+        self.assertLessEqual(
+            config.thinking_budget + config.min_response_tokens, config.max_tokens
+        )
+        with self.assertRaises(ValueError):
+            ModelConfig(
+                provider=Provider.ANTHROPIC,
+                model="claude-opus-4-6",
+                max_tokens=8000,
+                thinking_budget=6000,
+                min_response_tokens=4000,
+            )
+
+
+class TestProviderResponseReservationTruthfulness(unittest.IsolatedAsyncioTestCase):
+    """M2 — configuration must never promise a provider capability that the
+    execution path does not implement.
+
+    ``min_response_tokens`` is a real guarantee on Anthropic only: the adapter is
+    handed an explicit bounded ``thinking_budget``, and ``ModelConfig`` enforces
+    ``thinking_budget + min_response_tokens <= max_tokens``, so capping thinking
+    is what actually leaves the reserved tokens for visible text. ``_call_openai``
+    receives neither field and reserves no part of ``max_completion_tokens``, so
+    an OpenAI config carrying the reservation would be advertising a mechanism
+    that does not exist. These tests pin both halves of that boundary.
+    """
+
+    _STRATEGY_SYSTEM = "system"
+    _STRATEGY_PROMPT = "prompt"
+
+    @staticmethod
+    def _failing_anthropic():
+        async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            return SimpleNamespace(
+                text="", stop_reason="", model_used=model,
+                input_tokens=0, output_tokens=0, cache_read_tokens=0,
+                cost_usd=0.0, latency_ms=1,
+                error="upstream unavailable", error_type=SERVER_ERROR,
+            )
+        return anthropic
+
+    def _gateway(self, *, anthropic, openai):
+        return DefaultProviderGateway(
+            anthropic_executor=anthropic,
+            openai_executor=openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            max_retries=1,
+            sleep=AsyncMock(),
+        )
+
+    async def _call_strategy(self, gateway):
+        return await gateway.call(GatewayRequest(
+            phase="strategy",
+            system_prompt=self._STRATEGY_SYSTEM,
+            user_prompt=self._STRATEGY_PROMPT,
+            routing_context=RoutingContext(phase="strategy"),
+        ))
+
+    # ─── T1 ───────────────────────────────────────────────────────────────
+    def test_t1_anthropic_phase_default_preserves_reservation(self):
+        base = MODEL_ROUTING["strategy"]
+        self.assertIs(base.provider, Provider.ANTHROPIC)
+        self.assertEqual(base.max_tokens, 8000)
+        self.assertEqual(base.thinking_budget, 4000)
+        self.assertEqual(base.min_response_tokens, 4000)
+
+        primary, selection = select_model_config("strategy")
+
+        self.assertIs(primary.provider, Provider.ANTHROPIC)
+        self.assertEqual(primary.model, "claude-opus-4-6")
+        self.assertEqual(selection.reason, "phase_routing")
+        self.assertEqual(primary.max_tokens, 8000)
+        self.assertEqual(primary.thinking_budget, 4000)
+        self.assertEqual(primary.min_response_tokens, 4000)
+
+    # ─── T2 ───────────────────────────────────────────────────────────────
+    def test_t2_anthropic_same_provider_fallbacks_preserve_reservation(self):
+        fallbacks = [
+            (config, selection)
+            for config, selection in select_model_candidates("strategy")
+            if config.provider is Provider.ANTHROPIC and selection.reason != "phase_routing"
+        ]
+
+        # Both derivation paths are covered: the task-profile alias and the
+        # provider fallback chain.
+        self.assertEqual(
+            [(c.model, s.reason) for c, s in fallbacks],
+            [
+                ("claude-sonnet-4-6", "task_profile:deep_reasoning"),
+                ("claude-haiku-4-5-20251001", "fallback_chain:anthropic"),
+            ],
+        )
+        for config, _selection in fallbacks:
+            with self.subTest(model=config.model):
+                self.assertEqual(config.min_response_tokens, 4000)
+                self.assertEqual(config.thinking_budget, 4000)
+                # Still a load-bearing invariant, not a decorative label.
+                self.assertLessEqual(
+                    config.thinking_budget + config.min_response_tokens,
+                    config.max_tokens,
+                )
+
+    # ─── T3 ───────────────────────────────────────────────────────────────
+    def test_t3_openai_task_profile_candidate_carries_no_reservation(self):
+        matches = [
+            config for config, selection in select_model_candidates("strategy")
+            if config.provider is Provider.OPENAI
+            and selection.reason == "task_profile:deep_reasoning"
+        ]
+
+        self.assertEqual([c.model for c in matches], ["gpt-5"])
+        config = matches[0]
+        self.assertIsNone(config.min_response_tokens)
+        self.assertEqual(config.thinking_budget, 0)
+        # M2 corrects the claim, never the budget.
+        self.assertEqual(config.max_tokens, 8000)
+        self.assertEqual(config.temperature, MODEL_ROUTING["strategy"].temperature)
+
+    # ─── T4 ───────────────────────────────────────────────────────────────
+    def test_t4_openai_fallback_chain_candidate_carries_no_reservation(self):
+        matches = [
+            config for config, selection in select_model_candidates("strategy")
+            if selection.reason == "fallback_chain:openai"
+        ]
+
+        self.assertEqual([c.model for c in matches], ["gpt-5-mini"])
+        config = matches[0]
+        self.assertIs(config.provider, Provider.OPENAI)
+        self.assertIsNone(config.min_response_tokens)
+        self.assertEqual(config.thinking_budget, 0)
+        self.assertEqual(config.max_tokens, 8000)
+
+    # ─── T5 ───────────────────────────────────────────────────────────────
+    def test_t5_explicit_openai_alias_does_not_inherit_the_reservation(self):
+        config, selection = select_model_config(
+            "strategy",
+            routing_context=RoutingContext(
+                phase="strategy", explicit_model="openai:gpt-5"
+            ),
+        )
+
+        self.assertEqual(selection.reason, "explicit_model")
+        self.assertIs(config.provider, Provider.OPENAI)
+        self.assertIsNone(config.min_response_tokens)
+        self.assertEqual(config.thinking_budget, 0)
+
+        # The same alias path against Anthropic still inherits it, which is what
+        # makes this a provider boundary rather than a blanket removal.
+        sibling, sibling_selection = select_model_config(
+            "strategy",
+            routing_context=RoutingContext(
+                phase="strategy", explicit_model="anthropic:claude-sonnet-4-6"
+            ),
+        )
+        self.assertEqual(sibling_selection.reason, "explicit_model")
+        self.assertEqual(sibling.min_response_tokens, 4000)
+        self.assertEqual(sibling.thinking_budget, 4000)
+
+    # ─── T6 ───────────────────────────────────────────────────────────────
+    def test_t6_explicitly_configured_openai_reservation_is_rejected(self):
+        # Rejected, not normalized away: an explicitly supplied reservation is an
+        # operator instruction, and silently dropping it would answer a request
+        # for a guarantee with silence — the same untruth, relocated.
+        with self.assertRaisesRegex(ValueError, "response reservation"):
+            ModelConfig(
+                provider=Provider.OPENAI, model="gpt-5",
+                max_tokens=8000, min_response_tokens=4000,
+            )
+
+        # Zero is a value, not an absence: it still asserts that a reservation
+        # mechanism is being addressed, so it fails on the same grounds.
+        with self.assertRaisesRegex(ValueError, "response reservation"):
+            ModelConfig(provider=Provider.OPENAI, model="gpt-5", min_response_tokens=0)
+
+        # An OpenAI override that claims nothing stays valid and fully routable.
+        override = ModelConfig(provider=Provider.OPENAI, model="gpt-5-mini")
+        config, selection = select_model_config("strategy", config_override=override)
+        self.assertEqual(selection.reason, "config_override")
+        self.assertIs(config.provider, Provider.OPENAI)
+        self.assertIsNone(config.min_response_tokens)
+
+        # An Anthropic override keeps the ability to reserve.
+        reserved = ModelConfig(
+            provider=Provider.ANTHROPIC, model="claude-opus-4-6",
+            max_tokens=8000, thinking_budget=4000, min_response_tokens=4000,
+        )
+        config, _selection = select_model_config("strategy", config_override=reserved)
+        self.assertEqual(config.min_response_tokens, 4000)
+
+    # ─── T7 ───────────────────────────────────────────────────────────────
+    def test_t7_candidate_identity_and_order_are_unchanged(self):
+        # Pinned against the pre-M2 tree: provider, model, selection reason and
+        # every token budget are identical candidate-for-candidate; the only
+        # difference anywhere in the 76-candidate cross-phase set is the
+        # unsupported field on the two OpenAI strategy rows.
+        expected = [
+            ("anthropic", "claude-opus-4-6", "phase_routing", 8000, 0.4, 4000, 4000),
+            ("anthropic", "claude-sonnet-4-6", "task_profile:deep_reasoning",
+             8000, 0.4, 4000, 4000),
+            ("openai", "gpt-5", "task_profile:deep_reasoning", 8000, 0.4, 0, None),
+            ("anthropic", "claude-haiku-4-5-20251001", "fallback_chain:anthropic",
+             8000, 0.4, 4000, 4000),
+            ("openai", "gpt-5-mini", "fallback_chain:openai", 8000, 0.4, 0, None),
+        ]
+        actual = [
+            (config.provider.value, config.model, selection.reason, config.max_tokens,
+             config.temperature, config.thinking_budget, config.min_response_tokens)
+            for config, selection in select_model_candidates("strategy")
+        ]
+        self.assertEqual(actual, expected)
+
+        # Strategy is the only phase that reserves anything, so no other phase's
+        # candidate set could have moved: every candidate everywhere else already
+        # carried None before this change and must still.
+        for phase in MODEL_ROUTING:
+            if phase == "strategy":
+                continue
+            with self.subTest(phase=phase):
+                self.assertIsNone(MODEL_ROUTING[phase].min_response_tokens)
+                for config, _selection in select_model_candidates(phase):
+                    self.assertIsNone(config.min_response_tokens)
+
+    # ─── T8 ───────────────────────────────────────────────────────────────
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_t8_deferred_openai_executor_arguments_are_unchanged(self):
+        recorded: list[tuple] = []
+
+        async def openai(*args, **kwargs):
+            recorded.append((args, kwargs))
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=args[0],
+                input_tokens=5, output_tokens=5, cache_read_tokens=0,
+                cost_usd=0.01, latency_ms=1, error="", error_type="",
+            )
+
+        gateway = self._gateway(anthropic=self._failing_anthropic(), openai=openai)
+        response = await self._call_strategy(gateway)
+
+        self.assertTrue(response.text)
+        self.assertTrue(recorded, "the OpenAI fallback candidate must have executed")
+        args, kwargs = recorded[0]
+        # Exactly the pre-M2 call shape: five positionals, no keywords. M2 adds
+        # no reservation argument, because there is no mechanism to hand one to.
+        self.assertEqual(kwargs, {})
+        self.assertEqual(
+            args, ("gpt-5", self._STRATEGY_SYSTEM, self._STRATEGY_PROMPT, 8000, 0.4)
+        )
+
+    # ─── T9 ───────────────────────────────────────────────────────────────
+    async def test_t9_anthropic_executor_arguments_are_unchanged(self):
+        recorded: list[tuple] = []
+
+        async def anthropic(*args, **kwargs):
+            recorded.append((args, kwargs))
+            return SimpleNamespace(
+                text='{"ok": true}', stop_reason="end_turn", model_used=args[0],
+                input_tokens=5, output_tokens=5, cache_read_tokens=0,
+                cost_usd=0.01, latency_ms=1, error="", error_type="",
+            )
+
+        async def openai(*args, **kwargs):
+            raise _ExecutorMustNotRun("Anthropic primary succeeded; no fallback")
+
+        gateway = self._gateway(anthropic=anthropic, openai=openai)
+        response = await self._call_strategy(gateway)
+
+        self.assertTrue(response.text)
+        self.assertEqual(len(recorded), 1)
+        args, kwargs = recorded[0]
+        self.assertEqual(kwargs, {})
+        # The sixth positional is the bounded thinking budget — the mechanism the
+        # Anthropic reservation is built on. It is untouched by M2.
+        self.assertEqual(
+            args,
+            ("claude-opus-4-6", self._STRATEGY_SYSTEM, self._STRATEGY_PROMPT,
+             8000, 0.4, 4000),
+        )
+
+
+class TestUnusableOutputClassifier(unittest.TestCase):
+    def test_classifier_separates_exhaustion_from_other_empty_output(self):
+        cases = [
+            (None, "length", OUTPUT_TOKEN_EXHAUSTED),
+            ("", "max_tokens", OUTPUT_TOKEN_EXHAUSTED),
+            ("   ", "max_tokens", OUTPUT_TOKEN_EXHAUSTED),
+            ("", "stop", EMPTY_PROVIDER_OUTPUT),
+            ("", "refusal", EMPTY_PROVIDER_OUTPUT),
+            ("", None, EMPTY_PROVIDER_OUTPUT),
+            ("text", "max_tokens", ""),
+            ("text", "stop", ""),
+            (" x ", "stop", ""),
+        ]
+        for text, stop_reason, expected in cases:
+            with self.subTest(text=text, stop_reason=stop_reason):
+                self.assertEqual(
+                    classify_unusable_output(text=text, stop_reason=stop_reason),
+                    expected,
+                )
 
 
 if __name__ == "__main__":

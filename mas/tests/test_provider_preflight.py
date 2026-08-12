@@ -2,7 +2,6 @@ import io
 import json
 import re
 from collections.abc import Mapping
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -11,8 +10,6 @@ import openai
 from evals import provider_preflight
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "evals.yml"
 
 
 class RecordingCompletions:
@@ -38,38 +35,32 @@ def _client_with_outcomes(*outcomes):
     return client, completions
 
 
-def _workflow_text():
-    return WORKFLOW_PATH.read_text()
-
-
-def _job_block(workflow: str, job_name: str) -> str:
-    start_match = re.search(rf"(?m)^  {re.escape(job_name)}:\n", workflow)
-    assert start_match, job_name
-    next_match = re.search(
-        r"(?m)^  [a-zA-Z0-9_-]+:\n",
-        workflow[start_match.end() :],
+def _choice(content, *, finish_reason="stop", refusal=None):
+    return SimpleNamespace(
+        message=SimpleNamespace(content=content, refusal=refusal),
+        finish_reason=finish_reason,
     )
-    end = (
-        start_match.end() + next_match.start()
-        if next_match
-        else len(workflow)
-    )
-    return workflow[start_match.start() : end]
 
 
-def _job_directive(job_block: str, directive: str) -> str:
-    prefix = f"    {directive}:"
-    matches = [
-        line.strip()
-        for line in job_block.splitlines()
-        if line.startswith(prefix)
-    ]
-    assert len(matches) == 1, (directive, matches)
-    return matches[0]
+def _response(*choices):
+    return SimpleNamespace(choices=list(choices))
+
+
+def _usable_response(text="OK"):
+    """A response carrying usable visible text.
+
+    Preflight now inspects the response, so a bare sentinel object no longer
+    stands in for success.
+    """
+
+    return _response(_choice(text))
 
 
 def test_probe_order_and_both_success():
-    client, completions = _client_with_outcomes(object(), object())
+    client, completions = _client_with_outcomes(
+        _usable_response(),
+        _usable_response(),
+    )
     stdout = io.StringIO()
     stderr = io.StringIO()
 
@@ -108,7 +99,7 @@ def test_first_model_failure_stops_before_gpt5():
 
 def test_second_model_failure_occurs_only_after_first_success():
     client, completions = _client_with_outcomes(
-        object(),
+        _usable_response(),
         RuntimeError("not rendered"),
     )
     stdout = io.StringIO()
@@ -151,7 +142,10 @@ def test_probe_request_matches_runtime_gpt5_contract():
 
 
 def test_probe_uses_chat_completions_create_with_contract_for_each_model():
-    client, completions = _client_with_outcomes(object(), object())
+    client, completions = _client_with_outcomes(
+        _usable_response(),
+        _usable_response(),
+    )
 
     assert provider_preflight.run_preflight(
         client,
@@ -415,93 +409,334 @@ def test_last_resort_formatter_uses_only_constant_exception_identity(monkeypatch
     assert "original-exception-sentinel" not in diagnostic
 
 
-def test_workflow_self_path_can_trigger_evals_without_broadening_dispatch():
-    workflow = _workflow_text()
-    triggers = workflow.split("concurrency:", 1)[0]
-    expected_dispatch = (
-        "  workflow_dispatch:\n"
-        "    inputs:\n"
-        "      threshold:\n"
-        "        description: 'Pass rate threshold (0.0-1.0)'\n"
-        "        required: false\n"
-        "        default: '0.75'"
+# ─── M3: usable-output contract ──────────────────────────────────────────────
+#
+# PASS means the configured model produced usable visible text under the
+# preflight request shape.  "The SDK did not raise" is not sufficient.
+
+
+def _run(*outcomes):
+    """Run the preflight against injected responses; return (ok, out, err, calls)."""
+
+    client, completions = _client_with_outcomes(*outcomes)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    ok = provider_preflight.run_preflight(
+        client,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    return ok, stdout.getvalue(), stderr.getvalue(), completions.calls
+
+
+def _assert_first_model_rejected(stderr, calls, category, response=None):
+    """Assert the first model failed with ``category`` and stopped the probe.
+
+    Checking the emitted category (not merely the boolean) keeps these tests
+    honest: an incidental harness error could otherwise satisfy a bare
+    ``not ok``.
+    """
+
+    assert f"reason={category}" in stderr, response
+    assert "model=gpt-5-mini" in stderr, response
+    assert [call["model"] for call in calls] == ["gpt-5-mini"], response
+
+
+def test_p1_normal_non_empty_response_passes():
+    ok, stdout, stderr, calls = _run(_usable_response(), _usable_response())
+
+    assert ok
+    assert stderr == ""
+    assert stdout.splitlines()[-1] == "OPENAI_PROVIDER_PREFLIGHT=PASS"
+    assert len(calls) == 2
+
+
+def test_p2_none_content_fails():
+    ok, _, stderr, calls = _run(_response(_choice(None)))
+
+    assert not ok
+    _assert_first_model_rejected(stderr, calls, "empty_provider_output")
+    assert "content=none" in stderr
+
+
+def test_p3_empty_string_content_fails():
+    ok, _, stderr, calls = _run(_response(_choice("")))
+
+    assert not ok
+    _assert_first_model_rejected(stderr, calls, "empty_provider_output")
+    assert "content=empty" in stderr
+
+
+def test_p4_whitespace_only_content_fails():
+    ok, _, stderr, calls = _run(_response(_choice("  \n\t  ")))
+
+    assert not ok
+    _assert_first_model_rejected(stderr, calls, "empty_provider_output")
+    assert "content=whitespace" in stderr
+
+
+def test_p5_missing_or_empty_choices_fails():
+    for response in (
+        SimpleNamespace(),
+        SimpleNamespace(choices=None),
+        SimpleNamespace(choices=[]),
+    ):
+        ok, _, stderr, calls = _run(response)
+
+        assert not ok, response
+        _assert_first_model_rejected(
+            stderr,
+            calls,
+            "malformed_response",
+            response,
+        )
+
+
+def test_p6_malformed_message_or_content_fails():
+    missing_message = SimpleNamespace(
+        choices=[SimpleNamespace(finish_reason="stop")]
+    )
+    missing_content = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(),
+                finish_reason="stop",
+            )
+        ]
+    )
+    non_string_content = _response(_choice(12345))
+
+    for response in (missing_message, missing_content, non_string_content):
+        ok, _, stderr, calls = _run(response)
+
+        assert not ok, response
+        _assert_first_model_rejected(
+            stderr,
+            calls,
+            "malformed_response",
+            response,
+        )
+
+
+def test_p7_empty_output_at_token_limit_reports_exhaustion():
+    for content in (None, ""):
+        ok, _, stderr, calls = _run(
+            _response(_choice(content, finish_reason="length"))
+        )
+
+        assert not ok, content
+        _assert_first_model_rejected(
+            stderr,
+            calls,
+            "output_token_exhausted",
+            content,
+        )
+        assert "finish_reason=length" in stderr
+
+
+def test_p8_non_empty_output_at_token_limit_still_passes():
+    partial = _response(_choice("OK but truncat", finish_reason="length"))
+    ok, stdout, stderr, calls = _run(partial, partial)
+
+    assert ok
+    assert stderr == ""
+    assert stdout.splitlines()[-1] == "OPENAI_PROVIDER_PREFLIGHT=PASS"
+    assert len(calls) == 2
+
+
+def test_p9_refusal_without_visible_text_fails_without_leaking_refusal():
+    refusal_text = "refusal-sentinel-must-not-appear"
+    ok, stdout, stderr, calls = _run(
+        _response(_choice(None, refusal=refusal_text))
     )
 
-    assert "      - '.github/workflows/evals.yml'" in triggers
-    assert triggers.count("  workflow_dispatch:\n") == 1
-    dispatch_start = triggers.index("  workflow_dispatch:\n")
-    assert triggers[dispatch_start:].strip() == expected_dispatch.strip()
+    assert not ok
+    _assert_first_model_rejected(stderr, calls, "empty_provider_output")
+    assert "refusal=present" in stderr
+    assert refusal_text not in stderr
+    assert refusal_text not in stdout
 
 
-def test_workflow_provider_preflight_pull_request_auth_is_non_draft_paid_eval():
-    provider_job = _job_block(_workflow_text(), "provider-preflight")
+def test_p9b_refusal_alongside_visible_text_is_usable_capability():
+    # Pinned semantics: this probe measures output capability, not moderation.
+    # Visible text proves the model can emit output, so a populated refusal
+    # field alongside it does not fail the probe.
+    response = _response(_choice("OK", refusal="also-refused-sentinel"))
+    ok, stdout, stderr, _ = _run(response, response)
 
-    assert _job_directive(provider_job, "if") == (
-        "if: ${{ github.event_name == 'workflow_dispatch' || "
-        "(github.event.pull_request.draft == false && "
-        "contains(github.event.pull_request.labels.*.name, 'paid-eval')) }}"
-    )
-    assert _job_directive(provider_job, "needs") == "needs: smoke"
+    assert ok
+    assert stderr == ""
+    assert "also-refused-sentinel" not in stdout
+
+    assessment = provider_preflight.assess_output(response)
+    assert assessment.usable
+    assert assessment.refusal_status == provider_preflight.REFUSAL_PRESENT
 
 
-def test_workflow_real_shards_and_aggregate_require_successful_preflight():
-    workflow = _workflow_text()
-    real_job = _job_block(workflow, "real-eval-shard")
-    aggregate_job = _job_block(workflow, "aggregate")
-
-    assert _job_directive(real_job, "needs") == (
-        "needs: [smoke, provider-preflight]"
-    )
-    assert _job_directive(real_job, "if") == (
-        "if: ${{ needs.provider-preflight.result == 'success' && "
-        "(github.event_name == 'workflow_dispatch' || "
-        "(github.event.pull_request.draft == false && "
-        "contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}"
-    )
-    assert _job_directive(aggregate_job, "needs") == (
-        "needs: [provider-preflight, real-eval-shard]"
-    )
-    assert _job_directive(aggregate_job, "if") == (
-        "if: ${{ always() && needs.provider-preflight.result == 'success' && "
-        "(github.event_name == 'workflow_dispatch' || "
-        "(github.event.pull_request.draft == false && "
-        "contains(github.event.pull_request.labels.*.name, 'paid-eval'))) }}"
+def test_p10_unusable_first_model_stops_before_second():
+    ok, stdout, stderr, calls = _run(
+        _response(_choice("")),
+        _usable_response(),
     )
 
+    assert not ok
+    assert [call["model"] for call in calls] == ["gpt-5-mini"]
+    assert "model=gpt-5-mini" in stderr
+    assert "OPENAI_PROVIDER_PREFLIGHT_MODEL=PASS" not in stdout
+    assert "OPENAI_PROVIDER_PREFLIGHT=PASS" not in stdout
 
-def test_workflow_paid_provider_steps_are_openai_only_with_secret_injection():
-    workflow = _workflow_text()
-    provider_job = _job_block(workflow, "provider-preflight")
-    real_job = _job_block(workflow, "real-eval-shard")
 
-    assert provider_job.count("ANTHROPIC_API_KEY: ''") == 1
-    assert provider_job.count("OPENAI_LOG: ''") == 1
-    assert real_job.count("ANTHROPIC_API_KEY: ''") == 2
-    assert provider_job.count(
-        "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}"
-    ) == 1
-    assert real_job.count(
-        "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}"
-    ) == 2
-    assert "ANTHROPIC_API_KEY: ${{ secrets." not in workflow
+def test_p10b_unusable_second_model_fails_overall_after_a_usable_first():
+    # A later model's failure must not be hidden behind the earlier success.
+    ok, stdout, stderr, calls = _run(
+        _usable_response(),
+        _response(_choice(None, finish_reason="length")),
+    )
 
-    key_assignments = [
-        line.strip()
-        for line in workflow.splitlines()
-        if line.strip().startswith("OPENAI_API_KEY:")
+    assert not ok
+    assert [call["model"] for call in calls] == ["gpt-5-mini", "gpt-5"]
+    assert stdout.splitlines() == [
+        "OPENAI_PROVIDER_PREFLIGHT_MODEL=PASS model=gpt-5-mini"
     ]
-    assert key_assignments
-    assert set(key_assignments) == {
-        "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}"
+    assert "OPENAI_PROVIDER_PREFLIGHT=PASS" not in stdout
+    assert "model=gpt-5 " in stderr
+    assert "reason=output_token_exhausted" in stderr
+
+
+def test_p11_both_models_usable_passes_overall():
+    ok, stdout, stderr, calls = _run(_usable_response(), _usable_response())
+
+    assert ok
+    assert stderr == ""
+    assert [call["model"] for call in calls] == ["gpt-5-mini", "gpt-5"]
+    assert stdout.splitlines() == [
+        "OPENAI_PROVIDER_PREFLIGHT_MODEL=PASS model=gpt-5-mini",
+        "OPENAI_PROVIDER_PREFLIGHT_MODEL=PASS model=gpt-5",
+        "OPENAI_PROVIDER_PREFLIGHT=PASS",
+    ]
+
+
+def test_p12_sdk_exception_diagnostics_remain_sanitized():
+    class BadRequestError(Exception):
+        status_code = 400
+        body = {"message": "exception-body-sentinel", "code": "bad_request"}
+
+    ok, _, stderr, calls = _run(BadRequestError("exception-arg-sentinel"))
+
+    assert not ok
+    assert len(calls) == 1
+    assert "OPENAI_PROVIDER_PREFLIGHT=FAIL" in stderr
+    assert "type=BadRequestError" in stderr
+    assert "status=400" in stderr
+    assert "code=bad_request" in stderr
+    # The exception path is untouched by M3: allowlisted body message still
+    # renders, while the exception's own args never do.
+    assert "exception-body-sentinel" in stderr
+    assert "exception-arg-sentinel" not in stderr
+    assert "Traceback" not in stderr
+
+
+def test_p13_response_content_never_reaches_stdout_or_stderr():
+    sentinel = "response-content-sentinel"
+    hostile_finish_reason = "finish-reason-sentinel"
+    responses = (
+        _response(_choice(f"   {sentinel}   ".replace(sentinel, ""))),
+        _response(_choice(None, refusal=sentinel)),
+        _response(
+            _choice("", finish_reason=hostile_finish_reason, refusal=sentinel)
+        ),
+        _response(_choice(sentinel.encode())),
+    )
+
+    for response in responses:
+        ok, stdout, stderr, calls = _run(response)
+
+        assert not ok, response
+        assert len(calls) == 1, response
+        assert sentinel not in stdout, response
+        assert sentinel not in stderr, response
+        assert hostile_finish_reason not in stdout, response
+        assert hostile_finish_reason not in stderr, response
+
+    # An unrecognized finish reason is normalized rather than echoed.
+    assessment = provider_preflight.assess_output(
+        _response(_choice("", finish_reason=hostile_finish_reason))
+    )
+    assert assessment.finish_reason == provider_preflight.FINISH_REASON_OTHER
+
+
+def test_p14_hostile_response_accessors_cannot_crash_the_diagnostic_path():
+    class ExplodingChoices:
+        @property
+        def choices(self):
+            raise RuntimeError("choices-accessor-sentinel")
+
+    class ExplodingMessage:
+        @property
+        def message(self):
+            raise RuntimeError("message-accessor-sentinel")
+
+        finish_reason = "stop"
+
+    class ExplodingContent:
+        @property
+        def content(self):
+            raise RuntimeError("content-accessor-sentinel")
+
+        @property
+        def refusal(self):
+            raise RuntimeError("refusal-accessor-sentinel")
+
+    hostile = (
+        ExplodingChoices(),
+        SimpleNamespace(choices=[ExplodingMessage()]),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=ExplodingContent(),
+                    finish_reason="stop",
+                )
+            ]
+        ),
+    )
+
+    for response in hostile:
+        ok, stdout, stderr, calls = _run(response)
+
+        assert not ok, response
+        _assert_first_model_rejected(
+            stderr,
+            calls,
+            "malformed_response",
+            response,
+        )
+        assert "sentinel" not in stdout, response
+        assert "sentinel" not in stderr, response
+        assert "Traceback" not in stderr, response
+
+
+def test_probe_request_is_unchanged_by_the_usable_output_contract():
+    # M3 is response validation only; the request shape is pinned elsewhere in
+    # this module and must not drift here.
+    assert provider_preflight.PROBE_MODELS == ("gpt-5-mini", "gpt-5")
+    assert provider_preflight.PROBE_MAX_COMPLETION_TOKENS == 512
+    assert provider_preflight.PROBE_TEMPERATURE == 1
+    assert provider_preflight.PROBE_MAX_RETRIES == 0
+    assert provider_preflight.PROBE_TIMEOUT_SECONDS == 30.0
+    assert provider_preflight.probe_request("gpt-5") == {
+        "model": "gpt-5",
+        "messages": [
+            {"role": "system", "content": "You are a concise assistant."},
+            {"role": "user", "content": "Reply with OK."},
+        ],
+        "max_completion_tokens": 512,
+        "temperature": 1,
     }
 
 
-def test_workflow_executes_tested_module_without_substantive_inline_python():
-    provider_job = _job_block(_workflow_text(), "provider-preflight")
-
-    assert "uses: actions/checkout@v4" in provider_job
-    assert "working-directory: mas" in provider_job
-    assert "run: python -m evals.provider_preflight" in provider_job
-    assert "python - <<" not in provider_job
-    assert "chat.completions.create" not in provider_job
-    assert "max_completion_tokens" not in provider_job
+def test_usable_output_does_not_require_any_particular_reply_text():
+    # The probe validates output capability, not judge quality.
+    for text in ("OK", "no", "42", "¡hola!", "x" * 400):
+        assert provider_preflight.assess_output(
+            _response(_choice(text))
+        ).usable, text

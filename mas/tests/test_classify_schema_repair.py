@@ -12,7 +12,9 @@ if str(ROOT) not in sys.path:
 
 from llm_client import LLMResponse, parse_json
 from orchestrator import (
+    _parse_phase_json,
     _phase_json_retry_instruction,
+    _repair_strategy_payload,
     _store_phase_output,
     build_classify_prompt,
     build_gauntlet_prompt,
@@ -47,6 +49,39 @@ def make_classify_payload() -> dict:
     }
 
 
+def make_strategy_contract_payload() -> dict:
+    return {
+        "preliminary_verdicts": [
+            {
+                "id": "H1",
+                "verdict": "NEEDS_MONITORING",
+                "evidence": "bounded",
+                "monitoring_plan": "observe",
+            }
+        ],
+        "executive_strategy": "Run one bounded pilot.",
+        "strategies": [
+            {
+                "priority": "HIGH",
+                "action": "Run pilot",
+                "justification": "It is reversible.",
+                "evidence_chain": "H1 + audit -> pilot",
+                "expected_impact": "Learn",
+                "effort": "Low",
+                "timeline": "2 weeks",
+                "risk_if_ignored": "Uncertainty persists",
+                "framework_source": "FMEA",
+            }
+        ],
+        "implementation_sequence": "Pilot, review, decide",
+        "success_metrics": ["One measured outcome"],
+        "monitoring_plan": "Review weekly",
+        "review_date": "2026-09-01",
+        "confidence": "Medium",
+        "reentry_check": "none",
+    }
+
+
 def make_state() -> ProjectState:
     state = ProjectState(project_id="test-classify", project_name="Test", brief="Test brief")
     # Skip the security intake pass in unit tests so they stay scoped to
@@ -71,6 +106,118 @@ class TestClassifyPromptAndParser(unittest.TestCase):
     def test_parse_json_handles_fenced_json_with_trailing_prose(self):
         text = "```json\n{\"a\": 1}\n```\n\nblah"
         self.assertEqual(parse_json(text), {"a": 1})
+
+    def test_dict_required_parser_does_not_return_nested_list_from_unclosed_outer_object(self):
+        text = '{"preliminary_verdicts":[{"id":"H1"}],"executive_strategy":"cut'
+
+        self.assertIsNone(parse_json(text))
+        self.assertIsNone(parse_json(text, expected_root_type=dict))
+
+    def test_object_phase_preserves_complete_list_root_with_trailing_prose(self):
+        payload = [{"id": "H1"}, {"id": "H2"}]
+        text = json.dumps(payload) + " Done."
+
+        self.assertEqual(_parse_phase_json("strategy", text), payload)
+        self.assertNotIsInstance(_parse_phase_json("strategy", text), dict)
+
+    def test_object_phase_preserves_list_before_second_json_object(self):
+        payload = [{"id": "H1"}]
+        text = json.dumps(payload) + ' {"executive_strategy":"later"}'
+
+        self.assertEqual(_parse_phase_json("strategy", text), payload)
+
+    def test_object_phase_does_not_promote_nested_dict_from_incomplete_dict(self):
+        text = '{"outer":{"id":"nested"},"unfinished":"cut'
+
+        self.assertIsNone(_parse_phase_json("strategy", text))
+
+    def test_prose_prefixed_complete_dict_preserves_root(self):
+        self.assertEqual(
+            _parse_phase_json("strategy", 'Here is the result: {"ok":true} Done.'),
+            {"ok": True},
+        )
+        self.assertEqual(
+            _parse_phase_json("strategy", 'Result [JSON follows]: {"ok":true}'),
+            {"ok": True},
+        )
+
+    def test_fenced_complete_dict_preserves_root(self):
+        self.assertEqual(
+            _parse_phase_json("strategy", '```json\n{"ok":true}\n```'),
+            {"ok": True},
+        )
+
+    def test_parser_ignores_quoted_delimiters_and_handles_escaped_text(self):
+        payload = {
+            "text": 'quoted { brace } and [ bracket ] plus "quote" and \\path',
+            "nested": [{"value": "still valid"}],
+        }
+        text = "Result: " + json.dumps(payload) + " trailing"
+
+        self.assertEqual(_parse_phase_json("strategy", text), payload)
+
+    def test_wrong_shaped_root_remains_observable_for_diagnostics(self):
+        wrong_root = [{"id": "H1", "verdict": "NEEDS_MONITORING"}]
+
+        parsed = _parse_phase_json(
+            "strategy",
+            json.dumps(wrong_root) + ' {"executive_strategy":"not selected"}',
+        )
+
+        self.assertEqual(parsed, wrong_root)
+        self.assertIsInstance(parsed, list)
+
+    def test_first_wrong_dict_is_not_replaced_by_later_strategy_fragment(self):
+        verdict = {"id": "H1", "verdict": "NEEDS_MONITORING"}
+        later = {"executive_strategy": "must not replace the first root"}
+
+        parsed = _parse_phase_json(
+            "strategy",
+            json.dumps(verdict) + " " + json.dumps(later),
+        )
+
+        self.assertEqual(parsed, verdict)
+
+    def test_permissive_parser_still_supports_legitimate_hypotheses_list(self):
+        payload = [{"id": "H1"}, {"id": "H2"}]
+
+        self.assertEqual(parse_json(json.dumps(payload)), payload)
+        self.assertEqual(parse_json(f"```json\n{json.dumps(payload)}\n```"), payload)
+        self.assertEqual(_parse_phase_json("hypotheses", json.dumps(payload)), payload)
+
+    def test_first_structural_root_identity_never_promotes_nested_or_later_strategy(self):
+        payload = make_strategy_contract_payload()
+        encoded = json.dumps(payload)
+        rejected = {
+            "malformed_object_before_nested": "{\\" + encoded,
+            "malformed_array_before_nested": "[\\" + encoded,
+            "malformed_first_then_later": "{oops] " + encoded,
+            "incomplete_object_with_nested": '{"wrapper":' + encoded,
+            "incomplete_array_with_nested": "[" + encoded,
+        }
+        for label, text in rejected.items():
+            with self.subTest(label=label):
+                self.assertIsNone(_parse_phase_json("strategy", text))
+                self.assertIsNone(_repair_strategy_payload(text))
+
+        wrong_array = [{"id": "not-a-strategy"}]
+        array_then_strategy = json.dumps(wrong_array) + " " + encoded
+        self.assertEqual(_parse_phase_json("strategy", array_then_strategy), wrong_array)
+        self.assertIsNone(_repair_strategy_payload(array_then_strategy))
+
+    def test_strategy_root_identity_preserves_supported_wrappers_and_escaped_strings(self):
+        payload = make_strategy_contract_payload()
+        special = 'C:\\ops\\plan says "quoted" with {braces} and [brackets].'
+        payload["executive_strategy"] = special
+        encoded = json.dumps(payload)
+
+        self.assertEqual(_parse_phase_json("strategy", "Result: " + encoded), payload)
+        self.assertEqual(_parse_phase_json("strategy", f"```json\n{encoded}\n```"), payload)
+
+        truncated = encoded[:-1] + ',"appendix":"cut'
+        repaired = _repair_strategy_payload(truncated)
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired["executive_strategy"], special)
 
     def test_build_classify_prompt_requires_single_object(self):
         prompt = build_classify_prompt(make_state())

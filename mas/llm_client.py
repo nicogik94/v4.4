@@ -8,8 +8,9 @@ import json
 import re
 import time
 import logging
+from dataclasses import dataclass
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import anthropic
 import openai
@@ -32,10 +33,13 @@ from runtime.cache import InMemorySemanticCache, NoOpSemanticCache
 from runtime.provider_gateway import (
     DefaultProviderGateway,
     TRANSPORT_MALFORMED_RESPONSE,
+    classify_unusable_output,
     normalize_exception_category,
     normalize_error_type,
+    normalize_stop_reason,
     safe_provider_error_detail,
     select_model_config,
+    unusable_output_detail,
 )
 from scenarios.engine import run_shadow_evaluation
 
@@ -70,6 +74,7 @@ class CircuitBreaker:
 
 class LLMResponse(BaseModel):
     text: str = ""
+    stop_reason: str = ""
     ok: bool = True
     error: str = ""
     error_type: str = ""
@@ -95,11 +100,21 @@ class LLMResponse(BaseModel):
     attempt_count: int = 0
     attempts: list[dict] = Field(default_factory=list)
 
+    @field_validator("stop_reason", mode="before")
+    @classmethod
+    def _normalize_stop_reason_field(cls, value):
+        return normalize_stop_reason(value)
+
     @property
     def total_tokens(self) -> int:
         """v4.3 — convenience property for budget tracking."""
         return self.input_tokens + self.output_tokens
 
+
+# `normalize_stop_reason` now lives in runtime.provider_gateway, next to the
+# unusable-output classifier that reads it, so the adapters and the gateway
+# share one stop-reason vocabulary instead of two copies. It is re-exported here
+# because this module's public surface has always carried it.
 
 # v4.3 — verified per-million-token pricing as of April 2026.
 # Source: compliance/eu-ai-act-classification.md and the v2.1 strategy bundle's
@@ -281,6 +296,53 @@ def _safe_provider_error(
     return message
 
 
+def _unusable_output_response(
+    *,
+    provider: str,
+    model: str,
+    text,
+    stop_reason: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    latency_ms: float,
+) -> LLMResponse | None:
+    """Typed failure for a transport-level success that returned no usable text.
+
+    Returns None when the response does carry usable visible text — including
+    partial text truncated at max_tokens, which is a different case and stays a
+    success so downstream deterministic recovery still receives it.
+
+    Billed usage is preserved: the HTTP call succeeded and these tokens were
+    charged, so dropping them here would understate real spend.
+    """
+    category = classify_unusable_output(text=text, stop_reason=stop_reason)
+    if not category:
+        return None
+    return LLMResponse(
+        text="",
+        stop_reason=stop_reason,
+        ok=False,
+        error=_safe_provider_error(
+            category,
+            provider,
+            model,
+            unusable_output_detail(
+                text=text,
+                stop_reason=stop_reason,
+                output_tokens=output_tokens,
+            ),
+        ),
+        error_type=category,
+        model_used=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cost_usd=estimate_cost(model, input_tokens, output_tokens, cache_read_tokens),
+        latency_ms=latency_ms,
+    )
+
+
 
 # ═══════════ adapter-level telemetry (isolated from the provider result) ═══════
 #
@@ -368,6 +430,9 @@ async def _call_anthropic(
     capturing = attempt_capture.is_capturing()
     try:
         # Anthropic requires temperature=1 when extended thinking is enabled.
+        # Preserve the historical adapter behavior for direct/unreserved
+        # callers. Strategy's routed ModelConfig now prevents this clamp by
+        # reserving 4,000 response tokens before the adapter is reached.
         effective_thinking_budget = 0
         if thinking_budget > 0 and max_tokens > 1:
             effective_thinking_budget = min(thinking_budget, max_tokens - 1)
@@ -412,8 +477,25 @@ async def _call_anthropic(
         in_tok = getattr(usage, "input_tokens", 0)
         out_tok = getattr(usage, "output_tokens", 0)
         cache_tok = getattr(usage, "cache_read_input_tokens", 0)
+        stop_reason = normalize_stop_reason(getattr(response, "stop_reason", None))
+        # A reply made only of thinking blocks, or of no blocks at all, reaches
+        # here as text="". That is not an analytical result, so it must not
+        # leave this adapter looking like one.
+        unusable = _unusable_output_response(
+            provider=Provider.ANTHROPIC.value,
+            model=model,
+            text=text,
+            stop_reason=stop_reason,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_read_tokens=cache_tok,
+            latency_ms=(time.time() - start) * 1000,
+        )
+        if unusable is not None:
+            return unusable
         return LLMResponse(
             text=text, ok=True, model_used=model,
+            stop_reason=stop_reason,
             input_tokens=in_tok,
             output_tokens=out_tok,
             cache_read_tokens=cache_tok,
@@ -477,12 +559,35 @@ async def _call_openai(
                 model_used=model,
                 latency_ms=(time.time() - start) * 1000,
             )
-        text = response.choices[0].message.content or ""
+        raw_content = response.choices[0].message.content
+        text = raw_content or ""
         usage = response.usage
         in_tok = getattr(usage, "prompt_tokens", 0)
         out_tok = getattr(usage, "completion_tokens", 0)
+        stop_reason = normalize_stop_reason(
+            getattr(response.choices[0], "finish_reason", None)
+        )
+        # `message.content` is None whenever a GPT-5 reasoning turn spent the
+        # whole completion budget before emitting visible text. The `or ""`
+        # above makes that indistinguishable from a real answer downstream, so
+        # classify it here instead.
+        unusable = _unusable_output_response(
+            provider=Provider.OPENAI.value,
+            model=model,
+            # The raw value, so the diagnostic can distinguish a missing
+            # content field from a present-but-empty one.
+            text=raw_content,
+            stop_reason=stop_reason,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_read_tokens=0,
+            latency_ms=(time.time() - start) * 1000,
+        )
+        if unusable is not None:
+            return unusable
         return LLMResponse(
             text=text, ok=True, model_used=model,
+            stop_reason=stop_reason,
             input_tokens=in_tok,
             output_tokens=out_tok,
             cost_usd=estimate_cost(model, in_tok, out_tok),
@@ -587,6 +692,7 @@ async def call_llm(
         )
     result = LLMResponse(
         text=resp.text,
+        stop_reason=resp.stop_reason,
         ok=not bool(resp.error),
         error=resp.error,
         error_type=normalize_error_type(resp.error_type) if resp.error_type else "",
@@ -629,57 +735,146 @@ async def call_llm(
     return result
 
 
-def parse_json(text):
-    """Parse JSON from LLM output, tolerating markdown fences and prose.
+@dataclass(frozen=True)
+class JSONRoot:
+    """The first JSON root present in an LLM response."""
 
-    Tries in order:
-      1. Strict parse of the trimmed text
-      2. Strip markdown fences (```json ... ``` or ``` ... ```) then parse
-      3. Extract first balanced {...} block and parse
-      4. Extract first balanced [...] block and parse
-    Returns None if all attempts fail.
+    fragment: str
+    complete: bool
+    value: object | None
+
+
+def first_json_root(text: str) -> JSONRoot | None:
+    """Locate exactly one first JSON root without promoting nested values.
+
+    Markdown fences are inert wrapper text: the earliest object/array opener
+    still starts the root. Once that opener is selected, malformed or truncated
+    content fails in place; later or nested JSON values are never scanned as
+    replacement roots.
     """
     if not text:
         return None
+
+    stripped = text.strip()
     try:
-        return json.loads(text.strip())
+        return JSONRoot(stripped, True, json.loads(stripped))
     except (json.JSONDecodeError, ValueError):
         pass
-    fence_pattern = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL)
-    match = fence_pattern.search(text)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except (json.JSONDecodeError, ValueError):
-            pass
-    for open_char, close_char in (("{", "}"), ("[", "]")):
-        start = text.find(open_char)
-        if start == -1:
+
+    source = text
+
+    start = _first_structural_json_opener(source)
+    if start < 0:
+        return None
+
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    pairs = {"}": "{", "]": "["}
+    for index in range(start, len(source)):
+        char = source[index]
+        if escape:
+            escape = False
             continue
-        depth = 0
-        in_string = False
-        escape = False
-        for i in range(start, len(text)):
-            ch = text[i]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\":
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == open_char:
-                depth += 1
-            elif ch == close_char:
-                depth -= 1
-                if depth == 0:
-                    candidate = text[start:i + 1]
-                    try:
-                        return json.loads(candidate)
-                    except (json.JSONDecodeError, ValueError):
-                        break
-    return None
+        if char == "\\" and in_string:
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char in "{[":
+            stack.append(char)
+            continue
+        if char in "}]":
+            if not stack or stack[-1] != pairs[char]:
+                return JSONRoot(source[start:index + 1], False, None)
+            stack.pop()
+            if not stack:
+                fragment = source[start:index + 1]
+                try:
+                    value = json.loads(fragment)
+                except (json.JSONDecodeError, ValueError):
+                    value = None
+                return JSONRoot(fragment, True, value)
+
+    return JSONRoot(source[start:], False, None)
+
+
+_JSON_PROSE_INTRO_RE = re.compile(
+    r"(?:json|result|output|response|payload|data|object|array)"
+    r"(?:\s+(?:is|follows|below))?\s*:\s*$",
+    re.I,
+)
+
+
+def _first_structural_json_opener(source: str) -> int:
+    """Select one earliest structural JSON candidate and never abandon it.
+
+    A root begins at the first non-whitespace character, inside a markdown
+    fence, after an explicit JSON/result introduction, or at an opener whose
+    following token is lexically valid JSON. This keeps ordinary prose such as
+    ``[JSON follows]`` or ``use {braces}`` inert while ensuring that malformed
+    content *inside an already selected root* cannot promote a later/nested
+    value.
+    """
+    first_content = len(source) - len(source.lstrip())
+    search_start = 0
+    while search_start < len(source):
+        object_start = source.find("{", search_start)
+        array_start = source.find("[", search_start)
+        starts = [index for index in (object_start, array_start) if index >= 0]
+        if not starts:
+            return -1
+        candidate = min(starts)
+        if _is_structural_json_opener(source, candidate, first_content):
+            return candidate
+        search_start = candidate + 1
+    return -1
+
+
+def _is_structural_json_opener(source: str, index: int, first_content: int) -> bool:
+    if index == first_content:
+        return True
+
+    prefix = source[:index]
+    if prefix.count("```") % 2 == 1:
+        fence_tail = prefix.rsplit("```", 1)[-1].strip().lower()
+        if fence_tail in {"", "json"}:
+            return True
+
+    next_index = index + 1
+    while next_index < len(source) and source[next_index].isspace():
+        next_index += 1
+    next_char = source[next_index] if next_index < len(source) else ""
+    opener = source[index]
+    lexically_plausible = (
+        next_char in {'"', "}"}
+        if opener == "{"
+        else next_char in {'"', "{", "[", "]", "-", "t", "f", "n"}
+        or next_char.isdigit()
+    )
+    if lexically_plausible:
+        return True
+
+    # A malformed response introduced as JSON/result data has still begun its
+    # first root. Selecting it here is what prevents a nested valid object from
+    # becoming a replacement root. Arbitrary prose punctuation is not selected.
+    return bool(_JSON_PROSE_INTRO_RE.search(prefix[-160:]))
+
+
+def parse_json(text, *, expected_root_type: type | None = None):
+    """Parse JSON from LLM output, tolerating markdown fences and prose.
+
+    ``expected_root_type`` is intentionally diagnostic-only. The parser always
+    preserves the actual first root, including a list returned where an object
+    was expected. Callers can then report the wrong shape without scanning into
+    that list for a nested object. An incomplete first root returns ``None``.
+    Returns None if all attempts fail.
+    """
+    del expected_root_type
+    root = first_json_root(text)
+    if root is None or not root.complete:
+        return None
+    return root.value

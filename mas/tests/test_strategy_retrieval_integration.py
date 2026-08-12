@@ -203,21 +203,16 @@ class TestStrategyRunPhaseRetrievalIntegration(unittest.IsolatedAsyncioTestCase)
         state = make_strategy_state("strategy-phase-truncated-repair")
         payload = make_strategy_payload()
         truncated = (
-            json.dumps(
-                {
-                    "preliminary_verdicts": payload["preliminary_verdicts"],
-                    "executive_strategy": payload["executive_strategy"],
-                    "strategies": payload["strategies"],
-                }
-            )[:-1]
-            + ', "implementation_sequence": "Wave 1 starts, then output truncates'
+            json.dumps(payload)[:-1]
+            + ', "appendix": "output truncates after the complete contract'
         )
         response = make_llm_response(truncated)
 
-        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)):
+        with patch("orchestrator.call_llm", new=AsyncMock(return_value=response)) as call_mock:
             with patch("priors.get_prior_hint", new=AsyncMock(return_value="")):
                 updated = await run_phase_node(state, "strategy")
 
+        self.assertEqual(call_mock.await_count, 1)
         self.assertEqual(updated.phase_status["strategy"], PhaseStatus.COMPLETED)
         self.assertIsNotNone(updated.strategy)
         self.assertIsNone(updated.strategy_raw)
