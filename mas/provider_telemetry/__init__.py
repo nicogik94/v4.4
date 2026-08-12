@@ -183,6 +183,21 @@ from .posture import (
     scope_state,
     strict_required,
 )
+from .request_shape import (
+    KNOWN_REASONING_EFFORTS,
+    OBSERVATION_POINTS,
+    OPENAI_REQUEST_ALLOWLIST,
+    OUTBOUND_REQUEST_FIELDS,
+    POINT_ADAPTER_KWARGS,
+    SURFACE_CHAT_COMPLETIONS,
+    current_request_shape_observer,
+    observe_openai_create,
+    observe_openai_sdk_requests,
+    openai_completions_class,
+    openai_request_fields,
+    openai_request_shape,
+    request_shape_scope,
+)
 from .transport import (
     TelemetrySdkShapeUnsupported,
     TelemetryStartUnavailable,

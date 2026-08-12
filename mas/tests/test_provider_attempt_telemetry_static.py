@@ -58,11 +58,16 @@ ALLOWED = {
     "mas/provider_telemetry/models.py",
     "mas/provider_telemetry/posture.py",
     "mas/provider_telemetry/redaction.py",
+    # M4.0: outbound OpenAI request-shape observation. Declared here because
+    # this guard's whole point is that the telemetry surface grows by
+    # declaration rather than by accident.
+    "mas/provider_telemetry/request_shape.py",
     "mas/provider_telemetry/repository.py",
     "mas/provider_telemetry/service.py",
     "mas/provider_telemetry/transport.py",
     "mas/provider_telemetry/values.py",
     # schema and tools
+    "mas/tests/test_provider_request_shape.py",
     "mas/sql/v63_provider_attempt_telemetry_foundation.sql",
     "mas/tools/provider_attempt_telemetry_export.py",
     "mas/tools/provider_attempt_telemetry_migrate.py",

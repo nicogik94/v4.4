@@ -35,6 +35,8 @@ from provider_telemetry import (
     ENTRY_POINT_EVALUATION_PHASE,
     POSTURE_OBSERVATIONAL,
     configured_posture,
+    observe_openai_sdk_requests,
+    request_shape_scope,
     response_shape_scope,
     telemetry_scope,
 )
@@ -534,9 +536,27 @@ def _provenance_session_kwargs(recorder) -> dict:
 
 
 def _shape_observer(recorder):
+    """Bind the recorder as observer for both response and request shape.
+
+    Two independent scopes, deliberately not one: the response observer is fed
+    from the adapter after a reply arrives, the request observer from the
+    adapter and the transport before the bytes leave. Keeping them separate is
+    what stops a reader — or a future edit — from treating "what we sent" and
+    "what came back" as one record.
+    """
     if recorder is None:
         return contextlib.nullcontext()
-    return response_shape_scope(recorder)
+    stack = contextlib.ExitStack()
+    stack.enter_context(response_shape_scope(recorder))
+    stack.enter_context(request_shape_scope(recorder))
+    # M4.0. The adapter boundary is observed by wrapping the OpenAI SDK's own
+    # `create`, immediately outside `llm_client._call_openai`, because that
+    # adapter is a certified product path this observational wave must leave
+    # byte-identical. The wrapper publishes and delegates unchanged; if the
+    # installed SDK does not have the pinned shape it observes nothing, and the
+    # ledger says `unknown` rather than inventing a request.
+    stack.enter_context(observe_openai_sdk_requests())
+    return stack
 
 
 def build_case_provenance(case_id: str, output: dict, recorder) -> dict:

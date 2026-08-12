@@ -160,6 +160,28 @@ FAILURE_PROVENANCE_CATEGORIES = (
     FAILURE_NONE,
 )
 
+# ── outbound request shape (M4.0) ──
+#
+# Declared here rather than imported from the runtime for the same reason
+# `_from_provider_value` reads statuses by duck typing: this schema is a stable
+# reader contract, and a runtime rename must show up as a translation failure in
+# one place, not as a silently renamed column in an uploaded artifact.
+#
+# Every name is `request_*`. These fields describe what V4 **sent**, and are
+# never merged with, defaulted from, or named like the `effective_*` fields that
+# describe what the provider **returned**.
+REQUEST_POINT_ADAPTER = "adapter_sdk_kwargs"
+REQUEST_OBSERVATION_POINTS = (REQUEST_POINT_ADAPTER,)
+
+OUTBOUND_REQUEST_FIELDS = (
+    "request_model",
+    "request_max_completion_tokens",
+    "request_max_tokens",
+    "request_reasoning_effort",
+    "request_temperature",
+    "request_api_surface",
+)
+
 # Normalized stop reasons that mean "the model ran out of room", across both
 # provider vocabularies.
 LENGTH_STOP_REASONS = frozenset({"length", "max_tokens"})
@@ -180,6 +202,7 @@ NOTE_CALL_CAP = "call_cap_reached"
 NOTE_INVOCATION_CAP = "invocation_cap_reached"
 NOTE_EVENT_CAP = "event_cap_reached"
 NOTE_SHAPE_CAP = "shape_cap_reached"
+NOTE_REQUEST_SHAPE_CAP = "request_shape_cap_reached"
 NOTE_RECORDER_FAULT = "recorder_fault"
 NOTE_HARNESS_EXCEPTION = "harness_exception_recorded"
 
@@ -247,6 +270,28 @@ def _from_provider_value(raw: Any) -> dict[str, Any]:
     return value(STATUS_INVALID, detail=detail or status)
 
 
+def _request_field(request: Optional[dict], name: str) -> dict[str, Any]:
+    """One outbound-request field, or an explicit reason there is none.
+
+    ``no_request_shape_record`` means this invocation produced no observation at
+    the outbound boundary — which for a skipped candidate or a cache hit is the
+    truthful answer and not a gap. It is deliberately *not* rendered as
+    ``absent``: ``absent`` is reserved for "the request was observed and did not
+    carry this field", which is the evidence that proves ``reasoning_effort``
+    went unsent, and it must not be reachable without an actual observation.
+    """
+    if not isinstance(request, dict):
+        return unknown("no_request_shape_record")
+    field = request.get(name)
+    if not isinstance(field, dict):
+        return unknown("no_request_shape_field")
+    return value(
+        _token(field.get("status") or STATUS_UNKNOWN),
+        val=field.get("value"),
+        detail=_token(field.get("detail") or ""),
+    )
+
+
 def _shape_field(shape: Optional[dict], name: str) -> dict[str, Any]:
     if not isinstance(shape, dict):
         return unknown("no_shape_record")
@@ -280,6 +325,7 @@ class EvalProvenanceRecorder:
         self.invocations: list[dict[str, Any]] = []
         self.events: dict[str, list[dict[str, Any]]] = {}
         self.shapes: dict[str, dict[str, Any]] = {}
+        self.request_shapes: dict[str, dict[str, Any]] = {}
         self.judge_record: dict[str, Any] = {}
         self.notes: list[str] = []
         self.event_count = 0
@@ -338,6 +384,38 @@ class EvalProvenanceRecorder:
                     "reasoning_tokens",
                 )
             }
+        except Exception:  # noqa: BLE001 - the isolation boundary itself
+            self.note(NOTE_RECORDER_FAULT)
+
+    # ── outbound request-shape observer ──
+
+    def record_request_shape(self, payload: Any) -> None:
+        """Absorb one outbound request-shape observation.
+
+        Keyed by invocation, and **first-wins** for the same reason the response
+        shape is: the first observation is the one describing the request the
+        adapter composed, and anything arriving later for the same invocation is
+        describing something else. ``request_observation_point`` travels with the
+        record, so which boundary produced it is a stated fact rather than an
+        inference a reader has to make.
+        """
+        try:
+            if not isinstance(payload, dict):
+                return
+            invocation_id = _label(payload.get("invocation_id") or "", limit=64)
+            if not invocation_id:
+                return
+            point = _token(payload.get("observation_point") or "", limit=32)
+            if point not in REQUEST_OBSERVATION_POINTS:
+                return
+            if invocation_id in self.request_shapes:
+                return
+            if len(self.request_shapes) >= MAX_SHAPES:
+                self.note(NOTE_REQUEST_SHAPE_CAP)
+                return
+            record = {name: payload.get(name) for name in OUTBOUND_REQUEST_FIELDS}
+            record["request_observation_point"] = point
+            self.request_shapes[invocation_id] = record
         except Exception:  # noqa: BLE001 - the isolation boundary itself
             self.note(NOTE_RECORDER_FAULT)
 
@@ -460,6 +538,7 @@ class EvalProvenanceRecorder:
         rich = _richest_event(events)
         terminal = next((event for event in events if event["is_terminal"]), None)
         shape = self.shapes.get(entry["invocation_id"])
+        request = self.request_shapes.get(entry["invocation_id"])
         return {
             "case_id": self.case_id,
             "phase": entry["phase"],
@@ -483,6 +562,20 @@ class EvalProvenanceRecorder:
             "task_profile": unknown("carried_in_routing_fingerprint"),
             "request_config_fingerprint": entry["request_config_fingerprint"],
             "routing_decision_fingerprint": entry["routing_decision_fingerprint"],
+            # ── what V4 actually sent (M4.0) ──
+            # An invocation that never reached the outbound boundary — a skipped
+            # candidate, a cache hit, a call that failed before transport — has no
+            # record here at all, and every field reads `unknown` with a reason.
+            # That is the point: this build never fabricates a request that was
+            # not made, so "no evidence of a request" and "evidence of a request"
+            # are distinguishable rather than both rendering as a budget.
+            "request_observation_point": (
+                request["request_observation_point"] if request else ""
+            ),
+            **{
+                name: _request_field(request, name)
+                for name in OUTBOUND_REQUEST_FIELDS
+            },
             "stop_reason": rich["stop_reason"] if rich else unknown("no_event"),
             "input_tokens": rich["input_tokens"] if rich else unknown("no_event"),
             "output_tokens": rich["output_tokens"] if rich else unknown("no_event"),
@@ -996,6 +1089,9 @@ def aggregate_provenance(
     with_provenance = 0
     invocation_total = 0
     judge_truncated = 0
+    request_evidence = 0
+    request_point_counts: dict[str, int] = {}
+    effort_counts: dict[str, int] = {}
 
     for case in cases:
         # Aggregation reads shard reports that arrived as downloaded artifacts,
@@ -1034,6 +1130,17 @@ def aggregate_provenance(
             refusal = _status_key(record, "refusal_status")
             content_counts[content] = content_counts.get(content, 0) + 1
             refusal_counts[refusal] = refusal_counts.get(refusal, 0) + 1
+            # M4.0. Counted separately from the response-shape tallies above so
+            # a reader can see, without opening a shard artifact, how many
+            # invocations carry outbound-request evidence at all and what the
+            # reasoning-effort field actually was. `absent` here is the positive
+            # finding — the request was observed and did not carry the field.
+            point = _token(_case_field(record, "request_observation_point", ""), limit=32)
+            if point in REQUEST_OBSERVATION_POINTS:
+                request_evidence += 1
+                request_point_counts[point] = request_point_counts.get(point, 0) + 1
+            effort = _status_key(record, "request_reasoning_effort")
+            effort_counts[effort] = effort_counts.get(effort, 0) + 1
         judge = provenance.get("judge") or {}
         if isinstance(judge, dict) and judge.get("input_truncated"):
             judge_truncated += 1
@@ -1057,6 +1164,9 @@ def aggregate_provenance(
         "reasoning_token_evidence_available_count": reasoning_evidence,
         "content_status_counts": dict(sorted(content_counts.items())),
         "refusal_status_counts": dict(sorted(refusal_counts.items())),
+        "invocations_with_request_evidence": request_evidence,
+        "request_observation_point_counts": dict(sorted(request_point_counts.items())),
+        "request_reasoning_effort_status_counts": dict(sorted(effort_counts.items())),
         "cases_continued_after_structural_failure": continued_case_ids,
         "judge_inputs_truncated_count": judge_truncated,
         "failure_provenance_counts": dict(sorted(category_counts.items())),
@@ -1085,9 +1195,12 @@ __all__ = [
     "MAX_EVENTS",
     "MAX_INVOCATIONS",
     "MAX_SHAPES",
+    "OUTBOUND_REQUEST_FIELDS",
     "PARSE_RESULTS",
     "PHASE_FINAL_STATUSES",
     "PROVENANCE_ENV",
+    "REQUEST_OBSERVATION_POINTS",
+    "REQUEST_POINT_ADAPTER",
     "SCHEMA_VERSION",
     "STRUCTURAL_FAILURE_KINDS",
     "VALUE_STATUSES",
