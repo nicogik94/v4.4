@@ -1,14 +1,16 @@
 name: evals
 
-# V7 release validation runs as TWO gates that make TWO different claims.
+# V7's supported release validation is Anthropic-only. The workflow retains
+# two historical gate identities, but only Gate A is a V7 release claim.
 #
 #   Gate A -- gate_a_anthropic_primary -- Anthropic present, OpenAI blank.
 #             Validates the normal production posture. A PASS is a statement
 #             about the release.
 #
 #   Gate B -- gate_b_openai_fallback   -- OpenAI present, Anthropic blank.
-#             Validates that the certified V7 contract stays usable on the
-#             OpenAI fallback path. A PASS is NOT release validation.
+#             Historical compatibility harness for a capability deferred from
+#             V7. Its historical FAIL remains evidence; it is NOT a release
+#             requirement and a future PASS would NOT validate this release.
 #
 # Neither gate's artifacts may be read as the other's: the gate identity is in
 # the job name, the environment, the report summary and the artifact name, and
@@ -329,7 +331,7 @@ jobs:
         run: python -m evals.release_gates --validate-threshold
 
       - name: Install OpenAI SDK
-        run: python -m pip install 'openai>=1.60.0'
+        run: python -m pip install 'openai==2.54.0'
 
       # The audited M3 implementation, invoked as a module. Its exit code is the
       # gate: there is no second, weaker OpenAI preflight inlined in YAML.
@@ -393,8 +395,9 @@ jobs:
         working-directory: mas
         env:
           MAS_PROVIDER_GATE: 'gate_b_openai_fallback'
-          # Intentionally blank: Gate B exists to force the fallback path, which
-          # only happens when Anthropic candidates are unavailable.
+          # Historical Gate B posture. Supported V7 now removes OpenAI from the
+          # eligible candidate set, so this retained harness fails closed and is
+          # not a release requirement.
           ANTHROPIC_API_KEY: ''
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           MAS_EVAL_PROVENANCE: '1'

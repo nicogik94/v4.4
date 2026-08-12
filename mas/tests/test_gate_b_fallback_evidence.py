@@ -1,12 +1,11 @@
-"""What a Gate B run must be able to prove, exercised with fakes only.
+"""The historical Gate B posture now fails closed, exercised with fakes only.
 
-Gate B claims OpenAI fallback compatibility. That claim is only meaningful if
-the artifact can show three things a bare pass rate cannot:
+Gate B's FAIL remains historical evidence for a deferred capability. The final
+V7 product boundary must prove three different facts:
 
   1. Anthropic really was unavailable (the harness posture, not an outage);
-  2. OpenAI really was selected and really answered;
-  3. when it failed, *why* -- effective model, stop reason, visible-output
-     shape and reasoning-token behaviour.
+  2. an OpenAI credential did not make OpenAI eligible;
+  3. no response-shape evidence was fabricated for the skipped provider.
 
 No provider call is made here: `llm_client` is pointed at a fake SDK client and
 both credentials are controlled by the test.
@@ -131,67 +130,47 @@ def test_gate_b_posture_makes_anthropic_candidates_unavailable():
     assert "anthropic" not in [m for m in completions.models if m]
 
 
-# ════════════════ 2. OpenAI really was selected and answered ════════════════
+# ════════════════ 2. OpenAI is present but release-ineligible ════════════════
 
 
-def test_gate_b_can_prove_openai_was_actually_selected():
+def test_gate_b_posture_fails_closed_without_calling_openai():
     result, completions, records = _run_gate_b_phase([_usable()])
 
-    assert result.ok
+    assert result.ok is False
+    assert result.error_type == "provider_unavailable"
     openai_records = [r for r in records if r["provider"] == "openai"]
-    assert openai_records, "no OpenAI attempt recorded"
-    answered = [r for r in openai_records if r["terminal_event_kind"] != "skipped"]
-    assert answered, "OpenAI was never actually attempted"
-    assert completions.models, "no SDK call was made"
-    assert answered[0]["effective_model"]["status"] in provenance.VALUE_STATUSES
+    assert openai_records == [], "deferred OpenAI entered the supported candidate set"
+    assert completions.models == [], "an OpenAI SDK call was made"
 
 
-def test_a_gate_b_artifact_distinguishes_requested_from_effective_model():
+def test_a_deferred_openai_candidate_never_claims_an_effective_model():
     _, _, records = _run_gate_b_phase([_usable()])
 
-    answered = [
-        r for r in records if r["provider"] == "openai" and r["terminal_event_kind"] != "skipped"
-    ]
-    record = answered[0]
-    # The effective model is what the provider reported, not an echo of the
-    # request: the fake reports a dated snapshot the request never named.
-    assert record["effective_model"]["value"] == "gpt-5-2026-01-01"
-    assert record["requested_model"] != record["effective_model"]["value"]
+    assert [r for r in records if r["provider"] == "openai"] == []
 
 
-def test_effective_model_is_never_claimed_when_the_provider_did_not_report_one():
+def test_provider_response_fixture_cannot_bypass_release_eligibility():
     response = _completion(_message(content="ok", refusal=None), finish_reason="stop",
                            usage=_Usage(_Details(reasoning_tokens=1)))
     del response.model
 
-    _, _, records = _run_gate_b_phase([response])
-
-    answered = [
-        r for r in records if r["provider"] == "openai" and r["terminal_event_kind"] != "skipped"
-    ]
-    status = answered[0]["effective_model"]["status"]
-    assert status in (provenance.STATUS_MISSING, provenance.STATUS_ABSENT, provenance.STATUS_UNKNOWN)
-    assert answered[0]["effective_model"].get("value") in (None, "")
-
-
-# ════════════════ 3. Diagnosable failure ════════════════
-
-
-def test_the_v7_failure_signature_is_fully_described_not_merely_counted():
-    result, _, records = _run_gate_b_phase([_v7_signature()])
+    result, completions, records = _run_gate_b_phase([response])
 
     assert result.ok is False
-    answered = [
-        r for r in records if r["provider"] == "openai" and r["terminal_event_kind"] != "skipped"
-    ]
-    assert answered
-    record = answered[0]
-    # Every fact needed to attribute the failure, none of them the response text.
-    assert record["content_status"]["status"] == capture.SHAPE_EMPTY
-    assert record["visible_content_length"]["value"] == 0
-    assert record["stop_reason"]["value"] == "length"
-    assert record["reasoning_tokens"]["value"] == 4000
-    assert record["output_tokens"]["value"] == 3
+    assert completions.models == []
+    assert all(r["provider"] == "anthropic" for r in records)
+
+
+# ════════════════ 3. Skips never fabricate provider evidence ════════════════
+
+
+def test_the_historical_v7_failure_fixture_is_never_sent_to_openai():
+    result, completions, records = _run_gate_b_phase([_v7_signature()])
+
+    assert result.ok is False
+    assert completions.models == []
+    openai_records = [r for r in records if r["provider"] == "openai"]
+    assert openai_records == []
 
 
 def test_reasoning_tokens_are_observed_never_guessed():
@@ -200,20 +179,11 @@ def test_reasoning_tokens_are_observed_never_guessed():
     response = _completion(_message(content="ok", refusal=None), finish_reason="stop",
                            usage=_Usage(None))
 
-    _, _, records = _run_gate_b_phase([response])
+    _, completions, records = _run_gate_b_phase([response])
 
-    answered = [
-        r for r in records if r["provider"] == "openai" and r["terminal_event_kind"] != "skipped"
-    ]
-    reasoning = answered[0]["reasoning_tokens"]
-    assert reasoning["status"] in (
-        provenance.STATUS_MISSING,
-        provenance.STATUS_ABSENT,
-        provenance.STATUS_UNSUPPORTED,
-        provenance.STATUS_UNKNOWN,
-        provenance.STATUS_NULL,
-    )
-    assert reasoning.get("value") is None, "an unreported count was invented"
+    assert completions.models == []
+    openai_records = [r for r in records if r["provider"] == "openai"]
+    assert openai_records == []
 
 
 def test_a_skipped_candidate_never_reports_a_response_shape():
@@ -254,10 +224,8 @@ def test_refusal_text_is_recorded_as_a_status_not_as_text():
     payload = json.dumps(records)
     assert "hunter2" not in payload
     assert "I will not comply" not in payload
-    answered = [
-        r for r in records if r["provider"] == "openai" and r["terminal_event_kind"] != "skipped"
-    ]
-    assert answered[0]["refusal_status"]["status"] == capture.SHAPE_NONEMPTY
+    openai_records = [r for r in records if r["provider"] == "openai"]
+    assert openai_records == []
 
 
 # ════════════════ gate identity on the evidence ════════════════

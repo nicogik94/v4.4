@@ -150,17 +150,22 @@ The batch runner runs the same phase pipeline locally, but submits **all 12 judg
 
 Two GitHub Actions workflows:
 
-- **`.github/workflows/evals.yml`** — a free mock smoke job on every PR that touches `mas/prompts/**`, `mas/orchestrator.py`, `mas/llm_client.py`, `mas/config.py` or `mas/evals/**`, plus two **paid release gates** described below.
+- **`.github/workflows/evals.yml`** — a free mock smoke job on every PR that touches `mas/prompts/**`, `mas/orchestrator.py`, `mas/llm_client.py`, `mas/config.py` or `mas/evals/**`, plus the paid Gate A release gate and retained historical Gate B compatibility harness described below.
 - **`.github/workflows/evals-nightly-batch.yml`** — runs `run_evals_batch.py` on a 06:00 UTC cron. Opens a GitHub issue tagged `eval-regression` if the threshold fails, with the failing case IDs in the body.
 
-Set the `ANTHROPIC_API_KEY` secret in repo settings before enabling either.
+Set the `ANTHROPIC_API_KEY` secret in repo settings before authorizing Gate A.
 
 ## Release provider gates (V7)
 
-Release validation runs as **two gates that make two different claims**. They
-share the golden-case universe, the judge rubric, the six-shard split and the
-0.75 threshold — so their results are comparable — but a PASS means something
-different in each, and their artifacts are never interchangeable.
+The supported V7 production release is **Anthropic-only**. Gate A is the release
+gate and its historical PASS may be carried forward only by strict successful-
+path equivalence. Gate B is retained as a historical compatibility harness, but
+OpenAI fallback capability is deferred and a Gate B PASS is not a V7 release
+requirement. The historical Gate B FAIL remains evidence about the deferred
+capability; it is not reclassified or erased.
+
+The gates share the golden-case universe, judge rubric, six-shard split and 0.75
+threshold, but their artifacts and claims are never interchangeable.
 
 | | Gate A | Gate B |
 |---|---|---|
@@ -168,12 +173,19 @@ different in each, and their artifacts are never interchangeable.
 | Anthropic key | **present** | blank |
 | OpenAI key | blank | **present** |
 | preflight | `evals.anthropic_preflight` | `evals.provider_preflight` |
-| a PASS claims | the normal production posture meets the release threshold | the certified contract stays usable on the OpenAI fallback path |
-| a PASS does **not** claim | anything about fallback | **anything about the release** |
+| V7 status | **supported; historical PASS** | **historical FAIL; capability deferred** |
+| a PASS claims | the normal production posture meets the release threshold | the compatibility harness observed usable OpenAI fallback behavior at that exact candidate |
+| a PASS does **not** claim | anything about fallback | **anything about the V7 release** |
 
-Gate B is *not* release validation. It exists because a blank Anthropic key
-makes every Anthropic candidate unavailable, which is the only way to reach the
-OpenAI fallback candidates without changing routing code.
+Gate B is *not* V7 release validation. Its harness and evidence vocabulary remain
+for historical traceability and future provider-resilience work. The supported
+runtime makes OpenAI ineligible before any provider attempt, regardless of
+`OPENAI_API_KEY`; therefore a blank Anthropic key now fails closed instead of
+crossing into OpenAI.
+
+Do not authorize Gate B for an Anthropic-only V7 release. Its paid-run controls
+remain documented below solely to preserve the historical harness boundary and
+must not be interpreted as production eligibility.
 
 ### Authorizing a live run
 

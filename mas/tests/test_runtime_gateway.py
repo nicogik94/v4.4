@@ -31,6 +31,7 @@ from runtime.provider_gateway import (  # noqa: E402
     TIMEOUT,
     TRANSPORT_MALFORMED_RESPONSE,
     UNUSABLE_OUTPUT_ERRORS,
+    V7_SUPPORTED_PROVIDERS,
     build_cache_key,
     classify_unusable_output,
     normalize_exception_category,
@@ -119,6 +120,16 @@ class TestRuntimeRouting(unittest.TestCase):
                 _, selection = select_model_config(phase)
                 self.assertEqual(selection.task_profile, expected_profile)
                 self.assertEqual(task_profile_for_phase(phase), expected_profile)
+
+    def test_every_normal_phase_selects_anthropic_first(self):
+        for phase in MODEL_ROUTING:
+            with self.subTest(phase=phase):
+                candidates = select_model_candidates(phase)
+                self.assertTrue(candidates)
+                self.assertIs(candidates[0][0].provider, Provider.ANTHROPIC)
+
+    def test_v7_supported_provider_boundary_is_anthropic_only(self):
+        self.assertEqual(V7_SUPPORTED_PROVIDERS, frozenset({Provider.ANTHROPIC}))
 
     def test_unknown_phase_uses_safe_default(self):
         config, selection = select_model_config("unknown-phase")
@@ -541,12 +552,13 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime_events[-1]["fallback_model"], "claude-sonnet-4-6")
         self.assertEqual(runtime_events[-1]["cache_status"], "disabled")
 
-    async def test_unavailable_first_candidate_falls_back_to_second(self):
+    async def test_openai_key_cannot_rescue_an_unavailable_anthropic_path(self):
         async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             raise AssertionError("anthropic should be skipped when unavailable")
 
-        async def fake_openai(model, system, prompt, max_tokens, temperature):
-            return SimpleNamespace(text="openai ok", model_used=model, error="", error_type="")
+        fake_openai = AsyncMock(
+            side_effect=AssertionError("OpenAI is outside the supported V7 runtime")
+        )
 
         gateway = DefaultProviderGateway(
             anthropic_executor=fake_anthropic,
@@ -569,12 +581,137 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(response.text, "openai ok")
-        self.assertTrue(response.fallback_used)
+        self.assertEqual(response.text, "")
+        self.assertTrue(response.error)
+        self.assertFalse(response.fallback_used)
         self.assertEqual(response.fallback_reason, "provider_unavailable")
         self.assertEqual(response.failed_provider, "anthropic")
-        self.assertEqual(response.fallback_provider, "openai")
-        self.assertEqual(response.fallback_model, "gpt-5-mini")
+        self.assertEqual(response.fallback_provider, "")
+        self.assertEqual(response.fallback_model, "")
+        fake_openai.assert_not_awaited()
+        openai_attempts = [
+            attempt for attempt in response.attempts if attempt["provider"] == "openai"
+        ]
+        self.assertEqual(openai_attempts, [])
+
+    async def test_no_runtime_override_can_make_openai_eligible(self):
+        cases = (
+            (
+                "config_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(),
+                ModelConfig(provider=Provider.OPENAI, model="gpt-5-mini"),
+            ),
+            (
+                "explicit_model",
+                RoutingContext(phase="classify", explicit_model="openai:gpt-5"),
+                RoutingConfig(),
+                None,
+            ),
+            (
+                "phase_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(phase_overrides={"classify": "openai:gpt-5-mini"}),
+                None,
+            ),
+            (
+                "complexity_override",
+                RoutingContext(phase="classify", complexity_hint="deep"),
+                RoutingConfig(complexity_routes={"deep": "openai:gpt-5"}),
+                None,
+            ),
+            (
+                "default_provider_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(
+                    default_provider="openai",
+                    phase_overrides={"classify": "custom-openai-model"},
+                ),
+                None,
+            ),
+            (
+                "task_profile_override",
+                RoutingContext(phase="classify"),
+                RoutingConfig(
+                    task_profile_candidates={
+                        "fast_classification": ["openai:gpt-5-mini"]
+                    }
+                ),
+                None,
+            ),
+        )
+
+        for label, context, routing_config, config_override in cases:
+            with self.subTest(source=label):
+                anthropic = AsyncMock(return_value=SimpleNamespace(
+                    text="anthropic ok",
+                    model_used=MODEL_ROUTING["classify"].model,
+                    error="",
+                    error_type="",
+                ))
+                openai = AsyncMock(
+                    side_effect=AssertionError("runtime override reached OpenAI")
+                )
+                gateway = DefaultProviderGateway(
+                    anthropic_executor=anthropic,
+                    openai_executor=openai,
+                    cache=NoOpSemanticCache(),
+                    breaker=_BreakerStub(),
+                    routing_config=routing_config,
+                    provider_availability={"anthropic": True, "openai": True},
+                    max_retries=1,
+                )
+
+                response = await gateway.call(
+                    GatewayRequest(
+                        phase="classify",
+                        system_prompt="system",
+                        user_prompt="prompt",
+                        routing_context=context,
+                    ),
+                    config_override=config_override,
+                )
+
+                self.assertEqual(response.provider_used, "anthropic")
+                self.assertEqual(response.text, "anthropic ok")
+                openai.assert_not_awaited()
+                self.assertTrue(all(
+                    attempt["provider"] == "anthropic"
+                    for attempt in response.attempts
+                ))
+
+    async def test_anthropic_errors_never_cross_into_openai(self):
+        async def failing_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
+            return SimpleNamespace(
+                text="", model_used=model, error="rate limited", error_type=RATE_LIMITED
+            )
+
+        openai = AsyncMock(side_effect=AssertionError("Anthropic failure reached OpenAI"))
+        gateway = DefaultProviderGateway(
+            anthropic_executor=failing_anthropic,
+            openai_executor=openai,
+            cache=NoOpSemanticCache(),
+            breaker=_BreakerStub(),
+            provider_availability={"anthropic": True, "openai": True},
+            max_retries=1,
+        )
+
+        response = await gateway.call(GatewayRequest(
+            phase="classify",
+            system_prompt="system",
+            user_prompt="prompt",
+            routing_context=RoutingContext(phase="classify"),
+        ))
+
+        self.assertTrue(response.error)
+        self.assertEqual(response.failed_provider, "anthropic")
+        self.assertFalse(response.fallback_used)
+        openai.assert_not_awaited()
+        self.assertTrue(all(
+            attempt["provider"] == "anthropic"
+            for attempt in response.attempts
+            if attempt["status"] != "skipped"
+        ))
 
     async def test_unhealthy_candidate_is_skipped(self):
         breaker = _BreakerStub()
@@ -683,7 +820,11 @@ class TestProviderGateway(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.fallback_used)
         self.assertEqual(calls, [MODEL_ROUTING["audit"].model])
 
-    async def test_runtime_metadata_sanitizes_failed_primary_and_fallback(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_runtime_metadata_sanitizes_failed_primary_and_deferred_fallback(self):
         async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             return SimpleNamespace(
                 text="",
@@ -918,7 +1059,11 @@ class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
         exc = _FakeAnthropicBadRequest("model does not support extended thinking")
         self.assertEqual(normalize_exception_category(exc), INVALID_REQUEST)
 
-    async def test_judge_config_override_falls_back_to_openai_on_quota_exceeded(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_deferred_judge_fallback_handles_quota_exceeded(self):
         anthropic_calls: list[str] = []
         openai_calls: list[str] = []
 
@@ -1016,7 +1161,11 @@ class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.failed_provider, "anthropic")
         self.assertEqual(response.failed_error_type, QUOTA_EXCEEDED)
 
-    async def test_quota_exhaustion_fallback_metadata_preserved(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_deferred_quota_fallback_metadata_preserved(self):
         async def fake_anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             raise _FakeAnthropicLowCreditError()
 
@@ -1068,7 +1217,11 @@ class TestQuotaExhaustionFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.fallback_model, "gpt-5")
         self.assertFalse(response.error)
 
-    async def test_quota_exhausted_anthropic_candidate_not_retried_repeatedly(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_deferred_quota_fallback_does_not_retry_anthropic_repeatedly(self):
         """Quota-exhausted Anthropic must break out of the retry loop immediately
         (QUOTA_EXCEEDED is not in RETRYABLE_PROVIDER_ERRORS)."""
         anthropic_call_count = 0
@@ -1364,7 +1517,11 @@ class TestUnusableOutputGatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.attempt_count, len(calls))
         self.assertNotIn(OUTPUT_TOKEN_EXHAUSTED, RETRYABLE_PROVIDER_ERRORS)
 
-    async def test_g3_unusable_output_falls_back_to_the_next_candidate(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_g3_unusable_output_reaches_deferred_fallback_in_isolation(self):
         breaker = _BreakerStub()
         openai_calls: list[str] = []
 
@@ -1612,7 +1769,11 @@ class TestLogicalCallUsageAccounting(unittest.IsolatedAsyncioTestCase):
         self._assert_reports_every_billed_token(response)
 
     # ─── T3 ───────────────────────────────────────────────────────────────
-    async def test_t3_unusable_then_fallback_success_reports_the_sum(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_t3_deferred_fallback_success_reports_the_sum(self):
         """U4: the unusable attempt was a billed provider execution; fallback
         succeeding later does not un-bill it."""
         response = await self._call(self._gateway(
@@ -1633,8 +1794,8 @@ class TestLogicalCallUsageAccounting(unittest.IsolatedAsyncioTestCase):
         self._assert_reports_every_billed_token(response)
 
     # ─── T4 ───────────────────────────────────────────────────────────────
-    async def test_t4_unavailable_fallback_contributes_nothing_and_erases_nothing(self):
-        """U6: skipped candidates are free; the executed one still cost money."""
+    async def test_t4_ineligible_fallback_contributes_nothing_and_erases_nothing(self):
+        """U6: ineligible candidates are absent; executed attempts still cost money."""
         response = await self._call(self._gateway(
             anthropic=self._unusable_executor(),
             openai=self._never_called,
@@ -1643,12 +1804,8 @@ class TestLogicalCallUsageAccounting(unittest.IsolatedAsyncioTestCase):
 
         executed = len(self.billed.calls)
         self.assertTrue(response.error)
-        self.assertIn("openai", {a["provider"] for a in response.attempts})
-        self.assertTrue(
-            any(a["status"] == "skipped" for a in response.attempts),
-            "the unavailable candidate must appear as skipped",
-        )
-        # Exactly the executed attempts — the skipped ones added no phantom spend.
+        self.assertEqual({a["provider"] for a in response.attempts}, {"anthropic"})
+        # Exactly the executed attempts — the deferred provider added no phantom spend.
         self.assertAlmostEqual(response.cost_usd, 0.25 * executed, places=9)
         self._assert_reports_every_billed_token(response)
 
@@ -1851,7 +2008,11 @@ class TestLogicalCallUsageAccounting(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(consumed["total_cost_usd"], self.billed.cost_usd, places=9)
         self.assertGreater(consumed["total_cost_usd"], 0.0)
 
-    async def test_t10b_fallback_success_spend_reaches_the_budget_ledger(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_t10b_deferred_fallback_spend_reaches_the_budget_ledger(self):
         async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget):
             self._bill(model, in_tok=9200, out_tok=4000, cost=0.25)
             return llm_client.LLMResponse(
@@ -2140,7 +2301,11 @@ class TestProviderResponseReservationTruthfulness(unittest.IsolatedAsyncioTestCa
                     self.assertIsNone(config.min_response_tokens)
 
     # ─── T8 ───────────────────────────────────────────────────────────────
-    async def test_t8_openai_executor_arguments_are_unchanged(self):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
+    async def test_t8_deferred_openai_executor_arguments_are_unchanged(self):
         recorded: list[tuple] = []
 
         async def openai(*args, **kwargs):

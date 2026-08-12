@@ -638,7 +638,7 @@ class RuntimeCaptureChainTests(unittest.TestCase):
     the whole chain still lands, which is what the V7 live artifact could not do.
     """
 
-    def test_a_real_gateway_call_populates_both_capture_channels(self):
+    def test_gate_b_posture_records_skips_without_calling_deferred_openai(self):
         import llm_client
         from evals import provenance
         from provider_telemetry import (
@@ -691,47 +691,23 @@ class RuntimeCaptureChainTests(unittest.TestCase):
         finally:
             llm_client._openai, llm_client.OPENAI_API_KEY, llm_client.ANTHROPIC_API_KEY = previous
 
-        # This fixture is the V7 live signature, and the provider-output
-        # contract (#115) now fails closed on it instead of reporting a
-        # success that carried no text. So the gateway exhausts the OpenAI
-        # fallback chain rather than stopping at the first candidate, and the
-        # call ends unusable. Both are the corrected behaviour, not a
-        # regression: an empty completion is no longer a usable result.
-        self.assertEqual(completions.calls, 2)
+        # OpenAI credential presence is availability evidence, not release
+        # authorization. Supported V7 removes deferred candidates before the
+        # attempt loop and fails closed before the SDK fixture can answer.
+        self.assertEqual(completions.calls, 0)
         self.assertFalse(result.ok)
-        self.assertIn("output_token_exhausted", result.error)
+        self.assertEqual(result.error_type, "provider_unavailable")
 
         records = recorder.invocation_records()
-        answered = [r for r in records if r["provider"] == "openai"]
-        # One record per OpenAI candidate actually attempted.
-        self.assertEqual(len(answered), 2)
-        record = answered[0]
-
-        # Channel one: the runtime's own invocation start and attempt events.
-        self.assertEqual(record["phase"], "strategy")
-        self.assertGreaterEqual(record["candidate_ordinal"], 1)
-        self.assertEqual(record["retry_ordinal"], 1)
-        self.assertEqual(record["terminal_event_kind"], "provider_failure")
-        self.assertEqual(record["effective_model"]["value"], "gpt-5-2026-01-01")
-        self.assertEqual(record["stop_reason"]["value"], "length")
-        self.assertEqual(record["input_tokens"]["value"], 120)
-        self.assertEqual(record["output_tokens"]["value"], 3)
-
-        # Channel two: the shape metadata the durable relations have no column
-        # for, joined onto the same invocation.
-        self.assertEqual(record["content_status"]["status"], capture.SHAPE_EMPTY)
-        self.assertEqual(record["visible_content_length"]["value"], 0)
-        self.assertEqual(record["refusal_status"]["status"], capture.SHAPE_NULL)
-        self.assertEqual(record["reasoning_tokens"]["value"], 4000)
-
-        # A candidate the gateway skipped is recorded as skipped, not as a
-        # response that happened to say nothing.
-        skipped = [r for r in records if r["terminal_event_kind"] == "skipped"]
-        for entry in skipped:
+        openai = [r for r in records if r["provider"] == "openai"]
+        self.assertEqual(openai, [])
+        self.assertTrue(all(r["terminal_event_kind"] == "skipped" for r in records))
+        for entry in records:
             with self.subTest(provider=entry["provider"]):
                 self.assertEqual(
                     entry["content_status"]["status"], provenance.STATUS_UNKNOWN
                 )
+                self.assertIsNone(entry["reasoning_tokens"].get("value"))
 
         payload = json.dumps(records)
         for secret in ("system-sentinel", "user-sentinel", "test-key-not-a-credential"):

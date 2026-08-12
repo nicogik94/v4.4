@@ -22,12 +22,13 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import MODEL_ROUTING  # noqa: E402
+from config import MODEL_ROUTING, Provider  # noqa: E402
 from extensions.runtime import GatewayRequest, RoutingContext  # noqa: E402
 from llm_client import LLMResponse  # noqa: E402
 from provider_telemetry import repository  # noqa: E402
@@ -138,8 +139,12 @@ def _gateway(session, *, breaker=None, cache=None, max_retries=1, **kwargs):
 
 
 class DelayedTelemetryNeutralityTests(unittest.IsolatedAsyncioTestCase):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
     async def test_delayed_writes_cannot_change_fallback_selection(self):
-        """Requirement 1."""
+        """Requirement 1 for the dormant fallback path in isolation."""
         seen = []
 
         async def anthropic(model, system, prompt, max_tokens, temperature, thinking_budget=0):
@@ -388,6 +393,10 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SkippedCandidateTests(unittest.IsolatedAsyncioTestCase):
+    @patch(
+        "runtime.provider_gateway.V7_SUPPORTED_PROVIDERS",
+        frozenset({Provider.ANTHROPIC, Provider.OPENAI}),
+    )
     async def test_a_skipped_candidate_records_a_start_and_a_skipped_terminal(self):
         sink = RecordingSink()
         session = await _TelemetrySession(sink).start()

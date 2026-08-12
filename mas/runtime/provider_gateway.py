@@ -49,6 +49,12 @@ from provider_telemetry.models import (
 
 logger = logging.getLogger(__name__)
 
+# V7's certified production boundary is Anthropic-only.  Keep the dormant
+# OpenAI adapter and candidate metadata available for future provider-resilience
+# work, but never make OpenAI eligible in the supported runtime.  In particular,
+# credential presence is availability evidence, not release authorization.
+V7_SUPPORTED_PROVIDERS = frozenset({Provider.ANTHROPIC})
+
 AnthropicExecutor = Callable[[str, str, str, int, float, int], Awaitable[Any]]
 OpenAIExecutor = Callable[[str, str, str, int, float], Awaitable[Any]]
 BeforeAttemptHook = Callable[[ModelConfig], Any]
@@ -590,6 +596,13 @@ class DefaultProviderGateway:
             routing_context=request.routing_context,
             routing_config=self._routing_config,
         )
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate[0].provider in V7_SUPPORTED_PROVIDERS
+        ]
+        if not candidates:
+            raise RuntimeError("V7 routing invariant violated: no supported provider candidate")
         config, selection = candidates[0]
 
         cache_key = request.cache_key or build_cache_key(request, selection)

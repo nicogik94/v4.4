@@ -9,10 +9,10 @@ threshold so their results are comparable, but they do not share a claim:
     OpenAI absent.  A PASS is a statement about the release.
 
 ``gate_b_openai_fallback``
-    Validates that when Anthropic cannot service a call, the certified V7
-    logical contract remains usable on the OpenAI fallback path: Anthropic
-    absent, OpenAI present.  A PASS is a statement about fallback
-    compatibility, **not** about the release.
+    Historical compatibility-gate identity. Its FAIL remains preserved, while
+    OpenAI fallback is deferred outside the supported Anthropic-only V7 runtime.
+    A future PASS would be a statement about that exact experimental candidate,
+    **not** about the V7 release.
 
 Neither gate's evidence may be read as the other's.  Every live-capable run
 therefore carries a machine-readable gate identity from the workflow input all
@@ -104,7 +104,7 @@ DISPATCH_GATE_INPUT = "provider_gate"
 
 GATE_TITLES = {
     GATE_A: "Gate A - Anthropic primary release validation",
-    GATE_B: "Gate B - OpenAI fallback compatibility",
+    GATE_B: "Gate B - OpenAI fallback compatibility (deferred)",
 }
 
 GATE_CLAIMS = {
@@ -113,9 +113,9 @@ GATE_CLAIMS = {
         "the release quality threshold."
     ),
     GATE_B: (
-        "When Anthropic cannot service the call, the certified V7 logical "
-        "contract remains usable on the OpenAI fallback path. This is NOT "
-        "primary release validation."
+        "Historical compatibility evidence for the deferred OpenAI fallback "
+        "capability. Supported V7 is Anthropic-only, so this is NOT primary "
+        "release validation."
     ),
 }
 
@@ -151,10 +151,9 @@ class ProviderPosture:
     """Which credential a gate's live jobs receive, and which they must not.
 
     `blank_providers` is not "unset": the workflow assigns an explicit empty
-    string, so a job that inherits a runner-level value still sees blank.  The
-    runtime reads a blank key as *provider unavailable* and skips that
-    provider's candidates, which is precisely how each gate is forced onto the
-    path it claims to validate.
+    string, so a job that inherits a runner-level value still sees blank. The
+    historical harness retains both postures, but the supported V7 runtime now
+    independently makes OpenAI ineligible even when its key is present.
     """
 
     gate: str
@@ -200,12 +199,12 @@ def _task_profile(phase: str) -> str:
 
 
 def required_models(provider: str) -> tuple[str, ...]:
-    """Models of `provider` the live eval can actually reach, in first-seen order.
+    """Models in each gate's frozen routing inventory, in first-seen order.
 
-    Derived from the certified routing tables rather than restated, so a routing
-    change cannot silently leave a gate probing the wrong set.  Covers phase
-    defaults, task-profile candidates, the fallback chain and the judge
-    override -- every candidate source `select_model_candidates` consults.
+    Derived from the routing tables rather than restated. For Anthropic this is
+    the supported Gate A execution inventory. For OpenAI it preserves the
+    historical Gate B harness inventory even though the production runtime's V7
+    eligibility boundary prevents those candidates from executing.
     """
 
     models: list[str] = []
@@ -223,11 +222,11 @@ def required_models(provider: str) -> tuple[str, ...]:
                 alias_provider, _, alias_model = alias.partition(":")
                 add(alias_provider, alias_model)
 
-    # The judge is pinned to Anthropic by `config_override`, but the override is
-    # only the *first* candidate: the gateway still appends the phase's profile
-    # and chain candidates behind it, so a blank Anthropic key routes the judge
-    # onto its OpenAI fallback rather than failing the run.  Both providers
-    # therefore have a real judge path, and both are probed.
+    # The judge is pinned to Anthropic by `config_override`. The historical
+    # candidate inventory appended both providers behind that override, which
+    # is why the retained Gate B harness probes both. Supported V7 applies its
+    # Anthropic-only eligibility boundary before attempts begin, so this
+    # inventory does not authorize or expose an OpenAI production path.
     add(Provider.ANTHROPIC.value, EVAL_JUDGE_MODEL)
     for alias in TASK_PROFILE_MODEL_CANDIDATES.get(_task_profile(EVAL_JUDGE_PHASE), []):
         if alias == "phase_default":

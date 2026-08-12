@@ -1130,7 +1130,9 @@ def test_provider_unavailability_is_never_reported_as_quality_failure():
     assert outcome.result != release_gates.RESULT_QUALITY_FAILURE
 
 
-def test_gate_b_pass_never_claims_primary_release_validation():
+def test_gate_b_is_truthfully_deferred_and_never_claims_release_validation():
+    assert "deferred" in release_gates.GATE_CLAIMS[GATE_B].lower()
+    assert "Anthropic-only" in release_gates.GATE_CLAIMS[GATE_B]
     assert "NOT primary release validation" in release_gates.GATE_CLAIMS[GATE_B]
     assert "fallback" in release_gates.GATE_CLAIMS[GATE_B].lower()
     assert "release" in release_gates.GATE_CLAIMS[GATE_A].lower()
@@ -1161,6 +1163,19 @@ def test_gate_a_probe_set_matches_the_anthropic_models_the_eval_can_reach():
     from evals import anthropic_preflight
 
     assert anthropic_preflight.PROBE_MODELS == release_gates.required_models("anthropic")
+
+
+def test_openai_sdk_is_pinned_to_the_historical_gate_a_resolution():
+    requirements = (MAS_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    # GitHub run 31554765254 resolved this exact build before the successful
+    # deterministic smoke and Gate A execution. The later 3.0.0 resolution
+    # broke the frozen SDK-shape parity suite, so an open upper range is unsafe.
+    assert "openai==2.54.0" in requirements.splitlines()
+    assert "python -m pip install 'openai==2.54.0'" in workflow
+    assert "openai>=1.60.0" not in requirements
+    assert "openai>=1.60.0" not in workflow
 
 
 # ════════════════════ gate summary rendering ════════════════════
@@ -1546,6 +1561,7 @@ def test_removing_the_aggregate_gate_identity_check_is_detected(tmp_path):
 
 CERTIFIED_PRODUCT_BASELINE = "0ead418afa0447ae0a90535aaf8ae392df06b403"
 HARNESS_BASELINE = "46c4fbeb303f91c6434f94eb8bb103287f37879b"
+OPTION_2_BASELINE = "20a104f370e3cd427d2c3a5c02d72c4110b802a3"
 
 CERTIFIED_PRODUCT_PATHS = (
     "mas/api.py",
@@ -1582,13 +1598,16 @@ def _changed_since_harness_baseline() -> list[str]:
     return [p for p in _git("diff", "--name-only", HARNESS_BASELINE, "--").split("\n") if p]
 
 
-def test_the_certified_product_boundary_is_byte_identical():
-    """All 16 certified paths must still match the certified commit exactly."""
+def test_option_2_changes_only_the_runtime_boundary_inside_the_product_manifest():
+    """The new product identity changes only the gateway and its contract tests."""
 
-    changed = _git(
-        "diff", "--name-only", CERTIFIED_PRODUCT_BASELINE, "--", *CERTIFIED_PRODUCT_PATHS
-    ).strip()
-    assert changed == "", f"certified product blob changed: {changed}"
+    changed = set(_git(
+        "diff", "--name-only", OPTION_2_BASELINE, "--", *CERTIFIED_PRODUCT_PATHS
+    ).splitlines())
+    assert changed == {
+        "mas/runtime/provider_gateway.py",
+        "mas/tests/test_runtime_gateway.py",
+    }
 
 
 def test_no_generated_runtime_data_rides_along_in_the_harness_diff():
@@ -1610,11 +1629,22 @@ def test_the_scenario_shadow_fixture_is_unchanged():
     assert changed == "", "scenario_shadow.sqlite3 differs from the harness baseline"
 
 
-def test_the_harness_diff_touches_only_harness_paths():
-    allowed_prefixes = (".github/workflows/", "mas/evals/", "mas/tests/", "mas/provider_telemetry/")
+def test_the_option_2_closure_diff_touches_only_declared_paths():
+    allowed_paths = {
+        ".github/workflows/evals.yml",
+        "mas/evals/README.md",
+        "mas/evals/release_gates.py",
+        "mas/requirements.txt",
+        "mas/runtime/provider_gateway.py",
+        "mas/tests/test_gate_b_fallback_evidence.py",
+        "mas/tests/test_provider_attempt_telemetry_capture.py",
+        "mas/tests/test_provider_attempt_telemetry_gateway.py",
+        "mas/tests/test_release_gates_workflow.py",
+        "mas/tests/test_runtime_gateway.py",
+    }
     stray = [
         path
-        for path in _changed_since_harness_baseline()
-        if not path.startswith(allowed_prefixes)
+        for path in _git("diff", "--name-only", OPTION_2_BASELINE, "--").splitlines()
+        if path not in allowed_paths
     ]
-    assert stray == [], f"unexpected paths in the harness diff: {stray}"
+    assert stray == [], f"unexpected paths in the Option 2 closure diff: {stray}"
