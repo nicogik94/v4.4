@@ -97,8 +97,9 @@ def test_orchestrator_wiring_is_byte_stable_and_fail_closed():
     # research evidence section sits directly against the retrieval slot so an
     # empty section keeps legacy prompts byte-identical
     assert text.count("{retrieval_section}{research_evidence_section}") == 2
-    assert "def build_audit_prompt(state: ProjectState, research_evidence_section: str = \"\")" in text
-    assert "def build_strategy_prompt(state: ProjectState, research_evidence_section: str = \"\")" in text
+    assert "def build_audit_prompt(" in text
+    assert "def build_strategy_prompt(" in text
+    assert text.count("knowledge_retrieval_section: str | None = None") == 2
     # fail-closed: blocked consumption fails the phase and returns before call_llm
     consume_index = text.index("load_research_evidence_consumption(")
     blocked_index = text.index("if consumption.blocked:")
@@ -172,7 +173,7 @@ def test_attribution_check_observes_and_never_rewrites_the_report():
 def test_r3_adds_no_migration():
     """Provenance rides the state snapshot the run already persists.
 
-    v63 is the merged provider-attempt-telemetry migration; v64 is the next
-    unused number and must stay unused by this wave.
+    v64 belongs to the later W8.1 state-coherence foundation; R3 still adds no
+    migration of its own, and v65 remains unused.
     """
-    assert not list((ROOT / "mas/sql").glob("v64_*.sql"))
+    assert not list((ROOT / "mas/sql").glob("v65_*.sql"))

@@ -4,6 +4,7 @@ Deterministic state machine managing 6 specialist agents.
 Handles phase transitions, convergence gates, re-entry routing, and downstream invalidation.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -39,7 +40,7 @@ from cdp.citation_format import (
     derive_knowledge_item_locator,
 )
 from decision_objects import ensure_decision_objects
-from clarifications import ClarificationStatus
+from clarifications import current_authoritative_answers
 from knowledge.retrieval import evaluate_phase_retrieval
 import research_evidence_context
 import report_freshness
@@ -627,12 +628,18 @@ HYPOTHESES:
 PROJECT: {state.brief[:500]}"""
 
 
-def build_audit_prompt(state: ProjectState, research_evidence_section: str = "") -> str:
+def build_audit_prompt(
+    state: ProjectState,
+    research_evidence_section: str = "",
+    knowledge_retrieval_section: str | None = None,
+) -> str:
     ctx_classify = summarize_phase_output("classify", state)
     ctx_hyps = summarize_phase_output("hypotheses", state)
     ctx_gauntlet = summarize_phase_output("gauntlet", state)
     has_data = bool(state.data)
-    retrieval_section, _ = _phase_retrieval_context(state, "audit")
+    retrieval_section = knowledge_retrieval_section
+    if retrieval_section is None:
+        retrieval_section, _ = _phase_retrieval_context(state, "audit")
     return f"""PHASE 2: Audit using FMEA[#7],HAZOP[#8],FTA[#9],Swiss Cheese[#10],STPA[#11],Mental Models[#14],ODD[#22],Chaos[#18],Circuit Breaker[#19],Canary[#20].
 
 {"REAL DATA PROVIDED — base analysis on actual data." if has_data else "NO REAL DATA — label findings as PREDICTED."}
@@ -855,11 +862,6 @@ def _operator_constraint_excerpts(value: object, *, max_items: int = 8) -> list[
     return [candidate.text for candidate in ranked[:max_items]]
 
 
-def _clarification_answer_status(answer: object) -> str:
-    status = getattr(answer, "status", "")
-    return str(getattr(status, "value", status) or "").strip().casefold()
-
-
 def _clarification_answer_timestamp(answer: object) -> datetime | None:
     value = getattr(answer, "answered_at", None)
     if not isinstance(value, datetime):
@@ -891,59 +893,7 @@ def _current_applicable_clarification_answers(state: ProjectState) -> list[objec
     ANSWERED. Equal-time conflicting records are ambiguous and project nothing;
     equal-time exact ANSWERED duplicates collapse deterministically.
     """
-    answers = list(getattr(state, "clarification_answers", []) or [])
-    grouped: dict[str, list[tuple[int, object]]] = {}
-    for index, answer in enumerate(answers):
-        question_id = str(getattr(answer, "question_id", "") or "").strip()
-        if question_id:
-            grouped.setdefault(question_id, []).append((index, answer))
-
-    selected: list[object] = []
-    for records in grouped.values():
-        if len(records) == 1:
-            index, answer = records[0]
-            if (
-                _clarification_answer_status(answer)
-                == ClarificationStatus.ANSWERED.value
-                and str(getattr(answer, "answer_text", "") or "").strip()
-            ):
-                selected.append(answer)
-            continue
-
-        timestamped = [
-            (index, answer, _clarification_answer_timestamp(answer))
-            for index, answer in records
-        ]
-        if any(timestamp is None for _, _, timestamp in timestamped):
-            continue
-        latest_timestamp = max(timestamp for _, _, timestamp in timestamped)
-        latest = [
-            (index, answer)
-            for index, answer, timestamp in timestamped
-            if timestamp == latest_timestamp
-        ]
-        if len(latest) > 1:
-            statuses = {_clarification_answer_status(answer) for _, answer in latest}
-            texts = {
-                _operator_constraint_dedupe_key(
-                    str(getattr(answer, "answer_text", "") or "")
-                )
-                for _, answer in latest
-            }
-            if statuses != {ClarificationStatus.ANSWERED.value} or len(texts) != 1:
-                continue
-            latest.sort(
-                key=lambda item: str(getattr(item[1], "answer_id", "") or "")
-            )
-        index, answer = latest[0]
-        if (
-            _clarification_answer_status(answer)
-            == ClarificationStatus.ANSWERED.value
-            and str(getattr(answer, "answer_text", "") or "").strip()
-        ):
-            selected.append(answer)
-
-    return sorted(selected, key=_clarification_answer_stable_key)
+    return list(current_authoritative_answers(state))
 
 
 def _render_operator_constraint_projection(
@@ -1118,12 +1068,18 @@ def _strategy_recovery_operator_context(state: ProjectState) -> str:
     )
 
 
-def build_strategy_prompt(state: ProjectState, research_evidence_section: str = "") -> str:
+def build_strategy_prompt(
+    state: ProjectState,
+    research_evidence_section: str = "",
+    knowledge_retrieval_section: str | None = None,
+) -> str:
     ctx_classify = summarize_phase_output("classify", state)
     ctx_hyps = summarize_phase_output("hypotheses", state)
     ctx_audit = summarize_phase_output("audit", state)
     ctx_gauntlet = summarize_phase_output("gauntlet", state)
-    retrieval_section, _ = _phase_retrieval_context(state, "strategy")
+    retrieval_section = knowledge_retrieval_section
+    if retrieval_section is None:
+        retrieval_section, _ = _phase_retrieval_context(state, "strategy")
     hard_constraints = _operator_hard_constraints_prompt_block(state)
     return f"""PHASE 3: Generate STRATEGY PLAN WITH JUSTIFICATION.
 
@@ -1879,6 +1835,14 @@ def _sanitize_report_context(text: str) -> str:
 
 
 def _phase_retrieval_context(state: ProjectState, phase: str) -> tuple[str, list[dict]]:
+    section, used_items, _ = _phase_retrieval_context_with_attestation(state, phase)
+    return section, used_items
+
+
+def _phase_retrieval_context_with_attestation(
+    state: ProjectState,
+    phase: str,
+) -> tuple[str, list[dict], dict]:
     """Return a structured, whitelist-based knowledge section for a phase.
 
     This stays bounded to the backend-approved retrieval layer. If retrieval
@@ -1890,10 +1854,15 @@ def _phase_retrieval_context(state: ProjectState, phase: str) -> tuple[str, list
         retrieval_view = evaluate_phase_retrieval(state, normalized_phase)
     except Exception as exc:
         logger.warning(f"{normalized_phase.title()} retrieval evaluation skipped ({exc})")
-        return "", []
+        return "", [], {"status": "unavailable"}
 
     if not retrieval_view.eligible_items:
-        return "", []
+        return "", [], {
+            "status": "empty",
+            "policy_fingerprint": _canonical_sha256(
+                retrieval_view.policy.model_dump(mode="json")
+            ),
+        }
 
     lines = [
         "",
@@ -1923,9 +1892,54 @@ def _phase_retrieval_context(state: ProjectState, phase: str) -> tuple[str, list
                 "trust_tier": item.trust_tier,
                 "sensitivity": item.sensitivity,
                 "fact_keys": [fact.key for fact in projection.facts],
+                "projection_sha256": _canonical_sha256(
+                    projection.model_dump(mode="json")
+                ),
             }
         )
-    return "\n".join(lines), used_items
+    section = "\n".join(lines)
+    return section, used_items, {
+        "status": "used",
+        "projection_fingerprint": hashlib.sha256(section.encode("utf-8")).hexdigest(),
+        "policy_fingerprint": _canonical_sha256(
+            retrieval_view.policy.model_dump(mode="json")
+        ),
+        "items": [
+            {
+                "item_id": item["item_id"],
+                "source_id": item["source_id"],
+                "projection_sha256": item["projection_sha256"],
+            }
+            for item in used_items
+        ],
+    }
+
+
+def _canonical_sha256(value: object) -> str:
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _research_evidence_input_attestation(consumption: object) -> dict:
+    status = getattr(getattr(consumption, "status", ""), "value", "")
+    if status != "used":
+        return {"status": status or "unknown"}
+    return {
+        "status": "used",
+        "usage_scope": research_evidence_context.CONSUMER_USAGE_SCOPE.value,
+        "projection_fingerprint": str(
+            getattr(consumption, "projection_fingerprint", "") or ""
+        ),
+        "policy_identifier": str(getattr(consumption, "policy_identifier", "") or ""),
+        "policy_version": str(getattr(consumption, "policy_version", "") or ""),
+        "policy_fingerprint": str(getattr(consumption, "policy_fingerprint", "") or ""),
+        "sources": [
+            {"source_snapshot_id": str(source.source_snapshot_id)}
+            for source in (getattr(consumption, "sources", ()) or ())
+        ],
+    }
 
 
 # ═══ PHASE NODE FUNCTIONS ═══
@@ -2675,10 +2689,12 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
     # no partial Research Evidence reaches the model. When the feature is off or
     # nothing is admitted the phase prompt stays byte-stable.
     research_evidence_section = ""
+    research_evidence_attestation = {"status": "not_applicable"}
     if phase in {"audit", "strategy"}:
         consumption = await research_evidence_context.load_research_evidence_consumption(
             state, phase,
         )
+        research_evidence_attestation = _research_evidence_input_attestation(consumption)
         if consumption.records_event:
             log_policy_event(
                 state,
@@ -2701,14 +2717,17 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
             return state
         research_evidence_section = consumption.prompt_section()
 
-    prompt = (
-        builder(state, research_evidence_section=research_evidence_section)
-        if phase in {"audit", "strategy"}
-        else builder(state)
-    )
-
     if phase in {"audit", "strategy"}:
-        _, used_items = _phase_retrieval_context(state, phase)
+        # Replace only the attestation for a phase that is actually executing.
+        # Resumable/report-only runs preserve inputs behind skipped completed
+        # audit/strategy outputs.
+        retrieval_section, used_items, knowledge_attestation = (
+            _phase_retrieval_context_with_attestation(state, phase)
+        )
+        state.analysis_input_attestations[phase] = {
+            "knowledge": knowledge_attestation,
+            "research_evidence": research_evidence_attestation,
+        }
         if used_items:
             log_policy_event(state, "knowledge_retrieval_used", {
                 "phase": phase,
@@ -2717,7 +2736,20 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
                 "used_item_count": len(used_items),
                 "used_item_ids": [item["item_id"] for item in used_items],
                 "used_items": used_items,
+                "projection_fingerprint": knowledge_attestation.get(
+                    "projection_fingerprint", ""
+                ),
+                "policy_fingerprint": knowledge_attestation.get(
+                    "policy_fingerprint", ""
+                ),
             })
+        prompt = builder(
+            state,
+            research_evidence_section=research_evidence_section,
+            knowledge_retrieval_section=retrieval_section,
+        )
+    else:
+        prompt = builder(state)
 
     # v4.2: fetch calibration hint from prior_snapshots (lazy import; fail-soft)
     calibration_hint = ""

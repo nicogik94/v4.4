@@ -3477,6 +3477,10 @@ class TestPhaseBookkeeping(unittest.IsolatedAsyncioTestCase):
 class TestSequentialRunner(unittest.IsolatedAsyncioTestCase):
     async def test_runner_resumes_from_monitor_and_reruns_report(self):
         state = make_completed_state("resume-monitor")
+        state.analysis_input_attestations = {
+            "audit": {"knowledge": {"status": "used", "projection_fingerprint": "audit"}},
+            "strategy": {"research_evidence": {"status": "used", "projection_fingerprint": "strategy"}},
+        }
         state.phase_status["monitor"] = PhaseStatus.PENDING
         state.monitor = None
         executed: list[str] = []
@@ -3510,7 +3514,36 @@ class TestSequentialRunner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executed, ["monitor", "report"])
         self.assertEqual(updated.report, "rerun report")
         self.assertEqual(updated.phase_status["monitor"], PhaseStatus.COMPLETED)
+        self.assertEqual(
+            updated.analysis_input_attestations["audit"]["knowledge"]["projection_fingerprint"],
+            "audit",
+        )
+        self.assertEqual(
+            updated.analysis_input_attestations["strategy"]["research_evidence"]["projection_fingerprint"],
+            "strategy",
+        )
         self.assertGreaterEqual(len(persisted), 4)
+
+    async def test_report_only_resume_preserves_completed_phase_input_attestations(self):
+        state = make_completed_state("resume-report-only-attestations")
+        state.phase_status["report"] = PhaseStatus.STALE
+        state.report = None
+        state.analysis_input_attestations = {
+            "audit": {"knowledge": {"status": "used", "projection_fingerprint": "audit"}},
+            "strategy": {"research_evidence": {"status": "used", "projection_fingerprint": "strategy"}},
+        }
+
+        async def fake_run_phase_node(snapshot: ProjectState, phase: str) -> ProjectState:
+            self.assertEqual(phase, "report")
+            snapshot.report = "regenerated report"
+            snapshot.phase_status[phase] = PhaseStatus.COMPLETED
+            return snapshot
+
+        with patch("orchestrator.run_phase_node", new=AsyncMock(side_effect=fake_run_phase_node)):
+            updated = await run_workflow_sequence(state)
+
+        self.assertEqual(updated.report, "regenerated report")
+        self.assertEqual(set(updated.analysis_input_attestations), {"audit", "strategy"})
 
     async def test_runner_halts_after_raw_only_audit_failure(self):
         state = make_completed_state("halt-after-raw-audit")

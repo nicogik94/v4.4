@@ -140,6 +140,11 @@ def test_used_injects_block_logs_event_and_exposes_trace(monkeypatch):
     assert events[0]["details"]["projection_fingerprint"] == (
         projection.projection_fingerprint
     )
+    attestation = updated.analysis_input_attestations["audit"]["research_evidence"]
+    assert attestation["status"] == "used"
+    assert attestation["projection_fingerprint"] == projection.projection_fingerprint
+    assert attestation["policy_fingerprint"] == projection.policy_fingerprint
+    assert "claims" not in attestation
 
     # read-only, no-commit posture held through the real orchestrator path
     assert conn.commits == 0
@@ -166,6 +171,10 @@ def test_empty_projection_proceeds_without_block_and_attests(monkeypatch):
     events = _consumption_events(updated)
     assert len(events) == 1
     assert events[0]["details"]["status"] == "empty"
+    assert (
+        updated.analysis_input_attestations["audit"]["research_evidence"]["status"]
+        == "empty"
+    )
     trace = build_phase_trace(updated, "audit")
     assert trace.research_evidence_impact.status == "empty"
 
