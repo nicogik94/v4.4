@@ -13,6 +13,12 @@ import store
 
 
 @pytest.fixture(autouse=True)
+def isolate_store_database_url(monkeypatch):
+    """Keep unit tests independent of CI's job-wide PostgreSQL setting."""
+    monkeypatch.setattr(store, "DATABASE_URL", "")
+
+
+@pytest.fixture(autouse=True)
 def scenario_shadow_sqlite_path(tmp_path, monkeypatch):
     sqlite_path = tmp_path / "scenario_shadow.sqlite3"
     monkeypatch.setenv("SCENARIO_SHADOW_SQLITE_PATH", str(sqlite_path))
