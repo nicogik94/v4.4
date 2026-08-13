@@ -300,3 +300,146 @@ def test_durable_runtime_fails_closed_when_v64_is_missing():
     ):
         with pytest.raises(Exception, match="v64 decision-state coherence migration is required"):
             asyncio.run(api._accept_completed_analysis(state, None))
+
+
+def test_manual_strategy_rerun_cannot_promote_stale_downstream_then_can_complete():
+    state = make_completed_state("22222222-2222-4222-8222-222222222223")
+    durable_current = "33333333-3333-4333-8333-333333333334"
+    old_outputs = (state.sqi, state.monitor, state.report)
+    fresh_sqi = deepcopy(state.sqi)
+    fresh_sqi.sqi_overall = 76
+    fresh_monitor = deepcopy(state.monitor)
+    fresh_monitor.commitment_score = 81
+    durable_binding = {"generation_id": durable_current}
+    promoted_states: list[ProjectState] = []
+
+    async def run_requested_phase(working: ProjectState, phase: str) -> ProjectState:
+        if phase == "strategy":
+            # The endpoint must invalidate before it hands the state to the
+            # phase runner; otherwise this is the mixed-generation incident.
+            assert working.sqi is None
+            assert working.monitor is None
+            assert working.report is None
+            working.strategy.executive_strategy = "new coherent strategy"
+        elif phase == "sqi":
+            assert working.strategy.executive_strategy == "new coherent strategy"
+            working.sqi = fresh_sqi
+        elif phase == "monitor":
+            assert working.strategy.executive_strategy == "new coherent strategy"
+            working.monitor = fresh_monitor
+        elif phase == "report":
+            assert working.sqi is fresh_sqi
+            assert working.monitor is fresh_monitor
+            working.report = "report recomputed from the new strategy"
+        working.phase_status[phase] = PhaseStatus.COMPLETED
+        return working
+
+    async def promote(completed: ProjectState, expected_base: str | None) -> None:
+        assert expected_base == durable_current
+        assert completed.strategy.executive_strategy == "new coherent strategy"
+        assert completed.report == "report recomputed from the new strategy"
+        promoted_states.append(deepcopy(completed))
+        durable_binding["generation_id"] = "44444444-4444-4444-8444-444444444445"
+
+    async def current_generation(_state: ProjectState) -> str:
+        return durable_binding["generation_id"]
+
+    async def exercise() -> None:
+        with (
+            patch("api.store.load", new=AsyncMock(side_effect=lambda _project_id: state)),
+            patch("api.store.save", new=AsyncMock()),
+            patch("api._current_generation_id", new=AsyncMock(side_effect=current_generation)),
+            patch("api.run_phase_node", new=AsyncMock(side_effect=run_requested_phase)),
+            patch("api._accept_completed_analysis", new=AsyncMock(side_effect=promote)),
+        ):
+            await api.run_single_phase_endpoint(
+                state.project_id, api.RunPhaseRequest(phase="strategy")
+            )
+
+            assert promoted_states == []
+            assert durable_binding["generation_id"] == durable_current
+            assert state.analysis_generation_id == ""
+            for phase in ("sqi", "monitor", "report"):
+                assert state.phase_status[phase] == PhaseStatus.STALE
+                assert getattr(state, phase) is None
+
+            for phase in ("sqi", "monitor", "report"):
+                await api.run_single_phase_endpoint(
+                    state.project_id, api.RunPhaseRequest(phase=phase)
+                )
+
+    asyncio.run(exercise())
+
+    assert len(promoted_states) == 1
+    assert durable_binding["generation_id"] != durable_current
+    assert api.is_workflow_complete(promoted_states[0])
+    assert promoted_states[0].sqi == fresh_sqi
+    assert promoted_states[0].sqi != old_outputs[0]
+    assert promoted_states[0].monitor == fresh_monitor
+    assert promoted_states[0].monitor != old_outputs[1]
+
+
+def test_failed_manual_partial_rerun_leaves_durable_current_unpromoted():
+    state = make_completed_state("22222222-2222-4222-8222-222222222224")
+    durable_current = "33333333-3333-4333-8333-333333333335"
+    promote = AsyncMock()
+
+    async def fail_strategy(working: ProjectState, phase: str) -> ProjectState:
+        assert phase == "strategy"
+        working.strategy = None
+        working.phase_status[phase] = PhaseStatus.FAILED
+        return working
+
+    async def exercise() -> None:
+        with (
+            patch("api.store.load", new=AsyncMock(return_value=state)),
+            patch("api.store.save", new=AsyncMock()),
+            patch("api._current_generation_id", new=AsyncMock(return_value=durable_current)),
+            patch("api.run_phase_node", new=AsyncMock(side_effect=fail_strategy)),
+            patch("api._accept_completed_analysis", new=promote),
+        ):
+            await api.run_single_phase_endpoint(
+                state.project_id, api.RunPhaseRequest(phase="strategy")
+            )
+
+    asyncio.run(exercise())
+
+    promote.assert_not_awaited()
+    assert state.analysis_generation_id == ""
+    assert state.phase_status["strategy"] == PhaseStatus.FAILED
+    for phase in ("sqi", "monitor", "report"):
+        assert state.phase_status[phase] == PhaseStatus.STALE
+        assert getattr(state, phase) is None
+
+
+def test_manual_report_rerun_preserves_upstream_analysis():
+    state = make_completed_state("22222222-2222-4222-8222-222222222225")
+    upstream = {
+        phase: getattr(state, phase)
+        for phase in ("classify", "hypotheses", "gauntlet", "audit", "strategy", "sqi", "monitor")
+    }
+
+    async def replace_report(working: ProjectState, phase: str) -> ProjectState:
+        assert phase == "report"
+        working.report = "replacement report"
+        working.phase_status[phase] = PhaseStatus.COMPLETED
+        return working
+
+    async def exercise() -> None:
+        with (
+            patch("api.store.load", new=AsyncMock(return_value=state)),
+            patch("api.store.save", new=AsyncMock()),
+            patch("api._current_generation_id", new=AsyncMock(return_value=None)),
+            patch("api.run_phase_node", new=AsyncMock(side_effect=replace_report)),
+            patch("api._accept_completed_analysis", new=AsyncMock()),
+        ):
+            await api.run_single_phase_endpoint(
+                state.project_id, api.RunPhaseRequest(phase="report")
+            )
+
+    asyncio.run(exercise())
+
+    assert state.report == "replacement report"
+    for phase, output in upstream.items():
+        assert getattr(state, phase) is output
+        assert state.phase_status[phase] == PhaseStatus.COMPLETED

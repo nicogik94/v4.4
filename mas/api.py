@@ -1064,6 +1064,20 @@ async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
     expected_base_generation_id = await _current_generation_id(state)
     state.analysis_generation_id = ""
 
+    # A manual phase execution replaces that phase's contribution to the
+    # analysis.  Clear its existing dependency cone before the replacement can
+    # run so stale completed outputs can never make a partial rerun appear
+    # complete (and therefore promotable).  This is the same template-driven
+    # invalidation used by resumable full-workflow execution; terminal phases
+    # such as Report naturally have no downstream cone.
+    invalidated = invalidate_downstream(state, req.phase)
+    if invalidated:
+        logger.info(
+            "Manual %s replacement invalidated downstream phases: %s",
+            req.phase,
+            invalidated,
+        )
+
     # The manual phase endpoint is a supported entry point and carries its own
     # truthful identity: the project it acts on and the phase it runs.
     async with telemetry_scope(

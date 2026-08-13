@@ -3,6 +3,456 @@
 
 BEGIN;
 
+-- Reapply fail-closed preflight.  Every object below that CREATE OR REPLACE,
+-- DROP/CREATE, or REVOKE could repair is pinned here before that repair-capable
+-- statement runs.  A fresh installation has none of the v64 relations and
+-- therefore proceeds to creation; an existing installation must match the
+-- complete semantic contract exactly.
+DO $semantic_preflight$
+DECLARE
+    relation_count INTEGER;
+    protected_function_count INTEGER;
+    protected_trigger_count INTEGER;
+    projects_owner OID;
+    problem TEXT;
+BEGIN
+    SELECT count(*) INTO relation_count
+    FROM pg_catalog.pg_class relation
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND relation.relkind = 'r'
+      AND relation.relname IN (
+          'decision_input_snapshots',
+          'analysis_generations',
+          'current_analysis_generations'
+      );
+
+    SELECT count(*) INTO protected_function_count
+    FROM pg_catalog.pg_proc function_info
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = function_info.pronamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND function_info.proname IN (
+          'decision_state_reject_snapshot_mutation',
+          'decision_state_guard_generation_mutation',
+          'decision_state_guard_current_binding',
+          'promote_analysis_generation',
+          'bootstrap_analysis_generation'
+      );
+
+    SELECT count(*) INTO protected_trigger_count
+    FROM pg_catalog.pg_trigger trigger_info
+    JOIN pg_catalog.pg_class relation ON relation.oid = trigger_info.tgrelid
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND relation.relname IN (
+          'decision_input_snapshots',
+          'analysis_generations',
+          'current_analysis_generations'
+      )
+      AND NOT trigger_info.tgisinternal;
+
+    IF relation_count = 0 THEN
+        IF protected_function_count <> 0 OR protected_trigger_count <> 0 THEN
+            RAISE EXCEPTION
+                'v64 preflight: partial decision-state function/trigger installation detected'
+                USING ERRCODE = 'invalid_schema_definition';
+        END IF;
+        RETURN;
+    END IF;
+    IF relation_count <> 3 THEN
+        RAISE EXCEPTION 'v64 partial decision-state schema detected'
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    SELECT relation.relowner INTO projects_owner
+    FROM pg_catalog.pg_class relation
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND relation.relname = 'projects';
+
+    -- Function identity, execution properties, configuration, argument names,
+    -- defaults, and stored implementation are all semantic.  In particular,
+    -- comparing prosrc before CREATE OR REPLACE prevents a no-op or weakened
+    -- guard body from being silently overwritten and reported as a clean reapply.
+    WITH expected(
+        name, arguments, return_type, argument_names, argument_defaults,
+        language, security_definer, config, volatility, strictness,
+        parallel_safety, returns_set, leakproof, function_kind, body
+    ) AS (VALUES
+        (
+            'decision_state_reject_snapshot_mutation', '', 'trigger',
+            NULL::text[], 0, 'plpgsql', false,
+            ARRAY['search_path=' || pg_catalog.current_schema()],
+            'v'::text, false, 'u'::text, false, false, 'f'::text,
+$body_preflight$
+BEGIN
+    IF TG_OP = 'DELETE' AND NOT EXISTS (
+        SELECT 1 FROM projects WHERE id = OLD.project_id
+    ) THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'decision input snapshots are immutable';
+END;
+$body_preflight$
+        ),
+        (
+            'decision_state_guard_generation_mutation', '', 'trigger',
+            NULL::text[], 0, 'plpgsql', false,
+            ARRAY['search_path=' || pg_catalog.current_schema()],
+            'v'::text, false, 'u'::text, false, false, 'f'::text,
+$body_preflight$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF NOT EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id) THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'analysis generations are immutable historical records';
+    END IF;
+
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.project_id IS DISTINCT FROM OLD.project_id
+       OR NEW.decision_id IS DISTINCT FROM OLD.decision_id
+       OR NEW.effective_input_snapshot_id IS DISTINCT FROM OLD.effective_input_snapshot_id
+       OR NEW.workflow_fingerprint IS DISTINCT FROM OLD.workflow_fingerprint
+       OR NEW.expected_base_generation_id IS DISTINCT FROM OLD.expected_base_generation_id
+       OR NEW.analysis_state_sha256 IS DISTINCT FROM OLD.analysis_state_sha256
+       OR NEW.analysis_state_json IS DISTINCT FROM OLD.analysis_state_json
+       OR NEW.bootstrap_kind IS DISTINCT FROM OLD.bootstrap_kind
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION 'analysis generation identity and content are immutable';
+    END IF;
+
+    IF OLD.lifecycle_status <> 'candidate' THEN
+        RAISE EXCEPTION 'terminal analysis generation lifecycle is immutable';
+    END IF;
+    IF NEW.lifecycle_status = 'candidate' THEN
+        IF OLD.validated_at IS NOT NULL
+           OR NEW.validated_at IS NULL
+           OR NEW.promoted_at IS NOT NULL
+           OR NEW.terminal_at IS NOT NULL THEN
+            RAISE EXCEPTION 'invalid candidate validation transition';
+        END IF;
+    ELSIF NEW.lifecycle_status = 'accepted' THEN
+        IF OLD.validated_at IS NULL
+           OR NEW.validated_at IS DISTINCT FROM OLD.validated_at
+           OR NEW.promoted_at IS NULL
+           OR NEW.terminal_at IS NOT NULL THEN
+            RAISE EXCEPTION 'only a validated candidate may be accepted';
+        END IF;
+    ELSIF NEW.lifecycle_status IN ('failed', 'aborted') THEN
+        IF NEW.promoted_at IS NOT NULL OR NEW.terminal_at IS NULL THEN
+            RAISE EXCEPTION 'invalid terminal candidate transition';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid analysis generation lifecycle transition';
+    END IF;
+    RETURN NEW;
+END;
+$body_preflight$
+        ),
+        (
+            'decision_state_guard_current_binding', '', 'trigger',
+            NULL::text[], 0, 'plpgsql', false,
+            ARRAY['search_path=' || pg_catalog.current_schema()],
+            'v'::text, false, 'u'::text, false, false, 'f'::text,
+$body_preflight$
+DECLARE
+    generation_status TEXT;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF NOT EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id) THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'current analysis binding cannot be deleted directly';
+    END IF;
+    SELECT lifecycle_status INTO generation_status
+    FROM analysis_generations
+    WHERE id = NEW.generation_id
+      AND project_id = NEW.project_id
+      AND decision_id = NEW.decision_id;
+    IF generation_status IS DISTINCT FROM 'accepted' THEN
+        RAISE EXCEPTION 'current analysis must reference an accepted same-scope generation';
+    END IF;
+    RETURN NEW;
+END;
+$body_preflight$
+        ),
+        (
+            'promote_analysis_generation', 'uuid, uuid', 'void',
+            ARRAY['candidate_id', 'expected_base_id']::text[], 1,
+            'plpgsql', false,
+            ARRAY['search_path=' || pg_catalog.current_schema()],
+            'v'::text, false, 'u'::text, false, false, 'f'::text,
+$body_preflight$
+DECLARE
+    candidate analysis_generations%ROWTYPE;
+    actual_base UUID;
+BEGIN
+    SELECT * INTO candidate
+    FROM analysis_generations
+    WHERE id = candidate_id
+    FOR UPDATE;
+    IF NOT FOUND OR candidate.lifecycle_status <> 'candidate' THEN
+        RAISE EXCEPTION 'generation is not an active candidate';
+    END IF;
+    IF candidate.validated_at IS NULL THEN
+        RAISE EXCEPTION 'candidate has not been validated';
+    END IF;
+    IF candidate.expected_base_generation_id IS DISTINCT FROM expected_base_id THEN
+        RAISE EXCEPTION 'promotion expected-base does not match candidate';
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(candidate.project_id::text || '|' || candidate.decision_id, 0)
+    );
+    SELECT generation_id INTO actual_base
+    FROM current_analysis_generations
+    WHERE project_id = candidate.project_id
+      AND decision_id = candidate.decision_id
+    FOR UPDATE;
+    IF actual_base IS DISTINCT FROM expected_base_id THEN
+        RAISE EXCEPTION 'current analysis changed after candidate creation';
+    END IF;
+
+    UPDATE analysis_generations
+    SET lifecycle_status = 'accepted', promoted_at = NOW()
+    WHERE id = candidate_id;
+
+    INSERT INTO current_analysis_generations (project_id, decision_id, generation_id)
+    VALUES (candidate.project_id, candidate.decision_id, candidate.id)
+    ON CONFLICT (project_id, decision_id) DO UPDATE
+    SET generation_id = EXCLUDED.generation_id,
+        promoted_at = NOW();
+END;
+$body_preflight$
+        ),
+        (
+            'bootstrap_analysis_generation',
+            'uuid, uuid, text, text, jsonb, text, uuid, text, jsonb', 'uuid',
+            ARRAY[
+                'snapshot_id', 'project_scope', 'decision_scope', 'input_sha256',
+                'input_json', 'input_contract', 'generation_id', 'state_sha256',
+                'state_json'
+            ]::text[], 0, 'plpgsql', false,
+            ARRAY['search_path=' || pg_catalog.current_schema()],
+            'v'::text, false, 'u'::text, false, false, 'f'::text,
+$body_preflight$
+DECLARE
+    existing_current UUID;
+    existing_snapshot UUID;
+    existing_state_sha256 TEXT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(project_scope::text || '|' || decision_scope, 0)
+    );
+    SELECT current_generation.generation_id,
+           generation.effective_input_snapshot_id,
+           generation.analysis_state_sha256
+      INTO existing_current, existing_snapshot, existing_state_sha256
+    FROM current_analysis_generations current_generation
+    JOIN analysis_generations generation
+      ON generation.id = current_generation.generation_id
+    WHERE current_generation.project_id = project_scope
+      AND current_generation.decision_id = decision_scope;
+    IF existing_current IS NOT NULL THEN
+        IF existing_snapshot = snapshot_id
+           AND existing_state_sha256 = state_sha256 THEN
+            RETURN existing_current;
+        END IF;
+        RETURN NULL;
+    END IF;
+
+    INSERT INTO decision_input_snapshots (
+        id, project_id, decision_id, effective_input_sha256,
+        effective_input_json, contract_version
+    ) VALUES (
+        snapshot_id, project_scope, decision_scope, input_sha256,
+        input_json, input_contract
+    ) ON CONFLICT (project_id, decision_id, effective_input_sha256) DO NOTHING;
+
+    INSERT INTO analysis_generations (
+        id, project_id, decision_id, effective_input_snapshot_id,
+        workflow_fingerprint, lifecycle_status,
+        analysis_state_sha256, analysis_state_json,
+        validated_at, promoted_at, bootstrap_kind
+    ) VALUES (
+        generation_id, project_scope, decision_scope, snapshot_id,
+        'legacy-baseline.v1', 'accepted', state_sha256, state_json,
+        NOW(), NOW(), 'legacy_baseline'
+    ) ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO current_analysis_generations (project_id, decision_id, generation_id)
+    VALUES (project_scope, decision_scope, generation_id);
+    RETURN generation_id;
+END;
+$body_preflight$
+        )
+    ), actual(
+        name, arguments, return_type, argument_names, argument_defaults,
+        language, security_definer, config, volatility, strictness,
+        parallel_safety, returns_set, leakproof, function_kind, body
+    ) AS (
+        SELECT function_info.proname::text,
+               pg_catalog.oidvectortypes(function_info.proargtypes)::text,
+               function_info.prorettype::regtype::text,
+               function_info.proargnames,
+               function_info.pronargdefaults,
+               language_info.lanname::text,
+               function_info.prosecdef,
+               function_info.proconfig,
+               function_info.provolatile::text,
+               function_info.proisstrict,
+               function_info.proparallel::text,
+               function_info.proretset,
+               function_info.proleakproof,
+               function_info.prokind::text,
+               function_info.prosrc
+        FROM pg_catalog.pg_proc function_info
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = function_info.pronamespace
+        JOIN pg_catalog.pg_language language_info
+          ON language_info.oid = function_info.prolang
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND function_info.proname IN (
+              'decision_state_reject_snapshot_mutation',
+              'decision_state_guard_generation_mutation',
+              'decision_state_guard_current_binding',
+              'promote_analysis_generation',
+              'bootstrap_analysis_generation'
+          )
+    )
+    SELECT pg_catalog.string_agg(
+               drift.name || '(' || drift.arguments || '):' || drift.side,
+               ', ' ORDER BY drift.name, drift.arguments, drift.side
+           )
+      INTO problem
+    FROM (
+        SELECT name, arguments, 'missing_or_altered' AS side FROM (
+            SELECT * FROM expected EXCEPT SELECT * FROM actual
+        ) missing
+        UNION ALL
+        SELECT name, arguments, 'unexpected' FROM (
+            SELECT * FROM actual EXCEPT SELECT * FROM expected
+        ) unexpected
+    ) drift;
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'v64 preflight function semantic drift: %', problem
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    SELECT pg_catalog.string_agg(function_info.proname, ', ' ORDER BY function_info.proname)
+      INTO problem
+    FROM pg_catalog.pg_proc function_info
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = function_info.pronamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND function_info.proname IN (
+          'decision_state_reject_snapshot_mutation',
+          'decision_state_guard_generation_mutation',
+          'decision_state_guard_current_binding',
+          'promote_analysis_generation',
+          'bootstrap_analysis_generation'
+      )
+      AND (
+          function_info.proowner IS DISTINCT FROM projects_owner
+          OR function_info.proacl IS NULL
+          OR (
+              SELECT count(*)
+              FROM pg_catalog.aclexplode(function_info.proacl)
+          ) <> 1
+          OR EXISTS (
+              SELECT 1
+              FROM pg_catalog.aclexplode(function_info.proacl) privilege
+              WHERE privilege.grantor <> function_info.proowner
+                 OR privilege.grantee <> function_info.proowner
+                 OR privilege.privilege_type <> 'EXECUTE'
+                 OR privilege.is_grantable
+          )
+      );
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'v64 preflight function owner/ACL drift: %', problem
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
+    -- Exact trigger semantics.  tgtype pins timing/level/events; tgattr='' pins
+    -- whole-row UPDATE rather than UPDATE OF selected columns; the remaining
+    -- fields pin enablement, predicate, arguments, deferrability, and the exact
+    -- same-schema trigger function attachment.
+    WITH expected(
+        tbl, trigger_name, function_schema, function_name, function_arguments,
+        enabled_state, trigger_type, trigger_attributes, predicate,
+        argument_count, arguments_hex, trigger_deferrable, initially_deferred
+    ) AS (VALUES
+        (
+            'decision_input_snapshots', 'trg_dis_immutable',
+            pg_catalog.current_schema(), 'decision_state_reject_snapshot_mutation', '',
+            'O'::text, 27::smallint, ''::text, NULL::text,
+            0::smallint, ''::text, false, false
+        ),
+        (
+            'analysis_generations', 'trg_ag_immutable',
+            pg_catalog.current_schema(), 'decision_state_guard_generation_mutation', '',
+            'O'::text, 27::smallint, ''::text, NULL::text,
+            0::smallint, ''::text, false, false
+        ),
+        (
+            'current_analysis_generations', 'trg_cag_guard',
+            pg_catalog.current_schema(), 'decision_state_guard_current_binding', '',
+            'O'::text, 31::smallint, ''::text, NULL::text,
+            0::smallint, ''::text, false, false
+        )
+    ), actual(
+        tbl, trigger_name, function_schema, function_name, function_arguments,
+        enabled_state, trigger_type, trigger_attributes, predicate,
+        argument_count, arguments_hex, trigger_deferrable, initially_deferred
+    ) AS (
+        SELECT relation.relname::text,
+               trigger_info.tgname::text,
+               function_namespace.nspname::text,
+               function_info.proname::text,
+               pg_catalog.oidvectortypes(function_info.proargtypes)::text,
+               trigger_info.tgenabled::text,
+               trigger_info.tgtype,
+               trigger_info.tgattr::text,
+               trigger_info.tgqual::text,
+               trigger_info.tgnargs,
+               pg_catalog.encode(trigger_info.tgargs, 'hex'),
+               trigger_info.tgdeferrable,
+               trigger_info.tginitdeferred
+        FROM pg_catalog.pg_trigger trigger_info
+        JOIN pg_catalog.pg_class relation ON relation.oid = trigger_info.tgrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_catalog.pg_proc function_info ON function_info.oid = trigger_info.tgfoid
+        JOIN pg_catalog.pg_namespace function_namespace
+          ON function_namespace.oid = function_info.pronamespace
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND relation.relname IN (
+              'decision_input_snapshots',
+              'analysis_generations',
+              'current_analysis_generations'
+          )
+          AND NOT trigger_info.tgisinternal
+    )
+    SELECT pg_catalog.string_agg(
+               drift.tbl || '.' || drift.trigger_name || ':' || drift.side,
+               ', ' ORDER BY drift.tbl, drift.trigger_name, drift.side
+           )
+      INTO problem
+    FROM (
+        SELECT tbl, trigger_name, 'missing_or_altered' AS side FROM (
+            SELECT * FROM expected EXCEPT SELECT * FROM actual
+        ) missing
+        UNION ALL
+        SELECT tbl, trigger_name, 'unexpected' FROM (
+            SELECT * FROM actual EXCEPT SELECT * FROM expected
+        ) unexpected
+    ) drift;
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'v64 preflight trigger semantic drift: %', problem
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+END
+$semantic_preflight$;
+
 DO $$
 DECLARE
     relation_count INTEGER;

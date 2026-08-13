@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import psycopg
 import asyncpg
+from psycopg import sql
 
 import tests.evidence_snapshot_pg as pg
 import state_coherence
@@ -120,6 +121,86 @@ def _bootstrap(conn, project_id, snapshot_id, generation_id):
     ).fetchone()[0]
 
 
+def _function_semantic_inventory(conn):
+    return conn.execute(
+        """
+        SELECT function_info.proname,
+               pg_catalog.oidvectortypes(function_info.proargtypes),
+               function_info.prorettype::regtype::text,
+               function_info.proargnames,
+               function_info.pronargdefaults,
+               language_info.lanname,
+               function_info.prosecdef,
+               function_info.proconfig,
+               function_info.provolatile,
+               function_info.proisstrict,
+               function_info.proparallel,
+               function_info.proretset,
+               function_info.proleakproof,
+               function_info.prokind,
+               function_info.prosrc,
+               function_info.proowner,
+               function_info.proacl::text
+        FROM pg_catalog.pg_proc function_info
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = function_info.pronamespace
+        JOIN pg_catalog.pg_language language_info
+          ON language_info.oid = function_info.prolang
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND function_info.proname IN (
+              'decision_state_reject_snapshot_mutation',
+              'decision_state_guard_generation_mutation',
+              'decision_state_guard_current_binding',
+              'promote_analysis_generation',
+              'bootstrap_analysis_generation'
+          )
+        ORDER BY function_info.proname, function_info.proargtypes::text
+        """
+    ).fetchall()
+
+
+def _trigger_semantic_inventory(conn):
+    return conn.execute(
+        """
+        SELECT relation.relname,
+               trigger_info.tgname,
+               function_namespace.nspname,
+               function_info.proname,
+               pg_catalog.oidvectortypes(function_info.proargtypes),
+               trigger_info.tgenabled,
+               trigger_info.tgtype,
+               trigger_info.tgattr::text,
+               trigger_info.tgqual::text,
+               trigger_info.tgnargs,
+               pg_catalog.encode(trigger_info.tgargs, 'hex'),
+               trigger_info.tgdeferrable,
+               trigger_info.tginitdeferred
+        FROM pg_catalog.pg_trigger trigger_info
+        JOIN pg_catalog.pg_class relation ON relation.oid = trigger_info.tgrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_catalog.pg_proc function_info ON function_info.oid = trigger_info.tgfoid
+        JOIN pg_catalog.pg_namespace function_namespace
+          ON function_namespace.oid = function_info.pronamespace
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND relation.relname IN (
+              'decision_input_snapshots',
+              'analysis_generations',
+              'current_analysis_generations'
+          )
+          AND NOT trigger_info.tgisinternal
+        ORDER BY relation.relname, trigger_info.tgname
+        """
+    ).fetchall()
+
+
+def _assert_reapply_rejects_without_repair(conn, inventory, message):
+    drifted = inventory(conn)
+    with pytest.raises(Exception, match=message):
+        pg._run_script(conn, V64)
+    conn.rollback()
+    assert inventory(conn) == drifted
+
+
 def test_clean_apply_and_exact_reapply(conn, schema):
     assert conn.execute(
         """
@@ -138,8 +219,133 @@ def test_clean_apply_and_exact_reapply(conn, schema):
     conn.execute(f'SET search_path TO "{schema}"')
     conn.commit()
     assert conn.execute(
-        "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_dis_immutable','trg_ag_immutable','trg_cag_guard')"
+        """
+        SELECT count(*) FROM pg_trigger trigger_info
+        JOIN pg_class relation ON relation.oid = trigger_info.tgrelid
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = %s
+          AND trigger_info.tgname IN (
+              'trg_dis_immutable','trg_ag_immutable','trg_cag_guard'
+          )
+        """,
+        (schema,),
     ).fetchone()[0] == 3
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param(
+            """
+            CREATE OR REPLACE FUNCTION promote_analysis_generation(
+                candidate_id UUID, expected_base_id UUID DEFAULT NULL
+            ) RETURNS VOID LANGUAGE plpgsql SET search_path FROM CURRENT
+              AS $$ BEGIN NULL; END; $$
+            """,
+            id="body",
+        ),
+        pytest.param(
+            "ALTER FUNCTION promote_analysis_generation(UUID, UUID) "
+            "SET search_path = pg_catalog",
+            id="search_path",
+        ),
+        pytest.param(
+            "ALTER FUNCTION promote_analysis_generation(UUID, UUID) "
+            "SET work_mem = '64kB'",
+            id="additional_config",
+        ),
+        pytest.param(
+            """
+            DROP FUNCTION promote_analysis_generation(UUID, UUID);
+            CREATE FUNCTION promote_analysis_generation(candidate_id UUID)
+            RETURNS VOID LANGUAGE plpgsql SET search_path FROM CURRENT
+            AS $$ BEGIN NULL; END; $$;
+            REVOKE ALL ON FUNCTION promote_analysis_generation(UUID) FROM PUBLIC
+            """,
+            id="signature",
+        ),
+    ],
+)
+def test_reapply_rejects_function_body_config_search_path_and_signature_before_repair(
+    conn, schema, mutation
+):
+    prior = pg._begin_autocommit(conn)
+    canonical = _function_semantic_inventory(conn)
+    conn.execute(mutation)
+    assert _function_semantic_inventory(conn) != canonical
+    _assert_reapply_rejects_without_repair(
+        conn, _function_semantic_inventory, "preflight function semantic drift"
+    )
+    pg._restore_autocommit(conn, prior)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param(
+            """
+            DROP TRIGGER trg_ag_immutable ON analysis_generations;
+            CREATE TRIGGER trg_ag_immutable
+            BEFORE UPDATE OR DELETE ON analysis_generations
+            FOR EACH ROW EXECUTE FUNCTION decision_state_reject_snapshot_mutation()
+            """,
+            id="attachment",
+        ),
+        pytest.param(
+            "ALTER TABLE analysis_generations DISABLE TRIGGER trg_ag_immutable",
+            id="enabled_state",
+        ),
+        pytest.param(
+            """
+            DROP TRIGGER trg_ag_immutable ON analysis_generations;
+            CREATE TRIGGER trg_ag_immutable
+            BEFORE DELETE ON analysis_generations
+            FOR EACH ROW EXECUTE FUNCTION decision_state_guard_generation_mutation()
+            """,
+            id="event_type",
+        ),
+        pytest.param(
+            """
+            DROP TRIGGER trg_ag_immutable ON analysis_generations;
+            CREATE TRIGGER trg_ag_immutable
+            BEFORE UPDATE OF lifecycle_status OR DELETE ON analysis_generations
+            FOR EACH ROW EXECUTE FUNCTION decision_state_guard_generation_mutation()
+            """,
+            id="narrowed_update_of_tgattr",
+        ),
+        pytest.param(
+            """
+            DROP TRIGGER trg_ag_immutable ON analysis_generations;
+            CREATE TRIGGER trg_ag_immutable
+            BEFORE UPDATE OR DELETE ON analysis_generations
+            FOR EACH ROW WHEN (OLD.id IS NOT NULL)
+            EXECUTE FUNCTION decision_state_guard_generation_mutation()
+            """,
+            id="predicate",
+        ),
+        pytest.param(
+            """
+            DROP TRIGGER trg_ag_immutable ON analysis_generations;
+            CREATE TRIGGER trg_ag_immutable
+            BEFORE UPDATE OR DELETE ON analysis_generations
+            FOR EACH ROW EXECUTE FUNCTION
+                decision_state_guard_generation_mutation('narrowed')
+            """,
+            id="arguments",
+        ),
+    ],
+)
+def test_reapply_rejects_trigger_semantic_drift_before_drop_create_repair(
+    conn, schema, mutation
+):
+    prior = pg._begin_autocommit(conn)
+    canonical = _trigger_semantic_inventory(conn)
+    conn.execute(mutation)
+    assert _trigger_semantic_inventory(conn) != canonical
+    _assert_reapply_rejects_without_repair(
+        conn, _trigger_semantic_inventory, "preflight trigger semantic drift"
+    )
+    pg._restore_autocommit(conn, prior)
 
 
 def test_catalog_drift_fails_closed_on_reapply(conn, schema):
@@ -185,40 +391,72 @@ def test_owner_acl_drift_fails_closed_and_function_acl_is_owner_only(conn, schem
     pg._restore_autocommit(conn, prior)
 
 
-def test_explicit_function_grant_and_extra_trigger_fail_closed(conn, schema):
+def test_function_acl_owner_and_extra_trigger_drift_fail_closed_without_repair(
+    conn, schema
+):
     prior = pg._begin_autocommit(conn)
-    conn.execute("CREATE ROLE w8_extra_executor")
+    extra_executor = f"w8_extra_executor_{uuid4().hex[:8]}"
+    conn.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(extra_executor)))
     try:
+        canonical_functions = _function_semantic_inventory(conn)
         conn.execute(
-            "GRANT EXECUTE ON FUNCTION promote_analysis_generation(uuid,uuid) TO w8_extra_executor"
+            sql.SQL(
+                "GRANT EXECUTE ON FUNCTION "
+                "promote_analysis_generation(uuid,uuid) TO {}"
+            ).format(sql.Identifier(extra_executor))
         )
-        with pytest.raises(Exception, match="function owner/ACL drift"):
-            pg._run_script(conn, V64)
-        conn.rollback()
+        assert _function_semantic_inventory(conn) != canonical_functions
+        _assert_reapply_rejects_without_repair(
+            conn, _function_semantic_inventory, "preflight function owner/ACL drift"
+        )
         conn.execute(
-            "REVOKE EXECUTE ON FUNCTION promote_analysis_generation(uuid,uuid) FROM w8_extra_executor"
+            sql.SQL(
+                "REVOKE EXECUTE ON FUNCTION "
+                "promote_analysis_generation(uuid,uuid) FROM {}"
+            ).format(sql.Identifier(extra_executor))
         )
 
         conn.execute(
-            "ALTER FUNCTION promote_analysis_generation(uuid,uuid) OWNER TO w8_extra_executor"
+            "REVOKE EXECUTE ON FUNCTION promote_analysis_generation(uuid,uuid) FROM CURRENT_USER"
         )
-        with pytest.raises(Exception):
-            pg._run_script(conn, V64)
-        conn.rollback()
+        assert _function_semantic_inventory(conn) != canonical_functions
+        _assert_reapply_rejects_without_repair(
+            conn, _function_semantic_inventory, "preflight function owner/ACL drift"
+        )
+        conn.execute(
+            "GRANT EXECUTE ON FUNCTION promote_analysis_generation(uuid,uuid) TO CURRENT_USER"
+        )
+
+        conn.execute(
+            sql.SQL(
+                "ALTER FUNCTION promote_analysis_generation(uuid,uuid) OWNER TO {}"
+            ).format(sql.Identifier(extra_executor))
+        )
+        assert _function_semantic_inventory(conn) != canonical_functions
+        _assert_reapply_rejects_without_repair(
+            conn, _function_semantic_inventory, "preflight function owner/ACL drift"
+        )
         conn.execute(
             "ALTER FUNCTION promote_analysis_generation(uuid,uuid) OWNER TO CURRENT_USER"
         )
 
+        canonical_triggers = _trigger_semantic_inventory(conn)
         conn.execute(
             "CREATE TRIGGER trg_w8_extra BEFORE UPDATE ON analysis_generations "
             "FOR EACH ROW EXECUTE FUNCTION decision_state_guard_generation_mutation()"
         )
-        with pytest.raises(Exception, match="postflight trigger drift"):
-            pg._run_script(conn, V64)
-        conn.rollback()
+        assert _trigger_semantic_inventory(conn) != canonical_triggers
+        _assert_reapply_rejects_without_repair(
+            conn, _trigger_semantic_inventory, "preflight trigger semantic drift"
+        )
     finally:
-        conn.execute("DROP OWNED BY w8_extra_executor")
-        conn.execute("DROP ROLE IF EXISTS w8_extra_executor")
+        conn.rollback()
+        conn.execute(
+            sql.SQL("DROP OWNED BY {}").format(sql.Identifier(extra_executor))
+        )
+        conn.execute(
+            sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(extra_executor))
+        )
         pg._restore_autocommit(conn, prior)
 
 
