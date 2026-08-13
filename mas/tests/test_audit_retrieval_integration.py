@@ -187,6 +187,12 @@ class TestAuditRunPhaseRetrievalIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest["used_item_ids"], [eligible_item_id])
         self.assertEqual(latest["used_items"][0]["title"], "Fresh audit note")
         self.assertNotIn("blocked-audit-item", latest["used_item_ids"])
+        attestation = updated.analysis_input_attestations["audit"]["knowledge"]
+        self.assertEqual(attestation["status"], "used")
+        self.assertEqual(len(attestation["projection_fingerprint"]), 64)
+        self.assertEqual(len(attestation["policy_fingerprint"]), 64)
+        self.assertEqual([item["item_id"] for item in attestation["items"]], [eligible_item_id])
+        self.assertNotIn("blocked-audit-item", str(attestation))
 
         trace = build_phase_trace(updated, "audit")
         self.assertEqual(len(trace.knowledge_usage), 1)
@@ -215,6 +221,10 @@ class TestAuditRunPhaseRetrievalIntegration(unittest.IsolatedAsyncioTestCase):
                 and (event.get("details") or {}).get("phase") == "audit"
                 for event in updated.policy_audit_log
             )
+        )
+        self.assertEqual(
+            updated.analysis_input_attestations["audit"]["knowledge"]["status"],
+            "empty",
         )
 
 

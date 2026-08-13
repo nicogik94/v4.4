@@ -46,6 +46,7 @@ def test_no_new_sql_migration_was_added():
         "v60_research_evidence_automation_roi_execution.sql",
         "v61_research_evidence_pack_foundation.sql",
         "v63_provider_attempt_telemetry_foundation.sql",
+        "v64_decision_state_coherence_foundation.sql",
     ]
 
 

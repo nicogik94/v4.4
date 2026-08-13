@@ -6,7 +6,7 @@ or calibration.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import re
@@ -291,6 +291,82 @@ def same_gap_set(first: ClarificationCycle | None, second: ClarificationCycle | 
 def supersede_open_questions(state: Any) -> None:
     for question in open_clarification_questions(state):
         question.status = ClarificationStatus.SUPERSEDED
+
+
+def current_authoritative_answers(state: Any) -> list[Any]:
+    """Return one unambiguous current ANSWERED record per question.
+
+    Authority is determined from the existing clarification lifecycle.  List
+    order is never authority: the newest ``answered_at`` wins, unavailable or
+    superseded terminal records remove an older answer, and equal-time
+    conflicts fail closed.  Exact equal-time ANSWERED duplicates collapse by
+    stable identity.
+    """
+    grouped: dict[str, list[Any]] = {}
+    for answer in _read_answers(state):
+        question_id = _normalized_text(_get(answer, "question_id", ""))
+        if question_id:
+            grouped.setdefault(question_id, []).append(answer)
+
+    selected: list[Any] = []
+    for records in grouped.values():
+        timestamped = [
+            (answer, _authoritative_answer_datetime(_get(answer, "answered_at")))
+            for answer in records
+        ]
+        if any(timestamp is None for _, timestamp in timestamped):
+            if len(records) != 1:
+                continue
+            answer = records[0]
+        else:
+            latest_timestamp = max(timestamp for _, timestamp in timestamped)
+            latest = [answer for answer, timestamp in timestamped if timestamp == latest_timestamp]
+            if len(latest) > 1:
+                statuses = {_normalized_status(_get(answer, "status", "")) for answer in latest}
+                texts = {_normalized_text(_get(answer, "answer_text", "")) for answer in latest}
+                if statuses != {ClarificationStatus.ANSWERED.value} or len(texts) != 1:
+                    continue
+                latest.sort(key=_authoritative_answer_sort_key)
+            answer = latest[0]
+
+        if (
+            _normalized_status(_get(answer, "status", "")) == ClarificationStatus.ANSWERED.value
+            and _normalized_text(_get(answer, "answer_text", ""))
+        ):
+            selected.append(answer)
+
+    return sorted(selected, key=_authoritative_answer_sort_key)
+
+
+def _authoritative_answer_sort_key(answer: Any) -> tuple[str, str, str, str]:
+    timestamp = _authoritative_answer_datetime(_get(answer, "answered_at"))
+    timestamp_text = timestamp.isoformat() if timestamp is not None else ""
+    return (
+        _normalized_text(_get(answer, "question_id", "")),
+        _normalized_text(_get(answer, "answer_id", "")),
+        timestamp_text,
+        _normalized_text(_get(answer, "answer_text", "")),
+    )
+
+
+def _authoritative_answer_datetime(value: Any) -> datetime | None:
+    """Normalize authority timestamps to UTC without discarding offsets."""
+    raw = _value(value)
+    if isinstance(raw, datetime):
+        parsed = raw
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def build_clarification_summary(state: Any) -> ClarificationSummary:

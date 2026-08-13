@@ -123,6 +123,7 @@ from exporters import (
 from config import APP_VERSION, OPERATOR_AUTH_HEADER, get_operator_auth_config
 from version import get_git_sha
 import store
+import state_coherence
 from workflow_templates import (
     TECHNOLOGY_READINESS_PHASE_SEQUENCE,
     all_editable_phases,
@@ -1060,6 +1061,8 @@ async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
     if not state:
         raise HTTPException(404, "Project not found")
     await _ensure_project_not_running(project_id)
+    expected_base_generation_id = await _current_generation_id(state)
+    state.analysis_generation_id = ""
 
     # The manual phase endpoint is a supported entry point and carries its own
     # truthful identity: the project it acts on and the phase it runs.
@@ -1072,6 +1075,8 @@ async def run_single_phase_endpoint(project_id: str, req: RunPhaseRequest):
         with observability.trace_phase(project_id, req.phase, {"trigger": "manual"}):
             updated = await run_phase_node(state, req.phase)
     await store.save(updated)
+    if is_workflow_complete(updated):
+        await _accept_completed_analysis(updated, expected_base_generation_id)
     phase_status = updated.phase_status.get(req.phase)
     return {
         "status": phase_status.value if hasattr(phase_status, "value") else str(phase_status),
@@ -2100,6 +2105,73 @@ async def _run_workflow(project_id: str, run_id: str | None = None, *, job_id: s
         await _run_workflow_sequence_for_run(project_id, run_id)
 
 
+async def _current_generation_id(state: ProjectState) -> str | None:
+    pool = await store._get_pool()
+    if pool is None:
+        return None
+    coherence_ready = await state_coherence.schema_available(pool)
+    if store.DATABASE_URL and not coherence_ready:
+        raise state_coherence.StateCoherenceError(
+            "v64 decision-state coherence migration is required"
+        )
+    if not coherence_ready:
+        return None
+    current = await state_coherence.current_generation(
+        pool,
+        state.project_id,
+        state_coherence.primary_decision_id(state),
+    )
+    return str(current["id"]) if current is not None else None
+
+
+async def _accept_completed_analysis(
+    state: ProjectState,
+    expected_base_generation_id: str | None,
+) -> None:
+    """Validate and atomically accept one explicitly requested completed run."""
+    pool = await store._get_pool()
+    if pool is None:
+        await store.save(state)
+        return
+    coherence_ready = await state_coherence.schema_available(pool)
+    if store.DATABASE_URL and not coherence_ready:
+        raise state_coherence.StateCoherenceError(
+            "v64 decision-state coherence migration is required"
+        )
+    if not coherence_ready:
+        await store.save(state)
+        return
+    candidate = await state_coherence.create_candidate(
+        pool,
+        state,
+        workflow_identity=state_coherence.workflow_fingerprint(
+            state, code_version=APP_VERSION
+        ),
+        expected_base_generation_id=expected_base_generation_id,
+    )
+    try:
+        await state_coherence.validate_candidate(pool, candidate.generation_id)
+        await state_coherence.promote_candidate(
+            pool,
+            candidate.generation_id,
+            expected_base_generation_id=expected_base_generation_id,
+        )
+    except Exception:
+        try:
+            await state_coherence.abandon_candidate(
+                pool, candidate.generation_id, failed=True
+            )
+        except state_coherence.StateCoherenceError:
+            # Promotion may already have committed before a later persistence
+            # failure; accepted generations are intentionally immutable.
+            pass
+        state.analysis_generation_id = ""
+        raise
+    state.analysis_generation_id = candidate.generation_id
+    state.effective_input_snapshot_id = candidate.snapshot_id
+    await store.save(state)
+
+
 async def _run_workflow_sequence_for_run(project_id: str, run_id: str | None = None):
     current_phase = ""
     try:
@@ -2114,6 +2186,8 @@ async def _run_workflow_sequence_for_run(project_id: str, run_id: str | None = N
                 )
             return
         current_phase = state.current_phase or ""
+        expected_base_generation_id = await _current_generation_id(state)
+        state.analysis_generation_id = ""
         if run_id:
             await _safe_mark_workflow_run(
                 workflow_run_state.mark_run_running,
@@ -2134,9 +2208,9 @@ async def _run_workflow_sequence_for_run(project_id: str, run_id: str | None = N
 
         with observability.trace_phase(project_id, "full_workflow", {"trigger": "api"}):
             final_state = await run_workflow_sequence(state, persist_state=persist_workflow_state)
-        await store.save(final_state)
         current_phase = final_state.current_phase or current_phase
         if is_workflow_complete(final_state):
+            await _accept_completed_analysis(final_state, expected_base_generation_id)
             if run_id:
                 await _safe_mark_workflow_run(
                     workflow_run_state.mark_run_succeeded,

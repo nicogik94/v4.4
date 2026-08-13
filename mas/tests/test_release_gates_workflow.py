@@ -1562,6 +1562,7 @@ def test_removing_the_aggregate_gate_identity_check_is_detected(tmp_path):
 CERTIFIED_PRODUCT_BASELINE = "0ead418afa0447ae0a90535aaf8ae392df06b403"
 HARNESS_BASELINE = "46c4fbeb303f91c6434f94eb8bb103287f37879b"
 OPTION_2_BASELINE = "20a104f370e3cd427d2c3a5c02d72c4110b802a3"
+OPTION_2_BOUNDARY = "3d6b0a9a1b5783524de3960f01ca3379928f478e"
 
 CERTIFIED_PRODUCT_PATHS = (
     "mas/api.py",
@@ -1602,7 +1603,8 @@ def test_option_2_changes_only_the_runtime_boundary_inside_the_product_manifest(
     """The new product identity changes only the gateway and its contract tests."""
 
     changed = set(_git(
-        "diff", "--name-only", OPTION_2_BASELINE, "--", *CERTIFIED_PRODUCT_PATHS
+        "diff", "--name-only", OPTION_2_BASELINE, OPTION_2_BOUNDARY,
+        "--", *CERTIFIED_PRODUCT_PATHS
     ).splitlines())
     assert changed == {
         "mas/runtime/provider_gateway.py",
@@ -1644,7 +1646,9 @@ def test_the_option_2_closure_diff_touches_only_declared_paths():
     }
     stray = [
         path
-        for path in _git("diff", "--name-only", OPTION_2_BASELINE, "--").splitlines()
+        for path in _git(
+            "diff", "--name-only", OPTION_2_BASELINE, OPTION_2_BOUNDARY, "--"
+        ).splitlines()
         if path not in allowed_paths
     ]
     assert stray == [], f"unexpected paths in the Option 2 closure diff: {stray}"

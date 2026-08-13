@@ -10,11 +10,19 @@ so local development still works. Production sets DATABASE_URL and persistence i
 import os
 import json
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional
 from datetime import datetime
 
 from state import ProjectState
 from decision_objects import ensure_decision_objects
+from state_coherence import (
+    bind_effective_input,
+    bootstrap_current_analysis,
+    is_complete_analysis,
+    schema_available,
+    schema_available_conn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,33 +58,40 @@ async def _get_pool():
 
 
 async def save(state: ProjectState) -> None:
-    _mem[state.project_id] = state
     pool = await _get_pool()
     if pool is None:
+        _mem[state.project_id] = state
         return
-    payload = state.model_dump(mode="json")
     async with pool.acquire() as conn:
-        # Ensure the FK-parent row in projects exists so that outcomes,
-        # decision_events, approvals, and policy_decisions INSERTs succeed.
-        await conn.execute("""
-            INSERT INTO projects (id, name, brief, data, current_phase, status, created_at, updated_at)
-            VALUES ($1::uuid, $2, $3, $4, $5, 'active', $6::timestamptz, NOW())
-            ON CONFLICT (id) DO UPDATE
-            SET name          = EXCLUDED.name,
-                brief         = EXCLUDED.brief,
-                current_phase = EXCLUDED.current_phase,
-                updated_at    = NOW()
-        """, state.project_id, state.project_name, state.brief,
-             state.data, state.current_phase,
-             state.created_at)
-        await conn.execute("""
-            INSERT INTO state_snapshots (project_id, state_json, version, updated_at)
-            VALUES ($1::uuid, $2::jsonb, 1, NOW())
-            ON CONFLICT (project_id) DO UPDATE
-            SET state_json = EXCLUDED.state_json,
-                version = state_snapshots.version + 1,
-                updated_at = NOW()
-        """, state.project_id, json.dumps(payload))
+        async with _transaction(conn):
+            # Ensure the FK-parent row in projects exists so that outcomes,
+            # decision_events, approvals, and policy_decisions INSERTs succeed.
+            await conn.execute("""
+                INSERT INTO projects (id, name, brief, data, current_phase, status, created_at, updated_at)
+                VALUES ($1::uuid, $2, $3, $4, $5, 'active', $6::timestamptz, NOW())
+                ON CONFLICT (id) DO UPDATE
+                SET name          = EXCLUDED.name,
+                    brief         = EXCLUDED.brief,
+                    current_phase = EXCLUDED.current_phase,
+                    updated_at    = NOW()
+            """, state.project_id, state.project_name, state.brief,
+                 state.data, state.current_phase,
+                 state.created_at)
+            coherence_ready = await schema_available_conn(conn)
+            if DATABASE_URL and not coherence_ready:
+                raise RuntimeError("v64 decision-state coherence migration is required")
+            if coherence_ready:
+                await bind_effective_input(conn, state)
+            payload = state.model_dump(mode="json")
+            await conn.execute("""
+                INSERT INTO state_snapshots (project_id, state_json, version, updated_at)
+                VALUES ($1::uuid, $2::jsonb, 1, NOW())
+                ON CONFLICT (project_id) DO UPDATE
+                SET state_json = EXCLUDED.state_json,
+                    version = state_snapshots.version + 1,
+                    updated_at = NOW()
+            """, state.project_id, json.dumps(payload))
+    _mem[state.project_id] = state
 
 
 async def load(project_id: str) -> Optional[ProjectState]:
@@ -93,8 +108,20 @@ async def load(project_id: str) -> Optional[ProjectState]:
         )
     if not row:
         return None
+    coherence_ready = await schema_available(pool)
+    if DATABASE_URL and not coherence_ready:
+        raise RuntimeError("v64 decision-state coherence migration is required")
     state = ProjectState.model_validate(json.loads(row["state_json"]))
     ensure_decision_objects(state, trigger="store.load:db")
+    if (
+        is_complete_analysis(state)
+        and not state.analysis_generation_id
+        and coherence_ready
+    ):
+        generation_id = await bootstrap_current_analysis(pool, state)
+        if generation_id:
+            state.analysis_generation_id = generation_id
+            await save(state)
     _mem[project_id] = state
     return state
 
@@ -110,9 +137,21 @@ async def list_all() -> list[ProjectState]:
         rows = await conn.fetch(
             "SELECT state_json FROM state_snapshots ORDER BY updated_at DESC LIMIT 200"
         )
+    coherence_ready = await schema_available(pool)
+    if DATABASE_URL and not coherence_ready:
+        raise RuntimeError("v64 decision-state coherence migration is required")
     states = [ProjectState.model_validate(json.loads(r["state_json"])) for r in rows]
     for s in states:
         ensure_decision_objects(s, trigger="store.list_all:db")
+        if (
+            is_complete_analysis(s)
+            and not s.analysis_generation_id
+            and coherence_ready
+        ):
+            generation_id = await bootstrap_current_analysis(pool, s)
+            if generation_id:
+                s.analysis_generation_id = generation_id
+                await save(s)
         _mem[s.project_id] = s
     return states
 
@@ -137,3 +176,14 @@ async def close():
     if _pool is not None:
         await _pool.close()
         _pool = None
+
+
+@asynccontextmanager
+async def _transaction(conn):
+    """Use a real database transaction; retain compatibility with test fakes."""
+    transaction_factory = getattr(conn, "transaction", None)
+    if callable(transaction_factory):
+        async with transaction_factory():
+            yield
+    else:
+        yield

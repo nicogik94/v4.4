@@ -186,6 +186,7 @@ cp .env.example .env
 docker-compose up -d postgres
 psql $DATABASE_URL -f sql/init.sql
 psql $DATABASE_URL -f sql/outcomes.sql
+psql $DATABASE_URL -f sql/v64_decision_state_coherence_foundation.sql
 ```
 
 ### 4. Run the API

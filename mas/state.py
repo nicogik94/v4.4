@@ -1045,6 +1045,13 @@ class ProjectState(BaseModel):
     project_name: str = ""
     project_type: str = DEFAULT_PROJECT_TYPE
     created_at: datetime = Field(default_factory=datetime.now)
+    # W8.1 compatibility bindings. PostgreSQL currentness remains authoritative;
+    # these fields attribute the mutable working copy without replacing history.
+    effective_input_snapshot_id: str = ""
+    analysis_generation_id: str = ""
+    # Exact governed input projections consumed by prompt-facing phases. These
+    # are authority references/fingerprints, never copied evidence content.
+    analysis_input_attestations: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     # Input
     brief: str = ""
