@@ -764,7 +764,10 @@ def test_store_save_atomically_binds_effective_input_identity(conn, schema):
             with patch("store._get_pool", new=AsyncMock(return_value=pool)):
                 await store.save(state)
                 first_snapshot = state.effective_input_snapshot_id
-                state.brief = "Choose A or B before Q4"
+                # W8.2 governs direct-input changes through revisions. A risk-only
+                # authority update still exercises W8.1's ordinary snapshot bind.
+                state.risk_classification = "limited_risk"
+                state.risk_classification_rationale = "Operator classification"
                 state.analysis_generation_id = str(uuid4())
                 await store.save(state)
                 return first_snapshot

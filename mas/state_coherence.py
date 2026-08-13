@@ -65,9 +65,26 @@ class AnalysisGenerationIdentity:
     expected_base_generation_id: str | None = None
 
 
+DIRECT_INPUT_FIELDS: tuple[str, ...] = (
+    "project_name",
+    "brief",
+    "data",
+    "output_language",
+    "report_mode",
+    "observations",
+    "timer_logs",
+)
+
+
 def primary_decision_id(state: ProjectState) -> str:
     """Reuse the existing stable primary-decision identity."""
     return stable_object_id("decision", state.project_id, "primary")
+
+
+def direct_input_projection(state: ProjectState) -> dict[str, Any]:
+    """Return only the seven direct inputs governed by W8.2 revisions."""
+    serialized = state.model_dump(mode="json", include=set(DIRECT_INPUT_FIELDS))
+    return {field: serialized[field] for field in DIRECT_INPUT_FIELDS}
 
 
 def effective_input_payload(state: ProjectState) -> dict[str, Any]:

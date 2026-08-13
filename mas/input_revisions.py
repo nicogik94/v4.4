@@ -292,6 +292,10 @@ async def apply_revision(
     async with pool.acquire() as conn:
         async with conn.transaction():
             await _require_schema(conn)
+            await _lock_scope(conn, project_id)
+            current = await store.load_conn(conn, project_id, for_update=True)
+            if current is None:
+                raise InputRevisionNotFound("project not found")
             row = await conn.fetchrow(
                 "SELECT * FROM input_revisions WHERE id=$1::uuid AND project_id=$2::uuid FOR UPDATE",
                 revision_id,
@@ -304,10 +308,6 @@ async def apply_revision(
                 raise InputRevisionConflict(
                     f"input revision is already {record.status}; resulting_snapshot_id={record.resulting_snapshot_id or 'none'}"
                 )
-            await _lock_scope(conn, project_id)
-            current = await store.load_conn(conn, project_id, for_update=True)
-            if current is None:
-                raise InputRevisionNotFound("project not found")
             application = await _apply_conn(
                 conn, record, current, applied_by=applied_by, transform=transform
             )
@@ -440,26 +440,16 @@ async def _apply_conn(
     resulting = effective_input_identity(updated)
     if resulting.snapshot_id == actual.snapshot_id:
         raise InputRevisionValidationError("revision application would not change effective input")
-    await store.save_conn(
+    row = await store.save_conn(
         conn,
         updated,
         predecessor_snapshot_id=actual.snapshot_id,
-        change_cause_id=record.revision_id,
+        revision_change=store.RevisionChange(
+            revision_id=record.revision_id,
+            applied_by=actor,
+        ),
     )
     await _application_fault_point()
-    row = await conn.fetchrow(
-        """
-        UPDATE input_revisions
-        SET lifecycle_status='applied', applied_by=$3, applied_at=NOW(),
-            resulting_snapshot_id=$4::uuid
-        WHERE id=$1::uuid AND project_id=$2::uuid AND lifecycle_status='proposed'
-        RETURNING *
-        """,
-        record.revision_id,
-        record.project_id,
-        actor,
-        resulting.snapshot_id,
-    )
     if row is None:
         raise InputRevisionConflict("input revision is no longer proposed")
     return InputRevisionApplication(

@@ -11,11 +11,18 @@ DECLARE
     relation_exists BOOLEAN;
     function_count INTEGER;
     trigger_count INTEGER;
+    index_count INTEGER;
     projects_owner OID;
     problem TEXT;
 BEGIN
-    SELECT to_regclass(pg_catalog.current_schema() || '.input_revisions') IS NOT NULL
-      INTO relation_exists;
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND relation.relname = 'input_revisions'
+          AND relation.relkind = 'r'
+    ) INTO relation_exists;
     SELECT count(*) INTO function_count
     FROM pg_catalog.pg_proc function_info
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid = function_info.pronamespace
@@ -26,15 +33,43 @@ BEGIN
     JOIN pg_catalog.pg_class relation ON relation.oid = trigger_info.tgrelid
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE namespace.nspname = pg_catalog.current_schema()
-      AND relation.relname = 'input_revisions'
+      AND trigger_info.tgname = 'trg_ir_lifecycle_guard'
       AND NOT trigger_info.tgisinternal;
+    SELECT count(*) INTO index_count
+    FROM pg_catalog.pg_class index_relation
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = index_relation.relnamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND index_relation.relkind = 'i'
+      AND index_relation.relname IN (
+          'idx_ir_scope_status_created', 'idx_ir_expected_base'
+      );
 
     IF NOT relation_exists THEN
-        IF function_count <> 0 OR trigger_count <> 0 THEN
+        IF function_count <> 0 OR trigger_count <> 0 OR index_count <> 0 THEN
             RAISE EXCEPTION 'v65 partial input-revision schema detected'
                 USING ERRCODE = 'invalid_schema_definition';
         END IF;
         RETURN;
+    END IF;
+
+    SELECT relation.relowner INTO projects_owner
+    FROM pg_catalog.pg_class relation
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND relation.relname = 'projects'
+      AND relation.relkind = 'r';
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND relation.relname = 'input_revisions'
+          AND relation.relkind = 'r'
+          AND relation.relowner = projects_owner
+          AND relation.relacl IS NULL
+    ) THEN
+        RAISE EXCEPTION 'v65 preflight relation owner/ACL drift'
+            USING ERRCODE = 'invalid_schema_definition';
     END IF;
 
     WITH expected(col, typ, required, default_expr, generated) AS (VALUES
@@ -133,17 +168,125 @@ BEGIN
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
 
+    WITH expected(
+        name, tbl, access_method, is_unique, is_primary, is_exclusion,
+        is_immediate, is_valid, is_ready, is_live, is_replica_identity,
+        key_count, attribute_count, key_columns, predicate, expressions,
+        definition
+    ) AS (VALUES
+        (
+            'idx_ir_scope_status_created', 'input_revisions', 'btree',
+            false, false, false, true, true, true, true, false,
+            5::smallint, 5::smallint,
+            'project_id, decision_id, lifecycle_status, proposed_at, id',
+            NULL::text, NULL::text,
+            'CREATE INDEX idx_ir_scope_status_created ON input_revisions USING btree (project_id, decision_id, lifecycle_status, proposed_at, id)'
+        ),
+        (
+            'idx_ir_expected_base', 'input_revisions', 'btree',
+            false, false, false, true, true, true, true, false,
+            1::smallint, 1::smallint, 'expected_base_snapshot_id',
+            NULL::text, NULL::text,
+            'CREATE INDEX idx_ir_expected_base ON input_revisions USING btree (expected_base_snapshot_id)'
+        )
+    ), actual(
+        name, tbl, access_method, is_unique, is_primary, is_exclusion,
+        is_immediate, is_valid, is_ready, is_live, is_replica_identity,
+        key_count, attribute_count, key_columns, predicate, expressions,
+        definition
+    ) AS (
+        SELECT index_relation.relname::text,
+               table_relation.relname::text,
+               access_method.amname::text,
+               index_info.indisunique,
+               index_info.indisprimary,
+               index_info.indisexclusion,
+               index_info.indimmediate,
+               index_info.indisvalid,
+               index_info.indisready,
+               index_info.indislive,
+               index_info.indisreplident,
+               index_info.indnkeyatts,
+               index_info.indnatts,
+               (
+                   SELECT pg_catalog.string_agg(
+                       pg_catalog.pg_get_indexdef(index_info.indexrelid, position, true),
+                       ', ' ORDER BY position
+                   )
+                   FROM pg_catalog.generate_series(1, index_info.indnkeyatts) position
+               )::text,
+               pg_catalog.pg_get_expr(index_info.indpred, index_info.indrelid, true)::text,
+               pg_catalog.pg_get_expr(index_info.indexprs, index_info.indrelid, true)::text,
+               pg_catalog.replace(
+                   pg_catalog.pg_get_indexdef(index_info.indexrelid),
+                   pg_catalog.current_schema() || '.', ''
+               )::text
+        FROM pg_catalog.pg_index index_info
+        JOIN pg_catalog.pg_class index_relation ON index_relation.oid = index_info.indexrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = index_relation.relnamespace
+        JOIN pg_catalog.pg_class table_relation ON table_relation.oid = index_info.indrelid
+        JOIN pg_catalog.pg_am access_method ON access_method.oid = index_relation.relam
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND index_relation.relname IN (
+              'idx_ir_scope_status_created', 'idx_ir_expected_base'
+          )
+    )
+    SELECT pg_catalog.string_agg(drift.name || ':' || drift.side, ', ' ORDER BY drift.name)
+      INTO problem
+    FROM (
+        SELECT name, 'missing_or_altered' AS side FROM (
+            SELECT * FROM expected EXCEPT SELECT * FROM actual
+        ) missing
+        UNION ALL
+        SELECT name, 'unexpected' FROM (
+            SELECT * FROM actual EXCEPT SELECT * FROM expected
+        ) unexpected
+    ) drift;
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'v65 preflight index semantic drift: %', problem
+            USING ERRCODE = 'invalid_schema_definition';
+    END IF;
+
     IF function_count <> 1 OR trigger_count <> 1 THEN
         RAISE EXCEPTION 'v65 preflight lifecycle guard drift'
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
-    SELECT relation.relowner INTO projects_owner
-    FROM pg_catalog.pg_class relation
-    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-    WHERE namespace.nspname = pg_catalog.current_schema()
-      AND relation.relname = 'projects';
-    IF NOT EXISTS (
-        SELECT 1
+    WITH expected(
+        tbl_schema, tbl, trigger_name, function_schema, function_name,
+        function_arguments, enabled_state, trigger_type, trigger_attributes,
+        predicate, argument_count, arguments_hex, trigger_deferrable,
+        initially_deferred, is_internal
+    ) AS (VALUES
+        (
+            pg_catalog.current_schema(), 'input_revisions',
+            'trg_ir_lifecycle_guard', pg_catalog.current_schema(),
+            'input_revision_guard_mutation', '', 'O'::text, 27::smallint,
+            ''::text, NULL::text, 0::smallint, ''::text,
+            false, false, false
+        )
+    ), actual(
+        tbl_schema, tbl, trigger_name, function_schema, function_name,
+        function_arguments, enabled_state, trigger_type, trigger_attributes,
+        predicate, argument_count, arguments_hex, trigger_deferrable,
+        initially_deferred, is_internal
+    ) AS (
+        SELECT namespace.nspname::text,
+               relation.relname::text,
+               trigger_info.tgname::text,
+               function_namespace.nspname::text,
+               function_info.proname::text,
+               pg_catalog.oidvectortypes(function_info.proargtypes)::text,
+               trigger_info.tgenabled::text,
+               trigger_info.tgtype,
+               trigger_info.tgattr::text,
+               pg_catalog.pg_get_expr(
+                   trigger_info.tgqual, trigger_info.tgrelid, true
+               )::text,
+               trigger_info.tgnargs,
+               pg_catalog.encode(trigger_info.tgargs, 'hex'),
+               trigger_info.tgdeferrable,
+               trigger_info.tginitdeferred,
+               trigger_info.tgisinternal
         FROM pg_catalog.pg_trigger trigger_info
         JOIN pg_catalog.pg_class relation ON relation.oid = trigger_info.tgrelid
         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
@@ -151,31 +294,41 @@ BEGIN
         JOIN pg_catalog.pg_namespace function_namespace
           ON function_namespace.oid = function_info.pronamespace
         WHERE namespace.nspname = pg_catalog.current_schema()
-          AND relation.relname = 'input_revisions'
-          AND trigger_info.tgname = 'trg_ir_lifecycle_guard'
-          AND trigger_info.tgenabled = 'O'
-          AND trigger_info.tgtype = 27
-          AND trigger_info.tgattr::text = ''
-          AND trigger_info.tgqual IS NULL
-          AND trigger_info.tgnargs = 0
-          AND function_namespace.nspname = pg_catalog.current_schema()
-          AND function_info.proname = 'input_revision_guard_mutation'
-    ) THEN
-        RAISE EXCEPTION 'v65 preflight trigger semantic drift'
+          AND (
+              (relation.relname = 'input_revisions' AND NOT trigger_info.tgisinternal)
+              OR trigger_info.tgname = 'trg_ir_lifecycle_guard'
+          )
+    )
+    SELECT pg_catalog.string_agg(
+               drift.tbl || '.' || drift.trigger_name || ':' || drift.side,
+               ', ' ORDER BY drift.tbl, drift.trigger_name, drift.side
+           )
+      INTO problem
+    FROM (
+        SELECT tbl, trigger_name, 'missing_or_altered' AS side FROM (
+            SELECT * FROM expected EXCEPT SELECT * FROM actual
+        ) missing
+        UNION ALL
+        SELECT tbl, trigger_name, 'unexpected' FROM (
+            SELECT * FROM actual EXCEPT SELECT * FROM expected
+        ) unexpected
+    ) drift;
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'v65 preflight trigger semantic drift: %', problem
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_proc function_info
-        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = function_info.pronamespace
-        JOIN pg_catalog.pg_language language_info ON language_info.oid = function_info.prolang
-        WHERE namespace.nspname = pg_catalog.current_schema()
-          AND function_info.proname = 'input_revision_guard_mutation'
-          AND pg_catalog.oidvectortypes(function_info.proargtypes) = ''
-          AND function_info.prorettype = 'trigger'::pg_catalog.regtype
-          AND language_info.lanname = 'plpgsql'
-          AND function_info.proconfig = ARRAY['search_path=' || pg_catalog.current_schema()]
-          AND function_info.prosrc = $body$
+
+    WITH expected(
+        name, arguments, return_type, argument_names, argument_defaults,
+        language, security_definer, config, volatility, strictness,
+        parallel_safety, returns_set, leakproof, function_kind, body
+    ) AS (VALUES
+        (
+            'input_revision_guard_mutation', '', 'trigger', NULL::text[], 0,
+            'plpgsql', false,
+            ARRAY['search_path=' || pg_catalog.current_schema()],
+            'v'::text, false, 'u'::text, false, false, 'f'::text,
+$body$
 DECLARE
     snapshot_predecessor UUID;
     snapshot_cause TEXT;
@@ -223,8 +376,49 @@ BEGIN
     RETURN NEW;
 END;
 $body$
-    ) THEN
-        RAISE EXCEPTION 'v65 preflight function semantic drift'
+        )
+    ), actual(
+        name, arguments, return_type, argument_names, argument_defaults,
+        language, security_definer, config, volatility, strictness,
+        parallel_safety, returns_set, leakproof, function_kind, body
+    ) AS (
+        SELECT function_info.proname::text,
+               pg_catalog.oidvectortypes(function_info.proargtypes)::text,
+               function_info.prorettype::pg_catalog.regtype::text,
+               function_info.proargnames,
+               function_info.pronargdefaults,
+               language_info.lanname::text,
+               function_info.prosecdef,
+               function_info.proconfig,
+               function_info.provolatile::text,
+               function_info.proisstrict,
+               function_info.proparallel::text,
+               function_info.proretset,
+               function_info.proleakproof,
+               function_info.prokind::text,
+               function_info.prosrc
+        FROM pg_catalog.pg_proc function_info
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = function_info.pronamespace
+        JOIN pg_catalog.pg_language language_info ON language_info.oid = function_info.prolang
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND function_info.proname = 'input_revision_guard_mutation'
+    )
+    SELECT pg_catalog.string_agg(
+               drift.name || '(' || drift.arguments || '):' || drift.side,
+               ', ' ORDER BY drift.name, drift.arguments, drift.side
+           )
+      INTO problem
+    FROM (
+        SELECT name, arguments, 'missing_or_altered' AS side FROM (
+            SELECT * FROM expected EXCEPT SELECT * FROM actual
+        ) missing
+        UNION ALL
+        SELECT name, arguments, 'unexpected' FROM (
+            SELECT * FROM actual EXCEPT SELECT * FROM expected
+        ) unexpected
+    ) drift;
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'v65 preflight function semantic drift: %', problem
             USING ERRCODE = 'invalid_schema_definition';
     END IF;
     IF EXISTS (
@@ -391,9 +585,25 @@ REVOKE ALL ON FUNCTION input_revision_guard_mutation() FROM PUBLIC;
 DO $postflight$
 DECLARE
     problem TEXT;
+    projects_owner OID;
 BEGIN
-    IF to_regclass(pg_catalog.current_schema() || '.input_revisions') IS NULL THEN
-        RAISE EXCEPTION 'v65 postflight relation missing';
+    SELECT relation.relowner INTO projects_owner
+    FROM pg_catalog.pg_class relation
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = pg_catalog.current_schema()
+      AND relation.relname = 'projects'
+      AND relation.relkind = 'r';
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND relation.relname = 'input_revisions'
+          AND relation.relkind = 'r'
+          AND relation.relowner = projects_owner
+          AND relation.relacl IS NULL
+    ) THEN
+        RAISE EXCEPTION 'v65 postflight relation owner/ACL drift';
     END IF;
     SELECT pg_catalog.string_agg(required.required_name, ', ' ORDER BY required.required_name)
       INTO problem
@@ -416,23 +626,129 @@ BEGIN
     IF problem IS NOT NULL THEN
         RAISE EXCEPTION 'v65 postflight constraint missing: %', problem;
     END IF;
+
+    WITH expected(name, tbl, access_method, unique_index, key_columns, definition) AS (VALUES
+        (
+            'idx_ir_scope_status_created', 'input_revisions', 'btree', false,
+            'project_id, decision_id, lifecycle_status, proposed_at, id',
+            'CREATE INDEX idx_ir_scope_status_created ON input_revisions USING btree (project_id, decision_id, lifecycle_status, proposed_at, id)'
+        ),
+        (
+            'idx_ir_expected_base', 'input_revisions', 'btree', false,
+            'expected_base_snapshot_id',
+            'CREATE INDEX idx_ir_expected_base ON input_revisions USING btree (expected_base_snapshot_id)'
+        )
+    ), actual(name, tbl, access_method, unique_index, key_columns, definition) AS (
+        SELECT index_relation.relname::text,
+               table_relation.relname::text,
+               access_method.amname::text,
+               index_info.indisunique,
+               (
+                   SELECT pg_catalog.string_agg(
+                       pg_catalog.pg_get_indexdef(index_info.indexrelid, position, true),
+                       ', ' ORDER BY position
+                   )
+                   FROM pg_catalog.generate_series(1, index_info.indnkeyatts) position
+               )::text,
+               pg_catalog.replace(
+                   pg_catalog.pg_get_indexdef(index_info.indexrelid),
+                   pg_catalog.current_schema() || '.', ''
+               )::text
+        FROM pg_catalog.pg_index index_info
+        JOIN pg_catalog.pg_class index_relation ON index_relation.oid = index_info.indexrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = index_relation.relnamespace
+        JOIN pg_catalog.pg_class table_relation ON table_relation.oid = index_info.indrelid
+        JOIN pg_catalog.pg_am access_method ON access_method.oid = index_relation.relam
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND index_relation.relname IN (
+              'idx_ir_scope_status_created', 'idx_ir_expected_base'
+          )
+          AND NOT index_info.indisprimary
+          AND NOT index_info.indisexclusion
+          AND index_info.indimmediate
+          AND index_info.indisvalid
+          AND index_info.indisready
+          AND index_info.indislive
+          AND NOT index_info.indisreplident
+          AND index_info.indpred IS NULL
+          AND index_info.indexprs IS NULL
+          AND index_info.indnkeyatts = index_info.indnatts
+    )
+    SELECT pg_catalog.string_agg(drift.name || ':' || drift.side, ', ' ORDER BY drift.name)
+      INTO problem
+    FROM (
+        SELECT name, 'missing_or_altered' AS side FROM (
+            SELECT * FROM expected EXCEPT SELECT * FROM actual
+        ) missing
+        UNION ALL
+        SELECT name, 'unexpected' FROM (
+            SELECT * FROM actual EXCEPT SELECT * FROM expected
+        ) unexpected
+    ) drift;
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'v65 postflight index semantic drift: %', problem;
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1
         FROM pg_catalog.pg_trigger trigger_info
         JOIN pg_catalog.pg_class relation ON relation.oid = trigger_info.tgrelid
         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_catalog.pg_proc function_info ON function_info.oid = trigger_info.tgfoid
+        JOIN pg_catalog.pg_namespace function_namespace
+          ON function_namespace.oid = function_info.pronamespace
         WHERE namespace.nspname = pg_catalog.current_schema()
           AND relation.relname = 'input_revisions'
           AND trigger_info.tgname = 'trg_ir_lifecycle_guard'
           AND trigger_info.tgenabled = 'O'
+          AND trigger_info.tgtype = 27
+          AND trigger_info.tgattr::text = ''
+          AND trigger_info.tgqual IS NULL
+          AND trigger_info.tgnargs = 0
+          AND pg_catalog.encode(trigger_info.tgargs, 'hex') = ''
+          AND NOT trigger_info.tgdeferrable
+          AND NOT trigger_info.tginitdeferred
           AND NOT trigger_info.tgisinternal
+          AND function_namespace.nspname = pg_catalog.current_schema()
+          AND function_info.proname = 'input_revision_guard_mutation'
+          AND pg_catalog.oidvectortypes(function_info.proargtypes) = ''
     ) THEN
-        RAISE EXCEPTION 'v65 postflight lifecycle trigger missing';
+        RAISE EXCEPTION 'v65 postflight lifecycle trigger semantic drift';
     END IF;
-    IF pg_catalog.has_function_privilege(
-        'public', 'input_revision_guard_mutation()', 'EXECUTE'
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc function_info
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = function_info.pronamespace
+        JOIN pg_catalog.pg_language language_info ON language_info.oid = function_info.prolang
+        WHERE namespace.nspname = pg_catalog.current_schema()
+          AND function_info.proname = 'input_revision_guard_mutation'
+          AND pg_catalog.oidvectortypes(function_info.proargtypes) = ''
+          AND function_info.prorettype = 'trigger'::pg_catalog.regtype
+          AND function_info.proargnames IS NULL
+          AND function_info.pronargdefaults = 0
+          AND language_info.lanname = 'plpgsql'
+          AND NOT function_info.prosecdef
+          AND function_info.proconfig = ARRAY['search_path=' || pg_catalog.current_schema()]
+          AND function_info.provolatile = 'v'
+          AND NOT function_info.proisstrict
+          AND function_info.proparallel = 'u'
+          AND NOT function_info.proretset
+          AND NOT function_info.proleakproof
+          AND function_info.prokind = 'f'
+          AND function_info.proowner = projects_owner
+          AND function_info.proacl IS NOT NULL
+          AND (
+              SELECT count(*) FROM pg_catalog.aclexplode(function_info.proacl)
+          ) = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_catalog.aclexplode(function_info.proacl) privilege
+              WHERE privilege.grantor <> function_info.proowner
+                 OR privilege.grantee <> function_info.proowner
+                 OR privilege.privilege_type <> 'EXECUTE'
+                 OR privilege.is_grantable
+          )
     ) THEN
-        RAISE EXCEPTION 'v65 postflight lifecycle guard is public';
+        RAISE EXCEPTION 'v65 postflight lifecycle function semantic/ACL drift';
     END IF;
 END
 $postflight$;

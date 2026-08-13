@@ -10,7 +10,12 @@ import api
 import input_revisions
 import store
 from state import PhaseStatus, ProjectState
-from state_coherence import effective_input_identity, effective_input_payload
+from state_coherence import (
+    DIRECT_INPUT_FIELDS,
+    direct_input_projection,
+    effective_input_identity,
+    effective_input_payload,
+)
 
 
 def _state() -> ProjectState:
@@ -76,6 +81,27 @@ class TestInputRevisionNormalization(unittest.TestCase):
 
         payload = effective_input_payload(base)
         self.assertEqual(payload["contract_version"], "effective-decision-input.v2")
+
+    def test_direct_input_projection_is_exactly_the_w8_2_domain(self):
+        state = _state()
+        state.risk_classification = "limited_risk"
+        state.analysis_input_attestations = {"audit": {"knowledge": {"status": "used"}}}
+
+        projection = direct_input_projection(state)
+
+        self.assertEqual(tuple(projection), DIRECT_INPUT_FIELDS)
+        self.assertEqual(
+            set(projection),
+            {
+                "project_name",
+                "brief",
+                "data",
+                "output_language",
+                "report_mode",
+                "observations",
+                "timer_logs",
+            },
+        )
 
 
 class TestInputRevisionMemoryLifecycle(unittest.IsolatedAsyncioTestCase):

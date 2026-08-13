@@ -143,7 +143,7 @@ class TestIncidentPersistenceAndEvents(unittest.IsolatedAsyncioTestCase):
         api.running.clear()
         api.auto_refresh_jobs.clear()
 
-    async def test_store_save_creates_and_updates_parent_row(self):
+    async def test_store_save_creates_parent_and_rejects_ungoverned_name_update(self):
         pool = _IncidentPool()
         state = ProjectState(
             project_id="incident-parent-1",
@@ -155,10 +155,15 @@ class TestIncidentPersistenceAndEvents(unittest.IsolatedAsyncioTestCase):
         with patch("store._get_pool", new=AsyncMock(return_value=pool)):
             await store.save(state)
             state.project_name = "Updated Name"
+            with self.assertRaises(store.DirectInputAuthorityError):
+                await store.save(state)
+            state.project_name = "Initial Name"
+            state.current_phase = "audit"
             await store.save(state)
 
         self.assertIn(state.project_id, pool.conn.projects)
-        self.assertEqual(pool.conn.projects[state.project_id]["name"], "Updated Name")
+        self.assertEqual(pool.conn.projects[state.project_id]["name"], "Initial Name")
+        self.assertEqual(pool.conn.projects[state.project_id]["current_phase"], "audit")
         first_insert = next(call for call in pool.conn.calls if "INSERT INTO projects" in call[0])
         self.assertIsInstance(first_insert[1][5], datetime)
 
@@ -252,4 +257,3 @@ class TestIncidentPersistenceAndEvents(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
