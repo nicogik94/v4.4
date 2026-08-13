@@ -637,6 +637,101 @@ def test_stale_ordinary_save_cannot_undo_applied_revision(conn, schema):
     assert generation_count == 1
 
 
+def test_rejected_cached_in_place_mutation_refreshes_durable_authority(conn, schema):
+    async def exercise():
+        pool = await _pool(schema)
+        try:
+            store._mem.clear()
+            with patch("store._get_pool", new=AsyncMock(return_value=pool)):
+                state_a, _ = await _seed_completed(pool)
+                proposal = await input_revisions.propose_revision(
+                    state_a.project_id,
+                    {"brief": "Authoritative cached state B"},
+                    rationale="Governed A to B cache-authority proof",
+                    source_kind="test",
+                )
+                application = await input_revisions.apply_revision(
+                    state_a.project_id,
+                    proposal.revision_id,
+                    applied_by="operator",
+                    transform=api._apply_direct_input_revision,
+                )
+
+                loaded = await store.load(state_a.project_id)
+                assert loaded is store._mem[state_a.project_id]
+                assert loaded is application.state
+                assert loaded.brief == "Authoritative cached state B"
+
+                async with pool.acquire() as db:
+                    durable_before = await store.load_conn(db, state_a.project_id)
+                    revision_before = dict(
+                        await db.fetchrow(
+                            "SELECT * FROM input_revisions WHERE id=$1::uuid",
+                            proposal.revision_id,
+                        )
+                    )
+                    lineage_before = dict(
+                        await db.fetchrow(
+                            "SELECT * FROM decision_input_snapshots WHERE id=$1::uuid",
+                            application.revision.resulting_snapshot_id,
+                        )
+                    )
+
+                loaded.brief = "Unauthorized cached state C"
+                assert store._mem[state_a.project_id].brief == "Unauthorized cached state C"
+                with pytest.raises(store.DirectInputAuthorityError):
+                    await store.save(loaded)
+
+                async with pool.acquire() as db:
+                    durable_after = await store.load_conn(db, state_a.project_id)
+                    revision_after = dict(
+                        await db.fetchrow(
+                            "SELECT * FROM input_revisions WHERE id=$1::uuid",
+                            proposal.revision_id,
+                        )
+                    )
+                    lineage_after = dict(
+                        await db.fetchrow(
+                            "SELECT * FROM decision_input_snapshots WHERE id=$1::uuid",
+                            application.revision.resulting_snapshot_id,
+                        )
+                    )
+
+                reread = await store.load(state_a.project_id)
+                return (
+                    durable_before,
+                    durable_after,
+                    revision_before,
+                    revision_after,
+                    lineage_before,
+                    lineage_after,
+                    reread,
+                )
+        finally:
+            store._mem.clear()
+            await pool.close()
+
+    (
+        durable_before,
+        durable_after,
+        revision_before,
+        revision_after,
+        lineage_before,
+        lineage_after,
+        reread,
+    ) = _run(exercise())
+    assert durable_before is not None and durable_after is not None
+    assert durable_before.brief == "Authoritative cached state B"
+    assert durable_after.brief == "Authoritative cached state B"
+    assert revision_before == revision_after
+    assert revision_after["lifecycle_status"] == input_revisions.APPLIED
+    assert lineage_before == lineage_after
+    assert reread.brief == "Authoritative cached state B"
+    assert state_coherence.direct_input_projection(reread) == (
+        state_coherence.direct_input_projection(durable_after)
+    )
+
+
 def test_ordinary_non_direct_authority_saves_remain_allowed(conn, schema):
     async def exercise():
         pool = await _pool(schema)

@@ -83,9 +83,29 @@ async def save(state: ProjectState) -> None:
         _mem[state.project_id] = state
         return
     async with pool.acquire() as conn:
-        async with _transaction(conn):
-            await save_conn(conn, state)
+        try:
+            async with _transaction(conn):
+                await save_conn(conn, state)
+        except DirectInputAuthorityError:
+            await _refresh_cache_after_direct_input_rejection(conn, state.project_id)
+            raise
     _mem[state.project_id] = state
+
+
+async def _refresh_cache_after_direct_input_rejection(conn, project_id: str) -> None:
+    """Replace a possibly mutated cache alias with durable authority."""
+    _mem.pop(project_id, None)
+    try:
+        async with _transaction(conn):
+            authoritative = await load_conn(conn, project_id, for_update=True)
+            if authoritative is not None:
+                _mem[project_id] = authoritative
+    except Exception:
+        logger.exception(
+            "Project store: failed to refresh cache after direct-input rejection "
+            "for project %s",
+            project_id,
+        )
 
 
 async def save_conn(
