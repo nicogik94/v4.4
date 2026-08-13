@@ -47,6 +47,7 @@ def test_no_new_sql_migration_was_added():
         "v61_research_evidence_pack_foundation.sql",
         "v63_provider_attempt_telemetry_foundation.sql",
         "v64_decision_state_coherence_foundation.sql",
+        "v65_governed_input_revision_lifecycle.sql",
     ]
 
 

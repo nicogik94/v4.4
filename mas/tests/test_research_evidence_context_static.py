@@ -173,7 +173,8 @@ def test_attribution_check_observes_and_never_rewrites_the_report():
 def test_r3_adds_no_migration():
     """Provenance rides the state snapshot the run already persists.
 
-    v64 belongs to the later W8.1 state-coherence foundation; R3 still adds no
-    migration of its own, and v65 remains unused.
+    v64 and v65 belong to the later W8 state-coherence and governed-input
+    foundations; R3 still adds no migration of its own.
     """
-    assert not list((ROOT / "mas/sql").glob("v65_*.sql"))
+    assert not list((ROOT / "mas/sql").glob("v62_*.sql"))
+    assert (ROOT / "mas/sql/v65_governed_input_revision_lifecycle.sql").is_file()

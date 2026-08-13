@@ -131,6 +131,7 @@ from workflow_templates import (
     list_workflow_templates,
 )
 import observability
+import input_revisions
 from automation_roi_api import router as automation_roi_router
 
 logger = logging.getLogger("v4-api")
@@ -253,6 +254,17 @@ class PatchProjectInputRequest(BaseModel):
     report_mode: str | None = None
     observations: dict[str, str] | None = None
     timer_logs: list[dict] | None = None
+
+
+class ProposeInputRevisionRequest(BaseModel):
+    patch: input_revisions.DirectInputPatch
+    rationale: str
+    source_kind: str = "operator_api"
+    source_reference: str = ""
+
+
+class RejectInputRevisionRequest(BaseModel):
+    rationale: str
 
 
 class CSVImportMappingRequest(BaseModel):
@@ -1108,61 +1120,133 @@ async def patch_project_input(project_id: str, req: PatchProjectInputRequest):
     updates = req.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(400, "No input fields provided")
+    try:
+        application = await input_revisions.create_and_apply_revision(
+            project_id,
+            updates,
+            rationale="Authorized direct PATCH /input compatibility operation",
+            source_kind="direct_patch_compatibility",
+            source_reference=f"PATCH /projects/{project_id}/input",
+            proposed_by="operator",
+            applied_by="operator",
+            transform=_apply_direct_input_revision,
+            state=state,
+            allow_noop=True,
+            expected_base_snapshot_id=state_coherence.effective_input_identity(
+                state
+            ).snapshot_id,
+        )
+    except input_revisions.InputRevisionError as exc:
+        _raise_input_revision_http(exc)
 
-    changed_keys: list[str] = []
-    changed_field_paths: list[str] = []
-    for field, value in updates.items():
-        if field == "output_language":
-            try:
-                value = normalize_output_language(value)
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-        elif field == "report_mode":
-            try:
-                value = normalize_report_mode(value)
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-        if getattr(state, field) != value:
-            setattr(state, field, value)
-            changed_keys.append(field)
-            changed_field_paths.append(f"input.{field}")
-
-    if not changed_keys:
+    if application is None:
+        current = await store.load(project_id) or state
         return {
             "status": "unchanged",
             "project_id": project_id,
             "section": "input",
             "changed_fields": [],
             "invalidated_phases": [],
-            "next_phase": state.current_phase,
+            "next_phase": current.current_phase,
+            "revision_id": "",
         }
-
-    invalidated: list[str] = []
-    sequence = get_workflow_phase_sequence(getattr(state, "project_type", "strategic_audit"))
-    if any(key in ("brief", "data") for key in changed_keys):
-        restart_phase = "classify" if "classify" in sequence else sequence[0]
-        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
-        state.current_phase = invalidated[0] if invalidated else restart_phase
-    elif any(key in ("observations", "timer_logs") for key in changed_keys):
-        restart_phase = "monitor" if "monitor" in sequence else sequence[0]
-        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
-        state.current_phase = invalidated[0] if invalidated else restart_phase
-    elif any(key in ("output_language", "report_mode") for key in changed_keys):
-        if _mark_report_configuration_stale(state):
-            invalidated = ["report"]
-            state.current_phase = "report"
-
-    _log_operator_edit(state, "input", changed_field_paths, invalidated)
-    ensure_decision_objects(state, trigger="api.patch_input")
-    await store.save(state)
+    effects = application.effects
     return {
         "status": "updated",
         "project_id": project_id,
         "section": "input",
-        "changed_fields": changed_field_paths,
-        "invalidated_phases": invalidated,
-        "next_phase": state.current_phase,
+        "changed_fields": effects.changed_fields,
+        "invalidated_phases": effects.invalidated_phases,
+        "next_phase": effects.next_phase,
+        "revision_id": application.revision.revision_id,
+        "expected_base_snapshot_id": application.revision.expected_base_snapshot_id,
+        "resulting_snapshot_id": application.revision.resulting_snapshot_id,
     }
+
+
+@app.post(
+    "/projects/{project_id}/input-revisions",
+    dependencies=[Depends(require_operator_auth)],
+)
+async def propose_input_revision(project_id: str, req: ProposeInputRevisionRequest):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    try:
+        return await input_revisions.propose_revision(
+            project_id,
+            req.patch.model_dump(exclude_unset=True),
+            rationale=req.rationale,
+            source_kind=req.source_kind,
+            source_reference=req.source_reference,
+            proposed_by="operator",
+            state=state,
+        )
+    except input_revisions.InputRevisionError as exc:
+        _raise_input_revision_http(exc)
+
+
+@app.get("/projects/{project_id}/input-revisions")
+async def list_input_revisions(project_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    try:
+        return await input_revisions.list_revisions(project_id, state=state)
+    except input_revisions.InputRevisionError as exc:
+        _raise_input_revision_http(exc)
+
+
+@app.get("/projects/{project_id}/input-revisions/{revision_id}")
+async def get_input_revision(project_id: str, revision_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    try:
+        return await input_revisions.get_revision(project_id, revision_id, state=state)
+    except input_revisions.InputRevisionError as exc:
+        _raise_input_revision_http(exc)
+
+
+@app.post(
+    "/projects/{project_id}/input-revisions/{revision_id}/apply",
+    dependencies=[Depends(require_operator_auth)],
+)
+async def apply_input_revision(project_id: str, revision_id: str):
+    state = await store.load(project_id)
+    if not state:
+        raise HTTPException(404, "Project not found")
+    await _ensure_project_not_running(project_id)
+    try:
+        return await input_revisions.apply_revision(
+            project_id,
+            revision_id,
+            applied_by="operator",
+            transform=_apply_direct_input_revision,
+            state=state,
+        )
+    except input_revisions.InputRevisionError as exc:
+        _raise_input_revision_http(exc)
+
+
+@app.post(
+    "/projects/{project_id}/input-revisions/{revision_id}/reject",
+    dependencies=[Depends(require_operator_auth)],
+)
+async def reject_input_revision(
+    project_id: str, revision_id: str, req: RejectInputRevisionRequest
+):
+    if not await store.load(project_id):
+        raise HTTPException(404, "Project not found")
+    try:
+        return await input_revisions.reject_revision(
+            project_id,
+            revision_id,
+            rejected_by="operator",
+            rejection_rationale=req.rationale,
+        )
+    except input_revisions.InputRevisionError as exc:
+        _raise_input_revision_http(exc)
 
 
 @app.patch("/projects/{project_id}/phase-output/{phase}", dependencies=[Depends(require_operator_auth)])
@@ -1801,6 +1885,55 @@ def _invalidate_from_phase(
         invalidated.append(phase)
     invalidated.extend(invalidate_downstream(state, phase))
     return invalidated
+
+
+def _apply_direct_input_revision(
+    state: ProjectState, updates: dict[str, Any], actor: str
+) -> input_revisions.RevisionEffects:
+    """Reuse the exact historical PATCH /input mutation and invalidation rules."""
+    changed_keys = list(updates)
+    changed_field_paths = [f"input.{field}" for field in changed_keys]
+    for field, value in updates.items():
+        setattr(state, field, value)
+
+    invalidated: list[str] = []
+    sequence = get_workflow_phase_sequence(
+        getattr(state, "project_type", "strategic_audit")
+    )
+    if any(key in ("brief", "data") for key in changed_keys):
+        restart_phase = "classify" if "classify" in sequence else sequence[0]
+        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
+        state.current_phase = invalidated[0] if invalidated else restart_phase
+    elif any(key in ("observations", "timer_logs") for key in changed_keys):
+        restart_phase = "monitor" if "monitor" in sequence else sequence[0]
+        invalidated = _invalidate_from_phase(state, restart_phase, include_self=True)
+        state.current_phase = invalidated[0] if invalidated else restart_phase
+    elif any(key in ("output_language", "report_mode") for key in changed_keys):
+        if _mark_report_configuration_stale(state):
+            invalidated = ["report"]
+            state.current_phase = "report"
+
+    _log_operator_edit(state, "input", changed_field_paths, invalidated)
+    if state.policy_audit_log:
+        state.policy_audit_log[-1].setdefault("details", {})["edited_by"] = actor
+    ensure_decision_objects(state, trigger="api.patch_input_revision")
+    return input_revisions.RevisionEffects(
+        changed_fields=changed_field_paths,
+        invalidated_phases=invalidated,
+        next_phase=state.current_phase,
+    )
+
+
+def _raise_input_revision_http(exc: input_revisions.InputRevisionError) -> None:
+    if isinstance(exc, input_revisions.InputRevisionNotFound):
+        raise HTTPException(404, str(exc)) from exc
+    if isinstance(exc, input_revisions.InputRevisionSchemaRequired):
+        raise HTTPException(503, str(exc)) from exc
+    if isinstance(exc, input_revisions.InputRevisionConflict):
+        raise HTTPException(409, str(exc)) from exc
+    if isinstance(exc, input_revisions.InputRevisionValidationError):
+        raise HTTPException(400, str(exc)) from exc
+    raise HTTPException(500, "Input revision operation failed") from exc
 
 
 def _field_paths_for_payload(section: str, payload: Any) -> list[str]:

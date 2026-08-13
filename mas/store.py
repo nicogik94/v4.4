@@ -64,33 +64,73 @@ async def save(state: ProjectState) -> None:
         return
     async with pool.acquire() as conn:
         async with _transaction(conn):
-            # Ensure the FK-parent row in projects exists so that outcomes,
-            # decision_events, approvals, and policy_decisions INSERTs succeed.
-            await conn.execute("""
-                INSERT INTO projects (id, name, brief, data, current_phase, status, created_at, updated_at)
-                VALUES ($1::uuid, $2, $3, $4, $5, 'active', $6::timestamptz, NOW())
-                ON CONFLICT (id) DO UPDATE
-                SET name          = EXCLUDED.name,
-                    brief         = EXCLUDED.brief,
-                    current_phase = EXCLUDED.current_phase,
-                    updated_at    = NOW()
-            """, state.project_id, state.project_name, state.brief,
-                 state.data, state.current_phase,
-                 state.created_at)
-            coherence_ready = await schema_available_conn(conn)
-            if DATABASE_URL and not coherence_ready:
-                raise RuntimeError("v64 decision-state coherence migration is required")
-            if coherence_ready:
-                await bind_effective_input(conn, state)
-            payload = state.model_dump(mode="json")
-            await conn.execute("""
-                INSERT INTO state_snapshots (project_id, state_json, version, updated_at)
-                VALUES ($1::uuid, $2::jsonb, 1, NOW())
-                ON CONFLICT (project_id) DO UPDATE
-                SET state_json = EXCLUDED.state_json,
-                    version = state_snapshots.version + 1,
-                    updated_at = NOW()
-            """, state.project_id, json.dumps(payload))
+            await save_conn(conn, state)
+    _mem[state.project_id] = state
+
+
+async def save_conn(
+    conn,
+    state: ProjectState,
+    *,
+    predecessor_snapshot_id: str | None = None,
+    change_cause_id: str | None = None,
+) -> None:
+    """Persist state inside a caller-owned transaction.
+
+    Callers own commit/rollback and must update the process cache only after a
+    successful commit.  This is the composable durability boundary used by
+    governed input revision application.
+    """
+    await conn.execute("""
+        INSERT INTO projects (id, name, brief, data, current_phase, status, created_at, updated_at)
+        VALUES ($1::uuid, $2, $3, $4, $5, 'active', $6::timestamptz, NOW())
+        ON CONFLICT (id) DO UPDATE
+        SET name          = EXCLUDED.name,
+            brief         = EXCLUDED.brief,
+            data          = EXCLUDED.data,
+            current_phase = EXCLUDED.current_phase,
+            updated_at    = NOW()
+    """, state.project_id, state.project_name, state.brief,
+         state.data, state.current_phase, state.created_at)
+    coherence_ready = await schema_available_conn(conn)
+    if DATABASE_URL and not coherence_ready:
+        raise RuntimeError("v64 decision-state coherence migration is required")
+    if coherence_ready:
+        await bind_effective_input(
+            conn,
+            state,
+            predecessor_snapshot_id=predecessor_snapshot_id,
+            change_cause_id=change_cause_id,
+        )
+    payload = state.model_dump(mode="json")
+    await conn.execute("""
+        INSERT INTO state_snapshots (project_id, state_json, version, updated_at)
+        VALUES ($1::uuid, $2::jsonb, 1, NOW())
+        ON CONFLICT (project_id) DO UPDATE
+        SET state_json = EXCLUDED.state_json,
+            version = state_snapshots.version + 1,
+            updated_at = NOW()
+    """, state.project_id, json.dumps(payload))
+
+
+async def load_conn(conn, project_id: str, *, for_update: bool = False) -> Optional[ProjectState]:
+    suffix = " FOR UPDATE" if for_update else ""
+    row = await conn.fetchrow(
+        "SELECT state_json FROM state_snapshots WHERE project_id = $1::uuid" + suffix,
+        project_id,
+    )
+    if not row:
+        return None
+    raw = row["state_json"]
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    state = ProjectState.model_validate(raw)
+    ensure_decision_objects(state, trigger="store.load_conn")
+    return state
+
+
+def cache_state(state: ProjectState) -> None:
+    """Publish a committed state to the process-local read-through cache."""
     _mem[state.project_id] = state
 
 

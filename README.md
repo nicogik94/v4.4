@@ -187,6 +187,7 @@ docker-compose up -d postgres
 psql $DATABASE_URL -f sql/init.sql
 psql $DATABASE_URL -f sql/outcomes.sql
 psql $DATABASE_URL -f sql/v64_decision_state_coherence_foundation.sql
+psql $DATABASE_URL -f sql/v65_governed_input_revision_lifecycle.sql
 ```
 
 ### 4. Run the API

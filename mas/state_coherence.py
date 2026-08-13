@@ -21,7 +21,8 @@ from workflow_templates import get_workflow_phase_sequence
 
 
 STATE_COHERENCE_SCHEMA_VERSION = "decision-state.v1"
-EFFECTIVE_INPUT_CONTRACT_VERSION = "effective-decision-input.v1"
+LEGACY_EFFECTIVE_INPUT_CONTRACT_VERSION = "effective-decision-input.v1"
+EFFECTIVE_INPUT_CONTRACT_VERSION = "effective-decision-input.v2"
 ANALYSIS_STATE_CONTRACT_VERSION = "analysis-generation.v1"
 LEGACY_BASELINE_WORKFLOW_FINGERPRINT = "legacy-baseline.v1"
 _IDENTITY_NAMESPACE = uuid.UUID("c956f954-d100-4d4f-a2a0-afd687c4dfef")
@@ -94,6 +95,7 @@ def effective_input_payload(state: ProjectState) -> dict[str, Any]:
             "decision_id": primary_decision_id(state),
         },
         "question": {
+            "project_name": state.project_name,
             "brief": state.brief,
             "operator_data": state.data,
             "project_type": state.project_type,
@@ -109,6 +111,10 @@ def effective_input_payload(state: ProjectState) -> dict[str, Any]:
             "report_mode": state.report_mode,
             "risk_classification": state.risk_classification,
             "risk_classification_rationale": state.risk_classification_rationale,
+        },
+        "operator_monitoring_input": {
+            "observations": _jsonable(state.observations),
+            "timer_logs": _jsonable(state.timer_logs),
         },
         "operator_supplied_evidence": sorted(
             (_effective_evidence(item) for item in state.imported_evidence),
@@ -144,6 +150,25 @@ def effective_input_identity(state: ProjectState) -> EffectiveInputIdentity:
         effective_input_sha256=digest,
         payload=payload,
     )
+
+
+def is_legacy_effective_input_payload(state: ProjectState, payload: Any) -> bool:
+    """Recognize the exact W8.1 projection during the v1 -> v2 transition.
+
+    W8.1 did not include ``project_name``, ``observations``, or ``timer_logs``.
+    W8.2 governs those existing direct-input fields, so a durable project may
+    need one metadata-only rebind before a proposal can pin its exact v2 base.
+    No clarification, Knowledge, or Research Evidence content is copied here.
+    """
+    if not isinstance(payload, dict):
+        return False
+    expected = effective_input_payload(state)
+    expected["contract_version"] = LEGACY_EFFECTIVE_INPUT_CONTRACT_VERSION
+    question = expected.get("question")
+    if isinstance(question, dict):
+        question.pop("project_name", None)
+    expected.pop("operator_monitoring_input", None)
+    return payload == expected
 
 
 def analysis_state_payload(state: ProjectState) -> dict[str, Any]:
@@ -391,13 +416,20 @@ async def schema_available_conn(conn: Any) -> bool:
         return False
 
 
-async def _insert_snapshot(conn: Any, snapshot: EffectiveInputIdentity) -> None:
+async def _insert_snapshot(
+    conn: Any,
+    snapshot: EffectiveInputIdentity,
+    *,
+    predecessor_snapshot_id: str | None = None,
+    change_cause_id: str | None = None,
+) -> None:
     await conn.execute(
         """
         INSERT INTO decision_input_snapshots (
             id, project_id, decision_id, effective_input_sha256,
-            effective_input_json, contract_version
-        ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6)
+            effective_input_json, contract_version,
+            predecessor_snapshot_id, change_cause_id
+        ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6, $7::uuid, $8)
         ON CONFLICT (project_id, decision_id, effective_input_sha256) DO NOTHING
         """,
         snapshot.snapshot_id,
@@ -406,10 +438,39 @@ async def _insert_snapshot(conn: Any, snapshot: EffectiveInputIdentity) -> None:
         snapshot.effective_input_sha256,
         _canonical_json(snapshot.payload),
         EFFECTIVE_INPUT_CONTRACT_VERSION,
+        predecessor_snapshot_id,
+        change_cause_id,
     )
+    if predecessor_snapshot_id is not None or change_cause_id is not None:
+        row = await conn.fetchrow(
+            """
+            SELECT id, predecessor_snapshot_id, change_cause_id
+            FROM decision_input_snapshots
+            WHERE project_id = $1::uuid AND decision_id = $2
+              AND effective_input_sha256 = $3
+            """,
+            snapshot.project_id,
+            snapshot.decision_id,
+            snapshot.effective_input_sha256,
+        )
+        if (
+            row is None
+            or _uuid_text(row["id"]) != snapshot.snapshot_id
+            or _uuid_text(row["predecessor_snapshot_id"]) != predecessor_snapshot_id
+            or row["change_cause_id"] != change_cause_id
+        ):
+            raise StateCoherenceError(
+                "effective input content already exists with different lineage"
+            )
 
 
-async def bind_effective_input(conn: Any, state: ProjectState) -> EffectiveInputIdentity:
+async def bind_effective_input(
+    conn: Any,
+    state: ProjectState,
+    *,
+    predecessor_snapshot_id: str | None = None,
+    change_cause_id: str | None = None,
+) -> EffectiveInputIdentity:
     """Persist and bind the immutable input identity inside an existing transaction."""
     snapshot = effective_input_identity(state)
     if state.effective_input_snapshot_id and state.effective_input_snapshot_id != snapshot.snapshot_id:
@@ -417,7 +478,12 @@ async def bind_effective_input(conn: Any, state: ProjectState) -> EffectiveInput
         # analysis produced from the old snapshot.
         state.analysis_generation_id = ""
     state.effective_input_snapshot_id = snapshot.snapshot_id
-    await _insert_snapshot(conn, snapshot)
+    await _insert_snapshot(
+        conn,
+        snapshot,
+        predecessor_snapshot_id=predecessor_snapshot_id,
+        change_cause_id=change_cause_id,
+    )
     return snapshot
 
 
