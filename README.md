@@ -99,7 +99,8 @@ v4.4/
 │   ├── security/                      # prompt injection defenses (v4.3)
 │   │   ├── __init__.py
 │   │   └── intake_sanitizer.py
-│   ├── requirements.txt
+│   ├── requirements.txt                # direct dependency intent
+│   ├── requirements.lock.txt           # exact Python 3.12 Linux closure
 │   ├── Dockerfile + docker-compose.yml + .env.example
 │   ├── sql/
 │   │   ├── init.sql
@@ -166,8 +167,14 @@ v4.4/
 ```bash
 cd mas
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip==25.3
+python scripts/validate_requirements_lock.py
+python -m pip install -r requirements.lock.txt
 ```
+
+Edit `requirements.txt` to change direct dependency intent, then regenerate
+`requirements.lock.txt` in a clean Python 3.12 Linux environment. The validator
+rejects a stale lock before installation.
 
 ### 2. Set credentials
 

@@ -32,7 +32,9 @@
 
 ```bash
 # 1. Clone and install
-pip install -r requirements.txt
+python -m pip install --upgrade pip==25.3
+python scripts/validate_requirements_lock.py
+python -m pip install -r requirements.lock.txt
 
 # 2. Configure
 cp .env.example .env
@@ -59,7 +61,8 @@ uvicorn api:app --reload
 ├── orchestrator.py              # LangGraph state machine + prompt builders
 ├── main.py                      # CLI entry point
 ├── api.py                       # FastAPI REST server
-├── requirements.txt
+├── requirements.txt            # Human-maintained direct dependency intent
+├── requirements.lock.txt       # Exact Python 3.12 Linux dependency closure
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example

@@ -7,9 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install the validated, exact Python dependency graph.
+COPY requirements.txt requirements.lock.txt ./
+COPY scripts/validate_requirements_lock.py scripts/validate_requirements_lock.py
+RUN python -m pip install --no-cache-dir --upgrade pip==25.3 && \
+    python scripts/validate_requirements_lock.py && \
+    python -m pip install --no-cache-dir -r requirements.lock.txt
 
 # Copy application
 COPY . .
