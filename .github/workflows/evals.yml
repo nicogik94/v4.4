@@ -89,12 +89,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: mas/requirements.lock.txt
 
       - name: Install dependencies
         working-directory: mas
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip==25.3
+          python scripts/validate_requirements_lock.py
+          python -m pip install -r requirements.lock.txt
 
       - name: Smoke test (mock mode)
         working-directory: mas
@@ -140,6 +142,8 @@ jobs:
           EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
         run: python -m evals.release_gates --validate-threshold
 
+      # Provider-only preflight: intentionally outside the full product/test
+      # environment lock and unchanged by dependency-lock stabilization.
       - name: Install Anthropic SDK
         run: python -m pip install 'anthropic>=0.40.0'
 
@@ -183,12 +187,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: mas/requirements.lock.txt
 
       - name: Install dependencies
         working-directory: mas
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip==25.3
+          python scripts/validate_requirements_lock.py
+          python -m pip install -r requirements.lock.txt
 
       - name: Verify Anthropic-primary provider posture
         working-directory: mas
@@ -252,12 +258,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: mas/requirements.lock.txt
 
       - name: Install dependencies
         working-directory: mas
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip==25.3
+          python scripts/validate_requirements_lock.py
+          python -m pip install -r requirements.lock.txt
 
       - name: Download Gate A shard reports
         uses: actions/download-artifact@v4
@@ -330,6 +338,8 @@ jobs:
           EVAL_THRESHOLD: ${{ github.event.inputs.threshold || '0.75' }}
         run: python -m evals.release_gates --validate-threshold
 
+      # Historical provider-only preflight: intentionally outside the full
+      # product/test environment lock and unchanged by this stabilization.
       - name: Install OpenAI SDK
         run: python -m pip install 'openai==2.54.0'
 
@@ -375,12 +385,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: mas/requirements.lock.txt
 
       - name: Install dependencies
         working-directory: mas
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip==25.3
+          python scripts/validate_requirements_lock.py
+          python -m pip install -r requirements.lock.txt
 
       - name: Verify OpenAI-fallback provider posture
         working-directory: mas
@@ -445,12 +457,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: mas/requirements.lock.txt
 
       - name: Install dependencies
         working-directory: mas
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip==25.3
+          python scripts/validate_requirements_lock.py
+          python -m pip install -r requirements.lock.txt
 
       - name: Download Gate B shard reports
         uses: actions/download-artifact@v4
