@@ -38,6 +38,26 @@ def conn():
 
 
 @pytest.fixture
+def default_search_path_conn():
+    database = f"w8_default_{uuid4().hex[:16]}"
+    admin = psycopg.connect(pg.require_dsn(), autocommit=True)
+    connection = None
+    try:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+        connection = psycopg.connect(pg.require_dsn(), dbname=database)
+        yield connection
+    finally:
+        if connection is not None:
+            connection.close()
+        admin.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                sql.Identifier(database)
+            )
+        )
+        admin.close()
+
+
+@pytest.fixture
 def schema(conn):
     name = f"w8_state_{uuid4().hex[:16]}"
     prior = pg._begin_autocommit(conn)
@@ -199,6 +219,41 @@ def _assert_reapply_rejects_without_repair(conn, inventory, message):
         pg._run_script(conn, V64)
     conn.rollback()
     assert inventory(conn) == drifted
+
+
+def test_default_search_path_fresh_apply_and_exact_reapply(default_search_path_conn):
+    conn = default_search_path_conn
+    default_search_path = '"$user", public'
+    assert conn.execute("SHOW search_path").fetchone()[0] == default_search_path
+    assert conn.execute("SELECT current_schema()").fetchone()[0] == "public"
+
+    prior = pg._begin_autocommit(conn)
+    pg._run_script(conn, pg.INIT_SQL)
+    pg._run_script(conn, pg.OUTCOMES_SQL)
+    pg._run_script(conn, V64)
+
+    assert conn.execute("SHOW search_path").fetchone()[0] == default_search_path
+    assert conn.execute(
+        """
+        SELECT count(*) FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relkind = 'r'
+          AND relation.relname IN (
+              'decision_input_snapshots', 'analysis_generations',
+              'current_analysis_generations')
+        """
+    ).fetchone()[0] == 3
+
+    inventory = _function_semantic_inventory(conn)
+    assert len(inventory) == 5
+    assert {tuple(row[7] or ()) for row in inventory} == {("search_path=public",)}
+    assert all("$user" not in setting for row in inventory for setting in row[7])
+
+    pg._run_script(conn, V64)
+    assert conn.execute("SHOW search_path").fetchone()[0] == default_search_path
+    assert _function_semantic_inventory(conn) == inventory
+    pg._restore_autocommit(conn, prior)
 
 
 def test_clean_apply_and_exact_reapply(conn, schema):
