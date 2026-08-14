@@ -509,6 +509,14 @@ BEGIN
 END;
 $$;
 
+-- Resolve the target schema while the caller's original search path is still
+-- active, then pin this migration transaction to that schema.  The protected
+-- functions below capture their current search path, so this transaction-local
+-- setting makes their stored configuration match the single-schema manifest.
+SELECT pg_catalog.set_config(
+    'search_path', pg_catalog.current_schema(), true
+);
+
 CREATE TABLE IF NOT EXISTS decision_input_snapshots (
     id UUID PRIMARY KEY,
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
