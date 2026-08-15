@@ -46,6 +46,16 @@ existing counters, and the two are kept apart on purpose:
 An invalid observation is still operationally red — the objective is truthful
 red, not cosmetic green.
 
+Two further ways a run could claim more than it measured are closed the same
+way.  A ``--resume`` collection scores pipeline outputs that were produced at
+*submit* time, so the submit-time commit is persisted in the batch input cache
+and the resume binds to it: a cache carrying no commit, an unreadable one, or
+one that disagrees with the resuming checkout fails closed rather than
+relabelling outputs from commit A with the SHA of commit B.  And ``--mock``
+fabricates its judge scores, so it reports ``mode: mock`` and can never be a
+valid observation; its synthetic smoke verdict is kept in its own field, well
+away from the measured-quality counters.
+
 Nothing in this module is imported by a product path, and nothing here changes
 what the judge is asked, which model answers, which cases run, or where the
 pass threshold sits.
@@ -88,20 +98,37 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("evals_batch")
 
 NIGHTLY_SCHEMA_VERSION = "nightly_batch_observation.v1"
+# The submit-time cache `--resume` reads back. Versioned because the resume path
+# now depends on a field the pre-wave layout (a bare list) does not carry.
+BATCH_INPUTS_SCHEMA_VERSION = "nightly_batch_inputs.v1"
+
+# ═══ Execution modes ═══
+#
+# What actually produced this run's judge scores. Recorded explicitly in the
+# artifact rather than inferred from judge prose, so `mode` is the machine-
+# readable discriminator between a real observation and a synthetic smoke.
+
+EXECUTION_MODE_BATCH = "batch"
+EXECUTION_MODE_MOCK = "mock"
+
+EXECUTION_MODES = (EXECUTION_MODE_BATCH, EXECUTION_MODE_MOCK)
 
 # ═══ Per-case judge observation vocabulary ═══
 #
 # A judge observation is either a real measurement or it is not.  `score` is
-# populated *only* under JUDGE_VALID, so no consumer can mistake "the judge did
-# not answer" for "the judge answered zero".
+# populated *only* under JUDGE_VALID and JUDGE_SYNTHETIC, and only the former is
+# `valid`, so no consumer can mistake "the judge did not answer" for "the judge
+# answered zero" — nor a fabricated score for a measured one.
 
 JUDGE_VALID = "valid_judge_result"
+JUDGE_SYNTHETIC = "synthetic_judge_result"
 JUDGE_PROVIDER_OR_BATCH_FAILURE = "provider_or_batch_failure"
 JUDGE_MALFORMED = "malformed_judge_response"
 JUDGE_MISSING = "missing_judge_response"
 
 JUDGE_STATUSES = (
     JUDGE_VALID,
+    JUDGE_SYNTHETIC,
     JUDGE_PROVIDER_OR_BATCH_FAILURE,
     JUDGE_MALFORMED,
     JUDGE_MISSING,
@@ -126,6 +153,8 @@ PIPELINE_STATUSES = (
 # consulted in a fixed order (see `classify_result`).
 
 VALIDITY_SOURCE_SHA_MISSING = "source_sha_missing"
+VALIDITY_SOURCE_SHA_MALFORMED = "source_sha_malformed"
+VALIDITY_SOURCE_SHA_MISMATCH = "source_sha_mismatch"
 VALIDITY_HARNESS_FAILURE = "harness_failure"
 VALIDITY_PIPELINE_HARNESS_FAILURE = "pipeline_harness_failure"
 
@@ -140,11 +169,15 @@ VALIDITY_DUPLICATE_CASE_IDS = "duplicate_case_ids"
 VALIDITY_JUDGE_RESULT_MISSING = "judge_result_missing"
 VALIDITY_JUDGE_RESULT_MALFORMED = "judge_result_malformed"
 VALIDITY_DENOMINATOR_MISMATCH = "denominator_mismatch"
+VALIDITY_SYNTHETIC_JUDGE_SCORES = "synthetic_judge_scores"
 
-# An observation that cannot be bound to a commit, or whose harness itself
-# broke, describes nothing — not even a provider outage.  It is reported first.
+# An observation that cannot be bound to a commit — or that is bound to the
+# *wrong* commit — or whose harness itself broke, describes nothing about the
+# product, not even a provider outage.  It is reported first.
 ATTRIBUTION_AND_HARNESS_CODES = frozenset({
     VALIDITY_SOURCE_SHA_MISSING,
+    VALIDITY_SOURCE_SHA_MALFORMED,
+    VALIDITY_SOURCE_SHA_MISMATCH,
     VALIDITY_HARNESS_FAILURE,
     VALIDITY_PIPELINE_HARNESS_FAILURE,
 })
@@ -167,6 +200,9 @@ STRUCTURAL_CODES = frozenset({
     VALIDITY_JUDGE_RESULT_MISSING,
     VALIDITY_JUDGE_RESULT_MALFORMED,
     VALIDITY_DENOMINATOR_MISMATCH,
+    # A synthetic run is structurally ineligible as release evidence: nothing is
+    # broken, there is simply nothing measured to report.
+    VALIDITY_SYNTHETIC_JUDGE_SCORES,
 })
 
 VALIDITY_CODES = ATTRIBUTION_AND_HARNESS_CODES | PROVIDER_CODES | STRUCTURAL_CODES
@@ -198,6 +234,22 @@ _CATEGORY_RE = re.compile(r"\bcategory=([a-z_]+)")
 
 # ═══════════════════════ source attribution ═══════════════════════
 
+SOURCE_SHA_ORIGIN_RESUME_CACHE = "resume_cache"
+
+
+def normalize_exact_sha(value: object) -> str:
+    """An exact lowercase commit SHA, or `""` for anything else.
+
+    Deliberately strict and shared by every attribution path: a ref name, a
+    short SHA, a list, `None` and `"HEAD"` all normalize to `""` and therefore
+    all fail the observation closed rather than half-identifying it.
+    """
+
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().lower()
+    return candidate if _SHA_RE.fullmatch(candidate) else ""
+
 
 def resolve_source_sha(environ: dict | None = None, repo_root: Path | None = None) -> tuple[str, str]:
     """The exact commit this observation describes, and where it came from.
@@ -210,8 +262,8 @@ def resolve_source_sha(environ: dict | None = None, repo_root: Path | None = Non
     """
 
     source = os.environ if environ is None else environ
-    candidate = str(source.get("GITHUB_SHA", "") or "").strip().lower()
-    if _SHA_RE.fullmatch(candidate):
+    candidate = normalize_exact_sha(source.get("GITHUB_SHA", ""))
+    if candidate:
         return candidate, "github_sha"
 
     root = Path(__file__).resolve().parent.parent if repo_root is None else Path(repo_root)
@@ -225,10 +277,95 @@ def resolve_source_sha(environ: dict | None = None, repo_root: Path | None = Non
         )
     except Exception:  # noqa: BLE001 - attribution never breaks the harness
         return "", "unavailable"
-    resolved = (completed.stdout or "").strip().lower()
-    if completed.returncode == 0 and _SHA_RE.fullmatch(resolved):
+    resolved = normalize_exact_sha(completed.stdout)
+    if completed.returncode == 0 and resolved:
         return resolved, "git_rev_parse"
     return "", "unavailable"
+
+
+def build_batch_inputs(
+    records: list["PipelineRecord"], *, source_sha: str, source_sha_origin: str
+) -> dict:
+    """The submit-time cache `--resume` will score later.
+
+    The commit is stored *with* the outputs on purpose. These outputs were
+    produced by the pipeline at this exact commit; a later resume runs from a
+    checkout that may be anything at all, and without this field it had no way
+    to know that and simply stamped its own SHA on someone else's results.
+    """
+
+    return {
+        "schema_version": BATCH_INPUTS_SCHEMA_VERSION,
+        "source_sha": source_sha,
+        "source_sha_origin": source_sha_origin,
+        "cases": [{"case": record.case, "output": record.output} for record in records],
+    }
+
+
+def read_cached_cases(payload: object) -> list[dict]:
+    """The `{case, output}` entries of a submit-time cache, in either layout.
+
+    Pre-wave caches are a bare list. They are still *readable* — the operator
+    gets full per-case diagnostics — but they carry no commit, so
+    `resolve_resume_source_sha` fails them closed regardless.
+    """
+
+    entries = payload.get("cases") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return []
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and "case" in entry and "output" in entry
+    ]
+
+
+def resolve_resume_source_sha(
+    payload: object, checkout_sha: object
+) -> tuple[str, str, dict | None]:
+    """Bind a resumed collection to the commit its outputs were produced at.
+
+    Returns `(source_sha, origin, validity_error_or_None)`. The resuming
+    checkout's SHA is never substituted for a missing or disagreeing cached one:
+    the whole point is that the artifact must not claim commit B for outputs
+    created at commit A. Every failure path here lands in
+    `ATTRIBUTION_AND_HARNESS_CODES`, so a resume that cannot be attributed can
+    reach neither `pass` nor `quality_failure`.
+
+    Diagnostics stay closed-vocabulary. The only variable text ever emitted is a
+    pair of already-validated hex SHAs, so no cache content, provider prose or
+    credential can travel through this field.
+    """
+
+    raw = payload.get("source_sha") if isinstance(payload, dict) else None
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return "", "unavailable", _validity_error(
+            VALIDITY_SOURCE_SHA_MISSING, detail="resume_cache_without_source_sha"
+        )
+
+    cached = normalize_exact_sha(raw)
+    if not cached:
+        # Present but not an exact commit. The value itself is never echoed: it
+        # is untrusted on-disk content by the time we are reading it back.
+        return "", "unavailable", _validity_error(
+            VALIDITY_SOURCE_SHA_MALFORMED, detail="resume_cache_source_sha_malformed"
+        )
+
+    current = normalize_exact_sha(checkout_sha)
+    if not current:
+        # Nothing to compare against, so the binding cannot be proven. The
+        # cached commit is still the truthful attribution for these outputs.
+        return cached, SOURCE_SHA_ORIGIN_RESUME_CACHE, _validity_error(
+            VALIDITY_SOURCE_SHA_MISSING, detail="resume_checkout_sha_unavailable"
+        )
+
+    if cached != current:
+        return cached, SOURCE_SHA_ORIGIN_RESUME_CACHE, _validity_error(
+            VALIDITY_SOURCE_SHA_MISMATCH,
+            detail=f"submitted_at={cached} resumed_at={current}",
+        )
+
+    return cached, SOURCE_SHA_ORIGIN_RESUME_CACHE, None
 
 
 # ═══════════════════════ failure classification ═══════════════════════
@@ -404,6 +541,12 @@ class NightlyObservation:
     total: int
     pass_rate: float
     threshold: float
+    execution_mode: str = EXECUTION_MODE_BATCH
+    # The synthetic harness's own verdict, and *only* that: did `--mock` run
+    # every case through the plumbing and would its fabricated scores have
+    # passed? `None` outside mock mode. Kept in its own field precisely so it
+    # can never be confused with `ok`, which answers a different question.
+    synthetic_smoke_ok: bool | None = None
 
 
 def _validity_error(code: str, *, case_ids=(), detail: str = "") -> dict:
@@ -440,15 +583,29 @@ def build_observation(
     source_sha: str,
     source_sha_origin: str,
     harness_errors: list[dict] | None = None,
+    execution_mode: str = EXECUTION_MODE_BATCH,
 ) -> NightlyObservation:
     """Assemble the nightly observation and decide whether it may count.
 
     The denominator is the *expected* universe, always. A case that never
     reached a measurement leaves the denominator alone and invalidates the
     observation instead of shrinking it.
+
+    Only a genuinely measured judge score reaches the numerator, so a synthetic
+    run contributes nothing to `passed`/`pass_rate` no matter how its fabricated
+    scores would have scored.
     """
 
     validity_errors: list[dict] = list(harness_errors or [])
+
+    # An unrecognized mode is a harness bug, not a licence to guess. It is
+    # reported as the most conservative label *and* invalidates the run.
+    mode = execution_mode
+    if mode not in EXECUTION_MODES:
+        mode = EXECUTION_MODE_BATCH
+        validity_errors.append(
+            _validity_error(VALIDITY_HARNESS_FAILURE, detail="unknown_execution_mode")
+        )
 
     if not source_sha:
         validity_errors.append(
@@ -505,6 +662,7 @@ def build_observation(
     judge_provider: list[str] = []
     judge_malformed: list[str] = []
     judge_missing: list[str] = []
+    judge_synthetic: list[str] = []
 
     cases: list[dict] = []
     seen: set[str] = set()
@@ -528,6 +686,8 @@ def build_observation(
                 judge_malformed.append(case_id)
             elif judge.status == JUDGE_MISSING:
                 judge_missing.append(case_id)
+            elif judge.status == JUDGE_SYNTHETIC:
+                judge_synthetic.append(case_id)
 
         # Quality is measured only when the case completed the pipeline *and*
         # a real judge score came back for it. Anything else keeps `judge_overall`
@@ -539,6 +699,15 @@ def build_observation(
             result.judge_rationale = judge.rationale
             result.passed = pass_fail(result)
 
+        # The synthetic smoke verdict is scored on a throwaway copy so a
+        # fabricated score can never touch `result`, and it is reported under
+        # its own key so it can never be read as a measured pass.
+        synthetic_passed = None
+        if record.complete and judge.status == JUDGE_SYNTHETIC:
+            probe = score_deterministic(record.case, record.output)
+            probe.judge_overall = judge.score or 0
+            synthetic_passed = pass_fail(probe)
+
         serialized = asdict(result)
         serialized["judge_overall"] = judge.score if measured else None
         serialized["judge_rationale"] = judge.rationale if measured else ""
@@ -548,7 +717,11 @@ def build_observation(
         serialized["pipeline_detail"] = record.category
         serialized["judge_status"] = judge.status
         serialized["judge_detail"] = judge.detail
-        serialized["judge_score"] = judge.score if measured else None
+        # The raw observed score, whatever produced it. It is `None` for every
+        # status that never yielded one, and `judge_status` — never this field —
+        # says whether it was measured or fabricated.
+        serialized["judge_score"] = judge.score
+        serialized["synthetic_passed"] = synthetic_passed
         cases.append(serialized)
 
     if provider_pipeline:
@@ -572,6 +745,19 @@ def build_observation(
     if judge_missing:
         validity_errors.append(
             _validity_error(VALIDITY_JUDGE_RESULT_MISSING, case_ids=sorted(judge_missing))
+        )
+
+    # Asserted from two independent directions: the declared mode, and the judge
+    # statuses actually present. Either one alone disqualifies the run, so a
+    # synthetic score smuggled into a run labelled `batch` still fails closed,
+    # and a mock run that produced no judge results at all is still not evidence.
+    if mode == EXECUTION_MODE_MOCK or judge_synthetic:
+        validity_errors.append(
+            _validity_error(
+                VALIDITY_SYNTHETIC_JUDGE_SCORES,
+                case_ids=sorted(judge_synthetic),
+                detail="judge scores were fabricated by the harness, not measured",
+            )
         )
 
     measured_ids = {entry["case_id"] for entry in cases if entry["quality_measured"]}
@@ -600,6 +786,18 @@ def build_observation(
     valid_observation = not validity_errors
     result_class = classify_result(validity_errors, pass_rate=pass_rate, threshold=threshold)
 
+    # "Did the synthetic harness work?" — computed only in mock mode, from the
+    # synthetic column alone, and never folded into the evidence fields above.
+    synthetic_smoke_ok = None
+    if mode == EXECUTION_MODE_MOCK:
+        smoke_codes = {str(entry.get("code", "")) for entry in validity_errors}
+        synthetic_smoke_ok = (
+            smoke_codes == {VALIDITY_SYNTHETIC_JUDGE_SCORES}
+            and bool(expected)
+            and all(entry["synthetic_passed"] is True for entry in cases)
+            and {entry["case_id"] for entry in cases} == expected_set
+        )
+
     return NightlyObservation(
         source_sha=source_sha,
         source_sha_origin=source_sha_origin,
@@ -615,6 +813,8 @@ def build_observation(
         total=total,
         pass_rate=pass_rate,
         threshold=threshold,
+        execution_mode=mode,
+        synthetic_smoke_ok=synthetic_smoke_ok,
     )
 
 
@@ -739,7 +939,9 @@ def write_report(observation: NightlyObservation, out_dir: Path, batch_id: str |
     summary = {
         "schema_version": NIGHTLY_SCHEMA_VERSION,
         "timestamp": datetime.now().isoformat(),
-        "mode": "batch",
+        # What produced the judge scores. `batch` is a real provider batch;
+        # `mock` is synthetic and can never be a valid observation.
+        "mode": observation.execution_mode,
         "batch_id": batch_id,
         # ── attribution ──
         "source_sha": observation.source_sha,
@@ -758,8 +960,12 @@ def write_report(observation: NightlyObservation, out_dir: Path, batch_id: str |
         "pass_rate": observation.pass_rate,
         "threshold": observation.threshold,
         # `ok` now means "a valid observation that measured a pass", so it can
-        # never be true for a run that did not measure quality at all.
+        # never be true for a run that did not measure quality at all — a mock
+        # run included, however well its fabricated scores did.
         "ok": observation.valid_observation and observation.result_class == release_gates.RESULT_PASS,
+        # Operational success of the synthetic harness, `None` outside mock mode.
+        # Deliberately not part of the evidence contract.
+        "synthetic_smoke_ok": observation.synthetic_smoke_ok,
         "cases": observation.cases,
     }
     (out_dir / "summary_batch.json").write_text(json.dumps(summary, indent=2, default=str))
@@ -784,13 +990,20 @@ def _print_outcome(summary: dict) -> None:
         f"\n=== BATCH RESULT: {summary['passed']}/{summary['total']} "
         f"({summary['pass_rate']:.1%}) ==="
     )
+    print(f"mode:              {summary['mode']}")
     print(f"source_sha:        {summary['source_sha'] or '<unavailable>'}")
     print(f"valid_observation: {summary['valid_observation']}")
     print(f"result_class:      {summary['result_class']}")
     for entry in summary["validity_errors"]:
         cases = ", ".join(entry["case_ids"])
         print(f"VALIDITY ERROR: {entry['code']}" + (f" [{cases}]" if cases else ""))
-    if not summary["valid_observation"]:
+    if summary["mode"] == EXECUTION_MODE_MOCK:
+        print(f"synthetic_smoke_ok: {summary['synthetic_smoke_ok']}")
+        print(
+            "MOCK RUN: judge scores are fabricated. This artifact is a smoke "
+            "check and is NOT release-quality evidence."
+        )
+    elif not summary["valid_observation"]:
         print(
             "INVALID OBSERVATION: this run did not measure product quality and is "
             "NOT evidence of a quality regression."
@@ -810,7 +1023,9 @@ async def main():
 
     out_dir = Path(args.report)
     golden_case_ids = [case["id"] for case in load_cases()]
-    source_sha, source_sha_origin = resolve_source_sha()
+    checkout_sha, checkout_sha_origin = resolve_source_sha()
+    source_sha, source_sha_origin = checkout_sha, checkout_sha_origin
+    execution_mode = EXECUTION_MODE_MOCK if args.mock else EXECUTION_MODE_BATCH
     harness_errors: list[dict] = []
     judge_observations: dict[str, JudgeObservation] = {}
     batch_id = args.resume
@@ -823,16 +1038,39 @@ async def main():
         if not cache_file.exists():
             logger.error(f"No cached inputs for batch {args.resume} at {cache_file}")
             sys.exit(2)
-        cached = json.loads(cache_file.read_text())
+        try:
+            cached = json.loads(cache_file.read_text())
+        except Exception:  # noqa: BLE001 - an unreadable cache is a harness failure
+            cached = None
+            harness_errors.append(
+                _validity_error(VALIDITY_HARNESS_FAILURE, detail="resume_cache_unreadable")
+            )
         records = [
-            pipeline_record_for_output(entry["case"], entry["output"]) for entry in cached
+            pipeline_record_for_output(entry["case"], entry["output"])
+            for entry in read_cached_cases(cached)
         ]
         expected_case_ids = [record.case_id for record in records]
-        try:
-            await wait_for_batch(args.resume, args.poll_interval)
-            judge_observations = await collect_batch_results(args.resume)
-        except Exception as exc:  # noqa: BLE001 - classified, never quality-scored
-            harness_errors.append(_batch_stage_error("resume", exc, expected_case_ids))
+
+        # These outputs were produced at the *submitting* checkout, so that is
+        # the commit this observation describes — never today's. A cache that
+        # cannot prove the two are the same commit fails closed here, before a
+        # single provider call is made: there is nothing to be learned by
+        # waiting up to 24h for results that can never be valid evidence.
+        source_sha, source_sha_origin, attribution_error = resolve_resume_source_sha(
+            cached, checkout_sha
+        )
+        if attribution_error is not None:
+            logger.error(
+                "Resume attribution failed (%s); not collecting batch results",
+                attribution_error["code"],
+            )
+            harness_errors.append(attribution_error)
+        else:
+            try:
+                await wait_for_batch(args.resume, args.poll_interval)
+                judge_observations = await collect_batch_results(args.resume)
+            except Exception as exc:  # noqa: BLE001 - classified, never quality-scored
+                harness_errors.append(_batch_stage_error("resume", exc, expected_case_ids))
     else:
         subset = set(args.cases.split(",")) if args.cases else None
         cases = load_cases(subset)
@@ -842,9 +1080,12 @@ async def main():
         records = await run_pipeline_for_all_cases(cases, args.mock)
 
         if args.mock:
+            # Fabricated, and typed as such. `JUDGE_SYNTHETIC` is what makes the
+            # whole run ineligible as evidence; the `mock` rationale is prose and
+            # is never what any consumer decides on.
             judge_observations = {
                 record.case_id: JudgeObservation(
-                    JUDGE_VALID,
+                    JUDGE_SYNTHETIC,
                     score=(
                         70
                         if (record.output.get("classify") or {}).get("domain")
@@ -852,6 +1093,7 @@ async def main():
                         else 40
                     ),
                     rationale="mock",
+                    detail="synthetic_score_from_mock_harness",
                 )
                 for record in records
             }
@@ -864,10 +1106,16 @@ async def main():
                 batch_id = None
 
             if batch_id is not None:
-                # Cache inputs so --resume can score them later
+                # Cache inputs so --resume can score them later, *with* the
+                # commit they were produced at.
                 out_dir.mkdir(parents=True, exist_ok=True)
                 (out_dir / f"batch_inputs_{batch_id}.json").write_text(json.dumps(
-                    [{"case": r.case, "output": r.output} for r in records], default=str
+                    build_batch_inputs(
+                        records,
+                        source_sha=source_sha,
+                        source_sha_origin=source_sha_origin,
+                    ),
+                    default=str,
                 ))
 
                 if args.submit_only:
@@ -892,9 +1140,19 @@ async def main():
         source_sha=source_sha,
         source_sha_origin=source_sha_origin,
         harness_errors=harness_errors,
+        execution_mode=execution_mode,
     )
     summary = write_report(observation, out_dir, batch_id=batch_id)
     _print_outcome(summary)
+
+    # A mock run is a provider-free smoke check, and its exit status answers the
+    # only question it can answer: did the synthetic harness run everything
+    # cleanly? That stays independent of evidence eligibility, which the
+    # artifact already reports as false.
+    if summary["mode"] == EXECUTION_MODE_MOCK:
+        if not summary["synthetic_smoke_ok"]:
+            sys.exit(1)
+        return
 
     # Truthful red: any non-pass result stays operationally red, including the
     # non-quality ones. Only a valid measured pass exits zero.

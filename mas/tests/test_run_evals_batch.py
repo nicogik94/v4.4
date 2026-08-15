@@ -17,6 +17,7 @@ observation, classify as a non-quality failure, and still exit non-zero.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -73,6 +74,7 @@ def _observe(
     source_sha_origin: str = "github_sha",
     harness_errors=None,
     threshold: float = PASS_THRESHOLD,
+    execution_mode: str = batch.EXECUTION_MODE_BATCH,
 ) -> batch.NightlyObservation:
     records = _complete_records() if records is None else records
     judges = _judges() if judges is None else judges
@@ -85,6 +87,7 @@ def _observe(
         source_sha=source_sha,
         source_sha_origin=source_sha_origin,
         harness_errors=harness_errors,
+        execution_mode=execution_mode,
     )
 
 
@@ -820,3 +823,637 @@ def test_module_declares_no_second_provider_credential():
 
     assert "OPENAI_API_KEY" not in source
     assert source.count("ANTHROPIC_API_KEY") == 3  # submit, wait, collect clients
+
+
+# ═══════════════ MAJOR-1 — resume source-SHA attribution ═══════════════
+#
+# A batch's pipeline outputs are produced at the *submitting* checkout. A
+# `--resume` may run days later from any checkout at all, so the submit-time
+# commit is persisted with the outputs and the resume binds to it. Every
+# variant below proves the same thing from a different angle: a resume that
+# cannot prove it is scoring outputs from the commit it claims must not be able
+# to produce valid evidence.
+
+SHA_A = "a1b2c3d4" * 5
+SHA_B = "f9e8d7c6" * 5
+FAKE_BATCH_ID = "msgbatch_deterministic"
+
+
+class _ProviderCalls:
+    """Counts every provider entry point the CLI could reach. All must stay 0
+    except where a test deliberately exercises a successful collection."""
+
+    def __init__(self) -> None:
+        self.submits = 0
+        self.waits = 0
+        self.collects = 0
+
+    @property
+    def total(self) -> int:
+        return self.submits + self.waits + self.collects
+
+
+def _install_fake_batch_api(monkeypatch, tracker: _ProviderCalls, *, judges=None):
+    """Replace the three provider-touching coroutines with counters.
+
+    Nothing here opens a socket or reads a credential; the batch API is never
+    reached, so these tests can assert on the resume contract without spend.
+    """
+
+    async def fake_pipeline(cases, mock):
+        return _complete_records([case["id"] for case in cases])
+
+    async def fake_submit(requests):
+        tracker.submits += 1
+        return FAKE_BATCH_ID
+
+    async def fake_wait(batch_id, poll_interval=30, max_wait=86400):
+        tracker.waits += 1
+        return {}
+
+    async def fake_collect(batch_id):
+        tracker.collects += 1
+        return _judges() if judges is None else judges
+
+    monkeypatch.setattr(batch, "run_pipeline_for_all_cases", fake_pipeline)
+    monkeypatch.setattr(batch, "submit_batch", fake_submit)
+    monkeypatch.setattr(batch, "wait_for_batch", fake_wait)
+    monkeypatch.setattr(batch, "collect_batch_results", fake_collect)
+
+
+def _run_cli(monkeypatch, argv: list[str]) -> int:
+    """Drive `main()` end to end and return the process exit code."""
+
+    monkeypatch.setattr(sys, "argv", ["run_evals_batch", *argv])
+    try:
+        asyncio.run(batch.main())
+    except SystemExit as exc:  # noqa: PERF203 - the CLI's own exit path
+        return int(exc.code or 0)
+    return 0
+
+
+def _cache_path(tmp_path: Path, batch_id: str = FAKE_BATCH_ID) -> Path:
+    return tmp_path / f"batch_inputs_{batch_id}.json"
+
+
+def _submit_at(tmp_path, monkeypatch, tracker, sha: str) -> dict:
+    """Submit a batch at `sha` and return the cache it persisted."""
+
+    monkeypatch.setenv("GITHUB_SHA", sha)
+    assert _run_cli(monkeypatch, ["--report", str(tmp_path), "--submit-only"]) == 0
+    return json.loads(_cache_path(tmp_path).read_text())
+
+
+def _summary_on_disk(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "summary_batch.json").read_text())
+
+
+def _seed_cache(tmp_path: Path, payload: object, batch_id: str = FAKE_BATCH_ID) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _cache_path(tmp_path, batch_id).write_text(json.dumps(payload, default=str))
+
+
+def _cached_entries() -> list[dict]:
+    return [
+        {"case": CASES_BY_ID[cid], "output": _passing_output(CASES_BY_ID[cid])}
+        for cid in GOLDEN_CASE_IDS
+    ]
+
+
+# ── 1. submit persists the exact commit it ran at ──
+
+
+def test_submit_persists_the_exact_source_sha_it_ran_at(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+
+    cached = _submit_at(tmp_path, monkeypatch, tracker, SHA_A)
+
+    assert cached["schema_version"] == batch.BATCH_INPUTS_SCHEMA_VERSION
+    assert cached["source_sha"] == SHA_A
+    assert cached["source_sha_origin"] == "github_sha"
+    assert [entry["case"]["id"] for entry in cached["cases"]] == GOLDEN_CASE_IDS
+    # Submission alone must not collect anything.
+    assert (tracker.waits, tracker.collects) == (0, 0)
+
+
+# ── 2. a same-commit resume uses the persisted commit ──
+
+
+def test_resume_at_the_submitting_commit_uses_the_cached_sha(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    _submit_at(tmp_path, monkeypatch, tracker, SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID])
+    summary = _summary_on_disk(tmp_path)
+
+    assert summary["source_sha"] == SHA_A
+    assert summary["source_sha_origin"] == batch.SOURCE_SHA_ORIGIN_RESUME_CACHE
+    assert summary["valid_observation"] is True
+    assert summary["quality_measured"] is True
+    assert summary["result_class"] == release_gates.RESULT_PASS
+    assert summary["ok"] is True
+    assert summary["mode"] == batch.EXECUTION_MODE_BATCH
+    # Denominator, provider and parser semantics are untouched by the binding.
+    assert summary["passed"] == len(GOLDEN_CASE_IDS)
+    assert summary["total"] == len(GOLDEN_CASE_IDS)
+    assert summary["expected_case_ids"] == GOLDEN_CASE_IDS
+    assert exit_code == 0
+    assert tracker.collects == 1
+
+
+# ── 3. a cross-commit resume cannot produce evidence ──
+
+
+def test_resuming_from_a_different_commit_cannot_produce_valid_evidence(tmp_path, monkeypatch):
+    """The exact defect: outputs made at A, resumed at B, reported as B."""
+
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    _submit_at(tmp_path, monkeypatch, tracker, SHA_A)
+
+    monkeypatch.setenv("GITHUB_SHA", SHA_B)
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID])
+    summary = _summary_on_disk(tmp_path)
+
+    # The artifact never relabels A's outputs with B.
+    assert summary["source_sha"] == SHA_A
+    assert summary["source_sha"] != SHA_B
+    assert summary["valid_observation"] is False
+    assert summary["quality_measured"] is False
+    assert summary["ok"] is False
+    assert summary["result_class"] == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+    assert batch.VALIDITY_SOURCE_SHA_MISMATCH in {
+        entry["code"] for entry in summary["validity_errors"]
+    }
+    assert exit_code == 1
+    # And no provider work is done chasing results that can never be evidence.
+    assert (tracker.waits, tracker.collects) == (0, 0)
+
+
+# ── 4. a pre-wave cache carries no commit ──
+
+
+def test_a_cache_without_a_source_sha_cannot_produce_valid_evidence(tmp_path, monkeypatch):
+    """The old cache layout was a bare list. It is readable, never valid."""
+
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    _seed_cache(tmp_path, _cached_entries())
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID])
+    summary = _summary_on_disk(tmp_path)
+
+    assert summary["source_sha"] == ""
+    assert summary["valid_observation"] is False
+    assert summary["quality_measured"] is False
+    assert summary["ok"] is False
+    assert summary["result_class"] == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+    assert batch.VALIDITY_SOURCE_SHA_MISSING in {
+        entry["code"] for entry in summary["validity_errors"]
+    }
+    assert exit_code == 1
+    assert (tracker.waits, tracker.collects) == (0, 0)
+    # Still fully diagnosable: the operator sees which cases were in the cache.
+    assert summary["observed_case_ids"] == GOLDEN_CASE_IDS
+
+
+def test_a_cache_with_an_empty_source_sha_is_treated_as_missing(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    _seed_cache(tmp_path, {"source_sha": "   ", "cases": _cached_entries()})
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    assert _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID]) == 1
+    summary = _summary_on_disk(tmp_path)
+
+    assert summary["valid_observation"] is False
+    assert batch.VALIDITY_SOURCE_SHA_MISSING in {
+        entry["code"] for entry in summary["validity_errors"]
+    }
+
+
+# ── 5. a malformed cached commit ──
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "HEAD",
+        "main",
+        "refs/heads/stabilization",
+        "a1b2c3d",            # short sha
+        "a" * 39,
+        "a" * 41,
+        "z" * 40,             # not hex
+        f"{SHA_A} {SHA_B}",   # ambiguous: two commits in one field
+        12345,
+        [SHA_A],
+        {},
+    ],
+)
+def test_a_malformed_cached_sha_cannot_produce_valid_evidence(tmp_path, monkeypatch, malformed):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    _seed_cache(tmp_path, {"source_sha": malformed, "cases": _cached_entries()})
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID])
+    summary = _summary_on_disk(tmp_path)
+
+    assert summary["source_sha"] == ""
+    assert summary["valid_observation"] is False
+    assert summary["quality_measured"] is False
+    assert summary["ok"] is False
+    assert summary["result_class"] == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+    assert exit_code == 1
+    assert (tracker.waits, tracker.collects) == (0, 0)
+    # The malformed value is untrusted on-disk content and is never echoed.
+    assert str(malformed) not in json.dumps(summary["validity_errors"])
+
+
+def test_an_unreadable_resume_cache_fails_closed(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _cache_path(tmp_path).write_text("{not json at all")
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID])
+    summary = _summary_on_disk(tmp_path)
+
+    assert exit_code == 1
+    assert summary["valid_observation"] is False
+    assert summary["result_class"] == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+    assert (tracker.waits, tracker.collects) == (0, 0)
+
+
+# ── 6. a mismatch reaches neither quality verdict ──
+
+
+@pytest.mark.parametrize("score", [95, 55, 0])
+def test_a_resume_mismatch_reaches_neither_pass_nor_quality_failure(score):
+    """Whatever the judges said, an unattributable resume is not a verdict."""
+
+    _, _, error = batch.resolve_resume_source_sha({"source_sha": SHA_A}, SHA_B)
+    observation = _observe(harness_errors=[error], judges=_judges(score=score))
+
+    assert observation.valid_observation is False
+    assert observation.quality_measured is False
+    assert observation.result_class != release_gates.RESULT_PASS
+    assert observation.result_class != release_gates.RESULT_QUALITY_FAILURE
+    assert observation.result_class in release_gates.GATE_RESULTS
+
+
+@pytest.mark.parametrize(
+    "payload,checkout,expected_sha,expected_code",
+    [
+        ({"source_sha": SHA_A}, SHA_A, SHA_A, None),
+        ({"source_sha": SHA_A.upper()}, SHA_A, SHA_A, None),
+        ({"source_sha": SHA_A}, SHA_B, SHA_A, batch.VALIDITY_SOURCE_SHA_MISMATCH),
+        ({"source_sha": SHA_A}, "", SHA_A, batch.VALIDITY_SOURCE_SHA_MISSING),
+        ({"source_sha": SHA_A}, "HEAD", SHA_A, batch.VALIDITY_SOURCE_SHA_MISSING),
+        ({"cases": []}, SHA_A, "", batch.VALIDITY_SOURCE_SHA_MISSING),
+        ([], SHA_A, "", batch.VALIDITY_SOURCE_SHA_MISSING),
+        (None, SHA_A, "", batch.VALIDITY_SOURCE_SHA_MISSING),
+        ({"source_sha": "HEAD"}, SHA_A, "", batch.VALIDITY_SOURCE_SHA_MALFORMED),
+    ],
+)
+def test_resume_attribution_table(payload, checkout, expected_sha, expected_code):
+    sha, origin, error = batch.resolve_resume_source_sha(payload, checkout)
+
+    assert sha == expected_sha
+    if expected_code is None:
+        assert error is None
+        assert origin == batch.SOURCE_SHA_ORIGIN_RESUME_CACHE
+    else:
+        assert error is not None
+        assert error["code"] == expected_code
+        assert error["code"] in batch.ATTRIBUTION_AND_HARNESS_CODES
+
+
+def test_every_resume_attribution_failure_classifies_as_non_quality():
+    for code in (
+        batch.VALIDITY_SOURCE_SHA_MISSING,
+        batch.VALIDITY_SOURCE_SHA_MALFORMED,
+        batch.VALIDITY_SOURCE_SHA_MISMATCH,
+    ):
+        classification = batch.classify_result(
+            [{"code": code, "case_ids": [], "detail": ""}],
+            pass_rate=1.0,
+            threshold=PASS_THRESHOLD,
+        )
+        assert classification == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+        assert classification in release_gates.GATE_RESULTS
+
+
+def test_mismatch_diagnostics_are_a_closed_pair_of_commit_identities():
+    _, _, error = batch.resolve_resume_source_sha({"source_sha": SHA_A}, SHA_B)
+
+    assert error["detail"] == f"submitted_at={SHA_A} resumed_at={SHA_B}"
+    # Nothing but validated hex can reach this field.
+    assert set(error["detail"]) <= set("submited_arn=0123456789abcdef ")
+
+
+# ── 7. the ordinary non-resume nightly is unchanged ──
+
+
+def test_a_standard_non_resume_nightly_is_unchanged(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path)])
+    summary = _summary_on_disk(tmp_path)
+
+    assert exit_code == 0
+    assert summary["mode"] == batch.EXECUTION_MODE_BATCH
+    assert summary["source_sha"] == SHA_A
+    assert summary["source_sha_origin"] == "github_sha"
+    assert summary["valid_observation"] is True
+    assert summary["quality_measured"] is True
+    assert summary["result_class"] == release_gates.RESULT_PASS
+    assert summary["ok"] is True
+    assert summary["passed"] == summary["total"] == len(GOLDEN_CASE_IDS)
+    assert summary["validity_errors"] == []
+    # It still caches an attributable input set for a later resume.
+    assert json.loads(_cache_path(tmp_path).read_text())["source_sha"] == SHA_A
+
+
+# ═══════════════ MAJOR-2 — mock artifact truthfulness ═══════════════
+#
+# `--mock` fabricates its judge scores. Before this wave its artifact was
+# field-for-field indistinguishable from a real measured pass. The discriminator
+# is now the declared `mode` and the typed `JUDGE_SYNTHETIC` status — never the
+# judge's prose.
+
+REAL_PASS_CONTRACT = {
+    "mode": batch.EXECUTION_MODE_BATCH,
+    "valid_observation": True,
+    "quality_measured": True,
+    "result_class": release_gates.RESULT_PASS,
+    "ok": True,
+}
+
+
+def _mock_summary(tmp_path, monkeypatch, sha: str = SHA_A) -> tuple[dict, int]:
+    monkeypatch.setenv("GITHUB_SHA", sha)
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--mock"])
+    return _summary_on_disk(tmp_path), exit_code
+
+
+def _synthetic_judges(score: int = 99, rationale: str = "mock"):
+    return {
+        cid: batch.JudgeObservation(batch.JUDGE_SYNTHETIC, score=score, rationale=rationale)
+        for cid in GOLDEN_CASE_IDS
+    }
+
+
+def test_mock_summary_declares_an_explicit_mock_mode(tmp_path, monkeypatch):
+    summary, _ = _mock_summary(tmp_path, monkeypatch)
+
+    assert summary["mode"] == batch.EXECUTION_MODE_MOCK
+    assert summary["mode"] in batch.EXECUTION_MODES
+    assert all(
+        entry["judge_status"] == batch.JUDGE_SYNTHETIC for entry in summary["cases"]
+    )
+
+
+def test_mock_is_not_a_valid_observation(tmp_path, monkeypatch):
+    summary, _ = _mock_summary(tmp_path, monkeypatch)
+
+    assert summary["valid_observation"] is False
+
+
+def test_mock_never_claims_measured_quality(tmp_path, monkeypatch):
+    summary, _ = _mock_summary(tmp_path, monkeypatch)
+
+    assert summary["quality_measured"] is False
+    assert all(entry["quality_measured"] is False for entry in summary["cases"])
+
+
+def test_mock_is_never_ok(tmp_path, monkeypatch):
+    summary, _ = _mock_summary(tmp_path, monkeypatch)
+
+    assert summary["ok"] is False
+
+
+def test_mock_result_class_is_a_non_quality_classification(tmp_path, monkeypatch):
+    summary, _ = _mock_summary(tmp_path, monkeypatch)
+
+    assert summary["result_class"] in release_gates.GATE_RESULTS
+    assert summary["result_class"] != release_gates.RESULT_PASS
+    assert summary["result_class"] != release_gates.RESULT_QUALITY_FAILURE
+    assert batch.VALIDITY_SYNTHETIC_JUDGE_SCORES in {
+        entry["code"] for entry in summary["validity_errors"]
+    }
+
+
+def test_no_mock_artifact_can_be_contract_equivalent_to_a_real_valid_pass(tmp_path, monkeypatch):
+    """The authoritative fields must differ on every single one."""
+
+    mock_summary, _ = _mock_summary(tmp_path, monkeypatch)
+
+    for field, real_value in REAL_PASS_CONTRACT.items():
+        assert mock_summary[field] != real_value, field
+
+    # And the numerator itself never absorbs a fabricated score.
+    assert mock_summary["passed"] == 0
+    assert mock_summary["pass_rate"] == 0.0
+    assert all(entry["passed"] is None for entry in mock_summary["cases"])
+    assert all(entry["judge_overall"] is None for entry in mock_summary["cases"])
+
+
+def test_a_perfect_synthetic_run_still_reaches_neither_quality_verdict():
+    """Synthetic 12/12, scored 99, and still not evidence."""
+
+    observation = _observe(judges=_synthetic_judges(score=99))
+
+    assert observation.valid_observation is False
+    assert observation.quality_measured is False
+    assert observation.passed == 0
+    assert observation.pass_rate == 0.0
+    assert observation.result_class != release_gates.RESULT_PASS
+    assert observation.result_class != release_gates.RESULT_QUALITY_FAILURE
+    assert observation.result_class in release_gates.GATE_RESULTS
+
+
+def test_real_batch_mode_still_reports_the_normal_mode(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    _run_cli(monkeypatch, ["--report", str(tmp_path)])
+
+    assert _summary_on_disk(tmp_path)["mode"] == batch.EXECUTION_MODE_BATCH
+
+
+def test_a_genuine_measured_pass_is_unchanged(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path)])
+    summary = _summary_on_disk(tmp_path)
+
+    for field, real_value in REAL_PASS_CONTRACT.items():
+        assert summary[field] == real_value, field
+    assert summary["synthetic_smoke_ok"] is None
+    assert all(entry["quality_measured"] is True for entry in summary["cases"])
+    assert all(entry["synthetic_passed"] is None for entry in summary["cases"])
+    assert exit_code == 0
+
+
+def test_a_measured_quality_failure_is_still_reachable(tmp_path, monkeypatch):
+    """The one verdict mock must never reach must stay reachable for real runs."""
+
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker, judges=_judges(score=20))
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path)])
+    summary = _summary_on_disk(tmp_path)
+
+    assert summary["mode"] == batch.EXECUTION_MODE_BATCH
+    assert summary["valid_observation"] is True
+    assert summary["quality_measured"] is True
+    assert summary["result_class"] == release_gates.RESULT_QUALITY_FAILURE
+    assert summary["ok"] is False
+    assert exit_code == 1
+
+
+def test_judge_rationale_alone_is_not_the_evidence_discriminator():
+    """Both halves: prose cannot disqualify, and prose cannot qualify."""
+
+    # A real, measured judge result that happens to say "mock" is still evidence.
+    real = _observe(
+        judges={
+            cid: batch.JudgeObservation(batch.JUDGE_VALID, score=90, rationale="mock")
+            for cid in GOLDEN_CASE_IDS
+        }
+    )
+    assert real.valid_observation is True
+    assert real.result_class == release_gates.RESULT_PASS
+
+    # A synthetic result dressed in convincing prose is still not evidence.
+    synthetic = _observe(
+        judges=_synthetic_judges(score=99, rationale="thorough, well-evidenced analysis")
+    )
+    assert synthetic.valid_observation is False
+    assert batch.VALIDITY_SYNTHETIC_JUDGE_SCORES in _codes(synthetic)
+
+
+def test_a_synthetic_result_smuggled_into_a_batch_run_still_fails_closed():
+    """Defence in depth: the judge statuses invalidate on their own."""
+
+    observation = _observe(
+        judges={**_judges(), GOLDEN_CASE_IDS[0]: batch.JudgeObservation(
+            batch.JUDGE_SYNTHETIC, score=100, rationale="ok"
+        )},
+        execution_mode=batch.EXECUTION_MODE_BATCH,
+    )
+
+    assert observation.valid_observation is False
+    assert batch.VALIDITY_SYNTHETIC_JUDGE_SCORES in _codes(observation)
+    assert observation.result_class != release_gates.RESULT_PASS
+    assert observation.result_class != release_gates.RESULT_QUALITY_FAILURE
+
+
+def test_an_unknown_execution_mode_fails_closed():
+    observation = _observe(execution_mode="totally_new_mode")
+
+    assert observation.execution_mode in batch.EXECUTION_MODES
+    assert observation.valid_observation is False
+    assert observation.result_class == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+
+
+# ── the provider-free smoke is preserved ──
+
+
+def test_the_synthetic_smoke_keeps_its_own_separate_verdict(tmp_path, monkeypatch):
+    """Mock still exits 0 when the harness worked — evidence is a separate axis."""
+
+    summary, exit_code = _mock_summary(tmp_path, monkeypatch)
+
+    assert summary["synthetic_smoke_ok"] is True
+    assert exit_code == 0
+    # Every case still ran the deterministic plumbing end to end.
+    assert summary["observed_case_ids"] == GOLDEN_CASE_IDS
+    assert all(entry["synthetic_passed"] is True for entry in summary["cases"])
+    # ...but none of that is evidence.
+    assert summary["ok"] is False
+    assert summary["valid_observation"] is False
+
+
+def test_a_broken_synthetic_harness_still_exits_nonzero():
+    observation = batch.build_observation(
+        pipeline_records=[
+            batch.PipelineRecord(
+                CASES_BY_ID[GOLDEN_CASE_IDS[0]], {}, batch.PIPELINE_HARNESS_FAILURE, "boom"
+            ),
+            *_complete_records(GOLDEN_CASE_IDS[1:]),
+        ],
+        judge_observations=_synthetic_judges(),
+        expected_case_ids=GOLDEN_CASE_IDS,
+        golden_case_ids=GOLDEN_CASE_IDS,
+        threshold=PASS_THRESHOLD,
+        source_sha=SOURCE_SHA,
+        source_sha_origin="github_sha",
+        execution_mode=batch.EXECUTION_MODE_MOCK,
+    )
+
+    assert observation.synthetic_smoke_ok is False
+    assert observation.valid_observation is False
+
+
+def test_the_mock_smoke_verdict_never_leaks_into_the_evidence_fields(tmp_path):
+    observation = batch.build_observation(
+        pipeline_records=_complete_records(),
+        judge_observations=_synthetic_judges(),
+        expected_case_ids=GOLDEN_CASE_IDS,
+        golden_case_ids=GOLDEN_CASE_IDS,
+        threshold=PASS_THRESHOLD,
+        source_sha=SOURCE_SHA,
+        source_sha_origin="github_sha",
+        execution_mode=batch.EXECUTION_MODE_MOCK,
+    )
+    summary = batch.write_report(observation, tmp_path, batch_id=None)
+
+    assert summary["synthetic_smoke_ok"] is True
+    assert summary["ok"] is False
+    assert summary["valid_observation"] is False
+    assert summary["quality_measured"] is False
+    assert summary["passed"] == 0
+
+
+def test_the_cli_makes_no_provider_call_on_any_invalid_resume(tmp_path, monkeypatch):
+    """One assertion over every fail-closed resume shape: zero provider calls."""
+
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    caches = [
+        _cached_entries(),                                        # pre-wave layout
+        {"cases": _cached_entries()},                             # no commit
+        {"source_sha": "HEAD", "cases": _cached_entries()},       # malformed
+        {"source_sha": SHA_B, "cases": _cached_entries()},        # different commit
+    ]
+    for index, payload in enumerate(caches):
+        report_dir = tmp_path / f"run{index}"
+        _seed_cache(report_dir, payload)
+        exit_code = _run_cli(
+            monkeypatch, ["--report", str(report_dir), "--resume", FAKE_BATCH_ID]
+        )
+        summary = _summary_on_disk(report_dir)
+
+        assert exit_code == 1, payload
+        assert summary["valid_observation"] is False
+        assert summary["quality_measured"] is False
+        assert summary["ok"] is False
+        assert summary["result_class"] != release_gates.RESULT_PASS
+        assert summary["result_class"] != release_gates.RESULT_QUALITY_FAILURE
+
+    assert tracker.total == 0
