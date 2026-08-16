@@ -38,8 +38,19 @@ SOURCE_SHA = "e8160077cc91a2eed3569fe4a2c9c57dfcca3209"
 # ═══════════════════════ fixtures / builders ═══════════════════════
 
 
+def _healthy_phase_status(phases=batch.REAL_CASE_PHASES) -> dict:
+    """`phase_status` as the orchestrator leaves it after a clean run."""
+
+    return {phase: "completed" for phase in phases}
+
+
 def _passing_output(case: dict) -> dict:
-    """A pipeline output that clears every deterministic check for `case`."""
+    """A pipeline output that clears every deterministic check for `case`.
+
+    Carries the phase bookkeeping a real `run_case_real` state carries, because
+    completion is now proven from that bookkeeping rather than assumed from the
+    absence of a recorded exception.
+    """
 
     return {
         "classify": {"domain": case["expected_domain"]},
@@ -48,7 +59,38 @@ def _passing_output(case: dict) -> dict:
             "frameworks": list(case.get("must_contain_frameworks", [])),
             "notes": list(case.get("strategy_must_mention", [])),
         },
+        "phase_status": _healthy_phase_status(),
+        "phase_failure_details": {},
     }
+
+
+def _failed_phase_output(case: dict, failures: dict, *, completed=()) -> dict:
+    """A pipeline output whose `failures` phases failed with a typed category.
+
+    Mirrors what the orchestrator records: a failed phase gets
+    `phase_status="failed"` and a `phase_failure_details` entry, and it does
+    *not* raise, so nothing lands in `ingestion_metadata.eval_errors`.
+    """
+
+    output = dict(_passing_output(case))
+    status = {}
+    details = {}
+    for phase in batch.REAL_CASE_PHASES:
+        if phase in failures:
+            status[phase] = "failed"
+            details[phase] = {
+                "phase": phase,
+                "category": failures[phase],
+                "message": f"diagnostic for {phase}",
+                "captured_at": "2026-08-16T00:00:00",
+            }
+        elif phase in completed:
+            status[phase] = "completed"
+        else:
+            status[phase] = "pending"
+    output["phase_status"] = status
+    output["phase_failure_details"] = details
+    return output
 
 
 def _complete_records(case_ids=None) -> list[batch.PipelineRecord]:
@@ -372,7 +414,7 @@ def test_untyped_phase_failure_fails_closed_to_a_harness_classification():
     record = batch.pipeline_record_for_output(CASES_BY_ID[GOLDEN_CASE_IDS[0]], output)
 
     assert record.status == batch.PIPELINE_HARNESS_FAILURE
-    assert record.category == "untyped_phase_failure"
+    assert record.category == batch.UNTYPED_PHASE_FAILURE
 
     observation = _observe(records=[record, *_complete_records(GOLDEN_CASE_IDS[1:])])
     assert observation.valid_observation is False
@@ -380,9 +422,22 @@ def test_untyped_phase_failure_fails_closed_to_a_harness_classification():
 
 
 def test_confused_halt_is_a_measured_outcome_not_a_failure():
-    """The product deliberately stops after a Confused classification."""
+    """The product deliberately stops after a Confused classification.
+
+    The state this leaves behind is the halt marker plus a completed `classify`
+    and four phases that were never run. That must stay a *measured* outcome:
+    the phases are missing because the product decided to stop, not because
+    anything failed.
+    """
 
     output = dict(_passing_output(CASES_BY_ID[GOLDEN_CASE_IDS[0]]))
+    output["phase_status"] = {
+        "classify": "completed",
+        "hypotheses": "pending",
+        "gauntlet": "pending",
+        "audit": "pending",
+        "strategy": "pending",
+    }
     output["ingestion_metadata"] = {"eval_errors": [batch.EVAL_ERROR_CONFUSED_HALT]}
     record = batch.pipeline_record_for_output(CASES_BY_ID[GOLDEN_CASE_IDS[0]], output)
 
@@ -390,6 +445,7 @@ def test_confused_halt_is_a_measured_outcome_not_a_failure():
 
     observation = _observe(records=[record, *_complete_records(GOLDEN_CASE_IDS[1:])])
     assert observation.valid_observation is True
+    assert observation.result_class == release_gates.RESULT_PASS
 
 
 def test_pipeline_exception_cannot_create_an_artificial_quality_score():
@@ -1457,3 +1513,558 @@ def test_the_cli_makes_no_provider_call_on_any_invalid_resume(tmp_path, monkeypa
         assert summary["result_class"] != release_gates.RESULT_QUALITY_FAILURE
 
     assert tracker.total == 0
+
+
+# ═══════════ MAJOR-3 — real pipeline phase failures are not completions ═══════════
+#
+# `run_case_real` drives the real orchestrator, and the orchestrator does not
+# raise on an ordinary `LLMResponse(ok=False)`: it marks the phase failed,
+# records a typed category in `phase_failure_details`, and returns the state.
+# Nothing reaches `ingestion_metadata.eval_errors`, so a nightly that consulted
+# `eval_errors` alone declared a case whose every phase was provider-dead
+# `complete` — and a run of twelve such cases could be reported as a measured
+# 0/12 quality failure, or, with eleven healthy cases beside it, as a pass.
+#
+# The tests below are provider-free: `call_llm` is replaced with a stub, so the
+# state under test is produced by the real product code with no network, no
+# credential and no spend.
+
+
+def _dead_provider_stub(counter: list, *, error_type: str = "quota_exceeded", text: str = ""):
+    """A `call_llm` replacement that fails the way a real provider outage does."""
+
+    import llm_client
+
+    async def stub(phase, system, prompt, **kwargs):
+        counter.append(phase)
+        return llm_client.LLMResponse(
+            ok=False,
+            text=text,
+            error_type=error_type,
+            error="your credit balance is too low; org_id=org-123 key=sk-ant-LEAKED",
+        )
+
+    return stub
+
+
+def _real_state_with_dead_provider(case: dict, monkeypatch, **kwargs) -> tuple[dict, list]:
+    """Drive the REAL `run_case_real` with a stubbed provider. Zero network."""
+
+    import orchestrator
+    from evals.run_evals import run_case_real
+
+    calls: list = []
+    monkeypatch.setattr(orchestrator, "call_llm", _dead_provider_stub(calls, **kwargs))
+    state = asyncio.run(run_case_real(case))
+    return state.model_dump(mode="json"), calls
+
+
+# ── A. the shape the real product emits ──
+
+
+def test_real_pipeline_provider_failure_is_not_a_completion(monkeypatch):
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output, calls = _real_state_with_dead_provider(case, monkeypatch)
+
+    # The product recorded the failure where it actually records it...
+    assert "failed" in set(output["phase_status"].values())
+    assert output["phase_failure_details"]
+    assert any(
+        entry["category"] in batch.PROVIDER_PHASE_FAILURE_KINDS
+        for entry in output["phase_failure_details"].values()
+    )
+    # ...and deliberately not as a raised eval-harness exception.
+    assert not (output.get("ingestion_metadata") or {}).get("eval_errors")
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status != batch.PIPELINE_COMPLETE
+    assert record.complete is False
+    assert record.status == batch.PIPELINE_PROVIDER_FAILURE
+    assert record.category == "quota_exceeded"
+    # The stub answered locally; nothing left the process.
+    assert calls
+
+
+def test_a_generic_provider_error_is_also_a_provider_failure(monkeypatch):
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output, _ = _real_state_with_dead_provider(case, monkeypatch, error_type="api_error")
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_PROVIDER_FAILURE
+    assert record.category in batch.PROVIDER_PHASE_FAILURE_KINDS
+
+
+# ── B. one dead case among valid judges ──
+
+
+def test_a_real_dead_pipeline_case_cannot_be_a_quality_failure(monkeypatch):
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output, _ = _real_state_with_dead_provider(case, monkeypatch)
+    record = batch.pipeline_record_for_output(case, output)
+
+    observation = _observe(
+        records=[record, *_complete_records(GOLDEN_CASE_IDS[1:])], judges=_judges()
+    )
+
+    assert observation.valid_observation is False
+    assert observation.quality_measured is False
+    assert batch.VALIDITY_PIPELINE_PROVIDER_FAILURE in _codes(observation)
+    assert observation.result_class == release_gates.RESULT_PROVIDER_UNAVAILABLE
+    assert observation.result_class != release_gates.RESULT_PASS
+    assert observation.result_class != release_gates.RESULT_QUALITY_FAILURE
+    assert _case_entry(observation, GOLDEN_CASE_IDS[0])["quality_measured"] is False
+
+
+# ── C. every case provider-dead, judges otherwise fine ──
+
+
+def test_twelve_dead_pipeline_cases_report_provider_unavailable(monkeypatch):
+    """The exact defect: 12 dead cases + good judges used to read 0/12 quality."""
+
+    records = []
+    for case_id in GOLDEN_CASE_IDS:
+        case = CASES_BY_ID[case_id]
+        output, _ = _real_state_with_dead_provider(case, monkeypatch)
+        records.append(batch.pipeline_record_for_output(case, output))
+
+    assert all(record.status == batch.PIPELINE_PROVIDER_FAILURE for record in records)
+
+    observation = _observe(records=records, judges=_judges())
+
+    assert observation.valid_observation is False
+    assert observation.quality_measured is False
+    assert observation.result_class == release_gates.RESULT_PROVIDER_UNAVAILABLE
+    assert observation.result_class != release_gates.RESULT_QUALITY_FAILURE
+    assert observation.passed == 0
+    # No product quality verdict was reached for any case.
+    assert all(entry["quality_measured"] is False for entry in observation.cases)
+    assert all(entry["passed"] is None for entry in observation.cases)
+    assert all(entry["judge_overall"] is None for entry in observation.cases)
+
+
+# ── D. one dead case, eleven healthy, good judges: never a pass ──
+
+
+def test_one_dead_case_among_eleven_healthy_ones_can_never_pass(monkeypatch):
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output, _ = _real_state_with_dead_provider(case, monkeypatch)
+    records = [
+        batch.pipeline_record_for_output(case, output),
+        *_complete_records(GOLDEN_CASE_IDS[1:]),
+    ]
+
+    observation = _observe(records=records, judges=_judges(score=100))
+
+    assert observation.valid_observation is False
+    assert observation.result_class != release_gates.RESULT_PASS
+    assert observation.result_class != release_gates.RESULT_QUALITY_FAILURE
+    # The denominator stays the full expected universe...
+    assert observation.total == len(GOLDEN_CASE_IDS)
+    assert observation.expected_case_ids == GOLDEN_CASE_IDS
+    # ...and the dead case is not counted as measured quality.
+    assert observation.passed == len(GOLDEN_CASE_IDS) - 1
+    assert _case_entry(observation, GOLDEN_CASE_IDS[0])["quality_measured"] is False
+
+
+# ── E. policy_blocked is a non-provider failure ──
+
+
+def test_policy_blocked_phase_failure_is_not_attributed_to_a_provider():
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = _failed_phase_output(case, {"classify": "policy_blocked"})
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.status != batch.PIPELINE_COMPLETE
+    assert record.category == "policy_blocked"
+
+    observation = _observe(records=[record, *_complete_records(GOLDEN_CASE_IDS[1:])])
+    assert observation.valid_observation is False
+    assert batch.VALIDITY_PIPELINE_HARNESS_FAILURE in _codes(observation)
+    assert batch.VALIDITY_PIPELINE_PROVIDER_FAILURE not in _codes(observation)
+    assert observation.result_class == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+    assert observation.result_class != release_gates.RESULT_QUALITY_FAILURE
+
+
+@pytest.mark.parametrize(
+    "category",
+    ["phase_configuration", "prerequisite_failed", "json_parse", "schema_validation"],
+)
+def test_other_known_non_provider_categories_are_harness_failures(category):
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    record = batch.pipeline_record_for_output(
+        case, _failed_phase_output(case, {"strategy": category}, completed=("classify", "hypotheses", "gauntlet", "audit"))
+    )
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.category == category
+
+
+# ── F. the raised-exception path is untouched ──
+
+
+def test_a_raised_phase_exception_still_invalidates_the_case():
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["ingestion_metadata"] = {
+        "eval_errors": [
+            "classify: Provider call failed: category=quota_exceeded, provider=anthropic"
+        ]
+    }
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_PROVIDER_FAILURE
+    assert record.category == "quota_exceeded"
+
+
+def test_a_raised_exception_outranks_an_otherwise_healthy_phase_state():
+    """`eval_errors` still counts even when `phase_status` says everything ran."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["ingestion_metadata"] = {"eval_errors": ["audit: RuntimeError('boom')"]}
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.category == batch.UNTYPED_PHASE_FAILURE
+
+
+def test_an_unattributable_eval_error_still_invalidates_the_case():
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["ingestion_metadata"] = {"eval_errors": ["something went wrong with no phase prefix"]}
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.complete is False
+
+
+# ── G/H. the Confused halt and the healthy pipeline ──
+
+
+def test_the_confused_halt_survives_the_phase_state_check():
+    """Only `classify` was expected to run, so four pending phases are fine."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["phase_status"] = {
+        "classify": "completed",
+        "hypotheses": "pending",
+        "gauntlet": "pending",
+        "audit": "pending",
+        "strategy": "pending",
+    }
+    output["ingestion_metadata"] = {"eval_errors": [batch.EVAL_ERROR_CONFUSED_HALT]}
+
+    assert batch.expected_real_phases(output) == batch.REAL_CASE_PHASES[:1]
+
+    record = batch.pipeline_record_for_output(case, output)
+    assert record.status == batch.PIPELINE_COMPLETE
+    assert record.complete is True
+
+
+def test_a_confused_halt_whose_classify_failed_is_still_not_complete():
+    """The halt marker is not a licence to skip proving `classify` ran."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = _failed_phase_output(case, {"classify": "quota_exceeded"})
+    output["ingestion_metadata"] = {"eval_errors": [batch.EVAL_ERROR_CONFUSED_HALT]}
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_PROVIDER_FAILURE
+
+
+def test_a_fully_healthy_pipeline_state_stays_complete():
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    record = batch.pipeline_record_for_output(case, _passing_output(case))
+
+    assert record.status == batch.PIPELINE_COMPLETE
+    assert record.category == ""
+
+    observation = _observe()
+    assert observation.valid_observation is True
+    assert observation.result_class == release_gates.RESULT_PASS
+
+
+# ── completion is proven, never assumed ──
+
+
+@pytest.mark.parametrize("status", ["pending", "running", "stale"])
+def test_a_phase_that_never_finished_is_not_a_completion(status):
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["phase_status"] = {**_healthy_phase_status(), "strategy": status}
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.category == f"{batch.PHASE_STATE_CATEGORY_PREFIX}{status}"
+
+
+@pytest.mark.parametrize(
+    "phase_status, expected_detail",
+    [
+        (None, "phase_state_unreadable"),
+        ("not a dict", "phase_state_unreadable"),
+        ({}, "phase_state_missing"),
+        ({"classify": "invented_status"}, "phase_state_unknown"),
+    ],
+)
+def test_missing_or_ambiguous_phase_state_fails_closed(phase_status, expected_detail):
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["phase_status"] = phase_status
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.category == expected_detail
+
+
+def test_a_pre_wave_output_without_phase_state_is_not_assumed_complete():
+    """A `--resume` cache from before phase bookkeeping cannot prove completion."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = {
+        "classify": {"domain": case["expected_domain"]},
+        "hypotheses": [{"id": "H1"}],
+    }
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.complete is False
+
+
+# ── adversarial probes ──
+
+
+def test_the_first_failure_in_canonical_order_is_the_reported_cause():
+    """Probe 4: the circuit breaker opens after a quota outage.
+
+    `audit`/`strategy` then fail `policy_blocked` as a *consequence*. Reporting
+    the consequence would hide the outage that caused it.
+    """
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = _failed_phase_output(
+        case,
+        {
+            "classify": "quota_exceeded",
+            "hypotheses": "quota_exceeded",
+            "gauntlet": "quota_exceeded",
+            "audit": "policy_blocked",
+            "strategy": "policy_blocked",
+        },
+    )
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_PROVIDER_FAILURE
+    assert record.category == "quota_exceeded"
+
+
+def test_the_real_circuit_breaker_cascade_reports_the_outage(monkeypatch):
+    """The same probe, against state the real orchestrator produced."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output, _ = _real_state_with_dead_provider(case, monkeypatch)
+    categories = {
+        entry["category"] for entry in output["phase_failure_details"].values()
+    }
+
+    assert "policy_blocked" in categories  # the breaker really did open
+    assert batch.pipeline_record_for_output(case, output).category == "quota_exceeded"
+
+
+def test_a_provider_failure_after_completed_phases_is_still_a_failure():
+    """Probe 3: three phases genuinely completed before the provider died."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = _failed_phase_output(
+        case,
+        {"audit": "provider_error", "strategy": "prerequisite_failed"},
+        completed=("classify", "hypotheses", "gauntlet"),
+    )
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_PROVIDER_FAILURE
+    assert record.category == "provider_error"
+
+
+def test_a_failed_phase_with_a_perfect_judge_score_is_still_not_measured():
+    """Probe 5: the judge scoring 100 on a dead pipeline changes nothing."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    record = batch.pipeline_record_for_output(
+        case, _failed_phase_output(case, {"classify": "quota_exceeded"})
+    )
+
+    observation = _observe(
+        records=[record, *_complete_records(GOLDEN_CASE_IDS[1:])], judges=_judges(score=100)
+    )
+    entry = _case_entry(observation, GOLDEN_CASE_IDS[0])
+
+    assert entry["quality_measured"] is False
+    assert entry["judge_overall"] is None
+    assert entry["passed"] is None
+    assert observation.result_class == release_gates.RESULT_PROVIDER_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        "not a dict",
+        {"classify": "not a dict either"},
+        {"classify": {}},
+        {"classify": {"category": ""}},
+        {"classify": {"category": None}},
+        {"classify": {"category": ["quota_exceeded"]}},
+    ],
+)
+def test_corrupt_phase_failure_details_never_become_a_completion(details):
+    """Probe 8: a failed phase stays failed however unreadable its diagnostic."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["phase_status"] = {**_healthy_phase_status(), "classify": "failed"}
+    output["phase_failure_details"] = details
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.complete is False
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.category in (
+        batch.UNCATEGORIZED_PHASE_FAILURE,
+        batch.UNKNOWN_PHASE_FAILURE_CATEGORY,
+    )
+
+
+def test_an_unknown_failure_category_is_bounded_and_never_provider():
+    """Probe 9: a category this build does not know is not a provider outage."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    record = batch.pipeline_record_for_output(
+        case, _failed_phase_output(case, {"classify": "some_future_category"})
+    )
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.category == batch.UNKNOWN_PHASE_FAILURE_CATEGORY
+
+
+def test_a_hostile_category_cannot_claim_a_provider_outage():
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["phase_status"] = {**_healthy_phase_status(), "classify": "failed"}
+    output["phase_failure_details"] = {
+        "classify": {"category": "quota_exceeded_but_actually_a_product_bug"}
+    }
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.category == batch.UNKNOWN_PHASE_FAILURE_CATEGORY
+
+
+# ── I. no prose, prompt or credential reaches the artifact ──
+
+
+SECRET_MARKERS = ("sk-ant", "org-123", "credit balance", "LEAKED", "diagnostic for")
+
+
+def test_no_failure_prose_or_secret_reaches_the_pipeline_record():
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output = dict(_passing_output(case))
+    output["phase_status"] = {**_healthy_phase_status(), "classify": "failed"}
+    output["phase_failure_details"] = {
+        "classify": {
+            "phase": "classify",
+            "category": "quota_exceeded",
+            "message": "credit balance too low; key=sk-ant-LEAKED org-123",
+            "captured_at": "2026-08-16T00:00:00",
+        }
+    }
+
+    record = batch.pipeline_record_for_output(case, output)
+
+    assert record.category == "quota_exceeded"
+    for marker in SECRET_MARKERS:
+        assert marker not in record.category
+
+
+def test_no_failure_prose_reaches_the_summary_artifact(tmp_path, monkeypatch):
+    """End to end, from the real orchestrator's own recorded diagnostics."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    output, _ = _real_state_with_dead_provider(case, monkeypatch)
+    record = batch.pipeline_record_for_output(case, output)
+
+    observation = _observe(records=[record, *_complete_records(GOLDEN_CASE_IDS[1:])])
+    summary = batch.write_report(observation, tmp_path, batch_id=None)
+
+    dead = next(item for item in summary["cases"] if item["case_id"] == GOLDEN_CASE_IDS[0])
+    assert dead["pipeline_detail"] == "quota_exceeded"
+
+    # The whole artifact, not just the fields we happen to have named.
+    serialized = json.dumps(summary)
+    for marker in ("sk-ant", "org-123", "credit balance", "org_id"):
+        assert marker not in serialized
+    for error in summary["validity_errors"]:
+        assert error["code"] in batch.VALIDITY_CODES
+
+
+def test_every_pipeline_detail_is_a_bounded_token():
+    """No pipeline classification detail is free text."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    outputs = [
+        _failed_phase_output(case, {"classify": "quota_exceeded"}),
+        _failed_phase_output(case, {"classify": "policy_blocked"}),
+        _failed_phase_output(case, {"classify": "some_future_category"}),
+        {**_passing_output(case), "phase_status": {}},
+        "not a dict at all",
+    ]
+
+    for output in outputs:
+        category = batch.pipeline_record_for_output(case, output).category
+        assert category == category.strip()
+        assert len(category) <= 64
+        assert " " not in category
+
+
+def test_the_pipeline_failure_vocabulary_stays_closed():
+    assert batch.PROVIDER_PHASE_FAILURE_KINDS <= batch.KNOWN_PHASE_FAILURE_KINDS
+    assert "quota_exceeded" in batch.PROVIDER_PHASE_FAILURE_KINDS
+    assert "provider_error" in batch.PROVIDER_PHASE_FAILURE_KINDS
+    assert "policy_blocked" not in batch.PROVIDER_PHASE_FAILURE_KINDS
+    assert "phase_configuration" not in batch.PROVIDER_PHASE_FAILURE_KINDS
+    assert "policy_blocked" in batch.KNOWN_PHASE_FAILURE_KINDS
+    assert "phase_configuration" in batch.KNOWN_PHASE_FAILURE_KINDS
+
+
+def test_the_expected_phase_universe_is_the_canonical_one():
+    from evals.run_evals import REAL_CASE_PHASES as canonical
+
+    assert batch.REAL_CASE_PHASES == canonical
+    assert batch.expected_real_phases({}) == canonical
+
+
+def test_the_real_pipeline_tests_reach_no_provider(monkeypatch):
+    """The stub answers every call locally; nothing opens a socket."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    output, calls = _real_state_with_dead_provider(case, monkeypatch)
+
+    assert calls  # the stub, not a provider, produced every response
+    assert batch.pipeline_record_for_output(case, output).complete is False

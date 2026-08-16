@@ -46,6 +46,14 @@ existing counters, and the two are kept apart on purpose:
 An invalid observation is still operationally red — the objective is truthful
 red, not cosmetic green.
 
+The same rule governs the *pipeline* half of a case, and for the same reason.
+An ordinary ``LLMResponse(ok=False)`` does not raise: the orchestrator marks the
+phase failed, records a typed category and returns the state, so a run whose
+every phase was provider-dead left no exception behind at all.  Completion is
+therefore read from the phase state the product actually records, and it is
+proven rather than assumed — a phase that cannot be shown to have completed
+fails the case closed instead of counting as a measurement.
+
 Two further ways a run could claim more than it measured are closed the same
 way.  A ``--resume`` collection scores pipeline outputs that were produced at
 *submit* time, so the submit-time commit is persisted in the batch input cache
@@ -78,9 +86,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evals.run_evals import (
     load_cases, run_case_real, run_case_mock,
     score_deterministic, pass_fail, JUDGE_PROMPT_TEMPLATE,
-    JUDGE_MODEL, PASS_THRESHOLD,
+    JUDGE_MODEL, PASS_THRESHOLD, REAL_CASE_PHASES,
 )
 from evals import release_gates
+# The failure-category vocabulary the provenance ledger already allow-lists from
+# `phase_failure_details`. Shared so the nightly and the ledger cannot drift into
+# two different opinions of what the orchestrator is allowed to have recorded.
+from evals.provenance import STRUCTURAL_FAILURE_KINDS
 # The canonical, fence-tolerant parser the real-time harness already uses for
 # judge output.  Reused rather than reimplemented: a second divergent JSON
 # parser is exactly how ```json fences became a "0/12 quality failure".
@@ -145,6 +157,41 @@ PIPELINE_STATUSES = (
     PIPELINE_PROVIDER_FAILURE,
     PIPELINE_HARNESS_FAILURE,
 )
+
+# ═══ What the product actually records when a phase fails ═══
+#
+# `run_case_real` only reaches its own `except` branch — and therefore only
+# writes `ingestion_metadata.eval_errors` — when a phase *raises*. An ordinary
+# `LLMResponse(ok=False)` does not raise: `run_phase_node` sets
+# `phase_status[phase] = "failed"`, records a typed
+# `phase_failure_details[phase].category`, and returns the state normally. A
+# nightly that consulted `eval_errors` alone therefore called a case whose every
+# phase was provider-dead "complete", which is the one thing this module exists
+# to prevent. Both signals are read now, and `phase_status` is the primary one.
+
+PHASE_STATUS_COMPLETED = "completed"
+PHASE_STATUS_FAILED = "failed"
+# `PhaseStatus`'s own members. A value outside them is `unknown`, never echoed.
+PHASE_STATUS_TOKENS = frozenset({"pending", "running", "completed", "failed", "stale"})
+
+# Categories that mean "the provider could not answer", as opposed to the
+# product answering badly. These are the two the runtime assigns from
+# `_provider_failure_diagnostic`.
+PROVIDER_PHASE_FAILURE_KINDS = frozenset({"provider_error", "quota_exceeded"})
+
+# Every failure category the orchestrator is known to record. Allow-listed, not
+# copied: an unrecognized category becomes a fixed token, so no unbounded
+# `phase_failure_details` text can travel into the nightly artifact.
+KNOWN_PHASE_FAILURE_KINDS = frozenset(STRUCTURAL_FAILURE_KINDS) | frozenset({
+    "prerequisite_failed",
+    "gate_structural",
+    "persisted_strategy_contract",
+}) | PROVIDER_PHASE_FAILURE_KINDS
+
+UNKNOWN_PHASE_FAILURE_CATEGORY = "unknown_failure_category"
+UNCATEGORIZED_PHASE_FAILURE = "uncategorized_phase_failure"
+UNTYPED_PHASE_FAILURE = "untyped_phase_failure"
+PHASE_STATE_CATEGORY_PREFIX = "phase_state_"
 
 # ═══ Validity error codes ═══
 #
@@ -492,13 +539,141 @@ class PipelineRecord:
         return self.status == PIPELINE_COMPLETE
 
 
-def pipeline_record_for_output(case: dict, output: dict) -> PipelineRecord:
-    """Classify a completed `run_case_real` state.
+def _eval_errors(output: dict) -> list[str]:
+    """The eval harness's own recorded exception strings, if any."""
 
-    `run_case_real` swallows per-phase exceptions into `eval_errors` so the
-    judge can still see partial output. A partial case is not a measurement, so
-    those recorded errors are read back here and classified from the typed
-    category the runtime attached to them.
+    metadata = output.get("ingestion_metadata")
+    if not isinstance(metadata, dict):
+        return []
+    recorded = metadata.get("eval_errors")
+    if not isinstance(recorded, list):
+        return []
+    return [str(entry) for entry in recorded]
+
+
+def _confused_halt_recorded(output: dict) -> bool:
+    return any(EVAL_ERROR_CONFUSED_HALT in entry for entry in _eval_errors(output))
+
+
+def _raised_phase_failures(output: dict) -> tuple[dict[str, str], list[str]]:
+    """Split recorded eval-harness exceptions by the phase they were raised in.
+
+    `run_case_real` records them as ``f"{phase}: {exc}"``, so the phase comes
+    from this harness's own closed list and never from the message. Anything
+    that is neither the Confused-halt marker nor a known phase prefix is kept
+    aside rather than dropped: an entry we cannot attribute is still evidence
+    that something went wrong.
+    """
+
+    by_phase: dict[str, str] = {}
+    unattributed: list[str] = []
+    for entry in _eval_errors(output):
+        if EVAL_ERROR_CONFUSED_HALT in entry:
+            continue
+        for phase in REAL_CASE_PHASES:
+            if entry.startswith(f"{phase}: "):
+                by_phase.setdefault(phase, entry)
+                break
+        else:
+            unattributed.append(entry)
+    return by_phase, unattributed
+
+
+def _phase_status_token(output: dict, phase: str) -> str:
+    """One phase's recorded status, bounded to `PhaseStatus`'s own members."""
+
+    statuses = output.get("phase_status")
+    if not isinstance(statuses, dict):
+        return "unreadable"
+    if phase not in statuses:
+        return "missing"
+    raw = statuses[phase]
+    token = str(getattr(raw, "value", raw) or "").strip().lower()
+    return token if token in PHASE_STATUS_TOKENS else "unknown"
+
+
+def recorded_failure_category(output: dict, phase: str) -> str:
+    """The runtime's own category for a failed phase, allow-listed.
+
+    Returns `""` when the phase failed with no diagnostic at all. A category the
+    allow-list does not know becomes `UNKNOWN_PHASE_FAILURE_CATEGORY`, so a
+    corrupt or hostile `phase_failure_details` entry can neither claim a
+    provider outage nor put its own text in the artifact.
+    """
+
+    details = output.get("phase_failure_details")
+    if not isinstance(details, dict):
+        return ""
+    entry = details.get(phase)
+    if not isinstance(entry, dict):
+        return ""
+    raw = entry.get("category")
+    if not isinstance(raw, str):
+        return UNKNOWN_PHASE_FAILURE_CATEGORY if raw is not None else ""
+    category = raw.strip().lower()
+    if not category:
+        return ""
+    return category if category in KNOWN_PHASE_FAILURE_KINDS else UNKNOWN_PHASE_FAILURE_CATEGORY
+
+
+def expected_real_phases(output: dict) -> tuple[str, ...]:
+    """The phases this case was genuinely expected to run.
+
+    Normally the whole canonical sequence. After a Confused classification the
+    product deliberately stops and `run_case_real` breaks out of the loop, so
+    the later phases were never meant to run: demanding that they completed
+    would turn a measured product outcome into a pipeline failure.
+    """
+
+    if _confused_halt_recorded(output):
+        return REAL_CASE_PHASES[:1]
+    return REAL_CASE_PHASES
+
+
+def _raised_failure_record(case: dict, output: dict, message: str) -> PipelineRecord:
+    category = typed_provider_category(message)
+    if category:
+        return PipelineRecord(case, output, PIPELINE_PROVIDER_FAILURE, category)
+    # Fail closed into the nearest truthful non-quality classification. The
+    # message itself is never carried: it is a raw `str(exc)`.
+    return PipelineRecord(case, output, PIPELINE_HARNESS_FAILURE, UNTYPED_PHASE_FAILURE)
+
+
+def _recorded_failure_record(case: dict, output: dict, phase: str) -> PipelineRecord:
+    category = recorded_failure_category(output, phase)
+    if not category:
+        # FAILED with no diagnostic at all. Non-complete either way, and
+        # attributed to the harness because nothing recorded says a provider
+        # was involved — a false provider attribution is its own untruth.
+        return PipelineRecord(case, output, PIPELINE_HARNESS_FAILURE, UNCATEGORIZED_PHASE_FAILURE)
+    if category in PROVIDER_PHASE_FAILURE_KINDS:
+        return PipelineRecord(case, output, PIPELINE_PROVIDER_FAILURE, category)
+    return PipelineRecord(case, output, PIPELINE_HARNESS_FAILURE, category)
+
+
+def pipeline_record_for_output(case: dict, output: dict) -> PipelineRecord:
+    """Classify a returned `run_case_real` state, from the state it recorded.
+
+    Two independent signals say a phase did not do its job, and both are read:
+
+    * `phase_status` / `phase_failure_details` — what the *orchestrator* records
+      when a phase fails without raising. This is the ordinary provider-failure
+      path: `LLMResponse(ok=False)` never raises, so it never reaches
+      `eval_errors`, and reading `eval_errors` alone classified an entirely
+      provider-dead case as `complete`.
+    * `ingestion_metadata.eval_errors` — what *this harness* records when a
+      phase raises. Still honoured, unchanged.
+
+    The canonical phase order is walked and the first phase that did not
+    demonstrably complete decides the classification, so the root cause is what
+    gets reported. That matters most in the shape the product actually produces:
+    a provider outage fails `classify`, the circuit breaker then opens and the
+    remaining phases fail `policy_blocked`. Naming the cascade would hide the
+    outage that caused it.
+
+    Completion is proven, never assumed: a phase that is neither `completed` nor
+    `failed` — pending, running, stale, absent, unreadable — is a case that
+    cannot be shown to have run, and it fails closed.
     """
 
     if not isinstance(output, dict):
@@ -506,18 +681,29 @@ def pipeline_record_for_output(case: dict, output: dict) -> PipelineRecord:
         # than crashed: a harness that dies has told the operator nothing.
         return PipelineRecord(case, {}, PIPELINE_HARNESS_FAILURE, "unreadable_case_output")
 
-    metadata = output.get("ingestion_metadata")
-    recorded = list((metadata or {}).get("eval_errors") or []) if isinstance(metadata, dict) else []
-    failures = [str(entry) for entry in recorded if EVAL_ERROR_CONFUSED_HALT not in str(entry)]
-    if not failures:
-        return PipelineRecord(case, output, PIPELINE_COMPLETE)
+    raised, unattributed = _raised_phase_failures(output)
+    expected = expected_real_phases(output)
 
-    for failure in failures:
-        category = typed_provider_category(failure)
-        if category:
-            return PipelineRecord(case, output, PIPELINE_PROVIDER_FAILURE, category)
-    # Fail closed into the nearest truthful non-quality classification.
-    return PipelineRecord(case, output, PIPELINE_HARNESS_FAILURE, "untyped_phase_failure")
+    for phase in expected:
+        if phase in raised:
+            return _raised_failure_record(case, output, raised[phase])
+        status = _phase_status_token(output, phase)
+        if status == PHASE_STATUS_COMPLETED:
+            continue
+        if status == PHASE_STATUS_FAILED:
+            return _recorded_failure_record(case, output, phase)
+        return PipelineRecord(
+            case, output, PIPELINE_HARNESS_FAILURE, f"{PHASE_STATE_CATEGORY_PREFIX}{status}"
+        )
+
+    # A recorded exception outside the expected set — an unattributable entry,
+    # or one for a phase the Confused halt skipped — still invalidates the case.
+    leftover = [raised[phase] for phase in raised if phase not in expected]
+    leftover.extend(unattributed)
+    if leftover:
+        return _raised_failure_record(case, output, leftover[0])
+
+    return PipelineRecord(case, output, PIPELINE_COMPLETE)
 
 
 # ═══════════════════════ the nightly validity contract ═══════════════════════
