@@ -903,28 +903,37 @@ class _ProviderCalls:
         self.submits = 0
         self.waits = 0
         self.collects = 0
+        # What the CLI actually handed the scheduling/budget seams.
+        self.concurrency = None
+        self.max_wait = None
 
     @property
     def total(self) -> int:
         return self.submits + self.waits + self.collects
 
 
-def _install_fake_batch_api(monkeypatch, tracker: _ProviderCalls, *, judges=None):
+def _install_fake_batch_api(
+    monkeypatch, tracker: _ProviderCalls, *, judges=None, wait_budget_exhausted: bool = False
+):
     """Replace the three provider-touching coroutines with counters.
 
     Nothing here opens a socket or reads a credential; the batch API is never
     reached, so these tests can assert on the resume contract without spend.
     """
 
-    async def fake_pipeline(cases, mock):
+    async def fake_pipeline(cases, mock, concurrency=batch.DEFAULT_CASE_CONCURRENCY):
+        tracker.concurrency = concurrency
         return _complete_records([case["id"] for case in cases])
 
     async def fake_submit(requests):
         tracker.submits += 1
         return FAKE_BATCH_ID
 
-    async def fake_wait(batch_id, poll_interval=30, max_wait=86400):
+    async def fake_wait(batch_id, poll_interval=30, max_wait=batch.DEFAULT_BATCH_WAIT_SECONDS):
         tracker.waits += 1
+        tracker.max_wait = max_wait
+        if wait_budget_exhausted:
+            raise batch.BatchWaitBudgetExhausted(batch_id, max_wait)
         return {}
 
     async def fake_collect(batch_id):
@@ -2068,3 +2077,993 @@ def test_the_real_pipeline_tests_reach_no_provider(monkeypatch):
 
     assert calls  # the stub, not a provider, produced every response
     assert batch.pipeline_record_for_output(case, output).complete is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# nightly completion reliability
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Fourteen historical nightlies were killed at the workflow's 90-minute job
+# timeout, twelve of them before a single judge request had been submitted. A
+# SIGKILL writes no artifact, so those runs could not report even that they had
+# measured nothing — the truth contract proved above is worthless in a process
+# that never reaches its own `write_report`.
+#
+# Two bounds now keep the run inside the cap: independent cases are scheduled a
+# bounded number at a time, and the batch wait is budgeted below the job
+# timeout. Both are *scheduling* changes, and the tests below exist to prove
+# they are only that: the same cases, the same phases, the same order in the
+# report, the same product calls, and the same verdicts.
+#
+# Everything here is provider-free. The scheduling is driven by a stubbed
+# `run_case_real`, the clock is fake, and nothing sleeps for real.
+
+
+class _FakeState:
+    """The `.model_dump(mode="json")` surface `run_pipeline_for_all_cases` uses."""
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def model_dump(self, mode: str = "json") -> dict:
+        return self._payload
+
+
+class _Scheduler:
+    """An instrumented `run_case_real` that records how cases were scheduled.
+
+    "Duration" is a count of event-loop ticks rather than seconds: it makes
+    completion order fully deterministic and means no test ever waits on a
+    wall clock.
+    """
+
+    def __init__(self, *, ticks=None, raises=(), outputs=None) -> None:
+        self.ticks = dict(ticks or {})
+        self.raises = dict(raises or {})
+        self.outputs = outputs or (lambda case: _passing_output(case))
+        self.in_flight = 0
+        self.peak_in_flight = 0
+        self.started: list[str] = []
+        self.finished: list[str] = []
+
+    def install(self, monkeypatch) -> "_Scheduler":
+        monkeypatch.setattr(batch, "run_case_real", self._run_case)
+        return self
+
+    async def _run_case(self, case: dict):
+        case_id = case["id"]
+        self.started.append(case_id)
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        try:
+            for _ in range(self.ticks.get(case_id, 1)):
+                await asyncio.sleep(0)
+            if case_id in self.raises:
+                raise self.raises[case_id]
+            return _FakeState(self.outputs(case))
+        finally:
+            self.in_flight -= 1
+            self.finished.append(case_id)
+
+
+def _schedule(monkeypatch, case_ids, *, concurrency, **kwargs) -> tuple[list, _Scheduler]:
+    scheduler = _Scheduler(**kwargs).install(monkeypatch)
+    cases = [CASES_BY_ID[cid] for cid in case_ids]
+    records = asyncio.run(
+        batch.run_pipeline_for_all_cases(cases, False, concurrency=concurrency)
+    )
+    return records, scheduler
+
+
+def _inverse_ticks(case_ids) -> dict:
+    """The first case takes longest, the last finishes first."""
+
+    return {cid: len(case_ids) - index for index, cid in enumerate(case_ids)}
+
+
+def _truth_fields(observation) -> dict:
+    return {
+        "expected_case_ids": observation.expected_case_ids,
+        "observed_case_ids": observation.observed_case_ids,
+        "total": observation.total,
+        "passed": observation.passed,
+        "pass_rate": observation.pass_rate,
+        "validity_errors": observation.validity_errors,
+        "valid_observation": observation.valid_observation,
+        "quality_measured": observation.quality_measured,
+        "result_class": observation.result_class,
+    }
+
+
+def _tuples(records) -> list[tuple]:
+    return [(record.case_id, record.status, record.category) for record in records]
+
+
+# ── 1. the report is in input order, whatever order the cases finished in ──
+
+
+def test_record_order_is_input_order_not_completion_order(monkeypatch):
+    records, scheduler = _schedule(
+        monkeypatch, GOLDEN_CASE_IDS, concurrency=12, ticks=_inverse_ticks(GOLDEN_CASE_IDS)
+    )
+
+    # The cases genuinely completed in reverse...
+    assert scheduler.finished == list(reversed(GOLDEN_CASE_IDS))
+    # ...and the report is still in input order.
+    assert [record.case_id for record in records] == GOLDEN_CASE_IDS
+
+
+def test_inverse_completion_order_does_not_disturb_the_observation(monkeypatch):
+    records, _ = _schedule(
+        monkeypatch, GOLDEN_CASE_IDS, concurrency=6, ticks=_inverse_ticks(GOLDEN_CASE_IDS)
+    )
+
+    observation = _observe(records=records, judges=_judges())
+
+    assert observation.valid_observation is True
+    assert observation.observed_case_ids == GOLDEN_CASE_IDS
+    assert observation.result_class == release_gates.RESULT_PASS
+
+
+# ── 2. serial and concurrent produce the same records and the same truth ──
+
+
+@pytest.mark.parametrize("concurrency", [2, 3, 6, 12, 50])
+def test_concurrent_scheduling_is_equivalent_to_the_serial_one(monkeypatch, concurrency):
+    ticks = _inverse_ticks(GOLDEN_CASE_IDS)
+
+    serial, _ = _schedule(monkeypatch, GOLDEN_CASE_IDS, concurrency=1, ticks=ticks)
+    concurrent, _ = _schedule(monkeypatch, GOLDEN_CASE_IDS, concurrency=concurrency, ticks=ticks)
+
+    assert _tuples(concurrent) == _tuples(serial)
+    assert _truth_fields(_observe(records=concurrent)) == _truth_fields(_observe(records=serial))
+
+
+def test_denominator_and_validity_are_identical_under_either_schedule(monkeypatch):
+    """The same mixed universe: one dead case, one blocked, the rest healthy."""
+
+    outputs = {
+        GOLDEN_CASE_IDS[0]: _failed_phase_output(CASES_BY_ID[GOLDEN_CASE_IDS[0]], {"classify": "quota_exceeded"}),
+        GOLDEN_CASE_IDS[1]: _failed_phase_output(CASES_BY_ID[GOLDEN_CASE_IDS[1]], {"classify": "policy_blocked"}),
+    }
+
+    def build(case):
+        return outputs.get(case["id"], _passing_output(case))
+
+    serial, _ = _schedule(monkeypatch, GOLDEN_CASE_IDS, concurrency=1, outputs=build)
+    concurrent, _ = _schedule(monkeypatch, GOLDEN_CASE_IDS, concurrency=6, outputs=build)
+
+    assert _tuples(concurrent) == _tuples(serial)
+
+    truth = _truth_fields(_observe(records=concurrent))
+    assert truth == _truth_fields(_observe(records=serial))
+    assert truth["valid_observation"] is False
+    assert truth["total"] == len(GOLDEN_CASE_IDS)
+    assert truth["result_class"] not in (
+        release_gates.RESULT_PASS,
+        release_gates.RESULT_QUALITY_FAILURE,
+    )
+
+
+# ── 3. the bound is real ──
+
+
+@pytest.mark.parametrize("concurrency", [1, 2, 3, 6, 12])
+def test_peak_cases_in_flight_never_exceeds_the_configured_bound(monkeypatch, concurrency):
+    _, scheduler = _schedule(
+        monkeypatch, GOLDEN_CASE_IDS, concurrency=concurrency, ticks=_inverse_ticks(GOLDEN_CASE_IDS)
+    )
+
+    assert scheduler.peak_in_flight <= concurrency
+    # And the bound is actually reached: this is genuine concurrency, not a
+    # serial loop that happens to satisfy an upper bound vacuously.
+    assert scheduler.peak_in_flight == min(concurrency, len(GOLDEN_CASE_IDS))
+
+
+def test_a_bound_larger_than_the_case_count_runs_every_case_at_once(monkeypatch):
+    records, scheduler = _schedule(monkeypatch, GOLDEN_CASE_IDS, concurrency=100)
+
+    assert scheduler.peak_in_flight == len(GOLDEN_CASE_IDS)
+    assert [record.case_id for record in records] == GOLDEN_CASE_IDS
+
+
+def test_the_default_bound_is_the_measured_six(monkeypatch):
+    """The default is evidence-based: this corpus has run 6-way under Gate A."""
+
+    assert batch.DEFAULT_CASE_CONCURRENCY == 6
+
+    scheduler = _Scheduler(ticks=_inverse_ticks(GOLDEN_CASE_IDS)).install(monkeypatch)
+    asyncio.run(batch.run_pipeline_for_all_cases([CASES_BY_ID[cid] for cid in GOLDEN_CASE_IDS], False))
+
+    assert scheduler.peak_in_flight == batch.DEFAULT_CASE_CONCURRENCY
+
+
+# ── 4. `--concurrency 1` is the old schedule, exactly ──
+
+
+def test_concurrency_one_reproduces_the_serial_schedule(monkeypatch):
+    _, scheduler = _schedule(
+        monkeypatch, GOLDEN_CASE_IDS, concurrency=1, ticks=_inverse_ticks(GOLDEN_CASE_IDS)
+    )
+
+    # One case at a time...
+    assert scheduler.peak_in_flight == 1
+    # ...each finished before the next began...
+    assert scheduler.started == scheduler.finished
+    # ...in input order.
+    assert scheduler.started == GOLDEN_CASE_IDS
+
+
+# ── 5. one case's failure costs exactly one case ──
+
+
+def test_a_raising_case_does_not_cancel_its_peers(monkeypatch):
+    victim = GOLDEN_CASE_IDS[0]
+    records, scheduler = _schedule(
+        monkeypatch,
+        GOLDEN_CASE_IDS,
+        concurrency=6,
+        raises={victim: RuntimeError("harness bug")},
+    )
+
+    assert [record.case_id for record in records] == GOLDEN_CASE_IDS
+    assert len(records) == len(GOLDEN_CASE_IDS)
+    # Every peer ran to completion — no gather-wide cancellation.
+    assert set(scheduler.finished) == set(GOLDEN_CASE_IDS)
+
+    failed = [record for record in records if not record.complete]
+    assert [record.case_id for record in failed] == [victim]
+    assert failed[0].status == batch.PIPELINE_HARNESS_FAILURE
+    assert failed[0].category == "RuntimeError"
+
+
+def test_a_case_that_raises_immediately_still_leaves_eleven_records(monkeypatch):
+    """The failure lands before any peer has had a chance to start."""
+
+    victim = GOLDEN_CASE_IDS[0]
+    records, _ = _schedule(
+        monkeypatch,
+        GOLDEN_CASE_IDS,
+        concurrency=6,
+        ticks={victim: 0},
+        raises={victim: ValueError("immediate")},
+    )
+
+    assert len(records) == len(GOLDEN_CASE_IDS)
+    assert sum(1 for record in records if record.complete) == len(GOLDEN_CASE_IDS) - 1
+
+
+def test_a_case_that_outlives_its_peers_still_gets_its_own_record(monkeypatch):
+    straggler = GOLDEN_CASE_IDS[-1]
+    ticks = {cid: 1 for cid in GOLDEN_CASE_IDS}
+    ticks[straggler] = 200
+
+    records, scheduler = _schedule(monkeypatch, GOLDEN_CASE_IDS, concurrency=6, ticks=ticks)
+
+    assert scheduler.finished[-1] == straggler
+    assert [record.case_id for record in records] == GOLDEN_CASE_IDS
+    assert all(record.complete for record in records)
+
+
+@pytest.mark.parametrize(
+    "exc, expected_status",
+    [
+        (TimeoutError("transport"), batch.PIPELINE_PROVIDER_FAILURE),
+        (ConnectionError("transport"), batch.PIPELINE_PROVIDER_FAILURE),
+        (RuntimeError("harness"), batch.PIPELINE_HARNESS_FAILURE),
+    ],
+)
+def test_several_simultaneously_failing_cases_stay_typed_and_non_quality(
+    monkeypatch, exc, expected_status
+):
+    victims = GOLDEN_CASE_IDS[:3]
+    records, _ = _schedule(
+        monkeypatch,
+        GOLDEN_CASE_IDS,
+        concurrency=6,
+        raises={cid: exc for cid in victims},
+    )
+
+    for record in records[:3]:
+        assert record.status == expected_status
+        assert record.complete is False
+    assert all(record.complete for record in records[3:])
+
+    observation = _observe(records=records, judges=_judges(score=100))
+
+    assert observation.valid_observation is False
+    assert observation.quality_measured is False
+    assert observation.result_class not in (
+        release_gates.RESULT_PASS,
+        release_gates.RESULT_QUALITY_FAILURE,
+    )
+    # The healthy peers keep their own records and are not blamed for the
+    # failures beside them.
+    for case_id in GOLDEN_CASE_IDS[3:]:
+        assert _case_entry(observation, case_id)["quality_measured"] is True
+    for case_id in victims:
+        assert _case_entry(observation, case_id)["quality_measured"] is False
+
+
+def test_an_escaped_exception_is_still_only_one_case(monkeypatch):
+    """The `return_exceptions=True` backstop, exercised directly.
+
+    `_run_one_case` classifies its own exceptions, so nothing should ever reach
+    `gather`'s error path — but if anything ever did, the default behaviour
+    would cancel every peer, and one case would erase eleven records.
+    """
+
+    victim = GOLDEN_CASE_IDS[0]
+
+    async def escaping(case: dict, mock: bool):
+        if case["id"] == victim:
+            raise ConnectionError("escaped classification entirely")
+        await asyncio.sleep(0)
+        return batch.PipelineRecord(case, _passing_output(case), batch.PIPELINE_COMPLETE)
+
+    monkeypatch.setattr(batch, "_run_one_case", escaping)
+    records = asyncio.run(
+        batch.run_pipeline_for_all_cases(
+            [CASES_BY_ID[cid] for cid in GOLDEN_CASE_IDS], False, concurrency=6
+        )
+    )
+
+    assert [record.case_id for record in records] == GOLDEN_CASE_IDS
+    assert records[0].status == batch.PIPELINE_PROVIDER_FAILURE
+    assert all(record.complete for record in records[1:])
+
+
+# ── 6. identity isolation, through the real product pipeline ──
+
+
+def _identity_probe(monkeypatch, case_ids, *, concurrency):
+    """Drive the REAL `run_case_real` concurrently with a stubbed provider.
+
+    Every phase call records the telemetry identity bound at the moment of the
+    call together with the prompt it was given. The prompt carries the case's
+    own brief, so the identity's claim can be checked against the case whose
+    work is actually being done — which is the only way to detect a leak.
+    """
+
+    import llm_client
+    import orchestrator
+    from provider_telemetry.identity import current_identity
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    seen: list[tuple[str, str, str]] = []
+
+    async def stub(phase, system, prompt, **kwargs):
+        identity = current_identity()
+        seen.append((identity.external_project_id, identity.run_id, prompt))
+        # Guarantees a yield inside every case, so the cases genuinely interleave.
+        await asyncio.sleep(0)
+        return llm_client.LLMResponse(ok=False, text="", error_type="api_error", error="stub")
+
+    monkeypatch.setattr(orchestrator, "call_llm", stub)
+    records = asyncio.run(
+        batch.run_pipeline_for_all_cases(
+            [CASES_BY_ID[cid] for cid in case_ids], False, concurrency=concurrency
+        )
+    )
+    return records, seen
+
+
+def test_concurrent_cases_never_borrow_each_others_identity(monkeypatch):
+    case_ids = GOLDEN_CASE_IDS[:4]
+    briefs = {cid: CASES_BY_ID[cid]["brief"] for cid in case_ids}
+    assert len(set(briefs.values())) == len(case_ids)  # the tie must be unique
+
+    records, seen = _identity_probe(monkeypatch, case_ids, concurrency=4)
+
+    assert seen  # the stub, not a provider, answered every call
+    for external_id, run_id, prompt in seen:
+        # Which case's work is this, really?
+        working_on = [cid for cid in case_ids if briefs[cid] in prompt]
+        assert len(working_on) == 1
+        assert external_id == f"eval-{working_on[0]}"
+        assert run_id == f"eval-{working_on[0]}"
+
+    assert {entry[0] for entry in seen} == {f"eval-{cid}" for cid in case_ids}
+    assert [record.case_id for record in records] == case_ids
+
+
+def test_the_identity_probe_really_ran_the_cases_concurrently(monkeypatch):
+    """Otherwise the isolation above would be proving nothing."""
+
+    case_ids = GOLDEN_CASE_IDS[:4]
+    _, concurrent = _identity_probe(monkeypatch, case_ids, concurrency=4)
+    _, serial = _identity_probe(monkeypatch, case_ids, concurrency=1)
+
+    concurrent_ids = [entry[0] for entry in concurrent]
+    serial_ids = [entry[0] for entry in serial]
+
+    # Serial: every case's calls in one uninterrupted block.
+    assert serial_ids == sorted(serial_ids, key=lambda cid: case_ids.index(cid[len("eval-"):]))
+    # Concurrent: genuinely interleaved, so not that.
+    assert concurrent_ids != serial_ids
+    assert len(set(concurrent_ids[:2])) == 2
+
+
+# ── 7. shared process state cannot manufacture quality evidence ──
+#
+# `llm_client._breaker` and `llm_client._semantic_cache` are process-global and
+# are deliberately not redesigned in this wave. What must be shown is narrower
+# and sufficient: no consequence of sharing them across concurrent cases can put
+# a case into the *measured quality* column that did not earn its way there.
+
+
+def test_a_breaker_blocked_case_is_never_measured_quality(monkeypatch):
+    """`policy_blocked` is the shape the breaker produces downstream."""
+
+    case = CASES_BY_ID[GOLDEN_CASE_IDS[0]]
+    blocked = _failed_phase_output(
+        case, {"audit": "policy_blocked"}, completed=("classify", "hypotheses", "gauntlet")
+    )
+    record = batch.pipeline_record_for_output(case, blocked)
+
+    assert record.status == batch.PIPELINE_HARNESS_FAILURE
+    assert record.status != batch.PIPELINE_PROVIDER_FAILURE
+    assert record.complete is False
+
+    observation = _observe(records=[record, *_complete_records(GOLDEN_CASE_IDS[1:])])
+
+    assert observation.valid_observation is False
+    assert _case_entry(observation, case["id"])["quality_measured"] is False
+    assert observation.result_class not in (
+        release_gates.RESULT_PASS,
+        release_gates.RESULT_QUALITY_FAILURE,
+    )
+
+
+def test_concurrent_dead_cases_leave_the_survivors_truthful(monkeypatch):
+    """The real product pipeline, several cases at once, one dead provider.
+
+    This is the shape the shared breaker actually produces: the first phases
+    fail on the provider, the per-case budget gate then blocks the rest. Root
+    cause is what gets reported, and nothing here is quality.
+    """
+
+    case_ids = GOLDEN_CASE_IDS[:4]
+    records, seen = _identity_probe(monkeypatch, case_ids, concurrency=4)
+
+    assert seen
+    assert [record.case_id for record in records] == case_ids
+    for record in records:
+        assert record.complete is False
+        assert record.status in (batch.PIPELINE_PROVIDER_FAILURE, batch.PIPELINE_HARNESS_FAILURE)
+
+    observation = _observe(
+        records=records,
+        judges=_judges(case_ids, score=100),
+        expected_case_ids=case_ids,
+        golden_case_ids=GOLDEN_CASE_IDS,
+    )
+
+    assert observation.valid_observation is False
+    assert observation.quality_measured is False
+    assert observation.passed == 0
+    assert observation.result_class not in (
+        release_gates.RESULT_PASS,
+        release_gates.RESULT_QUALITY_FAILURE,
+    )
+    assert all(entry["quality_measured"] is False for entry in observation.cases)
+
+
+# ── 8. a malformed bound fails before anything is scheduled ──
+
+
+@pytest.mark.parametrize("value", [0, -1, -6, "0", "-3", "", "  ", "six", "2.5", "6.0", None, 1.5, True, [6]])
+def test_an_invalid_concurrency_is_rejected(value):
+    with pytest.raises(ValueError):
+        batch.normalize_concurrency(value)
+
+
+@pytest.mark.parametrize("value", [1, 2, 6, 12, "6", " 6 "])
+def test_a_valid_concurrency_normalizes_to_an_int(value):
+    assert batch.normalize_concurrency(value) == int(str(value).strip())
+
+
+def test_an_invalid_concurrency_schedules_nothing(monkeypatch):
+    scheduler = _Scheduler().install(monkeypatch)
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            batch.run_pipeline_for_all_cases(
+                [CASES_BY_ID[cid] for cid in GOLDEN_CASE_IDS], False, concurrency=0
+            )
+        )
+
+    assert scheduler.started == []
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "2.5", ""])
+def test_a_malformed_concurrency_flag_exits_without_a_provider_call(
+    tmp_path, monkeypatch, value
+):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+    assert _run_cli(monkeypatch, ["--report", str(tmp_path), "--concurrency", value]) == 2
+    assert tracker.total == 0
+    assert not (tmp_path / "summary_batch.json").exists()
+
+
+@pytest.mark.parametrize("value", ["0", "-30", "thirty", "1.5"])
+def test_a_malformed_batch_wait_flag_exits_without_a_provider_call(
+    tmp_path, monkeypatch, value
+):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+    assert _run_cli(monkeypatch, ["--report", str(tmp_path), "--batch-wait-minutes", value]) == 2
+    assert tracker.total == 0
+
+
+def test_the_cli_passes_its_bounds_through_to_the_seams(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    _run_cli(monkeypatch, ["--report", str(tmp_path), "--concurrency", "3", "--batch-wait-minutes", "7"])
+
+    assert tracker.concurrency == 3
+    assert tracker.max_wait == 7 * 60
+
+
+def test_the_cli_defaults_are_the_documented_ones(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    _run_cli(monkeypatch, ["--report", str(tmp_path)])
+
+    assert tracker.concurrency == batch.DEFAULT_CASE_CONCURRENCY
+    assert tracker.max_wait == batch.DEFAULT_BATCH_WAIT_SECONDS
+
+
+# ── 9. mock mode and odd universes are unaffected by scheduling ──
+
+
+def test_mock_mode_runs_under_concurrency_and_is_still_never_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--mock", "--concurrency", "6"])
+    summary = _summary_on_disk(tmp_path)
+
+    assert exit_code == 0
+    assert summary["mode"] == batch.EXECUTION_MODE_MOCK
+    assert summary["valid_observation"] is False
+    assert summary["quality_measured"] is False
+    assert summary["ok"] is False
+    assert [entry["case_id"] for entry in summary["cases"]] == GOLDEN_CASE_IDS
+
+
+def test_an_empty_case_universe_schedules_nothing_and_stays_invalid(monkeypatch):
+    scheduler = _Scheduler().install(monkeypatch)
+
+    records = asyncio.run(batch.run_pipeline_for_all_cases([], False, concurrency=6))
+
+    assert records == []
+    assert scheduler.started == []
+
+    observation = _observe(records=[], judges={}, expected_case_ids=[], golden_case_ids=[])
+    assert observation.valid_observation is False
+    assert batch.VALIDITY_EXPECTED_UNIVERSE_EMPTY in _codes(observation)
+
+
+def test_a_subset_universe_is_scheduled_but_still_structurally_invalid(monkeypatch):
+    subset = GOLDEN_CASE_IDS[:3]
+    records, scheduler = _schedule(monkeypatch, subset, concurrency=6)
+
+    assert [record.case_id for record in records] == subset
+    assert scheduler.peak_in_flight == len(subset)
+
+    observation = _observe(
+        records=records, judges=_judges(subset), expected_case_ids=subset
+    )
+    assert observation.valid_observation is False
+    assert batch.VALIDITY_INCOMPLETE_CASE_SELECTION in _codes(observation)
+    assert observation.result_class != release_gates.RESULT_PASS
+
+
+# ═══════════════ the batch wait budget ═══════════════
+
+
+class _FakeClock:
+    """A monotonic clock that only ever advances when a fake sleep is awaited."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def install(self, monkeypatch) -> "_FakeClock":
+        async def fake_sleep(seconds: float) -> None:
+            self.slept.append(seconds)
+            self.now += seconds
+
+        monkeypatch.setattr(batch, "_now", lambda: self.now)
+        monkeypatch.setattr(batch, "_sleep", fake_sleep)
+        return self
+
+
+class _FakeBatchClient:
+    """The two attributes `wait_for_batch` reads off a retrieved batch."""
+
+    def __init__(self, statuses: list[str], recorder: list) -> None:
+        self._statuses = list(statuses)
+        self._recorder = recorder
+        self.messages = self
+
+    @property
+    def batches(self):
+        return self
+
+    async def retrieve(self, batch_id: str):
+        self._recorder.append(batch_id)
+        status = self._statuses.pop(0) if len(self._statuses) > 1 else self._statuses[0]
+        return type(
+            "FakeBatch",
+            (),
+            {
+                "id": batch_id,
+                "processing_status": status,
+                "request_counts": type(
+                    "Counts", (),
+                    {"succeeded": 0, "errored": 0, "processing": 12, "canceled": 0, "expired": 0},
+                )(),
+            },
+        )()
+
+
+def _install_fake_anthropic(monkeypatch, statuses: list[str]) -> list:
+    """Stand in for the `anthropic` module `wait_for_batch` imports locally."""
+
+    retrievals: list = []
+    fake_module = type(
+        "FakeAnthropic",
+        (),
+        {"AsyncAnthropic": staticmethod(lambda api_key=None: _FakeBatchClient(statuses, retrievals))},
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
+    return retrievals
+
+
+def _wait(monkeypatch, statuses, *, max_wait, poll_interval=30):
+    clock = _FakeClock().install(monkeypatch)
+    retrievals = _install_fake_anthropic(monkeypatch, statuses)
+    return clock, retrievals, batch.wait_for_batch(
+        FAKE_BATCH_ID, poll_interval, max_wait=max_wait
+    )
+
+
+# ── 10. the budget is respected, on a fake clock ──
+
+
+def test_a_batch_that_never_ends_reaches_a_clean_budget_exhaustion(monkeypatch):
+    clock, retrievals, coro = _wait(monkeypatch, ["in_progress"], max_wait=1800)
+
+    with pytest.raises(batch.BatchWaitBudgetExhausted) as raised:
+        asyncio.run(coro)
+
+    assert raised.value.batch_id == FAKE_BATCH_ID
+    assert raised.value.max_wait == 1800
+    # Bounded by the budget, on the fake clock, with no real sleeping at all.
+    assert clock.now == 1800
+    assert sum(clock.slept) == 1800
+    assert len(retrievals) == 1800 // 30 + 1
+
+
+def test_the_budget_is_wall_clock_not_a_count_of_polls(monkeypatch):
+    """A poll interval larger than the remaining budget is truncated, not
+    overshot: the bound exists to fit inside a job timeout."""
+
+    clock, _, coro = _wait(monkeypatch, ["in_progress"], max_wait=45, poll_interval=30)
+
+    with pytest.raises(batch.BatchWaitBudgetExhausted):
+        asyncio.run(coro)
+
+    assert clock.slept == [30, 15]
+    assert clock.now == 45
+
+
+def test_a_batch_that_ends_before_the_budget_is_collected(monkeypatch):
+    clock, retrievals, coro = _wait(
+        monkeypatch, ["in_progress", "in_progress", "ended"], max_wait=1800
+    )
+
+    result = asyncio.run(coro)
+
+    assert result.processing_status == "ended"
+    assert len(retrievals) == 3
+    assert clock.now == 60
+
+
+def test_a_batch_that_ends_exactly_at_the_budget_boundary_is_collected(monkeypatch):
+    """Two polls' worth of budget, ending on the second: still a collection."""
+
+    clock, _, coro = _wait(monkeypatch, ["in_progress", "ended"], max_wait=30)
+
+    assert asyncio.run(coro).processing_status == "ended"
+    assert clock.now == 30
+
+
+def test_a_batch_that_ends_one_tick_after_the_budget_is_not(monkeypatch):
+    clock, _, coro = _wait(monkeypatch, ["in_progress", "in_progress", "ended"], max_wait=30)
+
+    with pytest.raises(batch.BatchWaitBudgetExhausted):
+        asyncio.run(coro)
+
+    assert clock.now == 30
+
+
+def test_an_already_ended_batch_is_collected_even_on_a_tiny_budget(monkeypatch):
+    """A status is always retrieved at least once."""
+
+    clock, retrievals, coro = _wait(monkeypatch, ["ended"], max_wait=1)
+
+    assert asyncio.run(coro).processing_status == "ended"
+    assert retrievals == [FAKE_BATCH_ID]
+    assert clock.slept == []
+
+
+def test_budget_exhaustion_is_not_a_timeout_error(monkeypatch):
+    """`classify_exception` reads `TimeoutError` as provider transport, and this
+    condition is the opposite of a provider fact."""
+
+    assert not issubclass(batch.BatchWaitBudgetExhausted, TimeoutError)
+    assert not issubclass(batch.BatchWaitBudgetExhausted, OSError)
+
+    status, _ = batch.classify_exception(batch.BatchWaitBudgetExhausted(FAKE_BATCH_ID, 1800))
+    assert status == batch.PIPELINE_HARNESS_FAILURE
+
+
+# ── 11. the default budget fits inside the real workflow's job timeout ──
+
+
+def _nightly_job_timeout_minutes() -> int:
+    """Read the real workflow. Parsed, never modified."""
+
+    import yaml
+
+    workflow_path = (
+        Path(__file__).resolve().parents[2] / ".github" / "workflows" / "evals-nightly-batch.yml"
+    )
+    parsed = yaml.safe_load(workflow_path.read_text())
+    return int(parsed["jobs"]["nightly-batch"]["timeout-minutes"])
+
+
+def test_the_default_wait_budget_is_strictly_inside_the_job_timeout():
+    timeout = _nightly_job_timeout_minutes()
+
+    assert timeout == 90  # asserted, not assumed; this wave does not move it
+    assert batch.DEFAULT_BATCH_WAIT_MINUTES < timeout
+    # And with room to spare: setup plus a bounded-concurrency pipeline pass has
+    # to fit alongside it, and the run still has to write its artifact.
+    assert batch.DEFAULT_BATCH_WAIT_MINUTES <= timeout // 2
+    assert batch.DEFAULT_BATCH_WAIT_SECONDS == batch.DEFAULT_BATCH_WAIT_MINUTES * 60
+
+
+def test_the_old_unreachable_ceiling_is_gone():
+    """86400s inside a 90-minute job could only ever end as a SIGKILL."""
+
+    import inspect
+
+    default = inspect.signature(batch.wait_for_batch).parameters["max_wait"].default
+
+    assert default == batch.DEFAULT_BATCH_WAIT_SECONDS
+    assert default < _nightly_job_timeout_minutes() * 60
+
+
+# ── 12. what an exhausted budget leaves behind ──
+
+
+def _exhausted_run(tmp_path, monkeypatch, sha: str = SHA_A) -> tuple[dict, int, _ProviderCalls]:
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker, wait_budget_exhausted=True)
+    monkeypatch.setenv("GITHUB_SHA", sha)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path)])
+    return _summary_on_disk(tmp_path), exit_code, tracker
+
+
+def test_wait_budget_exhaustion_still_writes_a_summary(tmp_path, monkeypatch):
+    summary, exit_code, tracker = _exhausted_run(tmp_path, monkeypatch)
+
+    assert (tmp_path / "summary_batch.json").exists()
+    assert exit_code == 1
+    # Submitted once, waited once, and deliberately never collected.
+    assert (tracker.submits, tracker.waits, tracker.collects) == (1, 1, 0)
+
+
+def test_the_exhausted_summary_names_the_batch_it_gave_up_on(tmp_path, monkeypatch):
+    summary, _, _ = _exhausted_run(tmp_path, monkeypatch)
+
+    assert summary["batch_id"] == FAKE_BATCH_ID
+
+
+def test_an_exhausted_wait_is_not_a_measured_quality_verdict(tmp_path, monkeypatch):
+    summary, _, _ = _exhausted_run(tmp_path, monkeypatch)
+
+    assert summary["valid_observation"] is False
+    assert summary["quality_measured"] is False
+    assert summary["ok"] is False
+    assert summary["result_class"] != release_gates.RESULT_PASS
+    assert summary["result_class"] != release_gates.RESULT_QUALITY_FAILURE
+    assert summary["result_class"] == release_gates.RESULT_INFRASTRUCTURE_FAILURE
+
+
+def test_an_exhausted_wait_is_not_blamed_on_the_provider(tmp_path, monkeypatch):
+    """The provider accepted the batch and may still be working on it."""
+
+    summary, _, _ = _exhausted_run(tmp_path, monkeypatch)
+
+    assert summary["result_class"] != release_gates.RESULT_PROVIDER_UNAVAILABLE
+    codes = {entry["code"] for entry in summary["validity_errors"]}
+    assert batch.VALIDITY_JUDGE_PROVIDER_OR_BATCH_FAILURE not in codes
+    assert batch.VALIDITY_PIPELINE_PROVIDER_FAILURE not in codes
+
+
+def test_the_exhaustion_diagnostic_is_a_fixed_closed_token(tmp_path, monkeypatch):
+    summary, _, _ = _exhausted_run(tmp_path, monkeypatch)
+
+    errors = [
+        entry
+        for entry in summary["validity_errors"]
+        if entry["code"] == batch.VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED
+    ]
+
+    assert len(errors) == 1
+    assert errors[0]["detail"] == f"batch_collect:{batch.WAIT_BUDGET_EXHAUSTED_DETAIL}"
+    assert errors[0]["case_ids"] == GOLDEN_CASE_IDS
+    # In the module's own closed vocabulary, and classified.
+    assert batch.VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED in batch.VALIDITY_CODES
+    assert batch.VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED in batch.ATTRIBUTION_AND_HARNESS_CODES
+
+
+def test_no_exception_or_provider_prose_reaches_the_exhausted_artifact(tmp_path, monkeypatch):
+    summary, _, _ = _exhausted_run(tmp_path, monkeypatch)
+
+    serialized = json.dumps(summary)
+    for marker in ("BatchWaitBudgetExhausted", "Traceback", "elapsed before", "sk-ant", "api_key"):
+        assert marker not in serialized
+    for entry in summary["validity_errors"]:
+        assert entry["code"] in batch.VALIDITY_CODES
+        assert " " not in entry["detail"]
+
+
+def test_a_hostile_batch_id_cannot_smuggle_prose_into_the_diagnostic(tmp_path, monkeypatch):
+    """The diagnostic is built from fixed tokens, not from anything observed."""
+
+    hostile = 'msgbatch_"><script>  key=sk-ant-LEAKED'
+
+    async def fake_pipeline(cases, mock, concurrency=batch.DEFAULT_CASE_CONCURRENCY):
+        return _complete_records([case["id"] for case in cases])
+
+    async def fake_submit(requests):
+        return hostile
+
+    async def fake_wait(batch_id, poll_interval=30, max_wait=batch.DEFAULT_BATCH_WAIT_SECONDS):
+        raise batch.BatchWaitBudgetExhausted(batch_id, max_wait)
+
+    monkeypatch.setattr(batch, "run_pipeline_for_all_cases", fake_pipeline)
+    monkeypatch.setattr(batch, "submit_batch", fake_submit)
+    monkeypatch.setattr(batch, "wait_for_batch", fake_wait)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    assert _run_cli(monkeypatch, ["--report", str(tmp_path)]) == 1
+    summary = _summary_on_disk(tmp_path)
+
+    for entry in summary["validity_errors"]:
+        assert "sk-ant" not in entry["detail"]
+        assert "script" not in entry["detail"]
+    # `batch_id` is its own field and is the operator's resume handle; the
+    # *diagnostics* never quote it.
+    assert summary["batch_id"] == hostile
+
+
+def test_the_submitted_inputs_survive_an_exhausted_wait(tmp_path, monkeypatch):
+    _exhausted_run(tmp_path, monkeypatch)
+
+    cached = json.loads(_cache_path(tmp_path).read_text())
+
+    assert cached["source_sha"] == SHA_A
+    assert [entry["case"]["id"] for entry in cached["cases"]] == GOLDEN_CASE_IDS
+
+
+# ── 13. and what can be recovered from it ──
+
+
+def test_an_exhausted_wait_can_be_resumed_at_the_same_commit(tmp_path, monkeypatch):
+    """The whole point of stopping the wait cleanly: the batch is still there."""
+
+    _exhausted_run(tmp_path, monkeypatch)
+
+    resume_tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, resume_tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID])
+    summary = _summary_on_disk(tmp_path)
+
+    assert exit_code == 0
+    assert summary["valid_observation"] is True
+    assert summary["quality_measured"] is True
+    assert summary["ok"] is True
+    assert summary["result_class"] == release_gates.RESULT_PASS
+    assert summary["source_sha"] == SHA_A
+    assert summary["validity_errors"] == []
+    # No second batch was ever created.
+    assert resume_tracker.submits == 0
+    assert (resume_tracker.waits, resume_tracker.collects) == (1, 1)
+
+
+def test_resuming_an_exhausted_wait_at_another_commit_still_fails_closed(tmp_path, monkeypatch):
+    _exhausted_run(tmp_path, monkeypatch, sha=SHA_A)
+
+    resume_tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, resume_tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_B)
+
+    exit_code = _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID])
+    summary = _summary_on_disk(tmp_path)
+
+    assert exit_code == 1
+    assert summary["valid_observation"] is False
+    assert summary["result_class"] != release_gates.RESULT_PASS
+    assert summary["result_class"] != release_gates.RESULT_QUALITY_FAILURE
+    assert batch.VALIDITY_SOURCE_SHA_MISMATCH in {
+        entry["code"] for entry in summary["validity_errors"]
+    }
+    # Failed closed *before* touching the provider.
+    assert resume_tracker.total == 0
+
+
+def test_an_exhausted_wait_never_resubmits_by_itself(tmp_path, monkeypatch):
+    """Budget exhaustion is a recoverable observation, not authorization to buy
+    a second paid batch."""
+
+    _, _, tracker = _exhausted_run(tmp_path, monkeypatch)
+
+    assert tracker.submits == 1
+    caches = sorted(path.name for path in tmp_path.glob("batch_inputs_*.json"))
+    assert caches == [f"batch_inputs_{FAKE_BATCH_ID}.json"]
+
+
+def test_a_resume_whose_budget_also_expires_is_typed_the_same_way(tmp_path, monkeypatch):
+    _exhausted_run(tmp_path, monkeypatch)
+
+    resume_tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, resume_tracker, wait_budget_exhausted=True)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    assert _run_cli(monkeypatch, ["--report", str(tmp_path), "--resume", FAKE_BATCH_ID]) == 1
+    summary = _summary_on_disk(tmp_path)
+
+    errors = [
+        entry
+        for entry in summary["validity_errors"]
+        if entry["code"] == batch.VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED
+    ]
+    assert len(errors) == 1
+    assert errors[0]["detail"] == f"batch_resume:{batch.WAIT_BUDGET_EXHAUSTED_DETAIL}"
+    assert summary["valid_observation"] is False
+    assert summary["batch_id"] == FAKE_BATCH_ID
+    assert resume_tracker.collects == 0
+
+
+# ── 14. --submit-only is untouched by any of this ──
+
+
+def test_submit_only_is_still_exactly_one_submit_and_nothing_else(tmp_path, monkeypatch):
+    tracker = _ProviderCalls()
+    _install_fake_batch_api(monkeypatch, tracker)
+    monkeypatch.setenv("GITHUB_SHA", SHA_A)
+
+    assert _run_cli(monkeypatch, ["--report", str(tmp_path), "--submit-only"]) == 0
+
+    assert (tracker.submits, tracker.waits, tracker.collects) == (1, 0, 0)
+    assert _cache_path(tmp_path).exists()
+    assert not (tmp_path / "summary_batch.json").exists()

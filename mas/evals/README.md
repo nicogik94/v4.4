@@ -64,7 +64,7 @@ Fixture status meanings:
 | Runner | When to use | Cost | Latency |
 |---|---|---|---|
 | `run_evals.py` | PR feedback, iterative dev, single-case debugging | ~$2–4 / full suite | ~3 minutes |
-| `run_evals_batch.py` | Nightly suites, post-rewrite regression sweeps, broad benchmarks | **~50% cheaper** | minutes to 24h (Anthropic Batch API SLA) |
+| `run_evals_batch.py` | Nightly suites, post-rewrite regression sweeps, broad benchmarks | **~50% cheaper** | ~20 min pipeline pass + a bounded batch wait (default 30 min) |
 
 The split is deliberate: keep the dev loop tight on PRs, and let cost dominate on big runs.
 
@@ -132,7 +132,7 @@ rather than guessed. Summaries written before this wave aggregate unchanged.
 ### Batch runner (nightly + regression sweeps)
 
 ```bash
-# Full run, wait for completion (typically minutes for 12 cases)
+# Full run: bounded-concurrency pipeline pass, then wait for the batch
 python -m evals.run_evals_batch
 
 # Submit only — useful for very large suites
@@ -142,9 +142,63 @@ python -m evals.run_evals_batch --resume <batch_id>
 
 # Subset
 python -m evals.run_evals_batch --cases G01,G03,G12
+
+# Scheduling and wait bounds
+python -m evals.run_evals_batch --concurrency 1          # one case at a time
+python -m evals.run_evals_batch --batch-wait-minutes 45  # wait longer for the batch
 ```
 
 The batch runner runs the same phase pipeline locally, but submits **all 12 judge calls as a single Anthropic Message Batch**. Same scoring logic, same pass criteria — just half the judge cost. Pipeline calls (classify → strategy) still run real-time because they have inter-call dependencies.
+
+#### Completion bounds
+
+The nightly job is capped at **90 minutes** by the workflow, and that cap is
+deliberately not moved. Two bounds keep a run inside it, and both are scheduling
+decisions only — the same cases run, through the same phases, with the same
+product calls, and the report is always in input-case order.
+
+| Flag | Default | What it bounds |
+|---|---|---|
+| `--concurrency N` | `6` | Independent cases in the pipeline at once. Must be an integer ≥ 1. |
+| `--batch-wait-minutes N` | `30` | How long to wait for a submitted batch before stopping the wait. Must be an integer ≥ 1. |
+
+**`--concurrency`.** The twelve golden cases are independent of one another —
+each builds its own `ProjectState` and its own telemetry identity, and no case
+reads another's state — so they are scheduled a bounded number at a time. The
+five phases *within* a case (classify → hypotheses → gauntlet → audit →
+strategy) genuinely depend on each other and always run strictly sequentially.
+
+A full substantive case measures at a **~7.88 minute median**, so twelve of them
+one after another centres just past the 90-minute cap: fourteen historical
+nightlies were killed at exactly that cap, twelve of them before a single judge
+request had even been submitted. The default of 6 is what this same corpus has
+already been run at under Gate A, where it completed end to end in ~17 minutes.
+`--concurrency 1` restores the old one-case-at-a-time schedule unchanged.
+
+**`--batch-wait-minutes`.** The wait budget must stay below the job timeout,
+because a wait that outlives the job cannot end in anything but a SIGKILL — and
+a killed job writes no artifact at all, not even one saying it measured nothing.
+Every completed batch wait observed on this suite finished in 1.5–18.7 minutes,
+so 30 minutes covers the observed range while leaving roughly 40 minutes of
+margin for setup and the pipeline pass.
+
+When the budget runs out the run stops waiting **on purpose** and finishes
+normally:
+
+- the batch stays submitted, and `batch_inputs_<batch_id>.json` stays on disk;
+- `summary_batch.json` is written, naming the `batch_id`;
+- the observation is reported as `valid_observation: false`,
+  `quality_measured: false`, `ok: false`, with validity code
+  `batch_wait_budget_exhausted` and `result_class: infrastructure_failure`;
+- the CLI exits non-zero.
+
+It is classified as infrastructure, never as `provider_unavailable`: the
+provider accepted the batch and may still be working on it, and nothing about
+the product was measured either way. **Nothing is resubmitted automatically** —
+buying a second paid batch is an operator decision. Collect the original one
+with `--resume <batch_id>` from a checkout at **the same commit** the batch was
+submitted from; a resume at any other commit fails closed before touching the
+provider.
 
 ## CI integration
 
