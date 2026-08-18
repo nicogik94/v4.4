@@ -10,16 +10,18 @@ Anthropic's Message Batches API: 50% cheaper, 24h max turnaround. Use this for:
 Use the regular `run_evals.py` for PR feedback where latency matters more than cost.
 
 Workflow:
-  1. Run all 12 cases through the real pipeline (classify → strategy) — same as real-time
+  1. Run all 12 cases through the real pipeline (classify → strategy) — same as real-time,
+     with a bounded number of *independent cases* in flight at once
   2. Build all 12 judge prompts
   3. Submit as ONE batch to Anthropic
-  4. Poll until ended (typically minutes, max 24h)
+  4. Poll until ended, within a bounded wait budget
   5. Retrieve results, score, write report
 
 Usage:
     python -m evals.run_evals_batch                    # full run, wait for completion
     python -m evals.run_evals_batch --submit-only      # submit and exit (resume later)
     python -m evals.run_evals_batch --resume <batch_id>  # collect a previously submitted batch
+    python -m evals.run_evals_batch --concurrency 1    # force the old one-case-at-a-time schedule
 
 ─────────────────────────── nightly oracle truth ───────────────────────────
 
@@ -67,6 +69,39 @@ away from the measured-quality counters.
 Nothing in this module is imported by a product path, and nothing here changes
 what the judge is asked, which model answers, which cases run, or where the
 pass threshold sits.
+
+────────────────────── nightly completion reliability ──────────────────────
+
+Truthful classification only helps if the run survives long enough to write it
+down.  Fourteen historical nightlies were killed at the workflow's exact
+90-minute job timeout, and twelve of them died *before a single judge request
+had been submitted* — still inside the pipeline pass, typically around the tenth
+or eleventh case.  A SIGKILL leaves no artifact at all, so those runs could not
+even report that they had measured nothing.
+
+Two independent causes, both addressed here, and neither of them by moving the
+job timeout:
+
+* The pipeline pass ran twelve **independent** cases strictly one after another,
+  each of them five dependent real LLM phases at a measured ~7.88 min median per
+  substantive case.  Serially, that centres just past the 90-minute cliff.  Cases
+  share no state, so they are now scheduled with a bounded number in flight (see
+  `run_pipeline_for_all_cases`); the *phases within* a case remain strictly
+  sequential, because those genuinely do depend on each other.
+* `wait_for_batch` defaulted to a 24-hour ceiling inside a 90-minute job — a
+  bound that can never be reached, so a slow batch was structurally guaranteed to
+  end as a SIGKILL rather than as a controlled exit.  The wait is now budgeted
+  below the job timeout, and its expiry is its own typed observation
+  (`VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED`) rather than the generic `TimeoutError`
+  the old ceiling raised — which `classify_exception` would have read as a
+  *provider* outage.  It is not one: the provider may be working perfectly and
+  simply be slower than the budget the harness chose.  The batch is left
+  submitted and `--resume` can still collect it; nothing is ever resubmitted
+  automatically, because that would buy a second paid batch to cover for a
+  scheduling decision.
+
+Concurrency here is a change of *schedule* only.  The same cases run, through the
+same phases, in the same order in the report, with the same product calls.
 """
 import os
 import re
@@ -113,6 +148,87 @@ NIGHTLY_SCHEMA_VERSION = "nightly_batch_observation.v1"
 # The submit-time cache `--resume` reads back. Versioned because the resume path
 # now depends on a field the pre-wave layout (a bare list) does not carry.
 BATCH_INPUTS_SCHEMA_VERSION = "nightly_batch_inputs.v1"
+
+# ═══ Completion budget ═══
+#
+# The nightly job is capped at 90 minutes by the workflow, and that cap is
+# deliberately not moved: it is the thing that keeps a runaway nightly from
+# spending unbounded provider money. Everything below is chosen to *fit inside*
+# it with margin, so the harness always reaches its own artifact-writing code.
+
+# How many independent cases may be in the pipeline at once.
+#
+# Six, from measurement rather than taste: this same twelve-case corpus has
+# already been executed 6-way concurrent in this repository under Gate A and
+# completed end to end in ~17 minutes, against a ~7.88 min median for one
+# substantive case run serially. Twelve of those serially is ~90+ minutes, i.e.
+# exactly the cliff the historical nightlies died on. `--concurrency 1` restores
+# the old one-at-a-time schedule unchanged.
+DEFAULT_CASE_CONCURRENCY = 6
+
+# How long the harness will wait for a submitted batch before giving up *in a
+# controlled way*.
+#
+# Thirty minutes, and the arithmetic is the argument. The job has 90. Setup
+# (checkout, Python, locked install) costs a few minutes; the bounded-concurrency
+# pipeline pass is measured at ~17; every completed batch wait ever observed on
+# this suite finished in 1.5, 2.0, 2.0 and 18.7 minutes. 20 + 30 = 50 leaves
+# ~40 minutes of margin inside the cap — enough that budget expiry hands control
+# back to `main`, which then writes a truthful artifact, instead of GitHub
+# killing the process and leaving nothing behind. The previous 86400s default
+# was larger than the job timeout itself, so it could never be reached and
+# SIGKILL was the only way that wait could ever end.
+DEFAULT_BATCH_WAIT_MINUTES = 30
+DEFAULT_BATCH_WAIT_SECONDS = DEFAULT_BATCH_WAIT_MINUTES * 60
+
+# Fixed operator-facing text for a rejected bound. Not derived from the input:
+# the offending value is never echoed back.
+CONCURRENCY_ERROR = "concurrency must be an integer >= 1"
+BATCH_WAIT_ERROR = "batch wait budget must be an integer number of minutes >= 1"
+
+
+def _normalize_positive_int(value: object, message: str) -> int:
+    """A strictly positive integer, or `ValueError` carrying fixed text.
+
+    Deliberately strict about what an integer is: `True`, `2.5`, `"6.0"`, `""`
+    and `None` are all rejected rather than coerced, so a malformed bound fails
+    the run before any provider is contacted rather than silently becoming some
+    other number.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError(message)
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if parsed < 1:
+        raise ValueError(message)
+    return parsed
+
+
+def normalize_concurrency(value: object) -> int:
+    """How many cases may run at once. `1` is the serial schedule."""
+
+    return _normalize_positive_int(value, CONCURRENCY_ERROR)
+
+
+def normalize_batch_wait_minutes(value: object) -> int:
+    """The batch wait budget, in whole minutes."""
+
+    return _normalize_positive_int(value, BATCH_WAIT_ERROR)
+
+
+def _cli_int(normalizer):
+    """Adapt a normalizer into an argparse `type=`, so bad input exits 2."""
+
+    def parse(raw: str) -> int:
+        try:
+            return normalizer(raw)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from None
+
+    return parse
 
 # ═══ Execution modes ═══
 #
@@ -204,6 +320,16 @@ VALIDITY_SOURCE_SHA_MALFORMED = "source_sha_malformed"
 VALIDITY_SOURCE_SHA_MISMATCH = "source_sha_mismatch"
 VALIDITY_HARNESS_FAILURE = "harness_failure"
 VALIDITY_PIPELINE_HARNESS_FAILURE = "pipeline_harness_failure"
+# The harness's *own* wait budget ran out while the batch was still processing.
+# Deliberately its own code rather than a provider one: nothing here says the
+# provider failed. It accepted the batch and may well still be working on it —
+# this run simply stopped waiting, on purpose, so that it could write a truthful
+# artifact before the job timeout killed it. `--resume <batch_id>` can still
+# collect the very same batch.
+VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED = "batch_wait_budget_exhausted"
+# The closed token the `detail` field carries for that code, so a consumer can
+# recognize the condition from either field alone.
+WAIT_BUDGET_EXHAUSTED_DETAIL = "batch_wait_budget_exhausted"
 
 VALIDITY_PIPELINE_PROVIDER_FAILURE = "pipeline_provider_failure"
 VALIDITY_JUDGE_PROVIDER_OR_BATCH_FAILURE = "judge_provider_or_batch_failure"
@@ -227,6 +353,11 @@ ATTRIBUTION_AND_HARNESS_CODES = frozenset({
     VALIDITY_SOURCE_SHA_MISMATCH,
     VALIDITY_HARNESS_FAILURE,
     VALIDITY_PIPELINE_HARNESS_FAILURE,
+    # An exhausted wait budget is a fact about *this harness's* configuration,
+    # not about the product and not about the provider, so it belongs in the
+    # infrastructure bucket and must outrank the missing judge results it
+    # causes. Reporting the symptom would name the wrong culprit twice over.
+    VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED,
 })
 
 # Provider inability outranks structural incompleteness because it *causes* it:
@@ -1044,12 +1175,58 @@ async def submit_batch(requests: list[dict]) -> str:
     return batch.id
 
 
-async def wait_for_batch(batch_id: str, poll_interval: int = 30, max_wait: int = 86400) -> dict:
-    """Poll a batch until ended. Returns the final batch object."""
+class BatchWaitBudgetExhausted(Exception):
+    """The harness stopped waiting for a batch that had not ended yet.
+
+    Deliberately **not** a `TimeoutError`. `classify_exception` treats
+    `TimeoutError` as a provider-transport fact, and this is the opposite of
+    one: the provider accepted the batch and may still be working on it. The
+    only thing that expired is a bound this harness chose so it could exit in a
+    controlled way inside the job timeout. Carried as its own type so `main`
+    can classify it as infrastructure rather than as an outage.
+    """
+
+    def __init__(self, batch_id: str, max_wait: int) -> None:
+        super().__init__(f"batch wait budget of {int(max_wait)}s elapsed before the batch ended")
+        self.batch_id = batch_id
+        self.max_wait = int(max_wait)
+
+
+async def _sleep(seconds: float) -> None:
+    """The only wall-clock sleep in the wait loop, as a patchable seam.
+
+    Exists so the budget can be tested against a fake clock without a test ever
+    sleeping for real; nothing else about it is interesting.
+    """
+
+    await asyncio.sleep(seconds)
+
+
+def _now() -> float:
+    """Monotonic elapsed-time source, patchable for the same reason."""
+
+    return time.monotonic()
+
+
+async def wait_for_batch(
+    batch_id: str,
+    poll_interval: int = 30,
+    max_wait: int = DEFAULT_BATCH_WAIT_SECONDS,
+) -> dict:
+    """Poll a batch until it ends, or until the wait budget runs out.
+
+    The budget is wall-clock, not a count of poll intervals: the retrieve calls
+    themselves take time, and a bound that under-counts elapsed time is not a
+    bound against a job timeout. A status is always retrieved at least once, so
+    an already-ended batch is collected even with a very small budget.
+
+    Raises `BatchWaitBudgetExhausted` — never a bare `TimeoutError` — when the
+    budget elapses first. The batch stays submitted and resumable.
+    """
     import anthropic
     client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    waited = 0
-    while waited < max_wait:
+    deadline = _now() + max_wait
+    while True:
         batch = await client.messages.batches.retrieve(batch_id)
         status = batch.processing_status
         counts = batch.request_counts
@@ -1060,9 +1237,15 @@ async def wait_for_batch(batch_id: str, poll_interval: int = 30, max_wait: int =
         )
         if status == "ended":
             return batch
-        await asyncio.sleep(poll_interval)
-        waited += poll_interval
-    raise TimeoutError(f"Batch {batch_id} did not finish within {max_wait}s")
+        remaining = deadline - _now()
+        if remaining <= 0:
+            logger.error(
+                "Batch %s has not ended within the %ss wait budget; stopping the wait so "
+                "this run can write a truthful artifact. Resume with: --resume %s",
+                batch_id, max_wait, batch_id,
+            )
+            raise BatchWaitBudgetExhausted(batch_id, max_wait)
+        await _sleep(min(poll_interval, remaining))
 
 
 async def collect_batch_results(batch_id: str) -> dict[str, JudgeObservation]:
@@ -1095,28 +1278,96 @@ async def collect_batch_results(batch_id: str) -> dict[str, JudgeObservation]:
     return out
 
 
-async def run_pipeline_for_all_cases(cases: list[dict], mock: bool) -> list[PipelineRecord]:
-    """Run every case through the real (or mock) phase pipeline.
+async def _run_one_case(case: dict, mock: bool) -> PipelineRecord:
+    """One case, start to finish, with its phases in strict sequence.
+
+    This is the whole of the per-case behavior, unchanged and deliberately
+    untouched by the scheduling above it: `run_case_real` still walks
+    classify → hypotheses → gauntlet → audit → strategy one phase at a time,
+    because those phases genuinely depend on each other's output.
 
     An exception is recorded as a typed pipeline failure with an empty output.
-    It is deliberately no longer serialized as `{"error": <str(exc)>}`: that put
-    raw provider text into the next provider prompt and into the artifact, and
-    it let a crashed case keep flowing through quality scoring.
+    It is deliberately not serialized as `{"error": <str(exc)>}`: that put raw
+    provider text into the next provider prompt and into the artifact, and it
+    let a crashed case keep flowing through quality scoring.
     """
+
+    logger.info(f"  pipeline [{case['id']}] {case['brief'][:60]}...")
+    try:
+        if mock:
+            output = await run_case_mock(case)
+            return PipelineRecord(case, output, PIPELINE_COMPLETE)
+        state = await run_case_real(case)
+        return pipeline_record_for_output(case, state.model_dump(mode="json"))
+    except Exception as exc:  # noqa: BLE001 - classified, never quality-scored
+        status, category = classify_exception(exc)
+        logger.error(f"  ERROR on {case['id']}: {status} ({category})")
+        return PipelineRecord(case, {}, status, category)
+
+
+async def run_pipeline_for_all_cases(
+    cases: list[dict],
+    mock: bool,
+    concurrency: int = DEFAULT_CASE_CONCURRENCY,
+) -> list[PipelineRecord]:
+    """Run every case through the real (or mock) phase pipeline.
+
+    Cases are independent of one another — no case reads another's state, and
+    each builds its own `ProjectState` and its own telemetry identity — so a
+    bounded number of them run at once. This is the fix for the twelve historical
+    nightlies that were killed mid-pipeline at the 90-minute job timeout, and it
+    is a scheduling change only: the same cases, the same phases, the same
+    product calls, and no new retry or provider behavior.
+
+    Three properties the rest of the module depends on, and how they are held:
+
+    * **Order.** The returned list is in *input* order, never completion order,
+      so `expected_case_ids`, `observed_case_ids` and every per-case entry stay
+      exactly what they were serially. `asyncio.gather` is ordered by argument
+      position, which is precisely that guarantee.
+    * **Isolation.** Each case runs as its own task, and every identity the
+      telemetry layer binds — session, identity, capture, shape observer — is a
+      `contextvars.ContextVar`. A task gets a *copy* of the context at creation,
+      so concurrent cases cannot see or overwrite each other's identity.
+    * **Independence of failure.** A failing case must cost exactly one record,
+      never the whole run. `_run_one_case` already classifies its own
+      exceptions; `return_exceptions=True` is the backstop for anything that
+      could still escape it, so one case can never cancel its eleven peers —
+      which, with `gather`'s default, is exactly what would happen.
+
+    `concurrency=1` is the serial schedule: the semaphore is FIFO, so exactly one
+    case is in flight at a time and they acquire in input order.
+    """
+
+    limit = normalize_concurrency(concurrency)
+    if not cases:
+        return []
+
+    semaphore = asyncio.Semaphore(limit)
+
+    async def run_bounded(case: dict) -> PipelineRecord:
+        async with semaphore:
+            return await _run_one_case(case, mock)
+
+    logger.info(
+        f"Pipeline schedule: {len(cases)} case(s), up to {limit} in flight "
+        f"({'serial' if limit == 1 else 'bounded concurrency'})"
+    )
+    results = await asyncio.gather(
+        *(run_bounded(case) for case in cases), return_exceptions=True
+    )
+
     records: list[PipelineRecord] = []
-    for case in cases:
-        logger.info(f"  pipeline [{case['id']}] {case['brief'][:60]}...")
-        try:
-            if mock:
-                output = await run_case_mock(case)
-                records.append(PipelineRecord(case, output, PIPELINE_COMPLETE))
-            else:
-                state = await run_case_real(case)
-                records.append(pipeline_record_for_output(case, state.model_dump(mode="json")))
-        except Exception as exc:  # noqa: BLE001 - classified, never quality-scored
-            status, category = classify_exception(exc)
-            logger.error(f"  ERROR on {case['id']}: {status} ({category})")
-            records.append(PipelineRecord(case, {}, status, category))
+    for case, result in zip(cases, results):
+        if isinstance(result, PipelineRecord):
+            records.append(result)
+            continue
+        # Only reachable if something escaped `_run_one_case` entirely. Still
+        # one typed non-quality record for one case, and the other cases keep
+        # theirs.
+        status, category = classify_exception(result)
+        logger.error(f"  ERROR on {case['id']}: {status} ({category})")
+        records.append(PipelineRecord(case, {}, status, category))
     return records
 
 
@@ -1171,6 +1422,21 @@ def _batch_stage_error(stage: str, exc: BaseException, case_ids: list[str]) -> d
     return _validity_error(code, case_ids=list(case_ids), detail=f"batch_{stage}:{category}")
 
 
+def _wait_budget_error(stage: str, case_ids: list[str]) -> dict:
+    """The one typed validity error for an exhausted batch wait budget.
+
+    Fixed vocabulary end to end: the code, and a detail naming only the stage
+    it happened in. No exception text, no provider payload, no batch metadata
+    beyond the id the summary already records in its own field.
+    """
+
+    return _validity_error(
+        VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED,
+        case_ids=list(case_ids),
+        detail=f"batch_{stage}:{WAIT_BUDGET_EXHAUSTED_DETAIL}",
+    )
+
+
 def _print_outcome(summary: dict) -> None:
     print(
         f"\n=== BATCH RESULT: {summary['passed']}/{summary['total']} "
@@ -1194,6 +1460,14 @@ def _print_outcome(summary: dict) -> None:
             "INVALID OBSERVATION: this run did not measure product quality and is "
             "NOT evidence of a quality regression."
         )
+        if any(
+            entry["code"] == VALIDITY_BATCH_WAIT_BUDGET_EXHAUSTED
+            for entry in summary["validity_errors"]
+        ) and summary["batch_id"]:
+            print(
+                "The batch was submitted and was still processing when this run's "
+                f"wait budget ran out. Collect it with: --resume {summary['batch_id']}"
+            )
 
 
 async def main():
@@ -1205,7 +1479,35 @@ async def main():
                         help="Submit batch and exit (use --resume to collect)")
     parser.add_argument("--resume", help="Collect results from an existing batch ID")
     parser.add_argument("--poll-interval", type=int, default=30)
+    parser.add_argument(
+        "--concurrency",
+        type=_cli_int(normalize_concurrency),
+        default=DEFAULT_CASE_CONCURRENCY,
+        metavar="N",
+        help=(
+            "How many independent cases run through the pipeline at once "
+            f"(integer >= 1, default: {DEFAULT_CASE_CONCURRENCY}). Phases *within* a "
+            "case always stay sequential. Use 1 for the old one-case-at-a-time "
+            "schedule."
+        ),
+    )
+    parser.add_argument(
+        "--batch-wait-minutes",
+        type=_cli_int(normalize_batch_wait_minutes),
+        default=DEFAULT_BATCH_WAIT_MINUTES,
+        metavar="N",
+        help=(
+            "How long to wait for a submitted batch before stopping the wait "
+            f"(integer >= 1, default: {DEFAULT_BATCH_WAIT_MINUTES}). Must stay well "
+            "below the workflow's 90-minute job timeout so the run can write its "
+            "artifact. On expiry the batch is left submitted and resumable with "
+            "--resume; it is never resubmitted automatically."
+        ),
+    )
     args = parser.parse_args()
+
+    # The one place minutes become the seconds `wait_for_batch` takes.
+    batch_wait_seconds = normalize_batch_wait_minutes(args.batch_wait_minutes) * 60
 
     out_dir = Path(args.report)
     golden_case_ids = [case["id"] for case in load_cases()]
@@ -1253,8 +1555,12 @@ async def main():
             harness_errors.append(attribution_error)
         else:
             try:
-                await wait_for_batch(args.resume, args.poll_interval)
+                await wait_for_batch(args.resume, args.poll_interval, max_wait=batch_wait_seconds)
                 judge_observations = await collect_batch_results(args.resume)
+            except BatchWaitBudgetExhausted:
+                # Not a provider failure and not a resubmission trigger: the
+                # same batch is still there to be resumed again.
+                harness_errors.append(_wait_budget_error("resume", expected_case_ids))
             except Exception as exc:  # noqa: BLE001 - classified, never quality-scored
                 harness_errors.append(_batch_stage_error("resume", exc, expected_case_ids))
     else:
@@ -1263,7 +1569,7 @@ async def main():
         expected_case_ids = [case["id"] for case in cases]
         logger.info(f"Pipeline pass: {len(cases)} cases ({'MOCK' if args.mock else 'REAL'})")
 
-        records = await run_pipeline_for_all_cases(cases, args.mock)
+        records = await run_pipeline_for_all_cases(cases, args.mock, concurrency=args.concurrency)
 
         if args.mock:
             # Fabricated, and typed as such. `JUDGE_SYNTHETIC` is what makes the
@@ -1309,8 +1615,14 @@ async def main():
                     return
 
                 try:
-                    await wait_for_batch(batch_id, args.poll_interval)
+                    await wait_for_batch(batch_id, args.poll_interval, max_wait=batch_wait_seconds)
                     judge_observations = await collect_batch_results(batch_id)
+                except BatchWaitBudgetExhausted:
+                    # The inputs cache above and `batch_id` below are already on
+                    # disk, so the artifact this run is about to write names the
+                    # batch an operator can resume. Nothing is resubmitted: a
+                    # second paid batch is not the harness's decision to make.
+                    harness_errors.append(_wait_budget_error("collect", expected_case_ids))
                 except Exception as exc:  # noqa: BLE001 - classified, never quality-scored
                     harness_errors.append(_batch_stage_error("collect", exc, expected_case_ids))
             elif args.submit_only:
