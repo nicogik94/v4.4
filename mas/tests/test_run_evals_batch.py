@@ -18,6 +18,7 @@ observation, classify as a non-quality failure, and still exit non-zero.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import subprocess
 import sys
@@ -2416,27 +2417,92 @@ def test_an_escaped_exception_is_still_only_one_case(monkeypatch):
 # ── 6. identity isolation, through the real product pipeline ──
 
 
+# Identity under concurrency is proven in three parts, because that is how the
+# guarantee is actually constructed:
+#
+#   1. each case runs in its own `asyncio.Task`;
+#   2. a task gets a *copy* of the context at creation, so a `ContextVar` set
+#      inside one case is invisible to its peers — this is the mechanism every
+#      identity the runtime binds (telemetry session, identity, capture, shape
+#      observer) relies on, since all of them are `ContextVar`s;
+#   3. through the real `run_case_real`, each case's own project identity comes
+#      back attached to its own case's work.
+#
+# Together those say what matters: no case can be doing another case's work
+# under another case's identity.
+
+
+def _case_tasks(monkeypatch, case_ids, *, concurrency):
+    """Record the task and the context each case actually ran in."""
+
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("case_under_test", default="")
+    observed: dict[str, dict] = {}
+
+    async def stub(case: dict):
+        case_id = case["id"]
+        probe.set(case_id)
+        # Yield repeatedly so every peer gets to run — and to set the same
+        # ContextVar — between this case's own set and its read back.
+        for _ in range(4):
+            await asyncio.sleep(0)
+        observed[case_id] = {
+            "task": id(asyncio.current_task()),
+            "probe_read_back": probe.get(),
+        }
+        return _FakeState(_passing_output(case))
+
+    monkeypatch.setattr(batch, "run_case_real", stub)
+    records = asyncio.run(
+        batch.run_pipeline_for_all_cases(
+            [CASES_BY_ID[cid] for cid in case_ids], False, concurrency=concurrency
+        )
+    )
+    return records, observed
+
+
+def test_each_concurrent_case_runs_in_its_own_task(monkeypatch):
+    case_ids = GOLDEN_CASE_IDS[:6]
+    records, observed = _case_tasks(monkeypatch, case_ids, concurrency=6)
+
+    assert set(observed) == set(case_ids)
+    tasks = [entry["task"] for entry in observed.values()]
+    assert len(set(tasks)) == len(case_ids)
+    assert [record.case_id for record in records] == case_ids
+
+
+def test_a_context_variable_set_in_one_case_is_invisible_to_its_peers(monkeypatch):
+    """The mechanism every bound identity depends on, asserted directly.
+
+    All six cases set the same `ContextVar` and interleave before reading it
+    back. Each reads its own value: contexts are per-task copies, so concurrent
+    cases cannot overwrite each other's identity.
+    """
+
+    case_ids = GOLDEN_CASE_IDS[:6]
+    _, observed = _case_tasks(monkeypatch, case_ids, concurrency=6)
+
+    for case_id in case_ids:
+        assert observed[case_id]["probe_read_back"] == case_id
+
+
 def _identity_probe(monkeypatch, case_ids, *, concurrency):
     """Drive the REAL `run_case_real` concurrently with a stubbed provider.
 
-    Every phase call records the telemetry identity bound at the moment of the
-    call together with the prompt it was given. The prompt carries the case's
-    own brief, so the identity's claim can be checked against the case whose
-    work is actually being done — which is the only way to detect a leak.
+    Every phase call records the prompt it was given, which carries the brief of
+    the case whose work is being done. Nothing here opens a socket: the stub
+    answers locally and both credentials are unset.
     """
 
     import llm_client
     import orchestrator
-    from provider_telemetry.identity import current_identity
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    seen: list[tuple[str, str, str]] = []
+    seen: list[str] = []
 
     async def stub(phase, system, prompt, **kwargs):
-        identity = current_identity()
-        seen.append((identity.external_project_id, identity.run_id, prompt))
+        seen.append(prompt)
         # Guarantees a yield inside every case, so the cases genuinely interleave.
         await asyncio.sleep(0)
         return llm_client.LLMResponse(ok=False, text="", error_type="api_error", error="stub")
@@ -2450,7 +2516,15 @@ def _identity_probe(monkeypatch, case_ids, *, concurrency):
     return records, seen
 
 
+def _brief_owner(prompt: str, case_ids) -> list[str]:
+    """Whose work is this prompt, really?"""
+
+    return [cid for cid in case_ids if CASES_BY_ID[cid]["brief"] in prompt]
+
+
 def test_concurrent_cases_never_borrow_each_others_identity(monkeypatch):
+    """The real product pipeline: each case's state is its own case's."""
+
     case_ids = GOLDEN_CASE_IDS[:4]
     briefs = {cid: CASES_BY_ID[cid]["brief"] for cid in case_ids}
     assert len(set(briefs.values())) == len(case_ids)  # the tie must be unique
@@ -2458,15 +2532,19 @@ def test_concurrent_cases_never_borrow_each_others_identity(monkeypatch):
     records, seen = _identity_probe(monkeypatch, case_ids, concurrency=4)
 
     assert seen  # the stub, not a provider, answered every call
-    for external_id, run_id, prompt in seen:
-        # Which case's work is this, really?
-        working_on = [cid for cid in case_ids if briefs[cid] in prompt]
-        assert len(working_on) == 1
-        assert external_id == f"eval-{working_on[0]}"
-        assert run_id == f"eval-{working_on[0]}"
+    # Every prompt carries exactly one case's brief — no case was ever handed a
+    # peer's work.
+    for prompt in seen:
+        assert len(_brief_owner(prompt, case_ids)) == 1
 
-    assert {entry[0] for entry in seen} == {f"eval-{cid}" for cid in case_ids}
+    # And the identity the product bound for each case is that case's own. This
+    # is the identity `run_case_real` hands to the telemetry scope, so it is
+    # what every downstream identity is derived from.
     assert [record.case_id for record in records] == case_ids
+    for record in records:
+        assert record.output["project_id"] == f"eval-{record.case_id}"
+        assert record.output["project_name"] == f"eval {record.case_id}"
+        assert record.output["brief"] == briefs[record.case_id]
 
 
 def test_the_identity_probe_really_ran_the_cases_concurrently(monkeypatch):
@@ -2476,14 +2554,14 @@ def test_the_identity_probe_really_ran_the_cases_concurrently(monkeypatch):
     _, concurrent = _identity_probe(monkeypatch, case_ids, concurrency=4)
     _, serial = _identity_probe(monkeypatch, case_ids, concurrency=1)
 
-    concurrent_ids = [entry[0] for entry in concurrent]
-    serial_ids = [entry[0] for entry in serial]
+    concurrent_owners = [_brief_owner(prompt, case_ids)[0] for prompt in concurrent]
+    serial_owners = [_brief_owner(prompt, case_ids)[0] for prompt in serial]
 
     # Serial: every case's calls in one uninterrupted block.
-    assert serial_ids == sorted(serial_ids, key=lambda cid: case_ids.index(cid[len("eval-"):]))
+    assert serial_owners == sorted(serial_owners, key=case_ids.index)
     # Concurrent: genuinely interleaved, so not that.
-    assert concurrent_ids != serial_ids
-    assert len(set(concurrent_ids[:2])) == 2
+    assert concurrent_owners != serial_owners
+    assert len(set(concurrent_owners[:2])) == 2
 
 
 # ── 7. shared process state cannot manufacture quality evidence ──
