@@ -59,6 +59,7 @@ def build_delivery_review_readiness(
         ("clarifications", _clarification_signal),
         ("evidence_review", _evidence_review_signal),
         ("risk_gate", _risk_gate_signal),
+        ("decision_integrity", _decision_integrity_signal),
         ("phase_state", lambda value: _phase_state_signal(value, workspace_summary)),
         ("approvals", lambda value: _approvals_signal(value, workspace_summary)),
         ("staleness", _staleness_signal),
@@ -215,6 +216,31 @@ def _risk_gate_signal(state: ProjectState) -> tuple[dict[str, Any], list[str], l
         },
         [],
         [],
+    )
+
+
+def _decision_integrity_signal(state: ProjectState) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Deterministic integrity gate.
+
+    A criterion no run of the plan can satisfy blocks review outright. A hard
+    gate that could not be checked, or a control threshold with no verifiable
+    provenance, needs a human before it is trusted — never silent acceptance.
+    """
+    import decision_integrity
+
+    report = decision_integrity.build_decision_integrity_report(state)
+    signal = {
+        "available": True,
+        "schema_version": report.schema_version,
+        "sqi_finding_count": len(report.sqi_findings),
+        "impossible_criterion_count": len(report.impossible_criteria),
+        "unchecked_hard_gate_count": len(report.unchecked_hard_gates),
+        "unverified_threshold_count": len(report.unverified_thresholds),
+    }
+    return (
+        signal,
+        decision_integrity.delivery_blocking_reasons(state),
+        decision_integrity.delivery_review_warnings(state),
     )
 
 

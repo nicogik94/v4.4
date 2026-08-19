@@ -5,7 +5,7 @@ create decision gates, mutate report content, or change workflow state.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from io import BytesIO
 from typing import Any
@@ -14,6 +14,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from report_quality import assess_report_quality_context, evidence_maturity_projection
+from decision_integrity import classify_control_provenance, control_surface_threshold
 
 
 OPERATOR_TO_DEFINE = "Operator to define"
@@ -93,6 +94,9 @@ class MonitoringTemplateRow:
     evidence_ids: tuple[str, ...] = ()
     internal_source_refs: tuple[str, ...] = ()
     diagnostic_notes: str = ""
+    # P0-3: empty means the row has no control object declaring provenance, so
+    # any numeric threshold in it is an unsupported model-generated value.
+    threshold_provenance_class: str = ""
 
 
 def build_monitoring_template_rows(state: Any) -> tuple[MonitoringTemplateRow, ...]:
@@ -114,7 +118,28 @@ def build_monitoring_template_rows(state: Any) -> tuple[MonitoringTemplateRow, .
                 diagnostic_notes="No monitor, strategy, or clear Decision Gates state was available.",
             )
         )
-    return tuple(rows)
+    return tuple(_guard_threshold_provenance(row) for row in rows)
+
+
+def _guard_threshold_provenance(row: MonitoringTemplateRow) -> MonitoringTemplateRow:
+    """P0-3: a threshold without verifiable provenance may not read as authoritative.
+
+    The last gate before the stop/change-course column is rendered, so every row
+    source is covered by one rule. Rows built from prose (decision gates, OODA,
+    strategy metrics) carry no control object and therefore no provenance. The
+    figure is preserved and relabelled, never deleted: an unsourced proposal is
+    still a proposal an operator may confirm.
+    """
+    guarded = control_surface_threshold(row.stop_change_threshold, row.threshold_provenance_class)
+    if guarded == row.stop_change_threshold:
+        return row
+    provenance_class = row.threshold_provenance_class or "unsupported_model_generated"
+    note = (
+        f"{row.notes} Threshold provenance: {provenance_class}."
+        if row.notes
+        else f"Threshold provenance: {provenance_class}."
+    )
+    return replace(row, stop_change_threshold=guarded, notes=note.strip())
 
 
 def monitoring_template_xlsx_bytes(state: Any, *, audience: str) -> bytes:
@@ -416,6 +441,7 @@ def _circuit_breaker_rows(state: Any, status: str) -> list[MonitoringTemplateRow
                 evidence_maturity_validation_status=status,
                 notes="Circuit breaker is an implementation control; Decision Gates remain source of truth.",
                 row_source="monitor_circuit_breaker",
+                threshold_provenance_class=classify_control_provenance(item, state)[0],
                 hypothesis_ids=tuple(_extract_ids(strategy_ref, prefix="H")),
                 internal_source_refs=tuple(_extract_source_refs(" ".join([trip, reset, strategy_ref]))),
                 diagnostic_notes=f"monitor.circuit_breakers[{index}]",
@@ -454,6 +480,7 @@ def _canary_rows(state: Any, status: str) -> list[MonitoringTemplateRow]:
                 evidence_maturity_validation_status=status,
                 notes="Canary is an early-warning control; threshold requires operator confirmation.",
                 row_source="monitor_canary",
+                threshold_provenance_class=classify_control_provenance(item, state)[0],
                 internal_source_refs=tuple(_extract_source_refs(" ".join([signal, meaning]))),
                 diagnostic_notes=f"monitor.canaries[{index}]",
             )

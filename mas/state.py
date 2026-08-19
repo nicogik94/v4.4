@@ -504,6 +504,22 @@ class StrategyAction(BaseModel):
         return value
 
 
+class MeasurableCriterion(BaseModel):
+    """A success condition expressed in numbers a machine can check.
+
+    Additive and optional. Any count left ``None`` simply makes the criterion
+    ``not_machine_checkable`` in mas/decision_integrity.py — never guessed at.
+    """
+
+    criterion_id: str = ""
+    statement: str = ""
+    required_successes: Optional[int] = None
+    population: Optional[int] = None
+    eligible_observations: Optional[int] = None
+    observations_by_deadline: Optional[int] = None
+    hard_gate: bool = False
+
+
 class StrategyOutput(BaseModel):
     preliminary_verdicts: list[PreliminaryVerdict] = Field(default_factory=list)
     executive_strategy: str = ""
@@ -514,6 +530,10 @@ class StrategyOutput(BaseModel):
     review_date: str = ""
     confidence: str = ""
     reentry_check: str = ""
+    # Optional structured form of the success conditions. Deliberately absent
+    # from STRATEGY_REQUIRED_TOP_LEVEL_KEYS so persisted and legacy Strategy
+    # payloads stay valid.
+    measurable_criteria: list[MeasurableCriterion] = Field(default_factory=list)
 
 
 STRATEGY_REQUIRED_TOP_LEVEL_KEYS = (
@@ -581,10 +601,40 @@ class MonitorOODASchedule(BaseModel):
     monthly: list[MonitorScheduleItem] = Field(default_factory=list)
 
 
+class ThresholdDerivation(BaseModel):
+    """Inputs and operation sufficient to recompute a derived threshold."""
+
+    inputs: list[float] = Field(default_factory=list)
+    operation: str = ""  # sum | product | difference | quotient | mean
+    result: Optional[float] = None
+
+
+class ThresholdProvenance(BaseModel):
+    """Where a hard control threshold came from.
+
+    Additive and optional: a control that declares nothing is treated as
+    unsupported. See mas/decision_integrity.py — the class is only honoured when
+    the accompanying data verifies (an operator reference is present, the
+    evidence id resolves against state, or the derivation recomputes).
+    """
+
+    provenance_class: str = ""  # operator_stated | source_evidence_backed | reproducible_derived
+    operator_reference: str = ""
+    evidence_id: str = ""
+    # A citation proves identity, not support. To act as an authoritative
+    # control a source-backed threshold must also name the numeric value it
+    # claims and the structured evidence field that carries it, so the linkage
+    # can be verified by equality rather than assumed.
+    threshold_value: Optional[float] = None
+    evidence_value_key: str = ""
+    derivation: Optional[ThresholdDerivation] = None
+
+
 class MonitorCircuitBreaker(BaseModel):
     strategy_ref: str = ""
     trip: str = ""
     reset: str = ""
+    threshold_provenance: Optional[ThresholdProvenance] = None
 
 
 class MonitorCanary(BaseModel):
@@ -592,6 +642,7 @@ class MonitorCanary(BaseModel):
     direction: str = ""
     window: str = ""
     meaning: str = ""
+    threshold_provenance: Optional[ThresholdProvenance] = None
 
 
 class MonitorChaosDrill(BaseModel):
@@ -958,6 +1009,15 @@ class DetScores(BaseModel):
 # ═══ Phase 5: Report ═══
 
 class DQScores(BaseModel):
+    """Legacy six-link decision-quality container.
+
+    The strategic-audit workflow never assigns these fields; the authoritative
+    DQ for a run is derived from ``classify.dq`` by
+    ``decision_quality.authoritative_dq``. Kept unchanged so persisted state
+    round-trips; summing it is what published a structural zero, and no code
+    does that any more.
+    """
+
     frame: float = 0.0
     alt: float = 0.0
     info: float = 0.0
@@ -1124,6 +1184,15 @@ class ProjectState(BaseModel):
     # Summaries (compressed versions for downstream context)
     phase_summaries: dict[str, str] = Field(default_factory=dict)
     decision_objects: Optional[DecisionObjects] = None
+
+    # ═══ v4.4 PILOT INTEGRITY ═══
+    # The exact build that produced this run's evidence (mas/version.py).
+    # Stamped once at first phase execution and preserved through export and
+    # archive generation; never rewritten by a later environment. This is the
+    # only integrity value that is not derivable from other state, so it is the
+    # only one stored: SQI objections, criterion feasibility and threshold
+    # provenance are all pure projections computed by mas/decision_integrity.py.
+    build_provenance: dict[str, Any] = Field(default_factory=dict)
 
     # ═══ v4.3 POLICY LAYER (deterministic enforcement) ═══
     # See mas/policy.py for the enforcement logic. These fields are

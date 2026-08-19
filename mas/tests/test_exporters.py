@@ -53,6 +53,7 @@ from technology_readiness_workbook import (  # noqa: E402
     TECHNOLOGY_READINESS_WORKBOOK_SHEETS,
 )
 from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE  # noqa: E402
+from decision_integrity import ADVISORY_THRESHOLD_PREFIX  # noqa: E402
 from monitoring_templates import (  # noqa: E402
     CLIENT_MONITORING_TEMPLATE_HEADERS,
     OPERATOR_MONITORING_TEMPLATE_HEADERS,
@@ -1740,7 +1741,16 @@ Decision Gates remain the threshold source of truth.
         self.assertIn("'=Activation", combined)
         self.assertIn("'+good", combined)
         self.assertIn("'@warning", combined)
-        self.assertIn("'-stop if internal diagnostic redacted", combined)
+        # The circuit-breaker trip carries no numeric threshold, so it reaches
+        # the cell unchanged and still proves leading "-" is escaped.
+        self.assertIn("'-stop now", combined)
+        # The Decision Gates threshold does carry unsourced numbers, so P0-3
+        # demotes it to an explicit proposal before the cell is written; the
+        # client redaction of the internal diagnostic still applies to it.
+        self.assertIn(
+            f"{ADVISORY_THRESHOLD_PREFIX}: -stop if internal diagnostic redacted",
+            combined,
+        )
         self.assertIn("Uploaded project document", combined)
         for forbidden in (
             "ev-market",

@@ -42,8 +42,10 @@ from cdp.citation_format import (
 from decision_objects import ensure_decision_objects
 from clarifications import current_authoritative_answers
 from knowledge.retrieval import evaluate_phase_retrieval
-import research_evidence_context
+import decision_integrity
 import report_freshness
+import research_evidence_context
+import version
 from report_quality import (
     PROVISIONAL_CLARIFICATION_CAVEAT,
     SPARSE_CONFIDENCE_RULE,
@@ -1098,6 +1100,7 @@ GENERATION COMPACTNESS TARGETS (prompt guidance; preserve substance and traceabi
 - strategies: at most 5 actions, or fewer when operator constraints require fewer. Every action retains all schema fields; keep each explanatory string to one sentence and 40 words.
 - implementation_sequence: at most 6 numbered/dependency steps and 120 words total.
 - success_metrics: 3-6 concise, measurable entries; maximum 25 words each.
+- measurable_criteria: one entry per success metric that states a count. required_successes is how many successes the criterion demands; population is the sample it is drawn from; eligible_observations is how many times the measurement is actually taken under the plan; observations_by_deadline is how many of those fall on or before any stated deadline. Leave a count null when the plan does not state it — never estimate one. Set hard_gate true only when the criterion is used as a proceed/stop control.
 - top-level monitoring_plan: at most 100 words. review_date, confidence, and reentry_check must be terse contractual values.
 - Do not repeat upstream analysis, restate the brief, add appendices, or add fields outside the schema.
 These are generation targets, not structural cardinality validators. The hard acceptance boundary is the provider token budget plus required-key and typed/schema validation.
@@ -1108,6 +1111,7 @@ Return JSON:
 "strategies":[{{"priority":"CRITICAL","action":"","justification":"WHY this works","evidence_chain":"H_+FMEA+audit→action","expected_impact":"","effort":"High","timeline":"2 weeks","risk_if_ignored":"","framework_source":""}}],
 "implementation_sequence":"",
 "success_metrics":[""],
+"measurable_criteria":[{{"criterion_id":"C1","statement":"","required_successes":null,"population":null,"eligible_observations":null,"observations_by_deadline":null,"hard_gate":false}}],
 "monitoring_plan":"",
 "review_date":"",
 "confidence":"High|Medium|Low",
@@ -1193,6 +1197,28 @@ Return repaired JSON now."""
     return prompt
 
 
+def _sqi_material_objection_block(state: ProjectState) -> str:
+    """Carry material SQI objections into the phases that run after SQI.
+
+    P0-1: before this, ``state.sqi`` reached no downstream prompt at all, so a
+    material objection against a recommendation could only ever be dropped.
+    Empty string when SQI raised nothing material, so unaffected runs keep
+    byte-identical prompts.
+    """
+    lines = [
+        f"- [{finding.kind}] {finding.statement}"
+        for finding in decision_integrity.material_sqi_findings(state)[:6]
+    ]
+    if not lines:
+        return ""
+    return (
+        "MATERIAL STRATEGY-QUALITY OBJECTIONS (each one must be reconciled: "
+        "revise the recommendation, qualify it explicitly, or state the "
+        "objection and its consequence in plain language. Do not drop one "
+        "silently):\n" + "\n".join(lines) + "\n"
+    )
+
+
 def build_sqi_prompt(state: ProjectState) -> str:
     s = state.strategy
     if not s:
@@ -1238,15 +1264,17 @@ def build_monitor_prompt(state: ProjectState) -> str:
     ) or "- None"
     critical_text = "\n".join(critical_actions) or "- None"
     monitoring_text = "\n".join(monitoring_targets) or "- None"
+    sqi_objections = _sqi_material_objection_block(state)
     return f"""PHASE 4: Translate the strategy into a practical monitoring plan using OODA[#17], Chaos Engineering[#18], Circuit Breaker[#19], Canary[#20], and HRO[#29].
 
 Return ONE JSON object:
-{{"ooda_schedule":{{"daily":[{{"metric":"","owner":"","source":""}}],"weekly":[{{"metric":"","owner":"","source":""}}],"monthly":[{{"metric":"","owner":"","source":""}}]}},"circuit_breakers":[{{"strategy_ref":"","trip":"","reset":""}}],"canaries":[{{"signal":"","direction":"up","window":"","meaning":""}}],"chaos_drills":[{{"what":"","when":"","measure":""}}],"hro_principles_active":[],"reentry_watch":["R1"],"commitment_score":75,"commitment_rationale":""}}
+{{"ooda_schedule":{{"daily":[{{"metric":"","owner":"","source":""}}],"weekly":[{{"metric":"","owner":"","source":""}}],"monthly":[{{"metric":"","owner":"","source":""}}]}},"circuit_breakers":[{{"strategy_ref":"","trip":"","reset":"","threshold_provenance":null}}],"canaries":[{{"signal":"","direction":"up","window":"","meaning":"","threshold_provenance":null}}],"chaos_drills":[{{"what":"","when":"","measure":""}}],"hro_principles_active":[],"reentry_watch":["R1"],"commitment_score":75,"commitment_rationale":""}}
 
 Rules:
 - Every ooda_schedule item must include metric, owner, and source.
 - Include at least one circuit breaker for each CRITICAL strategy listed below.
 - Include at least 3 canaries.
+- A numeric trip or canary threshold is only authoritative when its threshold_provenance says where the number came from. Use {{"provenance_class":"operator_stated","operator_reference":"<what the operator said>"}}, or {{"provenance_class":"source_evidence_backed","evidence_id":"<id from the supplied evidence>","threshold_value":<number>,"evidence_value_key":"<field in that evidence's structured payload holding the same number>"}}, or {{"provenance_class":"reproducible_derived","derivation":{{"inputs":[..],"operation":"sum|product|difference|quotient|mean","result":<value>}}}}. Leave threshold_provenance null when the number is your own proposal — it will be labelled as unverified rather than dropped. Never invent an operator quote, an evidence id, or a derivation.
 - Keep reentry_watch values to R1-R8.
 - commitment_score must be a number from 0 to 100.
 - No markdown fences or prose before/after the JSON.
@@ -1258,6 +1286,7 @@ CRITICAL STRATEGIES:
 NEEDS_MONITORING TARGETS:
 {monitoring_text}
 
+{sqi_objections}
 EXISTING OBSERVATIONS:
 {obs_text}
 
@@ -1274,7 +1303,9 @@ def build_report_prompt(state: ProjectState) -> str:
     ctx_gauntlet = _sanitize_report_context(summarize_phase_output("gauntlet", state))
     ctx_audit = _sanitize_report_context(summarize_phase_output("audit", state))
     ctx_strategy = _sanitize_report_context(summarize_phase_output("strategy", state))
+    ctx_sqi = _sanitize_report_context(summarize_phase_output("sqi", state))
     ctx_monitor = _sanitize_report_context(summarize_phase_output("monitor", state))
+    sqi_objections = _sanitize_report_context(_sqi_material_objection_block(state))
     evidence_locator_register = _build_report_evidence_locator_register(state)
     # R3: carry authorized Research Evidence provenance across the synthesis
     # boundary. Empty string unless a consuming phase actually consumed
@@ -1310,7 +1341,9 @@ def build_report_prompt(state: ProjectState) -> str:
             ctx_gauntlet=ctx_gauntlet,
             ctx_audit=ctx_audit,
             ctx_strategy=ctx_strategy,
+            ctx_sqi=ctx_sqi,
             ctx_monitor=ctx_monitor,
+            sqi_objections=sqi_objections,
             obs_text=obs_text,
             timer_text=timer_text,
         )
@@ -1415,7 +1448,9 @@ Appendix: Technical Analysis:
 {ctx_gauntlet}
 {ctx_audit}
 {ctx_strategy}
+{ctx_sqi}
 {ctx_monitor}
+{sqi_objections}
 MONITORING: {obs_text}
 TIMER: {timer_text}
 PROJECT: {state.brief[:400]}"""
@@ -1519,7 +1554,9 @@ def _build_decision_memo_pilot_plan_report_prompt(
     ctx_gauntlet: str,
     ctx_audit: str,
     ctx_strategy: str,
+    ctx_sqi: str,
     ctx_monitor: str,
+    sqi_objections: str,
     obs_text: str,
     timer_text: str,
 ) -> str:
@@ -1618,7 +1655,9 @@ Appendix: Technical Analysis:
 {ctx_gauntlet}
 {ctx_audit}
 {ctx_strategy}
+{ctx_sqi}
 {ctx_monitor}
+{sqi_objections}
 MONITORING: {obs_text}
 TIMER: {timer_text}
 PROJECT: {state.brief[:400]}"""
@@ -2595,6 +2634,11 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
     """
     logger.info(f"▶ Running phase: {phase}")
 
+    # P0-5: stamp the exact build that produces this run's evidence. Recorded
+    # once; later calls are a no-op, so the identity belongs to the process
+    # that ran the first phase rather than to whoever exports the archive.
+    version.record_build_provenance(state)
+
     # A Strategy execution is a replacement attempt. Invalidate its full
     # dependency cone before any boundary that can fail (policy, evidence
     # loading, provider call, parsing, or schema validation).
@@ -3161,7 +3205,19 @@ async def run_phase_node(state: ProjectState, phase: str) -> ProjectState:
         state.report = response.text
         state.report_output_language = _report_output_language_for_state(state)
         state.report_output_mode = _report_mode_for_state(state)
+        # P0-1/2/3: deterministic integrity findings are surfaced on the report
+        # before the freshness hash is taken, so the recorded hash covers the
+        # report that is actually stored.
+        integrity = decision_integrity.apply_decision_integrity(state)
         generation_metadata = report_freshness.build_report_generation_metadata(state.report)
+        generation_metadata["decision_integrity"] = {
+            "schema_version": integrity.schema_version,
+            "surfaced": integrity.surfaced,
+            "sqi_finding_count": len(integrity.sqi_findings),
+            "impossible_criterion_count": len(integrity.impossible_criteria),
+            "unchecked_hard_gate_count": len(integrity.unchecked_hard_gates),
+            "unverified_threshold_count": len(integrity.unverified_thresholds),
+        }
         generation_metadata.update(
             {
                 "report_output_language": state.report_output_language,

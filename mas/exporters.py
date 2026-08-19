@@ -62,7 +62,8 @@ from technology_readiness_workbook import (
     technology_readiness_workbook_xlsx_bytes,
 )
 from workflow_templates import TECHNOLOGY_READINESS_PHASE_LABELS, TECHNOLOGY_READINESS_PHASE_SEQUENCE
-from version import get_git_sha
+import version
+from decision_quality import dq_display_text, dq_export_projection
 
 
 class ExportProfileConflict(ValueError):
@@ -2523,7 +2524,7 @@ def operator_classification_summary(state: ProjectState) -> str:
         ["Justification", c.justification],
         ["Structural BF estimate (operator trace, not measured posterior)", _fmt_value(c.bf)],
         ["Reference class", c.reference_class],
-        ["DQ diagnostic score", ", ".join(_fmt_value(value) for value in c.dq)],
+        ["DQ diagnostic score", dq_display_text(state)],
         ["Variety gaps", c.variety_gaps],
         ["RPD pattern", c.rpd_pattern],
         ["Sensemaking anchors", c.sensemaking_anchors],
@@ -2801,7 +2802,7 @@ def build_machine_archive_payload(state: ProjectState) -> dict[str, Any]:
         else _redact_unsafe_string(state.report or "No report available.")
     )
     files: dict[str, Any] = {
-        "project_state.json": sanitize_for_export(state, "machine_archive", mode="redact"),
+        "project_state.json": _project_state_payload(state),
         "report.md": report_markdown,
         "phase_outputs.json": sanitize_for_export(_phase_outputs_payload(state), "machine_archive", mode="redact"),
         "decision_objects.json": sanitize_for_export(decision_objects, "machine_archive", mode="redact"),
@@ -2811,7 +2812,7 @@ def build_machine_archive_payload(state: ProjectState) -> dict[str, Any]:
         "policy_summary.json": sanitize_for_export(_policy_summary_payload(state), "machine_archive", mode="redact"),
     }
 
-    calibration = _calibration_predictions_payload(state)
+    calibration = _calibration_predictions_payload(state, decision_objects)
     if calibration:
         files["calibration_predictions.json"] = sanitize_for_export(calibration, "machine_archive", mode="redact")
     approvals = _approvals_payload(state)
@@ -2831,6 +2832,21 @@ def build_machine_archive_payload(state: ProjectState) -> dict[str, Any]:
     return files
 
 
+def _project_state_payload(state: ProjectState) -> Any:
+    """Exported state copy, with the authoritative DQ substituted.
+
+    P0-4: the substitution happens on the *sanitized copy*, never on
+    ``ProjectState`` — exporters stay observational. ``state.dq`` is the legacy
+    six-link container this workflow never assigns, and publishing its zeros
+    next to a measured classify DQ is what produced the observed 40-vs-0 split.
+    """
+    payload = sanitize_for_export(state, "machine_archive", mode="redact")
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload["dq"] = sanitize_for_export(dq_export_projection(state), "machine_archive", mode="redact")
+    return payload
+
+
 def build_export_manifest(
     state: ProjectState,
     profile: str,
@@ -2839,6 +2855,10 @@ def build_export_manifest(
     included_files: list[str] | None = None,
 ) -> dict[str, Any]:
     current_version = report_freshness.current_code_version()
+    # P0-5: the run's recorded build wins over whatever the exporting
+    # environment can see, so an archive built in a checkout-less container no
+    # longer stamps "unknown" over a run that was produced from a known commit.
+    provenance = version.export_provenance_payload(state)
     return sanitize_for_export(
         {
             "export_schema_version": "1.0",
@@ -2848,7 +2868,7 @@ def build_export_manifest(
             "export_format": format,
             "generated_at": _utc_now(),
             "code_version": current_version,
-            "git_sha": get_git_sha(),
+            **provenance,
             "report_freshness": report_freshness.report_freshness_manifest(
                 state,
                 current_version=current_version,
@@ -3104,7 +3124,7 @@ def _build_dossier_blocks(state: ProjectState) -> list[dict]:
             f"Sensemaking anchors: {c.sensemaking_anchors}",
             f"Expectancy violations: {c.expectancy_violations}",
             f"Reference class: {c.reference_class}",
-            f"DQ: {', '.join(str(v) for v in c.dq)}",
+            f"DQ: {dq_display_text(state)}",
             f"Maturity assessment: {c.maturity_assessment}",
             f"Spiral depth: {c.spiral_depth}",
         ])
@@ -3896,7 +3916,9 @@ def _operator_overview_markdown(state: ProjectState) -> str:
     try:
         from overview import build_operator_overview
 
-        overview = build_operator_overview(state)
+        # ``build_operator_overview`` builds a workspace summary, which refreshes
+        # decision objects on the state it is given. Exports read a private copy.
+        overview = build_operator_overview(state.model_copy(deep=True))
         rows = [
             ["Field", "Value"],
             ["Project status", overview.project_status],
@@ -3914,7 +3936,11 @@ def _workspace_summary_markdown(state: ProjectState) -> str:
     try:
         from workspace import build_workspace_summary
 
-        workspace = build_workspace_summary(state)
+        # ``build_workspace_summary`` refreshes decision objects on the state it
+        # is given, which is right for the workspace endpoint and wrong for an
+        # exporter. Exports read a private copy so the caller's state is
+        # unchanged by having been exported.
+        workspace = build_workspace_summary(state.model_copy(deep=True))
         rows = [
             ["Field", "Value"],
             ["Project status", workspace.project_status],
@@ -4017,7 +4043,7 @@ def _approvals_summary_markdown(state: ProjectState) -> str:
 
 
 def _calibration_prediction_summary_markdown(state: ProjectState) -> str:
-    payload = _calibration_predictions_payload(state)
+    payload = _calibration_predictions_payload(state, _decision_objects_payload(state))
     if not payload:
         return "No calibration or prediction records saved."
     rows = [["Type", "ID/Phase", "Probability/Score", "Outcome/Notes"]]
@@ -4057,14 +4083,18 @@ def _phase_outputs_payload(state: ProjectState) -> dict[str, Any]:
 
 
 def _decision_objects_payload(state: ProjectState) -> dict[str, Any]:
-    if state.decision_objects is None:
-        try:
-            from decision_objects import ensure_decision_objects
+    if state.decision_objects is not None:
+        return _model_dump(state.decision_objects)
+    try:
+        from decision_objects import ensure_decision_objects
 
-            return _model_dump(ensure_decision_objects(state, trigger="export_profile"))
-        except Exception:
-            return {}
-    return _model_dump(state.decision_objects)
+        # Exporters are observational: rebuilding decision objects assigns
+        # ``state.decision_objects`` and back-fills ``hypothesis.evidence_ids``,
+        # so the rebuild runs against a private copy and the caller's state is
+        # left exactly as it was found.
+        return _model_dump(ensure_decision_objects(state.model_copy(deep=True), trigger="export_profile"))
+    except Exception:
+        return {}
 
 
 def _clarifications_payload(state: ProjectState) -> dict[str, Any]:
@@ -4127,14 +4157,27 @@ def _policy_summary_payload(state: ProjectState) -> dict[str, Any]:
     }
 
 
-def _calibration_predictions_payload(state: ProjectState) -> dict[str, Any]:
+def _calibration_predictions_payload(
+    state: ProjectState,
+    decision_objects: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Calibration evidence for an export.
+
+    ``decision_objects`` is the observational projection built by the caller.
+    Reading the snapshots from it — rather than from ``state.decision_objects``
+    — is what lets the archive stay pure: the projection is rebuilt on a private
+    copy when state carries none, so nothing here depends on an exporter having
+    written to ``ProjectState`` first.
+    """
+    snapshots = list((decision_objects or {}).get("calibration_snapshots") or [])
+    if not snapshots:
+        snapshots = _model_dump(
+            getattr(getattr(state, "decision_objects", None), "calibration_snapshots", []) or []
+        )
     payload = {
         "brier_score": state.brier_score,
         "predictions": _model_dump(state.predictions),
-        "calibration_snapshots": _model_dump(
-            getattr(getattr(state, "decision_objects", None), "calibration_snapshots", [])
-            or []
-        ),
+        "calibration_snapshots": snapshots,
     }
     return {key: value for key, value in payload.items() if value not in (None, [], {})}
 

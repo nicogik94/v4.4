@@ -121,6 +121,7 @@ from exporters import (
     export_project_profile_bytes,
 )
 from config import APP_VERSION, OPERATOR_AUTH_HEADER, get_operator_auth_config
+import decision_integrity
 from version import get_git_sha
 import store
 import state_coherence
@@ -1908,6 +1909,10 @@ def _finalize_phase_output_edit(state: ProjectState, phase: str) -> None:
     if phase == "hypotheses":
         state.sealed = True
         state.seal_date = datetime.now().date().isoformat()
+    if phase == "report":
+        # An operator-edited report is still a finalized report, so the same
+        # deterministic guarantees apply to it.
+        decision_integrity.apply_decision_integrity(state)
     state.phase_summaries[phase] = summarize_phase_output(phase, state)
 
 

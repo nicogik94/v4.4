@@ -13,6 +13,7 @@ from state import (
     ClassifyOutput, AuditOutput, Prediction, PhaseStatus
 )
 from config import GATE_CONFIGS, REENTRY_TRIGGERS, INVALIDATION_MAP
+from decision_quality import authoritative_dq_total
 from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE, get_downstream_phases
 
 
@@ -48,11 +49,17 @@ def check_gate(state: ProjectState, phase: str) -> dict:
     # Phase-specific checks
     if phase == "classify" and state.classify:
         bf = state.classify.bf
-        dq_total = sum(state.classify.dq)
+        # P0-4: one authoritative DQ per run; every surface derives from it.
+        dq_total = authoritative_dq_total(state)
         if config.bayesian_threshold and bf <= config.bayesian_threshold:
             blocking.append(f"BF={bf:.1f}, need >{config.bayesian_threshold}")
-        if config.dq_minimum and dq_total < config.dq_minimum:
-            blocking.append(f"DQ={dq_total:.0f}%, need >={config.dq_minimum}%")
+        if config.dq_minimum:
+            if dq_total is None:
+                # Absent is not zero, but a gate that requires DQ cannot pass
+                # without it either.
+                blocking.append(f"DQ unavailable, need >={config.dq_minimum}%")
+            elif dq_total < config.dq_minimum:
+                blocking.append(f"DQ={dq_total:.0f}%, need >={config.dq_minimum}%")
 
     if phase == "hypotheses" and state.hypotheses:
         if len(state.hypotheses) < 3:
@@ -283,7 +290,9 @@ def summarize_phase_output(phase: str, state: ProjectState) -> str:
 
     if phase == "classify" and state.classify:
         c = state.classify
-        return f"DOMAIN:{c.domain} BF={c.bf:.1f} GAPS:{c.variety_gaps[:200]} RPD:{c.rpd_pattern} DQ={sum(c.dq)}"
+        dq_total = authoritative_dq_total(state)
+        dq_text = "unavailable" if dq_total is None else f"{dq_total:g}"
+        return f"DOMAIN:{c.domain} BF={c.bf:.1f} GAPS:{c.variety_gaps[:200]} RPD:{c.rpd_pattern} DQ={dq_text}"
 
     if phase == "hypotheses" and state.hypotheses:
         lines = [
@@ -308,6 +317,20 @@ def summarize_phase_output(phase: str, state: ProjectState) -> str:
         s = state.strategy
         return f"STRATEGY:{s.executive_strategy[:200]}\n" + \
                "\n".join(f"[{a.priority}]{a.action[:60]}" for a in s.strategies[:5])
+
+    if phase == "sqi" and state.sqi:
+        # P0-1: SQI had no summary branch at all, so a material objection
+        # could not reach the monitor or report prompt even in principle.
+        from decision_integrity import material_sqi_findings
+
+        findings = material_sqi_findings(state)
+        header = f"SQI:overall={state.sqi.sqi_overall:.0f} material_objections={len(findings)}"
+        if not findings:
+            return header
+        return "\n".join(
+            [header, "MATERIAL STRATEGY OBJECTIONS:"]
+            + [f"- [{item.kind}] {item.statement}" for item in findings[:6]]
+        )
 
     if phase == "monitor" and state.monitor:
         m = state.monitor

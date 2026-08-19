@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from decision_quality import authoritative_dq
 from state import (
     ApprovalRecord,
     ApprovalStatus,
@@ -519,7 +520,10 @@ def build_decision_objects(
         )
         outcome_items.append(outcome)
 
-    if state.brier_score is not None or state.sqi or state.det_scores or sum(state.dq.model_dump().values()) > 0:
+    # P0-4: the calibration snapshot must publish the authoritative DQ, not a
+    # sum over a container the workflow never fills.
+    dq_assessment = authoritative_dq(state)
+    if state.brier_score is not None or state.sqi or state.det_scores or dq_assessment.available:
         calibration_items.append(
             CalibrationSnapshot(
                 snapshot_id=stable_object_id(
@@ -528,13 +532,13 @@ def build_decision_objects(
                     state.brier_score,
                     getattr(state.sqi, "sqi_overall", None),
                     getattr(state.det_scores, "overall", None),
-                    sum(state.dq.model_dump().values()),
+                    dq_assessment.total,
                 ),
                 recorded_at=rebuilt_at,
                 brier_score=state.brier_score,
                 sqi_overall=state.sqi.sqi_overall if state.sqi else None,
                 det_score_overall=state.det_scores.overall if state.det_scores else None,
-                dq_total=sum(state.dq.model_dump().values()),
+                dq_total=dq_assessment.total,
                 notes="Derived from current project state",
             )
         )

@@ -13,6 +13,7 @@ from ingestion_contract import DEFAULT_INGESTION_SOURCE, LEGACY_CONTRACT_VERSION
 from knowledge.freshness import build_knowledge_health
 from knowledge.retrieval import RetrievalPhaseImpactSummary, build_prompt_facing_retrieval_impact
 from report_quality import assess_decision_memo_pilot_plan_quality
+from decision_quality import authoritative_dq_total
 from state import (
     DEFAULT_OUTPUT_LANGUAGE,
     DEFAULT_REPORT_MODE,
@@ -28,7 +29,7 @@ class ScoreSummary(BaseModel):
     sqi_overall: Optional[float] = None
     det_score_overall: Optional[float] = None
     brier_score: Optional[float] = None
-    dq_total: float = 0.0
+    dq_total: Optional[float] = None
 
 
 class DecisionObjectHealth(BaseModel):
@@ -262,7 +263,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
             sqi_overall=state.sqi.sqi_overall if state.sqi else None,
             det_score_overall=state.det_scores.overall if state.det_scores else None,
             brier_score=state.brier_score,
-            dq_total=float(sum(state.dq.model_dump().values())) if state.dq else 0.0,
+            dq_total=authoritative_dq_total(state),
         ),
         decision_object_health=decision_object_health,
         knowledge_health=knowledge_health,
