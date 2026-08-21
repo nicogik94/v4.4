@@ -359,6 +359,13 @@ and reasoning tokens where the provider reports them. Reasoning-token counts are
 recorded only when observed — an unreported count stays `unknown`, never `0`.
 No prompt, response, refusal or reasoning **text** is ever recorded.
 
+#### Canonical nightly batch evidence
+
+The `evals-nightly-batch` observation for `4a9cc77` (2026-08-21) is preserved verbatim
+under [`evidence/nightly/2026-08-21_4a9cc77/`](evidence/nightly/2026-08-21_4a9cc77/):
+a valid, quality-measured run at 9/12 (75%). It carries no `provider_gate` and ran no
+provider preflight, so it is nightly quality evidence only — not a release gate result.
+
 #### Three identities, three sources
 
 Requested, selected and provider-observed identity are different facts, and the
