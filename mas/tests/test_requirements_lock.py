@@ -90,5 +90,5 @@ def test_docker_install_is_bounded_and_validated():
 def test_provider_only_preflights_remain_outside_the_full_environment_lock():
     workflow = (REPO_ROOT / ".github/workflows/evals.yml").read_text(encoding="utf-8")
 
-    assert "python -m pip install 'anthropic>=0.40.0'" in workflow
+    assert "python -m pip install 'anthropic==0.122.0'" in workflow
     assert "python -m pip install 'openai==2.54.0'" in workflow

@@ -145,7 +145,7 @@ jobs:
       # Provider-only preflight: intentionally outside the full product/test
       # environment lock and unchanged by dependency-lock stabilization.
       - name: Install Anthropic SDK
-        run: python -m pip install 'anthropic>=0.40.0'
+        run: python -m pip install 'anthropic==0.122.0'
 
       - name: Verify Anthropic provider availability
         working-directory: mas
