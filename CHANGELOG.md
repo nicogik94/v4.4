@@ -1,5 +1,39 @@
 # CHANGELOG
 
+> **Reading this file:** the product version has stayed at `4.4.0` while work landed inside it, so several dated entries below share that same version heading. Each `4.4.0` entry is distinguished by its subtitle and date; none of them supersedes another as a version number. The canonical version value lives in `mas/version.py`.
+
+## v4.4.0 — V7 release milestone closed (2026-08-21)
+
+**No version change.** `APP_VERSION` remains `4.4.0`. V7 is an internal release/provider milestone *inside* `4.4.0`, not a product version; no `5.x`, `6.x` or `7.x` product version exists.
+
+This entry records the identity anchors for the V7 milestone so they can be cited without ambiguity. Documentation only.
+
+### Release identity anchors
+
+| Anchor | Value |
+|--------|-------|
+| Product version | `4.4.0` — `mas/version.py`, unchanged |
+| Milestone | V7 — Anthropic-only supported production boundary |
+| Milestone closed at | `3d6b0a9a1b5783524de3960f01ca3379928f478e` — "V7 final — Anthropic-only production release" (2026-08-12) |
+| Runtime evaluated by the formal Gate A | `aff8f31a9a0feaed8299e81a3b2a374f6b57eb8d` (2026-08-21) |
+| Formal Gate A workflow run | [`32537157412`](https://github.com/nicogik94/v4.4/actions/runs/32537157412) — workflow `evals`, `workflow_dispatch`, conclusion `success` |
+| Gate A result | PASS — 10/12, `pass_rate` `0.8333333333333334`, `threshold` `0.75`, `ok` `true` |
+| Evidence preserved at | `b1018028a6e1fe69b678886981911b83cf18de3b` — PR #130 |
+| Preserved evidence path | `mas/evals/evidence/gate-a/2026-08-21_aff8f31/` |
+
+### Precisions
+
+- **The evaluated runtime and the preservation commit are different commits.** `aff8f31` is the runtime the formal Gate A ran against. `b1018028` is the commit that preserved the resulting evidence into the repository; `b1018028` was not itself evaluated.
+- **`3d6b0a9` is not the evaluated runtime either.** It is where the V7 milestone closed; the formal Gate A ran later, on `aff8f31`.
+- **The earlier Gate A PASS carried forward by strict successful-path equivalence is superseded** as current release evidence by the formal run above. It is retained as a historical antecedent in [`mas/evals/README.md`](mas/evals/README.md) — not erased, not reclassified.
+- **The historical Gate B FAIL is unchanged.** OpenAI fallback remains a deferred capability and was never a V7 release requirement.
+
+### Not changed
+
+No code, workflow, dependency, test or evidence artifact changed in this entry.
+
+---
+
 ## v4.4.0 — Wave 10.1 hardening (2026-06-10)
 
 v5-track hardening and productization work has landed inside the v4.4 repository. This entry records additive trust-hardening changes only; no runtime behavior, no prompt changes, no eval threshold changes.
@@ -16,7 +50,7 @@ v5-track hardening and productization work has landed inside the v4.4 repository
 
 ---
 
-## v4.4.0 — 2026-04-09
+## v4.4.0 — the UX release (2026-04-09)
 
 The UX release. v4.3 added a lot of capability (deterministic enforcement, prompt injection defenses, EU AI Act compliance, six new API endpoints) but the surface for using all of that was still curl commands and reading files. v4.4 collapses the daily-use surface to **one screen with buttons** and **one document that explains the workflow**.
 

@@ -1,6 +1,6 @@
 # v4 Multi-Agent System
 
-**Universal Project Workflow v4.0 — A 6-phase decision engine implemented as a multi-agent system with 30 analytical frameworks, Bayesian convergence gates, and a meta-learning engine.**
+**Universal Project Workflow v4.4.0 — An 8-phase decision engine implemented as a multi-agent system with 30 analytical frameworks, Bayesian convergence gates, and a meta-learning engine.**
 
 ## Architecture
 
@@ -8,7 +8,7 @@
 ┌──────────────────────────────────────────────────────────┐
 │              DETERMINISTIC ORCHESTRATOR                    │
 │  (Python/LangGraph — NOT an LLM)                          │
-│  ├── Phase State Machine: 6 states + gates                │
+│  ├── Phase State Machine: 8 states + gates                │
 │  ├── Convergence Gate Evaluator (Bayesian thresholds)     │
 │  ├── Re-entry Trigger Router (R1-R8)                      │
 │  └── Downstream Invalidation Manager                      │
@@ -21,7 +21,7 @@
 │  Strategy → SQI → Monitor → Report                        │
 ├──────────────────────────────────────────────────────────┤
 │           DUAL SCORING LAYER                              │
-│  📐 Deterministic (scipy) → 🤖 LLM-as-judge              │
+│  📐 Deterministic → 🤖 LLM-as-judge                      │
 ├──────────────────────────────────────────────────────────┤
 │           META-LEARNING ENGINE                            │
 │  Brier scores · ECE · Framework effectiveness             │

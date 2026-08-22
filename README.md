@@ -2,11 +2,17 @@
 
 A multi-agent decision engine that applies 30 analytical frameworks across 6 phases with mathematical convergence gates, Bayesian priors, a meta-learner that closes the loop on calibration, deterministic policy enforcement (v4.3), and a single-screen operator console (v4.4).
 
-**Status:** v4.4 — v5-track hardening and productization work underway inside this repository
+**Status:** v4.4.0 — internal V7 release/provider milestone closed (see [Release identity](#release-identity))
 **Author:** Nicolás Grinberg
-**Date:** April 2026
+**Date:** August 2026
 
-> **Wave 10 (in progress):** CI pytest gate and provenance reporting have landed. A pytest workflow runs on every PR and push to main. Version and git SHA are stamped in `/health`, `/runtime/preflight`, and machine-readable export manifests. This is hardening work; it does not change runtime behavior or claim public SaaS or v5 production readiness.
+> **Wave 10.1 (landed):** CI pytest gate and provenance reporting are in place. A pytest workflow runs on every PR and push to main. Version and git SHA are stamped in `/health`, `/runtime/preflight`, and machine-readable export manifests. This was hardening work; it did not change runtime behavior and it does not claim public SaaS or `5.x` production readiness. Recorded in [CHANGELOG.md](CHANGELOG.md).
+
+## Release identity
+
+- **Product version — `4.4.0`.** The single canonical value, defined in `mas/version.py` and stamped into `/health`, `/runtime/preflight` and machine-readable export manifests. It has not moved, and no `5.x` product version exists.
+- **V7 — an internal release/provider milestone inside `4.4.0`,** not a separate product version. It closed the supported production boundary as Anthropic-only in commit `3d6b0a9`. Its release-validation evidence lives in [`mas/evals/README.md`](mas/evals/README.md); the identity anchors are recorded in [CHANGELOG.md](CHANGELOG.md).
+- **`docs/v5-*.md` — a historical productization and documentation line.** The `v5-` prefix names that documentation lineage; it is not a product version and does not imply one. Filenames are kept as they are for traceability.
 
 ---
 
@@ -29,7 +35,7 @@ For tranche-1 baseline review and acceptance, start with:
 
 See [CHANGELOG.md](CHANGELOG.md) for the full diff. The headline items:
 
-1. **Canonical operator dashboard** — `dashboards/index.html` is the default v5 dashboard. It handles the daily workflow (create, classify, run, watch, kill, review, export), shows runtime readiness details, and keeps calibration/portfolio views available for operators.
+1. **Canonical operator dashboard** — `dashboards/index.html` is the canonical operator dashboard. It handles the daily workflow (create, classify, run, watch, kill, review, export), shows runtime readiness details, and keeps calibration/portfolio views available for operators.
 2. **Combined create + classify** — `POST /projects` now accepts `risk_classification` and `risk_rationale` in the same payload. Backward-compatible with v4.3 callers.
 3. **`START_HERE.md`** — one-page operator entry point at the bundle root. The 80 other files become reference material instead of homework.
 4. **File cleanup proposal** — `docs/v4.4-FILE-CLEANUP-PROPOSAL.md` lists 25 files that could move to `archive/` and `pitch/` subdirectories without breaking anything functional. Not executed until you sign off.

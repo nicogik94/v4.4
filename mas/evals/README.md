@@ -212,11 +212,44 @@ Set the `ANTHROPIC_API_KEY` secret in repo settings before authorizing Gate A.
 ## Release provider gates (V7)
 
 The supported V7 production release is **Anthropic-only**. Gate A is the release
-gate and its historical PASS may be carried forward only by strict successful-
-path equivalence. Gate B is retained as a historical compatibility harness, but
-OpenAI fallback capability is deferred and a Gate B PASS is not a V7 release
-requirement. The historical Gate B FAIL remains evidence about the deferred
-capability; it is not reclassified or erased.
+gate, and its current release evidence is the formal Gate A run executed on
+`aff8f31` and preserved in-repo (see *Canonical Gate A evidence* below). Gate B
+is retained as a historical compatibility harness, but OpenAI fallback
+capability is deferred and a Gate B PASS is not a V7 release requirement. The
+historical Gate B FAIL remains evidence about the deferred capability; it is not
+reclassified or erased.
+
+V7 is an internal release/provider milestone inside product version `4.4.0`. It
+is not a product version, and `APP_VERSION` did not change for it.
+
+### Canonical Gate A evidence
+
+Cite this run, not an equivalence argument.
+
+| Field | Value |
+|-------|-------|
+| Evaluated runtime SHA | `aff8f31a9a0feaed8299e81a3b2a374f6b57eb8d` |
+| Workflow run | [`32537157412`](https://github.com/nicogik94/v4.4/actions/runs/32537157412) — workflow `evals`, `workflow_dispatch`, conclusion `success` |
+| Gate identity | `gate_a_anthropic_primary` |
+| Result | PASS — 10/12, `pass_rate` `0.8333333333333334`, `threshold` `0.75`, `ok` `true` |
+| Preserved artifact | [`evidence/gate-a/2026-08-21_aff8f31/`](evidence/gate-a/2026-08-21_aff8f31/) |
+| Preserved at commit | `b1018028a6e1fe69b678886981911b83cf18de3b` (PR #130) |
+
+Read [`evidence/gate-a/2026-08-21_aff8f31/README.md`](evidence/gate-a/2026-08-21_aff8f31/README.md)
+before citing the result. It records the caveats that belong to this PASS —
+among them the judge-input truncation count, and why `quality_ok: false` does
+not contradict `ok: true`. The adjacent `summary.json` is preserved
+byte-for-byte and must not be edited.
+
+**Superseded antecedent.** Before this run, Gate A's PASS was carried forward
+onto the Anthropic-only boundary by strict successful-path equivalence at
+`3d6b0a9` ("V7 final"). That antecedent is **superseded as current release
+evidence** by the formal run above. It is retained here as history: not erased,
+not reclassified. It remains the record of how the boundary was closed before a
+formal run existed on it.
+
+**`b1018028` preserved the evidence; it is not the evaluated runtime.** The
+runtime Gate A ran against is `aff8f31`, ten commits after `3d6b0a9`.
 
 The gates share the golden-case universe, judge rubric, six-shard split and 0.75
 threshold, but their artifacts and claims are never interchangeable.
@@ -227,7 +260,7 @@ threshold, but their artifacts and claims are never interchangeable.
 | Anthropic key | **present** | blank |
 | OpenAI key | blank | **present** |
 | preflight | `evals.anthropic_preflight` | `evals.provider_preflight` |
-| V7 status | **supported; historical PASS** | **historical FAIL; capability deferred** |
+| V7 status | **supported; formal PASS on `aff8f31`** | **historical FAIL; capability deferred** |
 | a PASS claims | the normal production posture meets the release threshold | the compatibility harness observed usable OpenAI fallback behavior at that exact candidate |
 | a PASS does **not** claim | anything about fallback | **anything about the V7 release** |
 
