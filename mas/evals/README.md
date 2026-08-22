@@ -301,16 +301,23 @@ Runs are bucketed by whether they could spend money.
 * Only the free mock smoke job runs under a routine event, so cancelling those
   costs nothing.
 
-#### Pre-merge dispatch is not available
+#### Manual dispatch is available
 
-`workflow_dispatch` inputs are read from the workflow file on the **default
-branch**. `provider_gate` and `confirm_paid_execution` do not exist on `main`
-yet, so dispatching this workflow from the branch offers only `threshold` and
-cannot select a gate or confirm spend.
+`provider_gate` and `confirm_paid_execution` are both defined in the `evals`
+workflow on `main`, so `workflow_dispatch` is a usable route for authorizing a
+gate: the operator must **explicitly select a gate** and **confirm the spend**.
+Selecting a gate without confirming payment is a dry selection and runs nothing
+paid.
 
-**Pre-merge Gate A must therefore be authorized by the PR-event route above.**
-Manual dispatch becomes available after integration. Either way the guard fails
-closed: an unsupplied gate input is not a gate identity, so nothing paid runs.
+The defaults remain the safe ones — `provider_gate: none` and
+`confirm_paid_execution: false` — so a dispatch that just accepts the form
+authorizes nothing.
+
+`workflow_dispatch` inputs are still read from the workflow file on the
+**default branch**. A future change that introduces a *new* input cannot use it
+via dispatch until that input exists on `main`; until then, such a change is
+authorized by the PR-event route above. Either way the guard fails closed: an
+unsupplied gate input is not a gate identity, so nothing paid runs.
 
 #### Threshold is data, never code
 
@@ -358,6 +365,14 @@ effective model, stop reason, visible-content status and length, refusal status
 and reasoning tokens where the provider reports them. Reasoning-token counts are
 recorded only when observed — an unreported count stays `unknown`, never `0`.
 No prompt, response, refusal or reasoning **text** is ever recorded.
+
+#### Canonical formal Gate A evidence
+
+The Gate A (Anthropic primary) run for `aff8f31` (2026-08-21) is preserved verbatim under
+[`evidence/gate-a/2026-08-21_aff8f31/`](evidence/gate-a/2026-08-21_aff8f31/): a PASS at
+10/12 (83.3%) against the 75% threshold, with `provider_gate: gate_a_anthropic_primary`,
+a passed provider preflight, six complete shards and a clean aggregate. This is formal
+release gate evidence — distinct from the nightly batch evidence below.
 
 #### Canonical nightly batch evidence
 
