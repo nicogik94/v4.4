@@ -359,6 +359,14 @@ and reasoning tokens where the provider reports them. Reasoning-token counts are
 recorded only when observed — an unreported count stays `unknown`, never `0`.
 No prompt, response, refusal or reasoning **text** is ever recorded.
 
+#### Canonical formal Gate A evidence
+
+The Gate A (Anthropic primary) run for `aff8f31` (2026-08-21) is preserved verbatim under
+[`evidence/gate-a/2026-08-21_aff8f31/`](evidence/gate-a/2026-08-21_aff8f31/): a PASS at
+10/12 (83.3%) against the 75% threshold, with `provider_gate: gate_a_anthropic_primary`,
+a passed provider preflight, six complete shards and a clean aggregate. This is formal
+release gate evidence — distinct from the nightly batch evidence below.
+
 #### Canonical nightly batch evidence
 
 The `evals-nightly-batch` observation for `4a9cc77` (2026-08-21) is preserved verbatim
