@@ -301,16 +301,23 @@ Runs are bucketed by whether they could spend money.
 * Only the free mock smoke job runs under a routine event, so cancelling those
   costs nothing.
 
-#### Pre-merge dispatch is not available
+#### Manual dispatch is available
 
-`workflow_dispatch` inputs are read from the workflow file on the **default
-branch**. `provider_gate` and `confirm_paid_execution` do not exist on `main`
-yet, so dispatching this workflow from the branch offers only `threshold` and
-cannot select a gate or confirm spend.
+`provider_gate` and `confirm_paid_execution` are both defined in the `evals`
+workflow on `main`, so `workflow_dispatch` is a usable route for authorizing a
+gate: the operator must **explicitly select a gate** and **confirm the spend**.
+Selecting a gate without confirming payment is a dry selection and runs nothing
+paid.
 
-**Pre-merge Gate A must therefore be authorized by the PR-event route above.**
-Manual dispatch becomes available after integration. Either way the guard fails
-closed: an unsupplied gate input is not a gate identity, so nothing paid runs.
+The defaults remain the safe ones — `provider_gate: none` and
+`confirm_paid_execution: false` — so a dispatch that just accepts the form
+authorizes nothing.
+
+`workflow_dispatch` inputs are still read from the workflow file on the
+**default branch**. A future change that introduces a *new* input cannot use it
+via dispatch until that input exists on `main`; until then, such a change is
+authorized by the PR-event route above. Either way the guard fails closed: an
+unsupplied gate input is not a gate identity, so nothing paid runs.
 
 #### Threshold is data, never code
 
