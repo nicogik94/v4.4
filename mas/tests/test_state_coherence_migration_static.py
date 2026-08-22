@@ -17,7 +17,7 @@ def test_v64_is_the_next_used_migration_number():
         for path in (MAS / "sql").glob("v*.sql")
         if (match := re.match(r"v(\d+)_", path.name))
     )
-    assert numbered[-2:] == [63, 64]
+    assert numbered[-3:-1] == [63, 64]
 
 
 def test_migration_is_additive_transactional_and_provider_independent():

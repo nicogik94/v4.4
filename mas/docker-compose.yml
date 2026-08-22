@@ -12,6 +12,7 @@ services:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./sql/outcomes.sql:/docker-entrypoint-initdb.d/02-outcomes.sql
       - ./sql/v64_decision_state_coherence_foundation.sql:/docker-entrypoint-initdb.d/03-v64-decision-state-coherence.sql
+      - ./sql/v65_governed_input_revision_lifecycle.sql:/docker-entrypoint-initdb.d/04-v65-governed-input-revisions.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U workflow -d workflow_v4"]
       interval: 5s
