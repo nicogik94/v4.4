@@ -48,16 +48,74 @@ class TestExplainabilityDerivation(unittest.TestCase):
         self.assertTrue(trace.gate_result.passed)
         self.assertIn("Proceed", trace.next_step)
 
-    def test_completed_phase_prefers_recorded_gate_outcome_when_recompute_differs(self):
+    def test_completed_phase_reports_failed_recompute_without_overwriting_it(self):
         state = make_completed_state("trace-gate-history")
         state.sealed = False
 
         trace = build_phase_trace(state, "hypotheses")
 
+        # The recorded status still says completed, and the recomputation still
+        # says blocked. The trace reports both instead of resolving one away.
         self.assertEqual(trace.status, "completed")
-        self.assertTrue(trace.gate_result.passed)
-        self.assertEqual(trace.gate_result.source, "recorded_completion")
-        self.assertIn("persisted completed outcome", trace.gate_result.note)
+        self.assertFalse(trace.gate_result.passed)
+        self.assertEqual(trace.gate_result.recorded_status, "completed")
+        self.assertTrue(trace.gate_result.recompute_conflicts_with_recorded_status)
+        self.assertEqual(trace.gate_result.source, "current_check")
+        self.assertIn("does not pass", trace.gate_result.note)
+
+    def test_completed_phase_keeps_recompute_blocking_reasons(self):
+        state = make_completed_state("trace-gate-blocking")
+        state.sealed = False
+
+        trace = build_phase_trace(state, "hypotheses")
+
+        self.assertTrue(trace.gate_result.blocking)
+        self.assertTrue(any("sealed" in reason.lower() for reason in trace.gate_result.blocking))
+
+    def test_completed_phase_does_not_fabricate_full_confidence_on_failed_recompute(self):
+        state = make_completed_state("trace-gate-confidence")
+        state.sealed = False
+        state.phase_confidence["hypotheses"] = 0.4
+
+        trace = build_phase_trace(state, "hypotheses")
+
+        self.assertFalse(trace.gate_result.passed)
+        self.assertEqual(trace.gate_result.confidence, 0.4)
+        self.assertNotEqual(trace.gate_result.confidence, 1.0)
+
+    def test_gate_conflict_is_visible_in_deterministic_logic(self):
+        state = make_completed_state("trace-gate-logic")
+        state.sealed = False
+
+        trace = build_phase_trace(state, "hypotheses")
+
+        self.assertTrue(
+            any("disagree" in item for item in trace.logic_separation.deterministic_logic),
+            trace.logic_separation.deterministic_logic,
+        )
+        self.assertTrue(
+            any("passed=False" in item for item in trace.logic_separation.deterministic_logic),
+            trace.logic_separation.deterministic_logic,
+        )
+
+    def test_unconfigured_gate_reports_no_confidence_instead_of_one(self):
+        state = make_completed_state("trace-gate-unconfigured")
+        # "sqi" has no gate configuration, so there is no gate to score.
+        state.phase_confidence.pop("sqi", None)
+
+        trace = build_phase_trace(state, "sqi")
+
+        self.assertFalse(trace.gate_result.configured)
+        self.assertIsNone(trace.gate_result.confidence)
+
+    def test_unconfigured_gate_still_reports_recorded_phase_confidence(self):
+        state = make_completed_state("trace-gate-unconfigured-recorded")
+        state.phase_confidence["sqi"] = 0.75
+
+        trace = build_phase_trace(state, "sqi")
+
+        self.assertFalse(trace.gate_result.configured)
+        self.assertEqual(trace.gate_result.confidence, 0.75)
 
     def test_strategy_explanations_include_evidence_and_deterministic_checks(self):
         state = make_completed_state("trace-action")

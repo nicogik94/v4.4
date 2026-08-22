@@ -1290,8 +1290,18 @@ def _polish_client_metric_comparator_phrasing(markdown: str) -> str:
 
 def _protect_client_concrete_metric_values(markdown: str) -> tuple[str, list[str]]:
     fragments: list[str] = []
+    # Currency amounts are protected on the same footing as percentages, hours
+    # and months: an operator-supplied figure is a concrete value the client
+    # text must carry through, not prose for the simplifier to generalize away.
+    currency_symbol = r"(?:US\$|MX\$|\$|€|£)"
+    currency_code = r"(?:USD|MXN|EUR|GBP|CAD|AUD)"
+    amount = r"\d[\d,]*(?:\.\d+)?(?:\s*(?:[KMB]|bn|mn)\b)?"
     patterns = [
         r"(?<![A-Za-z0-9_])(?:[<>]=?|≥|≤)\s*\d+(?:\.\d+)?\s*(?:%|pp|h|hrs?|hours?|days?|weeks?|months?)\b",
+        rf"(?<![A-Za-z0-9_])(?:[<>]=?|≥|≤)\s*{currency_symbol}\s*{amount}",
+        rf"{currency_symbol}\s*{amount}",
+        rf"\b{amount}\s*{currency_code}\b",
+        rf"\b{currency_code}\s*{amount}",
         r"\b\d+(?:\.\d+)?\s*%",
         r"\b\d+(?:\.\d+)?\s*percentage[- ]points?\b",
         r"\b\d+(?:\.\d+)?\s*(?:h|hrs?|hours?|days?|weeks?|months?)\b",

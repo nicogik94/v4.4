@@ -3384,7 +3384,11 @@ async def convergence_gate_node(state: ProjectState) -> ProjectState:
     """Pure deterministic: check if current phase passes its exit gate."""
     phase = state.current_phase
     gate_result = check_gate(state, phase)
-    state.phase_confidence[phase] = gate_result["confidence"]
+    # An unconfigured phase has no gate to score, so check_gate reports
+    # confidence=None. Writing that through would erase whatever confidence the
+    # phase actually recorded, so only a real recomputed value is stored.
+    if gate_result["confidence"] is not None:
+        state.phase_confidence[phase] = gate_result["confidence"]
     logger.info(f"🚦 Gate {phase}: {'PASS' if gate_result['passed'] else 'FAIL'} "
                 f"(blocking: {gate_result['blocking']})")
     return state

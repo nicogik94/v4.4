@@ -283,6 +283,105 @@ class TestReportQualityHelpers(unittest.TestCase):
             {finding.rule_name for finding in unsupported_result.findings},
         )
 
+    def test_decision_memo_flags_payback_claim_without_calculation_result(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why="Inference: The automation reaches payback in 8 months."
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertTrue(result.checked)
+        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_flags_break_even_and_recovery_period_claims(self):
+        for claim in (
+            "Inference: Break-even arrives at month 14.",
+            "Inference: The breakeven point is 14 months out.",
+            "Inference: The recovery period is 9 months.",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_operator_fact_label_does_not_excuse_a_derived_period(self):
+        # The operator supplies inputs; the calculation produces the period.
+        # Labelling a derived number as operator-supplied is the fabrication
+        # this rule exists to catch, so the label must not exempt it.
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                facts="Operator-supplied fact: Payback period is 8 months."
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_accepts_payback_linked_to_a_calculation_result(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why=(
+                    "Inference: Payback is 8 months "
+                    "(calculation_result: 3f9a1c22-9c1e-4f0b-8a77-0d2f1c5b6e41)."
+                )
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertNotIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_bare_calculation_result_mention_is_not_a_link(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why="Inference: A calculation result is pending, but payback is 8 months."
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_allows_proposed_payback_threshold_and_unquantified_mention(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why="Inference: The pilot should measure payback before scale-up.",
+                thresholds=(
+                    "Proposed operator threshold: Change course if payback exceeds 12 months."
+                ),
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertTrue(result.checked)
+        self.assertNotIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_flags_spanish_recovery_period_claim(self):
+        state = _cacofonico_fixture_state()
+        state.report = state.report.replace(
+            "# Siguientes acciones",
+            "# Siguientes acciones\nInferencia: el periodo de recuperación es de 8 meses.",
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
     def test_generic_growth_ignores_generated_seo_terms_for_domain(self):
         state = ProjectState(
             project_id="growth-generated-seo",

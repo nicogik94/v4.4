@@ -28,7 +28,10 @@ class ScoreSummary(BaseModel):
     sqi_overall: Optional[float] = None
     det_score_overall: Optional[float] = None
     brier_score: Optional[float] = None
-    dq_total: float = 0.0
+    # None when the project has no DQ breakdown at all. A real DQ total of 0.0
+    # and a missing one are different facts, and the dashboard renders the
+    # missing case as an em dash rather than as a zero score.
+    dq_total: Optional[float] = None
 
 
 class DecisionObjectHealth(BaseModel):
@@ -262,7 +265,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
             sqi_overall=state.sqi.sqi_overall if state.sqi else None,
             det_score_overall=state.det_scores.overall if state.det_scores else None,
             brier_score=state.brier_score,
-            dq_total=float(sum(state.dq.model_dump().values())) if state.dq else 0.0,
+            dq_total=_dq_total(state),
         ),
         decision_object_health=decision_object_health,
         knowledge_health=knowledge_health,
@@ -280,6 +283,22 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         ),
         reentry_history=list(state.reentry_triggers_fired or []),
     )
+
+
+def _dq_total(state: ProjectState) -> Optional[float]:
+    """Total decision-quality score, or None when no DQ has been recorded.
+
+    ``state.dq`` is always present as an all-zero default, so an all-zero
+    breakdown means "never scored" rather than "scored zero". Reporting 0.0 for
+    it would put a real-looking DQ total of zero on the dashboard for every
+    project that has not been scored yet, which is a worse claim than admitting
+    the score is missing. ``decision_objects`` already treats a positive sum as
+    the test for "scores exist"; this uses the same rule.
+    """
+    if not state.dq:
+        return None
+    total = float(sum(state.dq.model_dump().values()))
+    return total if total > 0 else None
 
 
 def build_queue_item(state: ProjectState, *, workflow_running: bool = False) -> QueueItem:

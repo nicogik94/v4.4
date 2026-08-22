@@ -21,12 +21,17 @@ from workflow_templates import TECHNOLOGY_READINESS_PHASE_SEQUENCE, get_downstre
 def check_gate(state: ProjectState, phase: str) -> dict:
     """
     Evaluate whether a phase's exit gate is met.
-    Returns: {"passed": bool, "blocking": [reasons], "confidence": float}
+    Returns: {"passed": bool, "blocking": [reasons], "confidence": float | None}
     Pure deterministic — no LLM.
+
+    ``confidence`` is ``None`` when the phase has no gate configuration: there is
+    no gate to score, so there is no confidence to report. Reporting 1.0 there
+    would fabricate a maximally-confident deterministic result out of an absent
+    configuration, and callers cannot tell that apart from a real 1.0.
     """
     config = GATE_CONFIGS.get(phase)
     if not config:
-        return {"passed": True, "blocking": [], "confidence": 1.0}
+        return {"passed": True, "blocking": [], "confidence": None}
 
     blocking = []
     output = getattr(state, phase, None)

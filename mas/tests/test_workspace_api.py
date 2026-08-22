@@ -22,12 +22,52 @@ from clarifications import (  # noqa: E402
 )
 from decision_objects import ensure_decision_objects  # noqa: E402
 from overview import build_operator_overview  # noqa: E402
-from state import REPORT_MODE_DECISION_MEMO_PILOT_PLAN, PhaseStatus, ProjectState  # noqa: E402
+from state import (  # noqa: E402
+    REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+    DQScores,
+    PhaseStatus,
+    ProjectState,
+)
 from workspace import build_workspace_summary  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
 
 
 class TestWorkspaceSummary(unittest.TestCase):
+    def test_missing_dq_is_none_not_zero(self):
+        state = ProjectState(project_id="workspace-dq-missing", project_name="DQ missing")
+
+        workspace = build_workspace_summary(state)
+
+        # An unscored project has no DQ total. Reporting 0.0 would be a
+        # real-looking score of zero rather than an absent one.
+        self.assertIsNone(workspace.score_summary.dq_total)
+
+    def test_recorded_dq_is_reported_as_its_total(self):
+        state = ProjectState(
+            project_id="workspace-dq-present",
+            project_name="DQ present",
+            dq=DQScores(frame=20, alt=15, info=18, val=12),
+        )
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(workspace.score_summary.dq_total, 65.0)
+
+    def test_dashboard_renders_missing_dq_as_em_dash(self):
+        missing = ProjectState(project_id="overview-dq-missing", project_name="DQ missing")
+        present = ProjectState(
+            project_id="overview-dq-present",
+            project_name="DQ present",
+            dq=DQScores(frame=20, alt=15, info=18, val=12),
+        )
+
+        def dq_card(state):
+            cards = build_operator_overview(state).key_metrics
+            return next(card for card in cards if card.label == "DQ total")
+
+        self.assertEqual(dq_card(missing).value, "—")
+        self.assertEqual(dq_card(present).value, "65.00")
+
     def test_completed_workspace_is_backend_computed(self):
         state = make_state("workspace-complete")
         state.report = "final report"

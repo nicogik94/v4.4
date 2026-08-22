@@ -1666,6 +1666,7 @@ def assess_decision_memo_pilot_plan_quality(state: Any) -> DecisionMemoQualityRe
     _decision_memo_check_truncation(findings, report)
     _decision_memo_check_contradictory_counts(findings, main_text)
     _decision_memo_check_unsupported_numeric_claims(findings, main_text, exact_markers, output_language)
+    _decision_memo_check_derived_financial_claims(findings, main_text, output_language)
     _decision_memo_check_source_supported_locators(findings, main_text, exact_markers, output_language)
     _decision_memo_check_evidence_certainty_mismatch(findings, main_text, sections, output_language)
     _decision_memo_check_heading_language(findings, heading_entries, output_language)
@@ -2181,6 +2182,68 @@ def _decision_memo_numeric_range_has_sensitive_context(text: str, match: re.Matc
             re.I,
         )
     )
+
+
+# A payback, break-even, or recovery period is a *derived* financial quantity:
+# it only exists as the output of a calculation over supplied inputs. The
+# deterministic Automation ROI engine is the system's calculation of record, and
+# it does not compute any of them -- so a memo that states one has, by
+# construction, no calculation standing behind it unless it names the
+# calculation result it came from.
+_DECISION_MEMO_DERIVED_FINANCIAL_TERM = re.compile(
+    r"\b(?:payback(?:\s+period)?"
+    r"|break[\s-]?even(?:\s+(?:point|period))?"
+    r"|breakeven"
+    r"|recovery\s+period"
+    r"|per[ií]odo\s+de\s+recuperaci[óo]n"
+    r"|plazo\s+de\s+recuperaci[óo]n"
+    r"|punto\s+de\s+equilibrio)\b",
+    re.I,
+)
+
+# A link is only a link when it names something. A bare mention of the words
+# "calculation result" is prose, not provenance, so an identifier must follow --
+# and it has to look like an identifier (carrying a digit or a separator) so an
+# ordinary English word running on after the phrase cannot pass as one.
+_DECISION_MEMO_CALCULATION_RESULT_LINK = re.compile(
+    r"\b(?:calculation[_\s-]?result|resultado[_\s-]?de[_\s-]?c[áa]lculo)\b"
+    r"\s*[:=#]?\s*"
+    r"(?=[A-Za-z0-9._-]*[0-9._-])([A-Za-z0-9][A-Za-z0-9._-]{3,})",
+    re.I,
+)
+
+
+def _decision_memo_check_derived_financial_claims(
+    findings: list[DecisionMemoQualityFinding],
+    main_text: str,
+    output_language: str,
+) -> None:
+    """Flag stated payback / break-even / recovery periods with no calculation behind them.
+
+    An operator-fact label deliberately does not excuse the claim. Labelling a
+    derived number as operator-supplied is the fabrication this check exists to
+    catch: the operator supplies inputs, and the calculation produces the
+    period. A proposed threshold ("stop if payback exceeds 12 months") is not a
+    claim about a computed value, so it is left alone.
+    """
+    for line_number, line in _decision_memo_review_lines(main_text):
+        if not _DECISION_MEMO_DERIVED_FINANCIAL_TERM.search(line):
+            continue
+        if not re.search(r"\d", line):
+            continue
+        if _decision_memo_line_has_any_label(line, _decision_memo_proposed_threshold_labels(output_language)):
+            continue
+        if _DECISION_MEMO_CALCULATION_RESULT_LINK.search(line):
+            continue
+        _decision_memo_add_finding(
+            findings,
+            "derived_financial_claim_without_calculation_result",
+            "Main memo states a derived financial claim (payback, break-even, or "
+            "recovery period) that is not linked to a calculation result. A derived "
+            "financial value must reference the calculation it came from.",
+            location=f"line {line_number}",
+            excerpt=line,
+        )
 
 
 def _decision_memo_check_source_supported_locators(

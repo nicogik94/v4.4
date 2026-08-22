@@ -114,9 +114,15 @@ class GateTraceSummary(BaseModel):
     kind: str = "deterministic"
     passed: bool = True
     blocking: list[str] = Field(default_factory=list)
-    confidence: float = 0.0
+    # None when there is no gate configuration to score, or when the phase has
+    # recorded no confidence. It is never filled in with a stand-in number.
+    confidence: Optional[float] = None
     source: str = "current_check"
     note: str = ""
+    # The persisted workflow status for the phase, reported alongside the
+    # recomputation rather than substituted for it.
+    recorded_status: str = ""
+    recompute_conflicts_with_recorded_status: bool = False
 
 
 class UncertaintySummary(BaseModel):
@@ -291,24 +297,36 @@ def _gate_trace(
     status: str,
     confidence: Optional[float],
 ) -> GateTraceSummary:
+    """Report the deterministic gate recomputation exactly as it came out.
+
+    A completed phase whose gate no longer passes is a real disagreement between
+    the persisted workflow outcome and what the current inputs recompute to.
+    Both sides are reported: the recomputation keeps its own ``passed`` value and
+    its blocking reasons, and the recorded status travels next to it under an
+    explicit conflict flag. Rewriting the recomputation as passed -- and
+    inventing ``confidence=1.0`` to go with it -- would destroy the only signal
+    an operator has that the two disagree.
+    """
     gate = check_gate(state, phase)
     configured = phase in GATE_CONFIGS
     passed = bool(gate.get("passed", True))
     blocking = list(gate.get("blocking", []))
-    gate_confidence = float(gate.get("confidence", confidence or 0.0) or 0.0)
-    source = "current_check"
-    note = ""
 
-    # Explainability should not imply that a phase was blocked when the recorded
-    # workflow state shows that it completed and downstream work proceeded.
-    if status == "completed" and not passed:
-        passed = True
-        blocking = []
-        gate_confidence = max(gate_confidence, 1.0)
-        source = "recorded_completion"
+    # Fall back to the phase's recorded confidence, but never to a stand-in
+    # number: an absent confidence stays absent.
+    gate_confidence = gate.get("confidence")
+    if gate_confidence is None:
+        gate_confidence = confidence
+    gate_confidence = None if gate_confidence is None else float(gate_confidence)
+
+    conflicts = status == "completed" and not passed
+    note = ""
+    if conflicts:
         note = (
-            "This phase completed in the recorded workflow. The current deterministic "
-            "gate recomputation differs from the persisted completed outcome."
+            "This phase completed in the recorded workflow, but the current "
+            "deterministic gate recomputation does not pass. The recomputed "
+            "result and its blocking reasons are reported as-is and do not "
+            "retract the persisted completed status."
         )
 
     return GateTraceSummary(
@@ -316,8 +334,10 @@ def _gate_trace(
         passed=passed,
         blocking=blocking,
         confidence=gate_confidence,
-        source=source,
+        source="current_check",
         note=note,
+        recorded_status=status,
+        recompute_conflicts_with_recorded_status=conflicts,
     )
 
 
@@ -411,6 +431,11 @@ def _logic_for_phase(state: ProjectState, phase: str, gate: GateTraceSummary) ->
         f"Gate check ({'configured' if gate.configured else 'not configured'}): passed={gate.passed}",
         f"Phase status: {_normalized_status(state.phase_status.get(phase, 'pending'))}",
     ]
+    if gate.recompute_conflicts_with_recorded_status:
+        deterministic_logic.append(
+            f"Gate recomputation does not pass but the recorded phase status is "
+            f"'{gate.recorded_status}'; the two disagree."
+        )
     if gate.blocking:
         deterministic_logic.append("Blocking conditions: " + "; ".join(gate.blocking[:4]))
     if phase == "strategy" and state.det_scores:

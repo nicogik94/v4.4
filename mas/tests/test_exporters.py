@@ -2750,6 +2750,48 @@ The proposed planning gate is more than 20% activation.
         self.assertNotIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
 
+    def test_sparse_client_dossier_preserves_operator_currency_amounts(self):
+        state = ProjectState(
+            project_id="sparse-currency",
+            project_name="Sparse currency",
+            brief="Improve growth performance across sales, retention, and pipeline.",
+            report="""# Executive Summary
+The operator supplied a one-time implementation cost of $48,000 and an annual recurring cost of $7,500.
+Fully loaded rate is USD 85 per hour and the tooling budget is 12,000 USD.
+The pilot window is 90 days at 20 hours per week with a 15% target.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        # Currency survives client simplification on the same footing as the
+        # percentage, hours, and days figures alongside it.
+        self.assertIn("$48,000", markdown)
+        self.assertIn("$7,500", markdown)
+        self.assertIn("USD 85", markdown)
+        self.assertIn("12,000 USD", markdown)
+        self.assertIn("90 days", markdown)
+        self.assertIn("20 hours", markdown)
+        self.assertIn("15%", markdown)
+        self.assertNotIn("provisional planning estimate", markdown)
+
+    def test_sparse_client_dossier_preserves_currency_in_monitoring_thresholds(self):
+        state = ProjectState(
+            project_id="sparse-currency-threshold",
+            project_name="Sparse currency threshold",
+            brief="Improve growth performance across sales, retention, and pipeline.",
+            report="""# Monitoring and Kill Criteria
+Stop the pilot if monthly spend exceeds $12,000.
+The proposed planning gate is a run rate above $250,000.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        self.assertIn("$12,000", markdown)
+        self.assertIn("$250,000", markdown)
+        self.assertNotIn("provisional planning estimate", markdown)
+
     def test_sparse_report_preserves_exact_values_in_technical_appendix(self):
         state = ProjectState(
             project_id="sparse-technical-appendix",
