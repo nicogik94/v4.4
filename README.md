@@ -10,7 +10,8 @@ A multi-agent decision engine that applies 30 analytical frameworks across 6 pha
 
 ## Release identity
 
-- **Product version — `4.4.0`.** The single canonical value, defined in `mas/version.py` and stamped into `/health`, `/runtime/preflight` and machine-readable export manifests. It has not moved, and no `5.x` product version exists.
+- **Product version — `4.4.0`.** The single canonical value, defined in `mas/version.py` (as `APP_VERSION`) and stamped verbatim into `/health` and `/runtime/preflight`. It has not moved, and no `5.x` product version exists.
+  - **The `code_version` field in machine-readable export manifests is a build identifier, not the product version.** `report_freshness.current_code_version()` returns the first value set among `V4_CODE_VERSION`, `GIT_COMMIT`, `COMMIT_SHA` and `SOURCE_VERSION`, and only falls back to `APP_VERSION` when none is set (and to the short git SHA, or `unknown`, when `APP_VERSION` is unavailable). `build_export_manifest()` writes that resolved value to `code_version`, so a deployed manifest may legitimately carry a commit or deployment identifier rather than `4.4.0`. Read it as "which build produced this export", and read `4.4.0` from `/health` or `/runtime/preflight` as the product version.
 - **V7 — an internal release/provider milestone inside `4.4.0`,** not a separate product version. It closed the supported production boundary as Anthropic-only in commit `3d6b0a9`. Its release-validation evidence lives in [`mas/evals/README.md`](mas/evals/README.md); the identity anchors are recorded in [CHANGELOG.md](CHANGELOG.md).
 - **`docs/v5-*.md` — a historical productization and documentation line.** The `v5-` prefix names that documentation lineage; it is not a product version and does not imply one. Filenames are kept as they are for traceability.
 
