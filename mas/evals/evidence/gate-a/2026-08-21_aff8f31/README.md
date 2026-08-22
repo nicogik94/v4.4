@@ -84,13 +84,21 @@ non-provider judge scoring."* The gate decision `ok: true` is a separate fact: i
 threshold comparison, and 83.3% ≥ 75%. A gate can pass with individual case failures — that
 is what a pass-rate threshold means.
 
-**Judge-input truncation caveat.** `eval_provenance.judge_inputs_truncated_count` is `11`.
-This is preserved as a caveat on the run: judge inputs were truncated for 11 of the 70
-recorded invocations, so judge scores were produced over shortened inputs. Provenance is
-observational only — per the artifact's own `scoring_notice`, it does not alter
-`passed`, `total`, `pass_rate`, `threshold` or `ok`, and no corrected pass rate is derived
-from it. It is recorded here so the PASS is read with it in view, not to qualify the
-decision.
+**Judge-input truncation caveat.** `eval_provenance.judge_inputs_truncated_count` is `11`,
+and that means **11 of the 12 judge inputs** were truncated. The counter is incremented
+once per case from the case's `provenance.judge.input_truncated`, so its denominator is the
+12 cases. The affected cases are **`G01`–`G11`**; **only `G12`** ran with an untruncated
+judge input.
+
+`invocation_record_count: 70` is **not** the denominator for this metric — it counts every
+provider invocation across all phases, and reading `11` against it would badly understate
+how broadly the caveat applies.
+
+The PASS is valid under the current contract: provenance is observational only — per the
+artifact's own `scoring_notice`, it does not alter `passed`, `total`, `pass_rate`,
+`threshold` or `ok`, and no corrected pass rate is derived from it. But 11 of the 12 judge
+scores supporting this PASS were computed over shortened inputs, and the result must be
+read with that limitation in view.
 
 **No `valid_observation`.** That field belongs to the nightly batch contract
 (`nightly_batch_observation.v1`) and is **absent** from this Gate A aggregate. It is not
