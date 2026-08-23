@@ -118,9 +118,10 @@ class GateTraceSummary(BaseModel):
     # recorded no confidence. It is never filled in with a stand-in number.
     confidence: Optional[float] = None
     # Where `confidence` came from, kept separate from `source` because the two
-    # can differ: an unconfigured phase has no gate to score, so a confidence
-    # reported for it is the persisted phase value, not a recomputation.
-    # "gate_recomputation" | "recorded_phase_confidence" | "" when absent.
+    # differ: `check_gate` recomputes `passed` and `blocking`, but reads the
+    # confidence straight out of `state.phase_confidence`. No confidence in this
+    # trace is ever a recomputation, configured phase or not.
+    # "recorded_phase_confidence" | "" when no confidence is reported.
     confidence_source: str = ""
     source: str = "current_check"
     note: str = ""
@@ -313,27 +314,28 @@ def _gate_trace(
     an operator has that the two disagree.
 
     ``source`` describes where ``passed`` and ``blocking`` come from, which is
-    always the current check. ``confidence_source`` is tracked separately,
-    because a phase with no gate configuration has nothing to recompute and any
-    confidence reported for it is the persisted phase value.
+    always the current check. ``confidence_source`` is tracked separately
+    because the confidence does not come from the same place: ``check_gate``
+    recomputes the pass result and the blocking reasons, but reads the
+    confidence out of ``state.phase_confidence``. Reporting it as a gate
+    recomputation would be the same kind of false provenance this trace exists
+    to remove.
     """
     gate = check_gate(state, phase)
     configured = phase in GATE_CONFIGS
     passed = bool(gate.get("passed", True))
     blocking = list(gate.get("blocking", []))
 
-    # Fall back to the phase's recorded confidence, but never to a stand-in
-    # number: an absent confidence stays absent. The fallback is attributed to
-    # the persisted state rather than to the gate, so an unconfigured phase
-    # never presents a recorded number as a deterministic gate result.
+    # Confidence is persisted state on both paths: for a configured phase
+    # `check_gate` reads `state.phase_confidence` rather than deriving anything,
+    # and for an unconfigured one there is no gate at all. So it is attributed
+    # to the recorded state either way, never to a recomputation. The fallback
+    # never invents a stand-in number: an absent confidence stays absent.
     gate_confidence = gate.get("confidence")
-    confidence_source = "gate_recomputation"
     if gate_confidence is None:
         gate_confidence = confidence
-        confidence_source = "recorded_phase_confidence"
-    if gate_confidence is None:
-        confidence_source = ""
     gate_confidence = None if gate_confidence is None else float(gate_confidence)
+    confidence_source = "" if gate_confidence is None else "recorded_phase_confidence"
 
     conflicts = status == "completed" and not passed
     note = ""

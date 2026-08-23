@@ -82,7 +82,9 @@ class TestExplainabilityDerivation(unittest.TestCase):
         self.assertFalse(trace.gate_result.passed)
         self.assertEqual(trace.gate_result.confidence, 0.4)
         self.assertNotEqual(trace.gate_result.confidence, 1.0)
-        self.assertEqual(trace.gate_result.confidence_source, "gate_recomputation")
+        # check_gate reads state.phase_confidence; it does not derive a
+        # confidence, so a configured gate is not a recomputation either.
+        self.assertEqual(trace.gate_result.confidence_source, "recorded_phase_confidence")
 
     def test_gate_conflict_is_visible_in_deterministic_logic(self):
         state = make_completed_state("trace-gate-logic")
