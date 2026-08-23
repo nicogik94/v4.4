@@ -327,32 +327,28 @@ class TestReportQualityHelpers(unittest.TestCase):
 
         self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
 
-    def test_decision_memo_accepts_payback_linked_to_a_calculation_result(self):
-        state = _english_decision_memo_state(
-            _english_decision_memo_report(
-                why=(
-                    "Inference: Payback is 8 months "
-                    "(calculation_result: 3f9a1c22-9c1e-4f0b-8a77-0d2f1c5b6e41)."
+    def test_decision_memo_self_asserted_calculation_citation_does_not_exempt(self):
+        # Nothing here can resolve the identifier, so an invented citation would
+        # otherwise buy silence exactly like a real one.
+        for citation in (
+            "(calculation_result: fake-1)",
+            "(calculation_result: 3f9a1c22-9c1e-4f0b-8a77-0d2f1c5b6e41)",
+            "per calculation result roi-2026-04",
+            "A calculation result is pending",
+        ):
+            with self.subTest(citation=citation):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(
+                        why=f"Inference: Payback is 8 months {citation}."
+                    )
                 )
-            )
-        )
 
-        result = assess_decision_memo_pilot_plan_quality(state)
-        rule_names = {finding.rule_name for finding in result.findings}
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
 
-        self.assertNotIn("derived_financial_claim_without_calculation_result", rule_names)
-
-    def test_decision_memo_bare_calculation_result_mention_is_not_a_link(self):
-        state = _english_decision_memo_state(
-            _english_decision_memo_report(
-                why="Inference: A calculation result is pending, but payback is 8 months."
-            )
-        )
-
-        result = assess_decision_memo_pilot_plan_quality(state)
-        rule_names = {finding.rule_name for finding in result.findings}
-
-        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+                self.assertIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
 
     def test_decision_memo_requires_a_period_value_beside_the_financial_term(self):
         for claim in (
@@ -378,6 +374,9 @@ class TestReportQualityHelpers(unittest.TestCase):
             "Inference: Recovery-period analysis requires 3 inputs.",
             "Inference: Recovery-period analysis requires 3 inputs and 2 weeks of work.",
             "Inference: Break-even analysis needs 6 data sources.",
+            "Inference: Payback analysis takes 2 weeks.",
+            "Inference: Break-even modeling takes 3 days.",
+            "Inference: The payback review is scheduled for 2 weeks from now.",
         ):
             with self.subTest(line=line):
                 state = _english_decision_memo_state(

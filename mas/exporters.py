@@ -57,6 +57,7 @@ from report_quality import (
 import report_freshness
 from hypothesis_coverage import assess_hypothesis_variable_coverage
 from monitoring_templates import monitoring_template_xlsx_bytes
+from clarifications import current_authoritative_answers
 from state import REPORT_MODE_DECISION_MEMO_PILOT_PLAN, ProjectState
 from technology_readiness_workbook import (
     TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
@@ -1347,8 +1348,9 @@ def _operator_supplied_currency_keys(state: ProjectState) -> set[str]:
     """Currency amounts whose provenance is an operator-supplied structured input.
 
     Only inputs the operator actually supplied are read: the brief, the supplied
-    data notes, submitted clarification answers, and parsed knowledge items from
-    uploaded files. Generated artifacts -- the report itself, strategy, audit --
+    data notes, the current authoritative clarification answers, and parsed
+    knowledge items from uploaded files. Generated artifacts -- report, strategy,
+    audit --
     are deliberately excluded, because an amount appearing there is exactly the
     model-generated figure this gate exists to catch. Prose asserting that a
     number was "operator supplied" carries no weight; the number has to actually
@@ -1358,7 +1360,12 @@ def _operator_supplied_currency_keys(state: ProjectState) -> set[str]:
         str(getattr(state, "brief", "") or ""),
         str(getattr(state, "data", "") or ""),
     ]
-    for answer in list(getattr(state, "clarification_answers", []) or []):
+    # Only the current authoritative answer per question counts. The raw list
+    # keeps superseded records and answers later invalidated by an UNAVAILABLE
+    # one, so reading it directly would let an amount the operator has since
+    # corrected go on vouching for a figure they no longer stand behind. The
+    # clarification lifecycle already resolves this.
+    for answer in current_authoritative_answers(state):
         parts.append(str(getattr(answer, "answer_text", "") or ""))
     knowledge_layer = getattr(state, "knowledge_layer", None)
     for item in list(getattr(knowledge_layer, "items", []) or []):

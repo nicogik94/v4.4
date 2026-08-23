@@ -2861,6 +2861,39 @@ Monthly spend is $12,000 and the run rate is $250,000.
         self.assertIn("$12,000", markdown)
         self.assertIn("$250,000", markdown)
 
+    def test_superseded_clarification_answer_no_longer_vouches_for_an_amount(self):
+        state = ProjectState(
+            project_id="sparse-currency-superseded",
+            project_name="Sparse currency superseded",
+            brief="Improve growth performance across sales, retention, and pipeline.",
+            report="""# Executive Summary
+The implementation cost is $48,000 and the revised cost is $30,000.
+""",
+            clarification_answers=[
+                ClarificationAnswer(
+                    answer_id="a1",
+                    question_id="q-cost",
+                    answer_text="Implementation cost is $48,000.",
+                    status=ClarificationStatus.ANSWERED,
+                    answered_at="2026-01-01T00:00:00Z",
+                ),
+                ClarificationAnswer(
+                    answer_id="a2",
+                    question_id="q-cost",
+                    answer_text="Correction: implementation cost is $30,000.",
+                    status=ClarificationStatus.ANSWERED,
+                    answered_at="2026-02-01T00:00:00Z",
+                ),
+            ],
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        # The operator corrected the figure, so the old answer stops vouching
+        # for it and only the current authoritative amount survives.
+        self.assertIn("$30,000", markdown)
+        self.assertNotIn("$48,000", markdown)
+
     def test_sparse_client_dossier_preserves_supplied_currency_in_thresholds(self):
         state = ProjectState(
             project_id="sparse-currency-threshold",

@@ -2213,22 +2213,23 @@ _DECISION_MEMO_PERIOD_VALUE = re.compile(
     re.I,
 )
 
-# How close the period value has to sit to the financial term to read as one
-# claim. Wide enough for "Break-even arrives at month 14", tight enough that an
-# unrelated duration later in the same sentence does not bind to the term.
-_DECISION_MEMO_DERIVED_PERIOD_WINDOW = 24
-
-# A link is only a link when it names something. A bare mention of the words
-# "calculation result" is prose, not provenance, so an identifier must follow --
-# and it has to look like an identifier (carrying a digit or a separator) so an
-# ordinary English word running on after the phrase cannot pass as one.
-_DECISION_MEMO_CALCULATION_RESULT_LINK = re.compile(
-    r"\b(?:calculation[_\s-]?result|resultado[_\s-]?de[_\s-]?c[áa]lculo)\b"
-    r"\s*[:=#]?\s*"
-    r"(?=[A-Za-z0-9._-]*[0-9._-])([A-Za-z0-9][A-Za-z0-9._-]{3,})",
+# Proximity alone is not enough: "Payback analysis takes 2 weeks" puts a duration
+# right next to the term but states how long the analysis runs, not a two-week
+# payback. The value only counts when a linking construction actually assigns it
+# to the term, so everything between the two has to be connector text. Any
+# content word in the gap -- "analysis", "takes", "requires", "customers" --
+# means the number belongs to a different subject.
+_DECISION_MEMO_PERIOD_CONNECTOR = re.compile(
+    r"^[\s:=,;()\[\]–—-]*"
+    r"(?:(?:is|are|was|were|be|been|of|at|in|on|within|after|about|around|near|by|to|"
+    r"the|a|an|its|only|just|under|over|approximately|roughly|estimated|expected|"
+    r"projected|forecast|forecasted|occurs|occur|occurred|arrives|arrive|arrived|"
+    r"lands|land|landed|falls|fall|comes|come|reaches|reach|reached|hits|hit|"
+    r"es|de|del|la|el|los|las|en|un|una|dentro|ser[ií]a|llega|llegar[áa]|alcanza|"
+    r"aproximadamente|unos|unas)"
+    r"\b[\s:=,;()\[\]–—-]*)*$",
     re.I,
 )
-
 
 def _decision_memo_check_derived_financial_claims(
     findings: list[DecisionMemoQualityFinding],
@@ -2237,36 +2238,47 @@ def _decision_memo_check_derived_financial_claims(
 ) -> None:
     """Flag stated payback / break-even / recovery periods with no calculation behind them.
 
-    An operator-fact label deliberately does not excuse the claim. Labelling a
-    derived number as operator-supplied is the fabrication this check exists to
-    catch: the operator supplies inputs, and the calculation produces the
-    period. A proposed threshold ("stop if payback exceeds 12 months") is not a
-    claim about a computed value, so it is left alone.
+    No self-asserted citation earns an exemption. An earlier revision let a line
+    off when it named a ``calculation_result`` identifier, but nothing here can
+    resolve that identifier -- this assessor reads only ``ProjectState`` and has
+    no access to the calculation store -- so an invented ``calculation_result:
+    fake-1`` bought silence exactly like a real one. An unverifiable citation is
+    the same failure as an unverifiable number, so the exemption is gone.
+
+    That is not a gap waiting to be filled: the deterministic calculation of
+    record computes labor savings, net benefit and first-year ROI percent, and
+    does not compute payback, break-even or recovery periods at all. There is at
+    present no calculation any such claim could correctly cite.
+
+    An operator-fact label does not excuse the claim either. The operator
+    supplies inputs; the calculation produces the period. A proposed threshold
+    ("stop if payback exceeds 12 months") states no computed value and is left
+    alone.
     """
     for line_number, line in _decision_memo_review_lines(main_text):
         if not _decision_memo_states_derived_period(line):
             continue
         if _decision_memo_line_has_any_label(line, _decision_memo_proposed_threshold_labels(output_language)):
             continue
-        if _DECISION_MEMO_CALCULATION_RESULT_LINK.search(line):
-            continue
         _decision_memo_add_finding(
             findings,
             "derived_financial_claim_without_calculation_result",
             "Main memo states a derived financial claim (payback, break-even, or "
-            "recovery period) that is not linked to a calculation result. A derived "
-            "financial value must reference the calculation it came from.",
+            "recovery period) with no calculation of record behind it. The "
+            "deterministic calculator does not compute these periods, and a "
+            "citation written into the memo is not verifiable here.",
             location=f"line {line_number}",
             excerpt=line,
         )
 
 
 def _decision_memo_states_derived_period(line: str) -> bool:
-    """True when the line states a payback/break-even/recovery *period* value.
+    """True when the line assigns a time-denominated value to the financial term.
 
-    Requires a time-denominated number sitting next to the financial term, so a
-    line that merely mentions the term alongside an unrelated count does not
-    read as a derived-period claim.
+    Both halves are required: a period value, and a linking construction binding
+    it to the term. "Payback is 6.4 months" and "12-month payback" qualify;
+    "Payback analysis takes 2 weeks" and "Survey 20 customers about payback" do
+    not -- the first states an analysis duration, the second a headcount.
     """
     term_spans = [match.span() for match in _DECISION_MEMO_DERIVED_FINANCIAL_TERM.finditer(line)]
     if not term_spans:
@@ -2275,19 +2287,23 @@ def _decision_memo_states_derived_period(line: str) -> bool:
     if not value_spans:
         return False
     return any(
-        _decision_memo_span_gap(term, value) <= _DECISION_MEMO_DERIVED_PERIOD_WINDOW
+        _decision_memo_period_binds_to_term(line, term, value)
         for term in term_spans
         for value in value_spans
     )
 
 
-def _decision_memo_span_gap(left: tuple[int, int], right: tuple[int, int]) -> int:
-    """Characters between two spans; 0 when they touch or overlap."""
-    if left[1] <= right[0]:
-        return right[0] - left[1]
-    if right[1] <= left[0]:
-        return left[0] - right[1]
-    return 0
+def _decision_memo_period_binds_to_term(
+    line: str, term: tuple[int, int], value: tuple[int, int],
+) -> bool:
+    """True when only connector text separates the term from the period value."""
+    if term[1] <= value[0]:
+        between = line[term[1]:value[0]]
+    elif value[1] <= term[0]:
+        between = line[value[1]:term[0]]
+    else:
+        return True
+    return bool(_DECISION_MEMO_PERIOD_CONNECTOR.match(between))
 
 
 def _decision_memo_check_source_supported_locators(
