@@ -354,6 +354,68 @@ class TestReportQualityHelpers(unittest.TestCase):
 
         self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
 
+    def test_decision_memo_requires_a_period_value_beside_the_financial_term(self):
+        for claim in (
+            "Inference: Payback is 6.4 months.",
+            "Inference: A 12-month payback is expected.",
+            "Inference: Break-even occurs in 8 months.",
+            "Inference: Break-even arrives at month 14.",
+            "Inference: The recovery period is 9 months.",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_ignores_digits_that_state_no_period(self):
+        for line in (
+            "Inference: Survey 20 customers about payback.",
+            "Inference: Recovery-period analysis requires 3 inputs.",
+            "Inference: Recovery-period analysis requires 3 inputs and 2 weeks of work.",
+            "Inference: Break-even analysis needs 6 data sources.",
+        ):
+            with self.subTest(line=line):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=line)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertTrue(result.checked)
+                self.assertNotIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
+
+    def test_decision_memo_spanish_period_forms_match_and_bare_counts_do_not(self):
+        flagged = _cacofonico_fixture_state()
+        flagged.report = flagged.report.replace(
+            "# Siguientes acciones",
+            "# Siguientes acciones\nInferencia: el punto de equilibrio llega en 14 meses.",
+        )
+        ignored = _cacofonico_fixture_state()
+        ignored.report = ignored.report.replace(
+            "# Siguientes acciones",
+            "# Siguientes acciones\nInferencia: el análisis del periodo de recuperación requiere 3 insumos.",
+        )
+
+        flagged_rules = {
+            finding.rule_name
+            for finding in assess_decision_memo_pilot_plan_quality(flagged).findings
+        }
+        ignored_rules = {
+            finding.rule_name
+            for finding in assess_decision_memo_pilot_plan_quality(ignored).findings
+        }
+
+        self.assertIn("derived_financial_claim_without_calculation_result", flagged_rules)
+        self.assertNotIn("derived_financial_claim_without_calculation_result", ignored_rules)
+
     def test_decision_memo_allows_proposed_payback_threshold_and_unquantified_mention(self):
         state = _english_decision_memo_state(
             _english_decision_memo_report(

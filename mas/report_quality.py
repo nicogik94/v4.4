@@ -2191,15 +2191,32 @@ def _decision_memo_numeric_range_has_sensitive_context(text: str, match: re.Matc
 # construction, no calculation standing behind it unless it names the
 # calculation result it came from.
 _DECISION_MEMO_DERIVED_FINANCIAL_TERM = re.compile(
-    r"\b(?:payback(?:\s+period)?"
-    r"|break[\s-]?even(?:\s+(?:point|period))?"
-    r"|breakeven"
-    r"|recovery\s+period"
-    r"|per[ií]odo\s+de\s+recuperaci[óo]n"
-    r"|plazo\s+de\s+recuperaci[óo]n"
-    r"|punto\s+de\s+equilibrio)\b",
+    r"\b(?:payback(?:[\s-]+period)?"
+    r"|break[\s-]?even(?:[\s-]+(?:point|period))?"
+    r"|recovery[\s-]+period"
+    r"|per[ií]odo[\s-]+de[\s-]+recuperaci[óo]n"
+    r"|plazo[\s-]+de[\s-]+recuperaci[óo]n"
+    r"|punto[\s-]+de[\s-]+equilibrio)\b",
     re.I,
 )
+
+# The claim is the *period*, so a number only counts when it is denominated in
+# time. "Survey 20 customers about payback" and "Recovery-period analysis
+# requires 3 inputs" carry digits but state no period, and must not be flagged.
+_DECISION_MEMO_PERIOD_UNIT = (
+    r"(?:months?|years?|weeks?|days?|quarters?"
+    r"|mes|meses|a[ñn]os?|semanas?|d[ií]as?|trimestres?)"
+)
+_DECISION_MEMO_PERIOD_VALUE = re.compile(
+    rf"\b\d+(?:[.,]\d+)?\s*-?\s*{_DECISION_MEMO_PERIOD_UNIT}\b"
+    rf"|\b{_DECISION_MEMO_PERIOD_UNIT}\s+\d+(?:[.,]\d+)?\b",
+    re.I,
+)
+
+# How close the period value has to sit to the financial term to read as one
+# claim. Wide enough for "Break-even arrives at month 14", tight enough that an
+# unrelated duration later in the same sentence does not bind to the term.
+_DECISION_MEMO_DERIVED_PERIOD_WINDOW = 24
 
 # A link is only a link when it names something. A bare mention of the words
 # "calculation result" is prose, not provenance, so an identifier must follow --
@@ -2227,9 +2244,7 @@ def _decision_memo_check_derived_financial_claims(
     claim about a computed value, so it is left alone.
     """
     for line_number, line in _decision_memo_review_lines(main_text):
-        if not _DECISION_MEMO_DERIVED_FINANCIAL_TERM.search(line):
-            continue
-        if not re.search(r"\d", line):
+        if not _decision_memo_states_derived_period(line):
             continue
         if _decision_memo_line_has_any_label(line, _decision_memo_proposed_threshold_labels(output_language)):
             continue
@@ -2244,6 +2259,35 @@ def _decision_memo_check_derived_financial_claims(
             location=f"line {line_number}",
             excerpt=line,
         )
+
+
+def _decision_memo_states_derived_period(line: str) -> bool:
+    """True when the line states a payback/break-even/recovery *period* value.
+
+    Requires a time-denominated number sitting next to the financial term, so a
+    line that merely mentions the term alongside an unrelated count does not
+    read as a derived-period claim.
+    """
+    term_spans = [match.span() for match in _DECISION_MEMO_DERIVED_FINANCIAL_TERM.finditer(line)]
+    if not term_spans:
+        return False
+    value_spans = [match.span() for match in _DECISION_MEMO_PERIOD_VALUE.finditer(line)]
+    if not value_spans:
+        return False
+    return any(
+        _decision_memo_span_gap(term, value) <= _DECISION_MEMO_DERIVED_PERIOD_WINDOW
+        for term in term_spans
+        for value in value_spans
+    )
+
+
+def _decision_memo_span_gap(left: tuple[int, int], right: tuple[int, int]) -> int:
+    """Characters between two spans; 0 when they touch or overlap."""
+    if left[1] <= right[0]:
+        return right[0] - left[1]
+    if right[1] <= left[0]:
+        return left[0] - right[1]
+    return 0
 
 
 def _decision_memo_check_source_supported_locators(

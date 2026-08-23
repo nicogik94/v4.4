@@ -24,10 +24,22 @@ from decision_objects import ensure_decision_objects  # noqa: E402
 from overview import build_operator_overview  # noqa: E402
 from state import (  # noqa: E402
     REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+    ClassifyOutput,
     DQScores,
     PhaseStatus,
     ProjectState,
 )
+
+
+def _classified_output(*, dq: list[float]) -> ClassifyOutput:
+    """A classify output in the shape _store_phase_output persists."""
+    return ClassifyOutput(
+        domain="Complex",
+        justification="Cause and effect are only coherent in retrospect.",
+        bf=20.0,
+        variety_gaps="1. No offline mode",
+        dq=dq,
+    )
 from workspace import build_workspace_summary  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
 
@@ -42,10 +54,39 @@ class TestWorkspaceSummary(unittest.TestCase):
         # real-looking score of zero rather than an absent one.
         self.assertIsNone(workspace.score_summary.dq_total)
 
-    def test_recorded_dq_is_reported_as_its_total(self):
+    def test_dq_is_read_from_the_classification_output_that_records_it(self):
+        # The state shape a normal classify run produces: _store_phase_output
+        # writes the four DQ values onto state.classify.
         state = ProjectState(
-            project_id="workspace-dq-present",
-            project_name="DQ present",
+            project_id="workspace-dq-classified",
+            project_name="DQ classified",
+            classify=_classified_output(dq=[20, 15, 18, 12]),
+        )
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(workspace.score_summary.dq_total, 65.0)
+
+    def test_all_default_classify_dq_is_reported_as_missing(self):
+        state = ProjectState(
+            project_id="workspace-dq-default",
+            project_name="DQ default",
+            classify=_classified_output(dq=[0.0, 0.0, 0.0, 0.0]),
+        )
+
+        workspace = build_workspace_summary(state)
+
+        # An all-zero breakdown is the untouched default, so it reads as absent.
+        # A genuine exact-zero score is indistinguishable from it under the
+        # current storage contract; that limit is documented, not redesigned here.
+        self.assertIsNone(workspace.score_summary.dq_total)
+
+    def test_legacy_persisted_dq_model_is_still_honored(self):
+        # Nothing writes state.dq today; this covers a persisted state that
+        # already carries values.
+        state = ProjectState(
+            project_id="workspace-dq-legacy",
+            project_name="DQ legacy",
             dq=DQScores(frame=20, alt=15, info=18, val=12),
         )
 
@@ -58,7 +99,7 @@ class TestWorkspaceSummary(unittest.TestCase):
         present = ProjectState(
             project_id="overview-dq-present",
             project_name="DQ present",
-            dq=DQScores(frame=20, alt=15, info=18, val=12),
+            classify=_classified_output(dq=[20, 15, 18, 12]),
         )
 
         def dq_card(state):

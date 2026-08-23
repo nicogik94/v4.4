@@ -2750,13 +2750,18 @@ The proposed planning gate is more than 20% activation.
         self.assertNotIn("operator-confirmed threshold required", markdown)
         self.assertIn("proposed planning gate is more than 20% activation", markdown)
 
-    def test_sparse_client_dossier_preserves_operator_currency_amounts(self):
+    def test_sparse_client_dossier_preserves_operator_supplied_currency_amounts(self):
         state = ProjectState(
             project_id="sparse-currency",
             project_name="Sparse currency",
-            brief="Improve growth performance across sales, retention, and pipeline.",
+            brief=(
+                "Improve growth performance across sales, retention, and pipeline. "
+                "The one-time implementation cost is $48,000 and the annual recurring "
+                "cost is $7,500."
+            ),
+            data="Fully loaded rate is USD 85 per hour. Tooling budget is 12,000 USD.",
             report="""# Executive Summary
-The operator supplied a one-time implementation cost of $48,000 and an annual recurring cost of $7,500.
+The one-time implementation cost is $48,000 and the annual recurring cost is $7,500.
 Fully loaded rate is USD 85 per hour and the tooling budget is 12,000 USD.
 The pilot window is 90 days at 20 hours per week with a 15% target.
 """,
@@ -2764,8 +2769,8 @@ The pilot window is 90 days at 20 hours per week with a 15% target.
 
         markdown = build_client_dossier_markdown(state)
 
-        # Currency survives client simplification on the same footing as the
-        # percentage, hours, and days figures alongside it.
+        # Every amount here traces back to the brief or the supplied data notes,
+        # so it survives on the same footing as the percentage and durations.
         self.assertIn("$48,000", markdown)
         self.assertIn("$7,500", markdown)
         self.assertIn("USD 85", markdown)
@@ -2775,11 +2780,95 @@ The pilot window is 90 days at 20 hours per week with a 15% target.
         self.assertIn("15%", markdown)
         self.assertNotIn("provisional planning estimate", markdown)
 
-    def test_sparse_client_dossier_preserves_currency_in_monitoring_thresholds(self):
+    def test_sparse_client_dossier_generalizes_unsupported_generated_currency(self):
+        state = ProjectState(
+            project_id="sparse-currency-unsupported",
+            project_name="Sparse currency unsupported",
+            brief="Improve growth performance across sales, retention, and pipeline.",
+            report="""# Executive Summary
+Expected implementation cost is $48,000 with high confidence.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        # Nothing the operator supplied contains this figure, so the sparse
+        # simplifier still generalizes it away.
+        self.assertNotIn("$48,000", markdown)
+        self.assertIn("planning estimate", markdown)
+
+    def test_prose_claiming_operator_supply_does_not_establish_currency_provenance(self):
+        state = ProjectState(
+            project_id="sparse-currency-prose",
+            project_name="Sparse currency prose",
+            brief="Improve growth performance across sales, retention, and pipeline.",
+            report="""# Executive Summary
+Operator supplied: the implementation cost is $48,000.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        # A label is not provenance. The number is not in any supplied input.
+        self.assertNotIn("$48,000", markdown)
+        self.assertIn("planning estimate", markdown)
+
+    def test_supplied_currency_matches_across_formatting_variants(self):
+        state = ProjectState(
+            project_id="sparse-currency-variants",
+            project_name="Sparse currency variants",
+            brief="Improve growth performance. The implementation budget is $48K.",
+            report="""# Executive Summary
+The implementation budget is $48,000 for the pilot.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        # "$48K" in the brief and "$48,000" in the report are the same supplied
+        # amount, so normalization has to recognize it.
+        self.assertIn("$48,000", markdown)
+
+    def test_supplied_currency_from_clarification_answers_and_uploads(self):
+        state = ProjectState(
+            project_id="sparse-currency-sources",
+            project_name="Sparse currency sources",
+            brief="Improve growth performance across sales, retention, and pipeline.",
+            report="""# Executive Summary
+Monthly spend is $12,000 and the run rate is $250,000.
+""",
+            clarification_answers=[
+                ClarificationAnswer(
+                    answer_id="a1",
+                    question_id="q1",
+                    answer_text="Monthly spend is $12,000.",
+                    status=ClarificationStatus.ANSWERED,
+                )
+            ],
+            knowledge_layer=KnowledgeLayerState(
+                items=[
+                    KnowledgeItem(
+                        item_id="k1",
+                        title="Run rate note",
+                        summary="Current run rate is $250,000.",
+                    )
+                ]
+            ),
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        self.assertIn("$12,000", markdown)
+        self.assertIn("$250,000", markdown)
+
+    def test_sparse_client_dossier_preserves_supplied_currency_in_thresholds(self):
         state = ProjectState(
             project_id="sparse-currency-threshold",
             project_name="Sparse currency threshold",
-            brief="Improve growth performance across sales, retention, and pipeline.",
+            brief=(
+                "Improve growth performance across sales, retention, and pipeline. "
+                "Monthly spend is $12,000 and the run rate is $250,000."
+            ),
             report="""# Monitoring and Kill Criteria
 Stop the pilot if monthly spend exceeds $12,000.
 The proposed planning gate is a run rate above $250,000.
