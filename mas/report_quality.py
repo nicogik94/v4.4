@@ -1666,6 +1666,7 @@ def assess_decision_memo_pilot_plan_quality(state: Any) -> DecisionMemoQualityRe
     _decision_memo_check_truncation(findings, report)
     _decision_memo_check_contradictory_counts(findings, main_text)
     _decision_memo_check_unsupported_numeric_claims(findings, main_text, exact_markers, output_language)
+    _decision_memo_check_derived_financial_claims(findings, main_text, output_language)
     _decision_memo_check_source_supported_locators(findings, main_text, exact_markers, output_language)
     _decision_memo_check_evidence_certainty_mismatch(findings, main_text, sections, output_language)
     _decision_memo_check_heading_language(findings, heading_entries, output_language)
@@ -2181,6 +2182,207 @@ def _decision_memo_numeric_range_has_sensitive_context(text: str, match: re.Matc
             re.I,
         )
     )
+
+
+# A payback, break-even, or recovery period is a *derived* financial quantity:
+# it only exists as the output of a calculation over supplied inputs. The
+# deterministic Automation ROI engine is the system's calculation of record, and
+# it does not compute any of them -- so a memo that states one has, by
+# construction, no calculation standing behind it unless it names the
+# calculation result it came from.
+_DECISION_MEMO_DERIVED_FINANCIAL_TERM = re.compile(
+    r"\b(?:payback(?:[\s-]+period)?"
+    r"|break[\s-]?even(?:[\s-]+(?:point|period))?"
+    r"|recovery[\s-]+period"
+    r"|per[ií]odo[\s-]+de[\s-]+recuperaci[óo]n"
+    r"|plazo[\s-]+de[\s-]+recuperaci[óo]n"
+    r"|punto[\s-]+de[\s-]+equilibrio)\b",
+    re.I,
+)
+
+# The claim is the *period*, so a number only counts when it is denominated in
+# time. "Survey 20 customers about payback" and "Recovery-period analysis
+# requires 3 inputs" carry digits but state no period, and must not be flagged.
+_DECISION_MEMO_PERIOD_UNIT = (
+    r"(?:months?|years?|weeks?|days?|quarters?"
+    r"|mes|meses|a[ñn]os?|semanas?|d[ií]as?|trimestres?)"
+)
+_DECISION_MEMO_PERIOD_VALUE = re.compile(
+    rf"\b\d+(?:[.,]\d+)?\s*-?\s*{_DECISION_MEMO_PERIOD_UNIT}\b"
+    rf"|\b{_DECISION_MEMO_PERIOD_UNIT}\s+\d+(?:[.,]\d+)?\b",
+    re.I,
+)
+
+# Proximity alone is not enough: "Payback analysis takes 2 weeks" puts a duration
+# right next to the term but states how long the analysis runs, not a two-week
+# payback. The value only counts when a linking construction actually assigns it
+# to the term, so everything between the two has to be connector text. Any
+# content word in the gap -- "analysis", "takes", "requires", "customers" --
+# means the number belongs to a different subject.
+# Markdown delimiters carry no meaning for this test. Emphasis and table pipes
+# routinely land between the term and its value -- "**Payback:** 8 months",
+# "| Payback | 8 months |" -- and treating them as content would silently miss
+# the claim in exactly the formatting a decision memo actually uses.
+_DECISION_MEMO_PERIOD_CONNECTOR = re.compile(
+    r"^[\s:=,;()\[\]*|_`~>–—-]*"
+    r"(?:(?:is|are|was|were|be|been|of|at|in|on|within|after|about|around|near|by|to|"
+    r"the|a|an|its|only|just|under|over|approximately|roughly|estimated|expected|"
+    r"projected|forecast|forecasted|occurs|occur|occurred|arrives|arrive|arrived|"
+    r"lands|land|landed|falls|fall|comes|come|reaches|reach|reached|hits|hit|"
+    r"es|de|del|la|el|los|las|en|un|una|dentro|ser[ií]a|llega|llegar[áa]|alcanza|"
+    r"aproximadamente|unos|unas)"
+    r"\b[\s:=,;()\[\]*|_`~>–—-]*)*$",
+    re.I,
+)
+
+# Reverse order is adjectival only: "12-month payback", "| 8 months | Payback |".
+_DECISION_MEMO_REVERSE_GAP = re.compile(r"^[\s*|_`~>-]*$")
+
+# A duration introduced by one of these is scheduling something, not measuring
+# the financial term: "In 8 months, payback analysis begins".
+_DECISION_MEMO_SCHEDULING_LEAD = re.compile(
+    r"\b(?:in|within|after|over|during|by|for|starting|beginning|from|until|till"
+    r"|en|dentro|despu[eé]s|durante|desde|hasta)\s+(?:de\s+|the\s+|next\s+)*$",
+    re.I,
+)
+
+def _decision_memo_check_derived_financial_claims(
+    findings: list[DecisionMemoQualityFinding],
+    main_text: str,
+    output_language: str,
+) -> None:
+    """Flag stated payback / break-even / recovery periods with no calculation behind them.
+
+    No self-asserted citation earns an exemption. An earlier revision let a line
+    off when it named a ``calculation_result`` identifier, but nothing here can
+    resolve that identifier -- this assessor reads only ``ProjectState`` and has
+    no access to the calculation store -- so an invented ``calculation_result:
+    fake-1`` bought silence exactly like a real one. An unverifiable citation is
+    the same failure as an unverifiable number, so the exemption is gone.
+
+    That is not a gap waiting to be filled: the deterministic calculation of
+    record computes labor savings, net benefit and first-year ROI percent, and
+    does not compute payback, break-even or recovery periods at all. There is at
+    present no calculation any such claim could correctly cite.
+
+    An operator-fact label does not excuse the claim either. The operator
+    supplies inputs; the calculation produces the period. A proposed threshold
+    ("stop if payback exceeds 12 months") states no computed value and is left
+    alone.
+    """
+    threshold_labels = _decision_memo_proposed_threshold_labels(output_language)
+    for line_number, line in _decision_memo_review_lines(main_text):
+        # Detection stays on the whole line so that splitting never costs a
+        # match. Clauses only decide how far the threshold label reaches: it
+        # governs the clause it heads, not everything else sharing the line.
+        if not _decision_memo_states_derived_period(line):
+            continue
+        excerpt = _decision_memo_unexempt_claim_clause(line, threshold_labels)
+        if excerpt is None:
+            continue
+        _decision_memo_add_finding(
+            findings,
+            "derived_financial_claim_without_calculation_result",
+            "Main memo states a derived financial claim (payback, break-even, or "
+            "recovery period) with no calculation of record behind it. The "
+            "deterministic calculator does not compute these periods, and a "
+            "citation written into the memo is not verifiable here.",
+            location=f"line {line_number}",
+            excerpt=excerpt,
+        )
+
+
+# Delimiters that start a new independently-labelled clause on one line. A
+# semicolon is not the only way memos do this: commas, em/en dashes and Markdown
+# table cells all put a labelled threshold and a separate claim side by side.
+#
+# Digit-internal separators are never clause boundaries. The decimal point was
+# already protected; the comma needs the same treatment, because es-MX writes
+# decimals as "6,4 meses" and every locale writes thousands as "12,000".
+# Splitting those severs a claim from its value, and the exemption fallback then
+# reads the orphaned halves as an exempt line -- suppressing a finding the
+# whole-line detection had already made.
+_DECISION_MEMO_CLAUSE_SPLIT = re.compile(
+    r"\s*[;|]\s*"
+    r"|\s*(?<![0-9]),(?![0-9])\s*"
+    r"|\s+[—–]\s+"
+    r"|(?<![0-9])\.\s+"
+)
+
+
+def _decision_memo_unexempt_claim_clause(
+    line: str, threshold_labels: tuple[str, ...],
+) -> Optional[str]:
+    """The clause carrying an unexempt derived-period claim, or None if exempt.
+
+    Called only for a line that already states a derived period. Returns the
+    offending clause so the finding points at the claim rather than the whole
+    line. None means a proposed-threshold label governs the claim.
+    """
+    clauses = _decision_memo_claim_clauses(line)
+    for clause in clauses:
+        if not _decision_memo_states_derived_period(clause):
+            continue
+        if _decision_memo_line_has_any_label(clause, threshold_labels):
+            continue
+        return clause
+
+    # No single clause carries the claim, so it straddles a delimiter. Treat a
+    # labelled clause anywhere on the line as governing it -- conservative, and
+    # it keeps a labelled threshold from being reported by a splitting artifact.
+    if any(_decision_memo_line_has_any_label(clause, threshold_labels) for clause in clauses):
+        return None
+    return line
+
+
+def _decision_memo_claim_clauses(line: str) -> list[str]:
+    """Split a review line into independently-labelled claim clauses."""
+    parts = _DECISION_MEMO_CLAUSE_SPLIT.split(str(line or ""))
+    clauses = [part.strip() for part in parts if part and part.strip()]
+    return clauses or [str(line or "")]
+
+
+def _decision_memo_states_derived_period(line: str) -> bool:
+    """True when the line assigns a time-denominated value to the financial term.
+
+    Both halves are required: a period value, and a linking construction binding
+    it to the term. "Payback is 6.4 months" and "12-month payback" qualify;
+    "Payback analysis takes 2 weeks" and "Survey 20 customers about payback" do
+    not -- the first states an analysis duration, the second a headcount.
+    """
+    term_spans = [match.span() for match in _DECISION_MEMO_DERIVED_FINANCIAL_TERM.finditer(line)]
+    if not term_spans:
+        return False
+    value_spans = [match.span() for match in _DECISION_MEMO_PERIOD_VALUE.finditer(line)]
+    if not value_spans:
+        return False
+    return any(
+        _decision_memo_period_binds_to_term(line, term, value)
+        for term in term_spans
+        for value in value_spans
+    )
+
+
+def _decision_memo_period_binds_to_term(
+    line: str, term: tuple[int, int], value: tuple[int, int],
+) -> bool:
+    """True when the period value is actually assigned to the financial term.
+
+    Forward order ("payback is 8 months") allows any connector construction.
+    Reverse order is held to a stricter rule, because a leading duration usually
+    schedules something rather than measuring it: "In 8 months, payback analysis
+    begins" states when work starts, not an eight-month payback. A duration in
+    front only counts when it directly modifies the term -- "12-month payback"
+    -- so nothing but whitespace, hyphens or Markdown delimiters may separate
+    them, and a scheduling preposition in front of the duration disqualifies it.
+    """
+    if term[1] <= value[0]:
+        return bool(_DECISION_MEMO_PERIOD_CONNECTOR.match(line[term[1]:value[0]]))
+    if value[1] <= term[0]:
+        if not _DECISION_MEMO_REVERSE_GAP.match(line[value[1]:term[0]]):
+            return False
+        return not _DECISION_MEMO_SCHEDULING_LEAD.search(line[:value[0]])
+    return True
 
 
 def _decision_memo_check_source_supported_locators(

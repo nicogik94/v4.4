@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import report_quality  # noqa: E402
 from report_quality import (  # noqa: E402
     CLIENT_BF_CONFIDENCE_CAVEAT,
     EVIDENCE_CATEGORY_COVERAGE_WARNING,
@@ -282,6 +283,296 @@ class TestReportQualityHelpers(unittest.TestCase):
             "unsupported_numeric_claim",
             {finding.rule_name for finding in unsupported_result.findings},
         )
+
+    def test_decision_memo_flags_payback_claim_without_calculation_result(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why="Inference: The automation reaches payback in 8 months."
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertTrue(result.checked)
+        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_flags_break_even_and_recovery_period_claims(self):
+        for claim in (
+            "Inference: Break-even arrives at month 14.",
+            "Inference: The breakeven point is 14 months out.",
+            "Inference: The recovery period is 9 months.",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_operator_fact_label_does_not_excuse_a_derived_period(self):
+        # The operator supplies inputs; the calculation produces the period.
+        # Labelling a derived number as operator-supplied is the fabrication
+        # this rule exists to catch, so the label must not exempt it.
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                facts="Operator-supplied fact: Payback period is 8 months."
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_self_asserted_calculation_citation_does_not_exempt(self):
+        # Nothing here can resolve the identifier, so an invented citation would
+        # otherwise buy silence exactly like a real one.
+        for citation in (
+            "(calculation_result: fake-1)",
+            "(calculation_result: 3f9a1c22-9c1e-4f0b-8a77-0d2f1c5b6e41)",
+            "per calculation result roi-2026-04",
+            "A calculation result is pending",
+        ):
+            with self.subTest(citation=citation):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(
+                        why=f"Inference: Payback is 8 months {citation}."
+                    )
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
+
+    def test_decision_memo_requires_a_period_value_beside_the_financial_term(self):
+        for claim in (
+            "Inference: Payback is 6.4 months.",
+            "Inference: A 12-month payback is expected.",
+            "Inference: Break-even occurs in 8 months.",
+            "Inference: Break-even arrives at month 14.",
+            "Inference: The recovery period is 9 months.",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_binds_periods_through_markdown_delimiters(self):
+        # Emphasis and table pipes are formatting, not content, and a decision
+        # memo routinely writes claims this way.
+        for claim in (
+            "**Payback:** 8 months",
+            "*Break-even* is 8 months",
+            "| Payback | 8 months |",
+            "| Recovery period | 9 months |",
+            "**Payback** is 6.4 months",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_markdown_delimiters_do_not_bridge_content_words(self):
+        # Admitting delimiters must not turn an unrelated duration into a claim.
+        for line in (
+            "| Payback | analysis | 2 weeks |",
+            "**Payback analysis** takes 2 weeks",
+        ):
+            with self.subTest(line=line):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=line)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertNotIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
+
+    def test_decision_memo_ignores_digits_that_state_no_period(self):
+        for line in (
+            "Inference: Survey 20 customers about payback.",
+            "Inference: Recovery-period analysis requires 3 inputs.",
+            "Inference: Recovery-period analysis requires 3 inputs and 2 weeks of work.",
+            "Inference: Break-even analysis needs 6 data sources.",
+            "Inference: Payback analysis takes 2 weeks.",
+            "Inference: Break-even modeling takes 3 days.",
+            "Inference: The payback review is scheduled for 2 weeks from now.",
+        ):
+            with self.subTest(line=line):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=line)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertTrue(result.checked)
+                self.assertNotIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
+
+    def test_decision_memo_spanish_period_forms_match_and_bare_counts_do_not(self):
+        flagged = _cacofonico_fixture_state()
+        flagged.report = flagged.report.replace(
+            "# Siguientes acciones",
+            "# Siguientes acciones\nInferencia: el punto de equilibrio llega en 14 meses.",
+        )
+        ignored = _cacofonico_fixture_state()
+        ignored.report = ignored.report.replace(
+            "# Siguientes acciones",
+            "# Siguientes acciones\nInferencia: el análisis del periodo de recuperación requiere 3 insumos.",
+        )
+
+        flagged_rules = {
+            finding.rule_name
+            for finding in assess_decision_memo_pilot_plan_quality(flagged).findings
+        }
+        ignored_rules = {
+            finding.rule_name
+            for finding in assess_decision_memo_pilot_plan_quality(ignored).findings
+        }
+
+        self.assertIn("derived_financial_claim_without_calculation_result", flagged_rules)
+        self.assertNotIn("derived_financial_claim_without_calculation_result", ignored_rules)
+
+    def test_decision_memo_threshold_exemption_is_scoped_to_its_own_clause(self):
+        # A label governs the clause it heads. These are the common ways a memo
+        # puts a labelled threshold and a separate claim on one line.
+        for separator, thresholds in (
+            ("semicolon", "Proposed operator threshold: stop above 12 months; current payback is 8 months."),
+            ("comma", "Proposed operator threshold: stop above 12 months, current payback is 8 months."),
+            ("em dash", "Proposed operator threshold: stop above 12 months — current payback is 8 months."),
+            (
+                "table cells",
+                "| Proposed operator threshold | stop above 12 months | current payback is 8 months |",
+            ),
+        ):
+            with self.subTest(separator=separator):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(thresholds=thresholds)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                findings = [
+                    finding
+                    for finding in result.findings
+                    if finding.rule_name
+                    == "derived_financial_claim_without_calculation_result"
+                ]
+
+                self.assertTrue(findings)
+                self.assertIn("current payback is 8 months", findings[0].excerpt)
+
+    def test_decision_memo_clause_split_preserves_digit_internal_separators(self):
+        # A decimal comma (es-MX) or a thousands separator is not a clause
+        # boundary. Splitting one severs the claim from its value, and the
+        # exemption fallback then swallows a finding detection had already made.
+        line = (
+            "Umbral propuesto por el operador: detener arriba de 12 meses; "
+            "el período de recuperación es de 6,4 meses"
+        )
+
+        clauses = report_quality._decision_memo_claim_clauses(line)
+        findings: list = []
+        report_quality._decision_memo_check_derived_financial_claims(
+            findings, line, "es-MX"
+        )
+
+        self.assertIn("el período de recuperación es de 6,4 meses", clauses)
+        self.assertTrue(findings)
+        self.assertIn("6,4 meses", findings[0].excerpt)
+
+    def test_decision_memo_threshold_label_still_exempts_its_own_period(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                thresholds="Proposed operator threshold: payback is 12 months."
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertNotIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_leading_schedule_duration_is_not_a_derived_period(self):
+        for line in (
+            "Inference: In 8 months, payback analysis begins.",
+            "Inference: In 8 months payback analysis begins.",
+            "Inference: Within 6 months, the payback review starts.",
+        ):
+            with self.subTest(line=line):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=line)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertNotIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
+
+    def test_decision_memo_leading_duration_still_binds_when_adjectival(self):
+        for claim in (
+            "Inference: A 12-month payback is expected.",
+            "Inference: | 8 months | Payback |",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_allows_proposed_payback_threshold_and_unquantified_mention(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                why="Inference: The pilot should measure payback before scale-up.",
+                thresholds=(
+                    "Proposed operator threshold: Change course if payback exceeds 12 months."
+                ),
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertTrue(result.checked)
+        self.assertNotIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_flags_spanish_recovery_period_claim(self):
+        state = _cacofonico_fixture_state()
+        state.report = state.report.replace(
+            "# Siguientes acciones",
+            "# Siguientes acciones\nInferencia: el periodo de recuperación es de 8 meses.",
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
 
     def test_generic_growth_ignores_generated_seo_terms_for_domain(self):
         state = ProjectState(

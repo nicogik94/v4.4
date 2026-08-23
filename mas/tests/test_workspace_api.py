@@ -20,14 +20,155 @@ from clarifications import (  # noqa: E402
     ClarificationQuestion,
     ClarificationStatus,
 )
-from decision_objects import ensure_decision_objects  # noqa: E402
+from decision_objects import (  # noqa: E402
+    DECISION_OBJECTS_SCHEMA_VERSION,
+    compute_source_state_hash,
+    ensure_decision_objects,
+)
 from overview import build_operator_overview  # noqa: E402
-from state import REPORT_MODE_DECISION_MEMO_PILOT_PLAN, PhaseStatus, ProjectState  # noqa: E402
+from state import (  # noqa: E402
+    REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
+    ClassifyOutput,
+    DQScores,
+    DecisionObjectStatus,
+    PhaseStatus,
+    ProjectState,
+)
+
+
+def _classified_output(*, dq: list[float]) -> ClassifyOutput:
+    """A classify output in the shape _store_phase_output persists."""
+    return ClassifyOutput(
+        domain="Complex",
+        justification="Cause and effect are only coherent in retrospect.",
+        bf=20.0,
+        variety_gaps="1. No offline mode",
+        dq=dq,
+    )
 from workspace import build_workspace_summary  # noqa: E402
 from tests.test_decision_objects import make_state  # noqa: E402
 
 
 class TestWorkspaceSummary(unittest.TestCase):
+    def test_missing_dq_is_none_not_zero(self):
+        state = ProjectState(project_id="workspace-dq-missing", project_name="DQ missing")
+
+        workspace = build_workspace_summary(state)
+
+        # An unscored project has no DQ total. Reporting 0.0 would be a
+        # real-looking score of zero rather than an absent one.
+        self.assertIsNone(workspace.score_summary.dq_total)
+
+    def test_dq_is_read_from_the_classification_output_that_records_it(self):
+        # The state shape a normal classify run produces: _store_phase_output
+        # writes the four DQ values onto state.classify.
+        state = ProjectState(
+            project_id="workspace-dq-classified",
+            project_name="DQ classified",
+            classify=_classified_output(dq=[20, 15, 18, 12]),
+        )
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(workspace.score_summary.dq_total, 65.0)
+
+    def test_all_default_classify_dq_is_reported_as_missing(self):
+        state = ProjectState(
+            project_id="workspace-dq-default",
+            project_name="DQ default",
+            classify=_classified_output(dq=[0.0, 0.0, 0.0, 0.0]),
+        )
+
+        workspace = build_workspace_summary(state)
+
+        # An all-zero breakdown is the untouched default, so it reads as absent.
+        # A genuine exact-zero score is indistinguishable from it under the
+        # current storage contract; that limit is documented, not redesigned here.
+        self.assertIsNone(workspace.score_summary.dq_total)
+
+    def test_legacy_persisted_dq_model_is_still_honored(self):
+        # Nothing writes state.dq today; this covers a persisted state that
+        # already carries values.
+        state = ProjectState(
+            project_id="workspace-dq-legacy",
+            project_name="DQ legacy",
+            dq=DQScores(frame=20, alt=15, info=18, val=12),
+        )
+
+        workspace = build_workspace_summary(state)
+
+        self.assertEqual(workspace.score_summary.dq_total, 65.0)
+
+    def test_workspace_and_calibration_snapshot_report_the_same_dq(self):
+        # The dashboard and decision_objects.json must not disagree about one
+        # score. Both read the classification output through recorded_dq_total.
+        scored = ProjectState(
+            project_id="dq-agreement-scored",
+            project_name="DQ agreement scored",
+            classify=_classified_output(dq=[20, 15, 18, 12]),
+            brier_score=0.2,
+        )
+        unscored = ProjectState(
+            project_id="dq-agreement-unscored",
+            project_name="DQ agreement unscored",
+            brier_score=0.2,
+        )
+
+        for state, expected in ((scored, 65.0), (unscored, None)):
+            with self.subTest(project=state.project_id):
+                workspace = build_workspace_summary(state)
+                snapshots = ensure_decision_objects(state).calibration_snapshots
+
+                self.assertEqual(workspace.score_summary.dq_total, expected)
+                self.assertTrue(snapshots)
+                self.assertEqual(snapshots[0].dq_total, expected)
+                self.assertEqual(
+                    snapshots[0].dq_total, workspace.score_summary.dq_total
+                )
+
+    def test_snapshot_from_an_older_derivation_is_rebuilt(self):
+        # A derivation change leaves the source state identical, so the
+        # fresh/hash-matched fast path would otherwise hand back a snapshot
+        # built before the change -- leaving decision_objects.json reporting the
+        # old DQ while the dashboard reports the new one, for every project
+        # persisted before deployment.
+        state = ProjectState(
+            project_id="dq-legacy-snapshot",
+            project_name="DQ legacy snapshot",
+            classify=_classified_output(dq=[20, 15, 18, 12]),
+            brier_score=0.2,
+        )
+        stale = ensure_decision_objects(state)
+        stale.schema_version = "1.0"
+        stale.status = DecisionObjectStatus.FRESH
+        stale.source_state_hash = compute_source_state_hash(state)
+        stale.calibration_snapshots[0].dq_total = 0.0
+        state.decision_objects = stale
+
+        rebuilt = ensure_decision_objects(state)
+
+        self.assertEqual(rebuilt.schema_version, DECISION_OBJECTS_SCHEMA_VERSION)
+        self.assertEqual(rebuilt.calibration_snapshots[0].dq_total, 65.0)
+        self.assertEqual(
+            rebuilt.calibration_snapshots[0].dq_total,
+            build_workspace_summary(state).score_summary.dq_total,
+        )
+
+    def test_dashboard_renders_missing_dq_as_em_dash(self):
+        missing = ProjectState(project_id="overview-dq-missing", project_name="DQ missing")
+        present = ProjectState(
+            project_id="overview-dq-present",
+            project_name="DQ present",
+            classify=_classified_output(dq=[20, 15, 18, 12]),
+        )
+
+        def dq_card(state):
+            cards = build_operator_overview(state).key_metrics
+            return next(card for card in cards if card.label == "DQ total")
+
+        self.assertEqual(dq_card(missing).value, "—")
+        self.assertEqual(dq_card(present).value, "65.00")
+
     def test_completed_workspace_is_backend_computed(self):
         state = make_state("workspace-complete")
         state.report = "final report"

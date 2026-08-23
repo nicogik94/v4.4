@@ -21,6 +21,7 @@ from state import (
     Evidence,
     ProjectState,
     Risk,
+    recorded_dq_total,
 )
 
 
@@ -28,7 +29,10 @@ class ScoreSummary(BaseModel):
     sqi_overall: Optional[float] = None
     det_score_overall: Optional[float] = None
     brier_score: Optional[float] = None
-    dq_total: float = 0.0
+    # None when the project has no DQ breakdown at all. A real DQ total of 0.0
+    # and a missing one are different facts, and the dashboard renders the
+    # missing case as an em dash rather than as a zero score.
+    dq_total: Optional[float] = None
 
 
 class DecisionObjectHealth(BaseModel):
@@ -262,7 +266,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
             sqi_overall=state.sqi.sqi_overall if state.sqi else None,
             det_score_overall=state.det_scores.overall if state.det_scores else None,
             brier_score=state.brier_score,
-            dq_total=float(sum(state.dq.model_dump().values())) if state.dq else 0.0,
+            dq_total=recorded_dq_total(state),
         ),
         decision_object_health=decision_object_health,
         knowledge_health=knowledge_health,

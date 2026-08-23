@@ -153,6 +153,22 @@ class TestGates:
         result = check_gate(empty_state, "classify")
         assert result["passed"] is False
 
+    def test_unconfigured_gate_reports_no_confidence(self, classified_state):
+        # No gate configuration means no gate to score. Reporting 1.0 here would
+        # be indistinguishable from a phase that genuinely scored 1.0.
+        result = check_gate(classified_state, "sqi")
+
+        assert result["passed"] is True
+        assert result["blocking"] == []
+        assert result["confidence"] is None
+
+    def test_configured_gate_still_reports_recorded_confidence(self, classified_state):
+        classified_state.phase_confidence["classify"] = 0.8
+
+        result = check_gate(classified_state, "classify")
+
+        assert result["confidence"] == 0.8
+
 
 # ═══ INVALIDATION TESTS ═══
 
