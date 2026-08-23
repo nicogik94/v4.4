@@ -453,6 +453,72 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertIn("derived_financial_claim_without_calculation_result", flagged_rules)
         self.assertNotIn("derived_financial_claim_without_calculation_result", ignored_rules)
 
+    def test_decision_memo_threshold_exemption_is_scoped_to_its_own_clause(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                thresholds=(
+                    "Proposed operator threshold: stop above 12 months; "
+                    "current payback is 8 months."
+                )
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        findings = [
+            finding
+            for finding in result.findings
+            if finding.rule_name == "derived_financial_claim_without_calculation_result"
+        ]
+
+        # The labelled threshold is exempt; the unsupported claim beside it is not.
+        self.assertTrue(findings)
+        self.assertIn("current payback is 8 months", findings[0].excerpt)
+
+    def test_decision_memo_threshold_label_still_exempts_its_own_period(self):
+        state = _english_decision_memo_state(
+            _english_decision_memo_report(
+                thresholds="Proposed operator threshold: payback is 12 months."
+            )
+        )
+
+        result = assess_decision_memo_pilot_plan_quality(state)
+        rule_names = {finding.rule_name for finding in result.findings}
+
+        self.assertNotIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_leading_schedule_duration_is_not_a_derived_period(self):
+        for line in (
+            "Inference: In 8 months, payback analysis begins.",
+            "Inference: In 8 months payback analysis begins.",
+            "Inference: Within 6 months, the payback review starts.",
+        ):
+            with self.subTest(line=line):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=line)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertNotIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
+
+    def test_decision_memo_leading_duration_still_binds_when_adjectival(self):
+        for claim in (
+            "Inference: A 12-month payback is expected.",
+            "Inference: | 8 months | Payback |",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
     def test_decision_memo_allows_proposed_payback_threshold_and_unquantified_mention(self):
         state = _english_decision_memo_state(
             _english_decision_memo_report(

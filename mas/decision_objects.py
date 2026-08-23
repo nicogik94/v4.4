@@ -26,6 +26,7 @@ from state import (
     Provenance,
     Risk,
     Signal,
+    recorded_dq_total,
 )
 
 
@@ -519,7 +520,11 @@ def build_decision_objects(
         )
         outcome_items.append(outcome)
 
-    if state.brier_score is not None or state.sqi or state.det_scores or sum(state.dq.model_dump().values()) > 0:
+    # Same DQ source as the workspace summary. Reading the never-written
+    # state.dq model here would put a contradictory zero into
+    # decision_objects.json while the dashboard showed the real score.
+    dq_total = recorded_dq_total(state)
+    if state.brier_score is not None or state.sqi or state.det_scores or dq_total is not None:
         calibration_items.append(
             CalibrationSnapshot(
                 snapshot_id=stable_object_id(
@@ -528,13 +533,13 @@ def build_decision_objects(
                     state.brier_score,
                     getattr(state.sqi, "sqi_overall", None),
                     getattr(state.det_scores, "overall", None),
-                    sum(state.dq.model_dump().values()),
+                    dq_total,
                 ),
                 recorded_at=rebuilt_at,
                 brier_score=state.brier_score,
                 sqi_overall=state.sqi.sqi_overall if state.sqi else None,
                 det_score_overall=state.det_scores.overall if state.det_scores else None,
-                dq_total=sum(state.dq.model_dump().values()),
+                dq_total=dq_total,
                 notes="Derived from current project state",
             )
         )

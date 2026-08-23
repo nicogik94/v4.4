@@ -21,6 +21,7 @@ from state import (
     Evidence,
     ProjectState,
     Risk,
+    recorded_dq_total,
 )
 
 
@@ -265,7 +266,7 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
             sqi_overall=state.sqi.sqi_overall if state.sqi else None,
             det_score_overall=state.det_scores.overall if state.det_scores else None,
             brier_score=state.brier_score,
-            dq_total=_dq_total(state),
+            dq_total=recorded_dq_total(state),
         ),
         decision_object_health=decision_object_health,
         knowledge_health=knowledge_health,
@@ -283,45 +284,6 @@ def build_workspace_summary(state: ProjectState, *, workflow_running: bool = Fal
         ),
         reentry_history=list(state.reentry_triggers_fired or []),
     )
-
-
-def _dq_total(state: ProjectState) -> Optional[float]:
-    """Total decision-quality score, or None when no DQ has been recorded.
-
-    DQ is recorded by the classify phase: ``_store_phase_output`` writes the four
-    values into ``state.classify.dq``, and the classify gate scores them with
-    ``sum(state.classify.dq)``. That is the production write path, so it is the
-    one read here. The separate six-field ``state.dq`` model is never populated
-    by any workflow code; it is consulted only as a fallback for a persisted
-    state that somehow carries values, and it contributes nothing otherwise.
-
-    Both sources default to all-zero, so an all-zero breakdown means "never
-    scored" rather than "scored zero". Reporting 0.0 would put a real-looking DQ
-    total of zero on the dashboard for every unscored project, which is a worse
-    claim than admitting the score is missing. ``decision_objects`` already uses
-    a positive sum as its test for "scores exist"; this uses the same rule.
-
-    Known limit of the current storage contract: because an unrecorded score and
-    a genuine exact-zero score are both all-zero, they remain indistinguishable
-    here and both render as an em dash. Separating them would require giving DQ
-    an explicit recorded/not-recorded representation, which is a scoring
-    redesign and deliberately out of scope.
-    """
-    classify = getattr(state, "classify", None)
-    classify_scores = list(getattr(classify, "dq", []) or []) if classify else []
-    if classify_scores:
-        total = float(sum(classify_scores))
-        if total > 0:
-            return total
-
-    # Legacy fallback: nothing writes state.dq today, so this only fires for a
-    # persisted state that already carried values.
-    if state.dq:
-        legacy_total = float(sum(state.dq.model_dump().values()))
-        if legacy_total > 0:
-            return legacy_total
-
-    return None
 
 
 def build_queue_item(state: ProjectState, *, workflow_running: bool = False) -> QueueItem:

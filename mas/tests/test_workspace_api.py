@@ -94,6 +94,33 @@ class TestWorkspaceSummary(unittest.TestCase):
 
         self.assertEqual(workspace.score_summary.dq_total, 65.0)
 
+    def test_workspace_and_calibration_snapshot_report_the_same_dq(self):
+        # The dashboard and decision_objects.json must not disagree about one
+        # score. Both read the classification output through recorded_dq_total.
+        scored = ProjectState(
+            project_id="dq-agreement-scored",
+            project_name="DQ agreement scored",
+            classify=_classified_output(dq=[20, 15, 18, 12]),
+            brier_score=0.2,
+        )
+        unscored = ProjectState(
+            project_id="dq-agreement-unscored",
+            project_name="DQ agreement unscored",
+            brier_score=0.2,
+        )
+
+        for state, expected in ((scored, 65.0), (unscored, None)):
+            with self.subTest(project=state.project_id):
+                workspace = build_workspace_summary(state)
+                snapshots = ensure_decision_objects(state).calibration_snapshots
+
+                self.assertEqual(workspace.score_summary.dq_total, expected)
+                self.assertTrue(snapshots)
+                self.assertEqual(snapshots[0].dq_total, expected)
+                self.assertEqual(
+                    snapshots[0].dq_total, workspace.score_summary.dq_total
+                )
+
     def test_dashboard_renders_missing_dq_as_em_dash(self):
         missing = ProjectState(project_id="overview-dq-missing", project_name="DQ missing")
         present = ProjectState(

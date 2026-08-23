@@ -957,6 +957,43 @@ class DetScores(BaseModel):
 
 # ═══ Phase 5: Report ═══
 
+def recorded_dq_total(state: "ProjectState") -> Optional[float]:
+    """Total decision-quality score for a project, or None when none is recorded.
+
+    Single source of truth for "what is this project's DQ", so the dashboard and
+    the machine-readable dossier cannot disagree about the same score.
+
+    DQ is recorded by the classify phase: ``_store_phase_output`` writes the four
+    values onto ``state.classify.dq`` and the classify gate scores them with
+    ``sum(state.classify.dq)``. The separate six-field ``state.dq`` model is
+    never populated by any workflow code and is consulted only as a fallback for
+    a persisted state that already carries values.
+
+    Both sources default to all-zero, so an all-zero breakdown means "never
+    scored" rather than "scored zero"; reporting 0.0 would present an unscored
+    project as one that measured zero.
+
+    Known limit of the current storage contract: an unrecorded score and a
+    genuine exact-zero score are both all-zero and therefore indistinguishable
+    here. Separating them needs an explicit recorded/not-recorded representation
+    for DQ, which is a scoring redesign and deliberately out of scope.
+    """
+    classify = getattr(state, "classify", None)
+    classify_scores = list(getattr(classify, "dq", []) or []) if classify else []
+    if classify_scores:
+        total = float(sum(classify_scores))
+        if total > 0:
+            return total
+
+    legacy = getattr(state, "dq", None)
+    if legacy is not None:
+        legacy_total = float(sum(legacy.model_dump().values()))
+        if legacy_total > 0:
+            return legacy_total
+
+    return None
+
+
 class DQScores(BaseModel):
     frame: float = 0.0
     alt: float = 0.0

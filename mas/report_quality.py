@@ -2235,6 +2235,17 @@ _DECISION_MEMO_PERIOD_CONNECTOR = re.compile(
     re.I,
 )
 
+# Reverse order is adjectival only: "12-month payback", "| 8 months | Payback |".
+_DECISION_MEMO_REVERSE_GAP = re.compile(r"^[\s*|_`~>-]*$")
+
+# A duration introduced by one of these is scheduling something, not measuring
+# the financial term: "In 8 months, payback analysis begins".
+_DECISION_MEMO_SCHEDULING_LEAD = re.compile(
+    r"\b(?:in|within|after|over|during|by|for|starting|beginning|from|until|till"
+    r"|en|dentro|despu[eé]s|durante|desde|hasta)\s+(?:de\s+|the\s+|next\s+)*$",
+    re.I,
+)
+
 def _decision_memo_check_derived_financial_claims(
     findings: list[DecisionMemoQualityFinding],
     main_text: str,
@@ -2259,21 +2270,39 @@ def _decision_memo_check_derived_financial_claims(
     ("stop if payback exceeds 12 months") states no computed value and is left
     alone.
     """
+    threshold_labels = _decision_memo_proposed_threshold_labels(output_language)
     for line_number, line in _decision_memo_review_lines(main_text):
-        if not _decision_memo_states_derived_period(line):
-            continue
-        if _decision_memo_line_has_any_label(line, _decision_memo_proposed_threshold_labels(output_language)):
-            continue
-        _decision_memo_add_finding(
-            findings,
-            "derived_financial_claim_without_calculation_result",
-            "Main memo states a derived financial claim (payback, break-even, or "
-            "recovery period) with no calculation of record behind it. The "
-            "deterministic calculator does not compute these periods, and a "
-            "citation written into the memo is not verifiable here.",
-            location=f"line {line_number}",
-            excerpt=line,
-        )
+        # The exemption belongs to the threshold clause, not to the whole line.
+        # "Proposed operator threshold: stop above 12 months; current payback is
+        # 8 months" carries a labelled threshold and an unsupported claim side by
+        # side, and only the first is exempt.
+        for clause in _decision_memo_claim_clauses(line):
+            if not _decision_memo_states_derived_period(clause):
+                continue
+            if _decision_memo_line_has_any_label(clause, threshold_labels):
+                continue
+            _decision_memo_add_finding(
+                findings,
+                "derived_financial_claim_without_calculation_result",
+                "Main memo states a derived financial claim (payback, break-even, or "
+                "recovery period) with no calculation of record behind it. The "
+                "deterministic calculator does not compute these periods, and a "
+                "citation written into the memo is not verifiable here.",
+                location=f"line {line_number}",
+                excerpt=clause,
+            )
+            break
+
+
+def _decision_memo_claim_clauses(line: str) -> list[str]:
+    """Split a review line into independently-labelled claim clauses.
+
+    A label introduces the clause it heads, not everything else that happens to
+    share the line. Decimals are protected, so "6.4 months" is never split.
+    """
+    parts = re.split(r"\s*;\s*|(?<![0-9])\.\s+", str(line or ""))
+    clauses = [part.strip() for part in parts if part and part.strip()]
+    return clauses or [str(line or "")]
 
 
 def _decision_memo_states_derived_period(line: str) -> bool:
@@ -2300,14 +2329,23 @@ def _decision_memo_states_derived_period(line: str) -> bool:
 def _decision_memo_period_binds_to_term(
     line: str, term: tuple[int, int], value: tuple[int, int],
 ) -> bool:
-    """True when only connector text separates the term from the period value."""
+    """True when the period value is actually assigned to the financial term.
+
+    Forward order ("payback is 8 months") allows any connector construction.
+    Reverse order is held to a stricter rule, because a leading duration usually
+    schedules something rather than measuring it: "In 8 months, payback analysis
+    begins" states when work starts, not an eight-month payback. A duration in
+    front only counts when it directly modifies the term -- "12-month payback"
+    -- so nothing but whitespace, hyphens or Markdown delimiters may separate
+    them, and a scheduling preposition in front of the duration disqualifies it.
+    """
     if term[1] <= value[0]:
-        between = line[term[1]:value[0]]
-    elif value[1] <= term[0]:
-        between = line[value[1]:term[0]]
-    else:
-        return True
-    return bool(_DECISION_MEMO_PERIOD_CONNECTOR.match(between))
+        return bool(_DECISION_MEMO_PERIOD_CONNECTOR.match(line[term[1]:value[0]]))
+    if value[1] <= term[0]:
+        if not _DECISION_MEMO_REVERSE_GAP.match(line[value[1]:term[0]]):
+            return False
+        return not _DECISION_MEMO_SCHEDULING_LEAD.search(line[:value[0]])
+    return True
 
 
 def _decision_memo_check_source_supported_locators(
