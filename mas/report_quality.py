@@ -2295,9 +2295,18 @@ def _decision_memo_check_derived_financial_claims(
 # Delimiters that start a new independently-labelled clause on one line. A
 # semicolon is not the only way memos do this: commas, em/en dashes and Markdown
 # table cells all put a labelled threshold and a separate claim side by side.
-# Decimals are protected, so "6.4 months" is never split.
+#
+# Digit-internal separators are never clause boundaries. The decimal point was
+# already protected; the comma needs the same treatment, because es-MX writes
+# decimals as "6,4 meses" and every locale writes thousands as "12,000".
+# Splitting those severs a claim from its value, and the exemption fallback then
+# reads the orphaned halves as an exempt line -- suppressing a finding the
+# whole-line detection had already made.
 _DECISION_MEMO_CLAUSE_SPLIT = re.compile(
-    r"\s*[;,|]\s*|\s+[—–]\s+|(?<![0-9])\.\s+"
+    r"\s*[;|]\s*"
+    r"|\s*(?<![0-9]),(?![0-9])\s*"
+    r"|\s+[—–]\s+"
+    r"|(?<![0-9])\.\s+"
 )
 
 

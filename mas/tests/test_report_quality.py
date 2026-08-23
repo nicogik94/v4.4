@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import report_quality  # noqa: E402
 from report_quality import (  # noqa: E402
     CLIENT_BF_CONFIDENCE_CAVEAT,
     EVIDENCE_CATEGORY_COVERAGE_WARNING,
@@ -480,6 +481,25 @@ class TestReportQualityHelpers(unittest.TestCase):
 
                 self.assertTrue(findings)
                 self.assertIn("current payback is 8 months", findings[0].excerpt)
+
+    def test_decision_memo_clause_split_preserves_digit_internal_separators(self):
+        # A decimal comma (es-MX) or a thousands separator is not a clause
+        # boundary. Splitting one severs the claim from its value, and the
+        # exemption fallback then swallows a finding detection had already made.
+        line = (
+            "Umbral propuesto por el operador: detener arriba de 12 meses; "
+            "el período de recuperación es de 6,4 meses"
+        )
+
+        clauses = report_quality._decision_memo_claim_clauses(line)
+        findings: list = []
+        report_quality._decision_memo_check_derived_financial_claims(
+            findings, line, "es-MX"
+        )
+
+        self.assertIn("el período de recuperación es de 6,4 meses", clauses)
+        self.assertTrue(findings)
+        self.assertIn("6,4 meses", findings[0].excerpt)
 
     def test_decision_memo_threshold_label_still_exempts_its_own_period(self):
         state = _english_decision_memo_state(
