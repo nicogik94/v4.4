@@ -82,6 +82,7 @@ class TestExplainabilityDerivation(unittest.TestCase):
         self.assertFalse(trace.gate_result.passed)
         self.assertEqual(trace.gate_result.confidence, 0.4)
         self.assertNotEqual(trace.gate_result.confidence, 1.0)
+        self.assertEqual(trace.gate_result.confidence_source, "gate_recomputation")
 
     def test_gate_conflict_is_visible_in_deterministic_logic(self):
         state = make_completed_state("trace-gate-logic")
@@ -107,6 +108,7 @@ class TestExplainabilityDerivation(unittest.TestCase):
 
         self.assertFalse(trace.gate_result.configured)
         self.assertIsNone(trace.gate_result.confidence)
+        self.assertEqual(trace.gate_result.confidence_source, "")
 
     def test_unconfigured_gate_still_reports_recorded_phase_confidence(self):
         state = make_completed_state("trace-gate-unconfigured-recorded")
@@ -114,8 +116,11 @@ class TestExplainabilityDerivation(unittest.TestCase):
 
         trace = build_phase_trace(state, "sqi")
 
+        # There is no gate here, so the number is the persisted phase value and
+        # must not be presented as a deterministic gate result.
         self.assertFalse(trace.gate_result.configured)
         self.assertEqual(trace.gate_result.confidence, 0.75)
+        self.assertEqual(trace.gate_result.confidence_source, "recorded_phase_confidence")
 
     def test_strategy_explanations_include_evidence_and_deterministic_checks(self):
         state = make_completed_state("trace-action")

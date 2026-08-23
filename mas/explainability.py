@@ -117,6 +117,11 @@ class GateTraceSummary(BaseModel):
     # None when there is no gate configuration to score, or when the phase has
     # recorded no confidence. It is never filled in with a stand-in number.
     confidence: Optional[float] = None
+    # Where `confidence` came from, kept separate from `source` because the two
+    # can differ: an unconfigured phase has no gate to score, so a confidence
+    # reported for it is the persisted phase value, not a recomputation.
+    # "gate_recomputation" | "recorded_phase_confidence" | "" when absent.
+    confidence_source: str = ""
     source: str = "current_check"
     note: str = ""
     # The persisted workflow status for the phase, reported alongside the
@@ -306,6 +311,11 @@ def _gate_trace(
     explicit conflict flag. Rewriting the recomputation as passed -- and
     inventing ``confidence=1.0`` to go with it -- would destroy the only signal
     an operator has that the two disagree.
+
+    ``source`` describes where ``passed`` and ``blocking`` come from, which is
+    always the current check. ``confidence_source`` is tracked separately,
+    because a phase with no gate configuration has nothing to recompute and any
+    confidence reported for it is the persisted phase value.
     """
     gate = check_gate(state, phase)
     configured = phase in GATE_CONFIGS
@@ -313,10 +323,16 @@ def _gate_trace(
     blocking = list(gate.get("blocking", []))
 
     # Fall back to the phase's recorded confidence, but never to a stand-in
-    # number: an absent confidence stays absent.
+    # number: an absent confidence stays absent. The fallback is attributed to
+    # the persisted state rather than to the gate, so an unconfigured phase
+    # never presents a recorded number as a deterministic gate result.
     gate_confidence = gate.get("confidence")
+    confidence_source = "gate_recomputation"
     if gate_confidence is None:
         gate_confidence = confidence
+        confidence_source = "recorded_phase_confidence"
+    if gate_confidence is None:
+        confidence_source = ""
     gate_confidence = None if gate_confidence is None else float(gate_confidence)
 
     conflicts = status == "completed" and not passed
@@ -334,6 +350,7 @@ def _gate_trace(
         passed=passed,
         blocking=blocking,
         confidence=gate_confidence,
+        confidence_source=confidence_source,
         source="current_check",
         note=note,
         recorded_status=status,
