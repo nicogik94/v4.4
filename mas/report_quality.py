@@ -2219,15 +2219,19 @@ _DECISION_MEMO_PERIOD_VALUE = re.compile(
 # to the term, so everything between the two has to be connector text. Any
 # content word in the gap -- "analysis", "takes", "requires", "customers" --
 # means the number belongs to a different subject.
+# Markdown delimiters carry no meaning for this test. Emphasis and table pipes
+# routinely land between the term and its value -- "**Payback:** 8 months",
+# "| Payback | 8 months |" -- and treating them as content would silently miss
+# the claim in exactly the formatting a decision memo actually uses.
 _DECISION_MEMO_PERIOD_CONNECTOR = re.compile(
-    r"^[\s:=,;()\[\]–—-]*"
+    r"^[\s:=,;()\[\]*|_`~>–—-]*"
     r"(?:(?:is|are|was|were|be|been|of|at|in|on|within|after|about|around|near|by|to|"
     r"the|a|an|its|only|just|under|over|approximately|roughly|estimated|expected|"
     r"projected|forecast|forecasted|occurs|occur|occurred|arrives|arrive|arrived|"
     r"lands|land|landed|falls|fall|comes|come|reaches|reach|reached|hits|hit|"
     r"es|de|del|la|el|los|las|en|un|una|dentro|ser[ií]a|llega|llegar[áa]|alcanza|"
     r"aproximadamente|unos|unas)"
-    r"\b[\s:=,;()\[\]–—-]*)*$",
+    r"\b[\s:=,;()\[\]*|_`~>–—-]*)*$",
     re.I,
 )
 

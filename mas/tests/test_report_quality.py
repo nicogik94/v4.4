@@ -368,6 +368,44 @@ class TestReportQualityHelpers(unittest.TestCase):
 
                 self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
 
+    def test_decision_memo_binds_periods_through_markdown_delimiters(self):
+        # Emphasis and table pipes are formatting, not content, and a decision
+        # memo routinely writes claims this way.
+        for claim in (
+            "**Payback:** 8 months",
+            "*Break-even* is 8 months",
+            "| Payback | 8 months |",
+            "| Recovery period | 9 months |",
+            "**Payback** is 6.4 months",
+        ):
+            with self.subTest(claim=claim):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=claim)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertIn("derived_financial_claim_without_calculation_result", rule_names)
+
+    def test_decision_memo_markdown_delimiters_do_not_bridge_content_words(self):
+        # Admitting delimiters must not turn an unrelated duration into a claim.
+        for line in (
+            "| Payback | analysis | 2 weeks |",
+            "**Payback analysis** takes 2 weeks",
+        ):
+            with self.subTest(line=line):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(why=line)
+                )
+
+                result = assess_decision_memo_pilot_plan_quality(state)
+                rule_names = {finding.rule_name for finding in result.findings}
+
+                self.assertNotIn(
+                    "derived_financial_claim_without_calculation_result", rule_names
+                )
+
     def test_decision_memo_ignores_digits_that_state_no_period(self):
         for line in (
             "Inference: Survey 20 customers about payback.",

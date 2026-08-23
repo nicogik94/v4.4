@@ -1415,6 +1415,19 @@ def _protect_client_concrete_metric_values(
 
     def make_repl(is_currency: bool):
         def repl(match: re.Match[str]) -> str:
+            # A currency amount that traced back to an operator input is not a
+            # probability metric, whatever else its line talks about. The
+            # probability guard exists to leave probability figures exposed to
+            # generalization; letting it swallow a verified budget just because
+            # a percentage shares the sentence would erase a supplied value.
+            if (
+                is_currency
+                and currency_provenance is not None
+                and _currency_provenance_key(match.group(0)) in currency_provenance
+            ):
+                fragments.append(match.group(0))
+                return f"CLIENTMETRICVALUE{len(fragments) - 1}MARKER"
+
             line_start = value.rfind("\n", 0, match.start()) + 1
             line_end = value.find("\n", match.end())
             if line_end == -1:
@@ -1426,11 +1439,8 @@ def _protect_client_concrete_metric_values(
                 re.I,
             ):
                 return match.group(0)
-            if (
-                is_currency
-                and currency_provenance is not None
-                and _currency_provenance_key(match.group(0)) not in currency_provenance
-            ):
+            if is_currency and currency_provenance is not None:
+                # Unverified currency stays exposed to the sparse simplifier.
                 return match.group(0)
             fragments.append(match.group(0))
             return f"CLIENTMETRICVALUE{len(fragments) - 1}MARKER"

@@ -2894,6 +2894,30 @@ The implementation cost is $48,000 and the revised cost is $30,000.
         self.assertIn("$30,000", markdown)
         self.assertNotIn("$48,000", markdown)
 
+    def test_probability_line_does_not_strip_verified_currency(self):
+        state = ProjectState(
+            project_id="sparse-currency-probability",
+            project_name="Sparse currency probability",
+            brief=(
+                "Improve growth performance across sales, retention, and pipeline. "
+                "The pilot budget is $12,000."
+            ),
+            report="""# Executive Summary
+There is a 30% probability the pilot exceeds the $12,000 budget.
+The unsupported forecast cost is $99,000 at 40% probability.
+""",
+        )
+
+        markdown = build_client_dossier_markdown(state)
+
+        # The supplied budget survives even though a probability shares its line,
+        # while the probability itself is still generalized and the unsupported
+        # figure is still replaced.
+        self.assertIn("$12,000", markdown)
+        self.assertIn("structural prior", markdown)
+        self.assertNotIn("30% probability", markdown)
+        self.assertNotIn("$99,000", markdown)
+
     def test_sparse_client_dossier_preserves_supplied_currency_in_thresholds(self):
         state = ProjectState(
             project_id="sparse-currency-threshold",
