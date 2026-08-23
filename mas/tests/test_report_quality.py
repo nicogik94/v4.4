@@ -454,25 +454,32 @@ class TestReportQualityHelpers(unittest.TestCase):
         self.assertNotIn("derived_financial_claim_without_calculation_result", ignored_rules)
 
     def test_decision_memo_threshold_exemption_is_scoped_to_its_own_clause(self):
-        state = _english_decision_memo_state(
-            _english_decision_memo_report(
-                thresholds=(
-                    "Proposed operator threshold: stop above 12 months; "
-                    "current payback is 8 months."
+        # A label governs the clause it heads. These are the common ways a memo
+        # puts a labelled threshold and a separate claim on one line.
+        for separator, thresholds in (
+            ("semicolon", "Proposed operator threshold: stop above 12 months; current payback is 8 months."),
+            ("comma", "Proposed operator threshold: stop above 12 months, current payback is 8 months."),
+            ("em dash", "Proposed operator threshold: stop above 12 months — current payback is 8 months."),
+            (
+                "table cells",
+                "| Proposed operator threshold | stop above 12 months | current payback is 8 months |",
+            ),
+        ):
+            with self.subTest(separator=separator):
+                state = _english_decision_memo_state(
+                    _english_decision_memo_report(thresholds=thresholds)
                 )
-            )
-        )
 
-        result = assess_decision_memo_pilot_plan_quality(state)
-        findings = [
-            finding
-            for finding in result.findings
-            if finding.rule_name == "derived_financial_claim_without_calculation_result"
-        ]
+                result = assess_decision_memo_pilot_plan_quality(state)
+                findings = [
+                    finding
+                    for finding in result.findings
+                    if finding.rule_name
+                    == "derived_financial_claim_without_calculation_result"
+                ]
 
-        # The labelled threshold is exempt; the unsupported claim beside it is not.
-        self.assertTrue(findings)
-        self.assertIn("current payback is 8 months", findings[0].excerpt)
+                self.assertTrue(findings)
+                self.assertIn("current payback is 8 months", findings[0].excerpt)
 
     def test_decision_memo_threshold_label_still_exempts_its_own_period(self):
         state = _english_decision_memo_state(

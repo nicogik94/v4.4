@@ -7,8 +7,7 @@ from io import BytesIO
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape
 import re
-from decimal import Decimal, InvalidOperation
-from typing import Any, Optional
+from typing import Any
 
 from docx import Document
 from docx.shared import Pt
@@ -57,7 +56,6 @@ from report_quality import (
 import report_freshness
 from hypothesis_coverage import assess_hypothesis_variable_coverage
 from monitoring_templates import monitoring_template_xlsx_bytes
-from clarifications import current_authoritative_answers
 from state import REPORT_MODE_DECISION_MEMO_PILOT_PLAN, ProjectState
 from technology_readiness_workbook import (
     TECHNOLOGY_READINESS_WORKBOOK_PROFILE,
@@ -600,7 +598,7 @@ def build_client_dossier_markdown(
     for heading in CLIENT_DOSSIER_HEADINGS:
         body = section_bodies.get(heading) or "Not available in current project output."
         if heading != "Human review note":
-            body = _client_safe_text(body, quality, state)
+            body = _client_safe_text(body, quality)
             if not quality.has_concrete_locators:
                 body = _remove_empty_client_citation_marker_columns(body)
                 body = suppress_client_raw_evidence_ids(body)
@@ -615,7 +613,7 @@ def build_client_dossier_markdown(
         if heading == "Timeline / 7-30-60-90 roadmap" and requires_productization_wave_matrix(state, quality):
             lines.extend([
                 "## Wave 2 Graduation Matrix",
-                _client_safe_text(WAVE2_GRADUATION_MATRIX.replace("## Wave 2 Graduation Matrix\n\n", ""), quality, state),
+                _client_safe_text(WAVE2_GRADUATION_MATRIX.replace("## Wave 2 Graduation Matrix\n\n", ""), quality),
             ])
 
     markdown = normalize_export_text(
@@ -1290,165 +1288,33 @@ def _polish_client_metric_comparator_phrasing(markdown: str) -> str:
     return "\n".join(lines)
 
 
-# One currency grammar, reused for both extracting amounts from operator input
-# and matching them in generated text, so the two can never drift apart.
-_CURRENCY_SYMBOL = r"(?:US\$|MX\$|\$|€|£)"
-_CURRENCY_CODE = r"(?:USD|MXN|EUR|GBP|CAD|AUD)"
-_CURRENCY_AMOUNT = r"\d[\d,]*(?:\.\d+)?(?:\s*(?:[KMB]|bn|mn)\b)?"
-_CURRENCY_PATTERNS = (
-    rf"(?<![A-Za-z0-9_])(?:[<>]=?|≥|≤)\s*{_CURRENCY_SYMBOL}\s*{_CURRENCY_AMOUNT}",
-    rf"{_CURRENCY_SYMBOL}\s*{_CURRENCY_AMOUNT}",
-    rf"\b{_CURRENCY_AMOUNT}\s*{_CURRENCY_CODE}\b",
-    rf"\b{_CURRENCY_CODE}\s*{_CURRENCY_AMOUNT}",
-)
-_CURRENCY_ANY_RE = re.compile("|".join(_CURRENCY_PATTERNS), re.I)
-
-_CURRENCY_SYMBOL_CODES = {
-    "US$": "USD",
-    "MX$": "MXN",
-    "$": "USD",
-    "€": "EUR",
-    "£": "GBP",
-}
-_CURRENCY_MULTIPLIERS = {"k": 1000, "m": 1000000, "mn": 1000000, "b": 1000000000, "bn": 1000000000}
-
-
-def _currency_provenance_key(fragment: str) -> str:
-    """Canonical ``CODE:magnitude`` key for one currency amount.
-
-    Normalizes away formatting so the same supplied figure matches however it is
-    written: ``$48,000``, ``48,000 USD``, ``USD 48000`` and ``$48K`` all key to
-    ``USD:48000``. Returns "" when the fragment is not a currency amount.
-    """
-    text = str(fragment or "").strip()
-    code = ""
-    for symbol, symbol_code in _CURRENCY_SYMBOL_CODES.items():
-        if symbol in text:
-            code = symbol_code
-            break
-    if not code:
-        code_match = re.search(_CURRENCY_CODE, text, re.I)
-        if code_match:
-            code = code_match.group(0).upper()
-    number_match = re.search(r"\d[\d,]*(?:\.\d+)?", text)
-    if not code or not number_match:
-        return ""
-    try:
-        magnitude = Decimal(number_match.group(0).replace(",", ""))
-    except InvalidOperation:
-        return ""
-    suffix_match = re.search(r"(?:\d|\s)\s*(bn|mn|[KMB])\b", text, re.I)
-    if suffix_match:
-        magnitude *= _CURRENCY_MULTIPLIERS.get(suffix_match.group(1).lower(), 1)
-    magnitude = magnitude.normalize()
-    return f"{code}:{magnitude:f}"
-
-
-def _operator_supplied_currency_keys(state: ProjectState) -> set[str]:
-    """Currency amounts whose provenance is an operator-supplied structured input.
-
-    Only inputs the operator actually supplied are read: the brief, the supplied
-    data notes, the current authoritative clarification answers, and parsed
-    knowledge items from uploaded files. Generated artifacts -- report, strategy,
-    audit --
-    are deliberately excluded, because an amount appearing there is exactly the
-    model-generated figure this gate exists to catch. Prose asserting that a
-    number was "operator supplied" carries no weight; the number has to actually
-    be present in a supplied input.
-    """
-    parts: list[str] = [
-        str(getattr(state, "brief", "") or ""),
-        str(getattr(state, "data", "") or ""),
-    ]
-    # Only the current authoritative answer per question counts. The raw list
-    # keeps superseded records and answers later invalidated by an UNAVAILABLE
-    # one, so reading it directly would let an amount the operator has since
-    # corrected go on vouching for a figure they no longer stand behind. The
-    # clarification lifecycle already resolves this.
-    for answer in current_authoritative_answers(state):
-        parts.append(str(getattr(answer, "answer_text", "") or ""))
-    knowledge_layer = getattr(state, "knowledge_layer", None)
-    for item in list(getattr(knowledge_layer, "items", []) or []):
-        parts.extend([
-            str(getattr(item, "title", "") or ""),
-            str(getattr(item, "summary", "") or ""),
-            str(getattr(item, "source_ref", "") or ""),
-        ])
-        payload = getattr(item, "structured_payload", None)
-        if payload:
-            parts.append(str(payload))
-
-    source_text = "\n".join(part for part in parts if part)
-    keys = {_currency_provenance_key(match.group(0)) for match in _CURRENCY_ANY_RE.finditer(source_text)}
-    keys.discard("")
-    return keys
-
-
-def _protect_client_concrete_metric_values(
-    markdown: str,
-    *,
-    currency_provenance: Optional[set[str]] = None,
-) -> tuple[str, list[str]]:
-    """Shield concrete metric values from client-text rewriting.
-
-    Percentages, percentage points and durations are protected unconditionally:
-    rewriting them is a formatting loss, not a safety control.
-
-    Currency is different, because the sparse-evidence simplifier deliberately
-    generalizes unsupported money figures away. ``currency_provenance`` carries
-    the set of amounts verified against operator-supplied inputs; when it is
-    supplied, only those amounts are protected and every other figure is left
-    for the simplifier to handle. Passing ``None`` means this pass is not in
-    front of the simplifier and is only guarding text normalization, so currency
-    is protected purely to keep it from being reformatted.
-    """
+def _protect_client_concrete_metric_values(markdown: str) -> tuple[str, list[str]]:
     fragments: list[str] = []
     patterns = [
         r"(?<![A-Za-z0-9_])(?:[<>]=?|≥|≤)\s*\d+(?:\.\d+)?\s*(?:%|pp|h|hrs?|hours?|days?|weeks?|months?)\b",
-        *_CURRENCY_PATTERNS,
         r"\b\d+(?:\.\d+)?\s*%",
         r"\b\d+(?:\.\d+)?\s*percentage[- ]points?\b",
         r"\b\d+(?:\.\d+)?\s*(?:h|hrs?|hours?|days?|weeks?|months?)\b",
     ]
-    currency_pattern_set = set(_CURRENCY_PATTERNS)
     value = str(markdown or "")
 
-    def make_repl(is_currency: bool):
-        def repl(match: re.Match[str]) -> str:
-            # A currency amount that traced back to an operator input is not a
-            # probability metric, whatever else its line talks about. The
-            # probability guard exists to leave probability figures exposed to
-            # generalization; letting it swallow a verified budget just because
-            # a percentage shares the sentence would erase a supplied value.
-            if (
-                is_currency
-                and currency_provenance is not None
-                and _currency_provenance_key(match.group(0)) in currency_provenance
-            ):
-                fragments.append(match.group(0))
-                return f"CLIENTMETRICVALUE{len(fragments) - 1}MARKER"
-
-            line_start = value.rfind("\n", 0, match.start()) + 1
-            line_end = value.find("\n", match.end())
-            if line_end == -1:
-                line_end = len(value)
-            line_context = value[line_start:line_end]
-            if re.search(
-                r"\b(?:probability|scenario[_ -]?probability|structural probability|prior|likelihood|chance|failure probability|predicted failure probability)\b",
-                line_context,
-                re.I,
-            ):
-                return match.group(0)
-            if is_currency and currency_provenance is not None:
-                # Unverified currency stays exposed to the sparse simplifier.
-                return match.group(0)
-            fragments.append(match.group(0))
-            return f"CLIENTMETRICVALUE{len(fragments) - 1}MARKER"
-
-        return repl
+    def repl(match: re.Match[str]) -> str:
+        line_start = value.rfind("\n", 0, match.start()) + 1
+        line_end = value.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(value)
+        line_context = value[line_start:line_end]
+        if re.search(
+            r"\b(?:probability|scenario[_ -]?probability|structural probability|prior|likelihood|chance|failure probability|predicted failure probability)\b",
+            line_context,
+            re.I,
+        ):
+            return match.group(0)
+        fragments.append(match.group(0))
+        return f"CLIENTMETRICVALUE{len(fragments) - 1}MARKER"
 
     for pattern in patterns:
-        value = re.sub(pattern, make_repl(pattern in currency_pattern_set), value, flags=re.I)
+        value = re.sub(pattern, repl, value, flags=re.I)
     return value, fragments
 
 
@@ -3429,7 +3295,7 @@ def _safe_report_markdown(state: ProjectState) -> str:
     markdown = _redact_unsafe_string(state.report or "No report available.")
     quality = assess_report_quality_context(state)
     if quality.sparse_evidence:
-        markdown = _simplify_sparse_report_markdown(markdown, quality, state)
+        markdown = _simplify_sparse_report_markdown(markdown, quality)
     markdown = _prepend_evidence_maturity_badge(markdown, state, quality)
     if quality.provisional_report and quality.provisional_clarification_caveat not in markdown:
         provisional_warning = "\n\n".join([
@@ -3585,7 +3451,7 @@ def _operator_report_freshness_warning(
     return "\n\n".join(parts)
 
 
-def _simplify_sparse_report_markdown(markdown: str, quality, state: ProjectState) -> str:
+def _simplify_sparse_report_markdown(markdown: str, quality) -> str:
     lines: list[str] = []
     in_technical_appendix = False
     for raw_line in str(markdown or "").splitlines():
@@ -3597,7 +3463,7 @@ def _simplify_sparse_report_markdown(markdown: str, quality, state: ProjectState
         if in_technical_appendix:
             lines.append(raw_line)
         else:
-            lines.append(_client_safe_text(raw_line, quality, state))
+            lines.append(_client_safe_text(raw_line, quality))
     value = _collapse_markdown_blank_lines("\n".join(lines))
     if SPARSE_CONFIDENCE_RULE not in value:
         value = "\n\n".join([f"**Sparse confidence note:** {SPARSE_CONFIDENCE_RULE}", value])
@@ -3643,15 +3509,8 @@ def _ensure_single_client_source_locator_note(markdown: str, quality) -> str:
     return _collapse_markdown_blank_lines("\n".join(lines))
 
 
-def _client_safe_text(text: str, quality, state: ProjectState) -> str:
-    # This pass runs straight into client_simplify_text -> _simplify_sparse_precision,
-    # which generalizes unsupported money figures away on purpose. Currency is
-    # therefore protected only where the amount traces back to an operator-supplied
-    # input; everything else stays exposed to that safety behavior.
-    protected_text, metric_fragments = _protect_client_concrete_metric_values(
-        str(text or ""),
-        currency_provenance=_operator_supplied_currency_keys(state),
-    )
+def _client_safe_text(text: str, quality) -> str:
+    protected_text, metric_fragments = _protect_client_concrete_metric_values(str(text or ""))
     value = client_simplify_text(protected_text, sparse_evidence=quality.sparse_evidence or quality.evidence_warning)
     if quality.decision_domain == "growth":
         replacements = {

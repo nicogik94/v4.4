@@ -2272,35 +2272,63 @@ def _decision_memo_check_derived_financial_claims(
     """
     threshold_labels = _decision_memo_proposed_threshold_labels(output_language)
     for line_number, line in _decision_memo_review_lines(main_text):
-        # The exemption belongs to the threshold clause, not to the whole line.
-        # "Proposed operator threshold: stop above 12 months; current payback is
-        # 8 months" carries a labelled threshold and an unsupported claim side by
-        # side, and only the first is exempt.
-        for clause in _decision_memo_claim_clauses(line):
-            if not _decision_memo_states_derived_period(clause):
-                continue
-            if _decision_memo_line_has_any_label(clause, threshold_labels):
-                continue
-            _decision_memo_add_finding(
-                findings,
-                "derived_financial_claim_without_calculation_result",
-                "Main memo states a derived financial claim (payback, break-even, or "
-                "recovery period) with no calculation of record behind it. The "
-                "deterministic calculator does not compute these periods, and a "
-                "citation written into the memo is not verifiable here.",
-                location=f"line {line_number}",
-                excerpt=clause,
-            )
-            break
+        # Detection stays on the whole line so that splitting never costs a
+        # match. Clauses only decide how far the threshold label reaches: it
+        # governs the clause it heads, not everything else sharing the line.
+        if not _decision_memo_states_derived_period(line):
+            continue
+        excerpt = _decision_memo_unexempt_claim_clause(line, threshold_labels)
+        if excerpt is None:
+            continue
+        _decision_memo_add_finding(
+            findings,
+            "derived_financial_claim_without_calculation_result",
+            "Main memo states a derived financial claim (payback, break-even, or "
+            "recovery period) with no calculation of record behind it. The "
+            "deterministic calculator does not compute these periods, and a "
+            "citation written into the memo is not verifiable here.",
+            location=f"line {line_number}",
+            excerpt=excerpt,
+        )
+
+
+# Delimiters that start a new independently-labelled clause on one line. A
+# semicolon is not the only way memos do this: commas, em/en dashes and Markdown
+# table cells all put a labelled threshold and a separate claim side by side.
+# Decimals are protected, so "6.4 months" is never split.
+_DECISION_MEMO_CLAUSE_SPLIT = re.compile(
+    r"\s*[;,|]\s*|\s+[—–]\s+|(?<![0-9])\.\s+"
+)
+
+
+def _decision_memo_unexempt_claim_clause(
+    line: str, threshold_labels: tuple[str, ...],
+) -> Optional[str]:
+    """The clause carrying an unexempt derived-period claim, or None if exempt.
+
+    Called only for a line that already states a derived period. Returns the
+    offending clause so the finding points at the claim rather than the whole
+    line. None means a proposed-threshold label governs the claim.
+    """
+    clauses = _decision_memo_claim_clauses(line)
+    for clause in clauses:
+        if not _decision_memo_states_derived_period(clause):
+            continue
+        if _decision_memo_line_has_any_label(clause, threshold_labels):
+            continue
+        return clause
+
+    # No single clause carries the claim, so it straddles a delimiter. Treat a
+    # labelled clause anywhere on the line as governing it -- conservative, and
+    # it keeps a labelled threshold from being reported by a splitting artifact.
+    if any(_decision_memo_line_has_any_label(clause, threshold_labels) for clause in clauses):
+        return None
+    return line
 
 
 def _decision_memo_claim_clauses(line: str) -> list[str]:
-    """Split a review line into independently-labelled claim clauses.
-
-    A label introduces the clause it heads, not everything else that happens to
-    share the line. Decimals are protected, so "6.4 months" is never split.
-    """
-    parts = re.split(r"\s*;\s*|(?<![0-9])\.\s+", str(line or ""))
+    """Split a review line into independently-labelled claim clauses."""
+    parts = _DECISION_MEMO_CLAUSE_SPLIT.split(str(line or ""))
     clauses = [part.strip() for part in parts if part and part.strip()]
     return clauses or [str(line or "")]
 
