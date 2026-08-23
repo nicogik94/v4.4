@@ -326,15 +326,13 @@ def _gate_trace(
     passed = bool(gate.get("passed", True))
     blocking = list(gate.get("blocking", []))
 
-    # Confidence is persisted state on both paths: for a configured phase
-    # `check_gate` reads `state.phase_confidence` rather than deriving anything,
-    # and for an unconfigured one there is no gate at all. So it is attributed
-    # to the recorded state either way, never to a recomputation. The fallback
-    # never invents a stand-in number: an absent confidence stays absent.
-    gate_confidence = gate.get("confidence")
-    if gate_confidence is None:
-        gate_confidence = confidence
-    gate_confidence = None if gate_confidence is None else float(gate_confidence)
+    # The trace reports the recorded phase confidence itself, not check_gate's
+    # view of it. check_gate substitutes 0.0 for a missing entry so its own pass
+    # arithmetic has a number to compare; that substitute is not a recorded
+    # value and must not be reported as one. Reading state.phase_confidence
+    # directly keeps "never scored" distinct from "scored zero" here while
+    # leaving the gate arithmetic in tools.scoring exactly as it is.
+    gate_confidence = None if confidence is None else float(confidence)
     confidence_source = "" if gate_confidence is None else "recorded_phase_confidence"
 
     conflicts = status == "completed" and not passed

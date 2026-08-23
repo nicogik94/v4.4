@@ -101,6 +101,19 @@ class TestExplainabilityDerivation(unittest.TestCase):
             trace.logic_separation.deterministic_logic,
         )
 
+    def test_configured_gate_with_no_recorded_confidence_reports_none(self):
+        state = make_completed_state("trace-gate-configured-absent")
+        # check_gate substitutes 0.0 for a missing entry so its pass arithmetic
+        # has a number. That substitute was never recorded and must not be
+        # reported as a recorded confidence.
+        state.phase_confidence.pop("strategy", None)
+
+        trace = build_phase_trace(state, "strategy")
+
+        self.assertTrue(trace.gate_result.configured)
+        self.assertIsNone(trace.gate_result.confidence)
+        self.assertEqual(trace.gate_result.confidence_source, "")
+
     def test_unconfigured_gate_reports_no_confidence_instead_of_one(self):
         state = make_completed_state("trace-gate-unconfigured")
         # "sqi" has no gate configuration, so there is no gate to score.

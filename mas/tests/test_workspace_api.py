@@ -20,12 +20,17 @@ from clarifications import (  # noqa: E402
     ClarificationQuestion,
     ClarificationStatus,
 )
-from decision_objects import ensure_decision_objects  # noqa: E402
+from decision_objects import (  # noqa: E402
+    DECISION_OBJECTS_SCHEMA_VERSION,
+    compute_source_state_hash,
+    ensure_decision_objects,
+)
 from overview import build_operator_overview  # noqa: E402
 from state import (  # noqa: E402
     REPORT_MODE_DECISION_MEMO_PILOT_PLAN,
     ClassifyOutput,
     DQScores,
+    DecisionObjectStatus,
     PhaseStatus,
     ProjectState,
 )
@@ -120,6 +125,34 @@ class TestWorkspaceSummary(unittest.TestCase):
                 self.assertEqual(
                     snapshots[0].dq_total, workspace.score_summary.dq_total
                 )
+
+    def test_snapshot_from_an_older_derivation_is_rebuilt(self):
+        # A derivation change leaves the source state identical, so the
+        # fresh/hash-matched fast path would otherwise hand back a snapshot
+        # built before the change -- leaving decision_objects.json reporting the
+        # old DQ while the dashboard reports the new one, for every project
+        # persisted before deployment.
+        state = ProjectState(
+            project_id="dq-legacy-snapshot",
+            project_name="DQ legacy snapshot",
+            classify=_classified_output(dq=[20, 15, 18, 12]),
+            brier_score=0.2,
+        )
+        stale = ensure_decision_objects(state)
+        stale.schema_version = "1.0"
+        stale.status = DecisionObjectStatus.FRESH
+        stale.source_state_hash = compute_source_state_hash(state)
+        stale.calibration_snapshots[0].dq_total = 0.0
+        state.decision_objects = stale
+
+        rebuilt = ensure_decision_objects(state)
+
+        self.assertEqual(rebuilt.schema_version, DECISION_OBJECTS_SCHEMA_VERSION)
+        self.assertEqual(rebuilt.calibration_snapshots[0].dq_total, 65.0)
+        self.assertEqual(
+            rebuilt.calibration_snapshots[0].dq_total,
+            build_workspace_summary(state).score_summary.dq_total,
+        )
 
     def test_dashboard_renders_missing_dq_as_em_dash(self):
         missing = ProjectState(project_id="overview-dq-missing", project_name="DQ missing")
